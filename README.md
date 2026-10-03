@@ -11,6 +11,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；这些工具仅写入宿主内存并受现有 write 权限/审计链约束。
+- 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
 
 ## 快速开始
 
@@ -46,6 +47,7 @@ uv run --no-sync krim serve
 - 后端、Agent 运行时、协议、数据库、API 和 CLI 使用 Python。
 - 前端只使用必要的 TypeScript；当前仅有 `frontend/contracts/protocol.test.ts`，用于同一 JSON 向量校验。
 - `FakeProvider` 是离线确定性演示，不是真实模型、不调用商业服务，也不执行网络、Shell 或文件工具。
+- 默认 Provider 为 fake；仅当宿主配置 `KRIM_AGENT_PROVIDER=openai-compatible` 和模型端点时按配置发请求。模型端点密钥与 Krim API 访问密钥独立。
 - 当前 SQLite 保存消息、运行终态、审计和 SSE 帧；持久事件支持重启与读进程恢复，活跃生产仍要求单进程，不承诺多 worker 并发生产。
 - 物理工作区仍可能位于旧目录名下；项目文本、Python 包、CLI 和环境变量统一使用 `Krim Agent` / `krim_agent` / `krim` / `KRIM_AGENT_`。
 

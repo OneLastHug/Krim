@@ -24,7 +24,7 @@ from krim_agent.protocol.domain import (
     ServiceError,
 )
 from krim_agent.protocol.models import StreamFrame
-from krim_agent.providers import ModelProvider, ModelText, ModelToolCall
+from krim_agent.providers import ModelProvider, ModelText, ModelToolCall, ProviderError
 from krim_agent.tools import ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -154,6 +154,9 @@ class ChatRuntime:
         except ServiceError as exc:
             status, error = "failed", str(exc)
             error_code = exc.code
+        except ProviderError as exc:
+            status, error = "failed", str(exc)
+            error_code = exc.code
         except Exception:
             logger.exception("运行失败: %s", state.run.id)
             status, error = "failed", "模型或运行时执行失败"
@@ -237,25 +240,31 @@ class ChatRuntime:
                     },
                 )
             calls: list[ModelToolCall] = []
-            async for delta in self.provider.stream(messages, self.tools.definitions):
-                if isinstance(delta, ModelText):
-                    if len(state.draft) + len(delta.text) > 8192:
-                        raise ServiceError("output_limit", "单轮输出超过限制")
-                    state.draft += delta.text
-                    await state.publish("chunk", {"type": "text_delta", "text": delta.text})
-                else:
-                    if delta.id in state.seen_calls:
-                        raise ServiceError("duplicate_tool_call", "工具调用 ID 重复")
-                    state.seen_calls.add(delta.id)
-                    if len(calls) >= 8:
-                        raise ServiceError("tool_limit", "单轮工具调用超过限制")
-                    calls.append(delta)
-                    state.draft_calls.append(delta)
-                    await state.publish(
-                        "chunk", {"type": "tool_call", **delta.model_dump(mode="json")}
-                    )
-                if len(state.frames) >= 2048:
-                    raise ServiceError("stream_limit", "流事件超过限制")
+            provider_stream = self.provider.stream(messages, self.tools.definitions)
+            try:
+                async for delta in provider_stream:
+                    if isinstance(delta, ModelText):
+                        if len(state.draft) + len(delta.text) > 8192:
+                            raise ServiceError("output_limit", "单轮输出超过限制")
+                        state.draft += delta.text
+                        await state.publish("chunk", {"type": "text_delta", "text": delta.text})
+                    else:
+                        if delta.id in state.seen_calls:
+                            raise ServiceError("duplicate_tool_call", "工具调用 ID 重复")
+                        state.seen_calls.add(delta.id)
+                        if len(calls) >= 8:
+                            raise ServiceError("tool_limit", "单轮工具调用超过限制")
+                        calls.append(delta)
+                        state.draft_calls.append(delta)
+                        await state.publish(
+                            "chunk", {"type": "tool_call", **delta.model_dump(mode="json")}
+                        )
+                    if len(state.frames) >= 2048:
+                        raise ServiceError("stream_limit", "流事件超过限制")
+            finally:
+                close_stream = getattr(provider_stream, "aclose", None)
+                if close_stream is not None:
+                    await close_stream()
             if not calls:
                 if not state.draft:
                     raise ServiceError("no_output", "模型没有输出文本或工具请求")
