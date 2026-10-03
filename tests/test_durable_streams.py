@@ -289,8 +289,8 @@ async def test_event_migration_refuses_to_discard_persisted_data(runtime, reposi
     topic = await repository.create_topic("事件回退保护")
     run = await runtime.start(topic.id, ChatRequest(text="retained", idempotency_key="one"))
     original = await frames(runtime, run.id)
-    async with repository.database.engine.begin() as connection:
-        with pytest.raises(RuntimeError, match="持久流事件"):
+    with pytest.raises(RuntimeError, match="持久流事件"):
+        async with repository.database.engine.begin() as connection:
             await connection.run_sync(
                 lambda sync: command.downgrade(migration_config(sync), "0002_message_tree")
             )
