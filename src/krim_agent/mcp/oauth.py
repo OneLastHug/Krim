@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import math
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
+from typing import Protocol
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -121,21 +124,69 @@ class OAuthStateStore:
         return config, request
 
 
+@dataclass(frozen=True)
+class TokenSnapshot:
+    token: OAuthToken | None
+    revision: int
+
+
+def token_scope(config: OAuthConfig, subject: str) -> str:
+    config.validate_endpoints()
+    if not subject or len(subject) > 256 or any(ord(character) < 32 for character in subject):
+        raise OAuthError("invalid_token_subject", "OAuth subject 必须是非空的受控标识")
+    payload = {
+        "server": config.server,
+        "client_id": config.client_id,
+        "authorization_endpoint": config.authorization_endpoint,
+        "token_endpoint": config.token_endpoint,
+        "redirect_uri": config.redirect_uri,
+        "scopes": sorted(set(config.scopes)),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def encode_token(token: OAuthToken) -> bytes:
+    payload = token.model_dump(mode="json")
+    payload["access_token"] = token.access_token.get_secret_value()
+    payload["refresh_token"] = (
+        token.refresh_token.get_secret_value() if token.refresh_token is not None else None
+    )
+    encoded = json.dumps(payload, allow_nan=False).encode()
+    if len(encoded) > 65536:
+        raise OAuthError("invalid_token_response", "OAuth token 超过大小限制")
+    return encoded
+
+
+class OAuthTokenStore(Protocol):
+    async def read(self, config: OAuthConfig, subject: str) -> TokenSnapshot: ...
+
+    async def write(
+        self,
+        config: OAuthConfig,
+        subject: str,
+        token: OAuthToken,
+        *,
+        expected_revision: int | None = None,
+    ) -> None: ...
+
+    def lock(self, config: OAuthConfig, subject: str) -> AbstractAsyncContextManager[None]: ...
+
+
 class EncryptedTokenStore:
     def __init__(self, key: bytes | str) -> None:
         try:
             self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
-        except Exception as error:
+        except (TypeError, ValueError) as error:
             raise OAuthError("invalid_encryption_key", "Fernet 密钥无效") from error
         self._values: dict[tuple[str, str], bytes] = {}
+        self._revisions: dict[tuple[str, str], int] = {}
+        self._bindings: dict[tuple[str, str], str] = {}
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def put(self, server: str, subject: str, token: OAuthToken) -> None:
-        payload = token.model_dump(mode="json")
-        payload["access_token"] = token.access_token.get_secret_value()
-        payload["refresh_token"] = (
-            token.refresh_token.get_secret_value() if token.refresh_token is not None else None
-        )
-        self._values[(server, subject)] = self._fernet.encrypt(json.dumps(payload).encode())
+        key = (server, subject)
+        self._values[key] = self._fernet.encrypt(encode_token(token))
+        self._revisions[key] = self._revisions.get(key, 0) + 1
 
     def get(self, server: str, subject: str) -> OAuthToken | None:
         blob = self._values.get((server, subject))
@@ -147,7 +198,38 @@ class EncryptedTokenStore:
             raise OAuthError("token_corrupt", "OAuth token 密文无法验证") from error
 
     def delete(self, server: str, subject: str) -> None:
-        self._values.pop((server, subject), None)
+        key = (server, subject)
+        self._values.pop(key, None)
+        self._bindings.pop(key, None)
+        self._revisions[key] = self._revisions.get(key, 0) + 1
+
+    async def read(self, config: OAuthConfig, subject: str) -> TokenSnapshot:
+        scope = token_scope(config, subject)
+        key = (config.server, subject)
+        if self._bindings.get(key, scope) != scope:
+            raise OAuthError("token_scope_mismatch", "内存令牌已绑定其他客户端配置")
+        return TokenSnapshot(self.get(*key), self._revisions.get(key, 0))
+
+    async def write(
+        self,
+        config: OAuthConfig,
+        subject: str,
+        token: OAuthToken,
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
+        scope = token_scope(config, subject)
+        current = await self.read(config, subject)
+        if expected_revision is not None and current.revision != expected_revision:
+            raise OAuthError("token_conflict", "OAuth 令牌在请求期间已变化")
+        self.put(config.server, subject, token)
+        self._bindings[(config.server, subject)] = scope
+
+    @asynccontextmanager
+    async def lock(self, config: OAuthConfig, subject: str) -> AsyncIterator[None]:
+        token_scope(config, subject)
+        async with self._locks.setdefault((config.server, subject), asyncio.Lock()):
+            yield
 
 
 Requester = Callable[[str, dict[str, str]], Awaitable[httpx.Response]]
@@ -204,7 +286,7 @@ class OAuthHTTPRequester:
 
 
 class OAuthClient:
-    def __init__(self, states: OAuthStateStore, tokens: EncryptedTokenStore) -> None:
+    def __init__(self, states: OAuthStateStore, tokens: OAuthTokenStore) -> None:
         self.states, self.tokens = states, tokens
 
     async def exchange(self, state: str, code: str, subject: str, request: Requester) -> OAuthToken:
@@ -220,27 +302,67 @@ class OAuthClient:
         }
         if config.client_secret is not None:
             form["client_secret"] = config.client_secret.get_secret_value()
-        response = await request(config.token_endpoint, form)
-        token = self._parse(response)
-        self.tokens.put(config.server, subject, token)
-        return token
+        async with self.tokens.lock(config, subject):
+            current = await self.tokens.read(config, subject)
+            response = await request(config.token_endpoint, form)
+            token = self._parse(response)
+            await self.tokens.write(config, subject, token, expected_revision=current.revision)
+            return token
 
     async def refresh(self, config: OAuthConfig, subject: str, request: Requester) -> OAuthToken:
-        config.validate_endpoints()
-        current = self.tokens.get(config.server, subject)
-        if current is None or current.refresh_token is None:
+        config = config.model_copy(deep=True)
+        before = await self.tokens.read(config, subject)
+        async with self.tokens.lock(config, subject):
+            current = await self.tokens.read(config, subject)
+            if (
+                current.token is not None
+                and current.revision != before.revision
+                and not current.token.expired()
+            ):
+                return current.token
+            return await self._refresh_locked(config, subject, current, request)
+
+    async def _refresh_locked(
+        self, config: OAuthConfig, subject: str, current: TokenSnapshot, request: Requester
+    ) -> OAuthToken:
+        token = current.token
+        if token is None or token.refresh_token is None:
             raise OAuthError("refresh_unavailable", "没有可用 refresh token")
         form = {
             "grant_type": "refresh_token",
-            "refresh_token": current.refresh_token.get_secret_value(),
+            "refresh_token": token.refresh_token.get_secret_value(),
             "client_id": config.client_id,
         }
         if config.client_secret is not None:
             form["client_secret"] = config.client_secret.get_secret_value()
         response = await request(config.token_endpoint, form)
-        token = self._parse(response, previous_refresh=current.refresh_token.get_secret_value())
-        self.tokens.put(config.server, subject, token)
-        return token
+        refreshed = self._parse(response, previous_refresh=token.refresh_token.get_secret_value())
+        await self.tokens.write(config, subject, refreshed, expected_revision=current.revision)
+        return refreshed
+
+    async def access_token(
+        self,
+        config: OAuthConfig,
+        subject: str,
+        request: Requester,
+        *,
+        refresh_skew_seconds: float = 30,
+    ) -> OAuthToken:
+        if not math.isfinite(refresh_skew_seconds) or not 0 <= refresh_skew_seconds <= 3600:
+            raise ValueError("refresh_skew_seconds 超出范围")
+        config = config.model_copy(deep=True)
+        current = await self.tokens.read(config, subject)
+        if current.token is not None and not current.token.expired(
+            time.time() + refresh_skew_seconds
+        ):
+            return current.token
+        async with self.tokens.lock(config, subject):
+            current = await self.tokens.read(config, subject)
+            if current.token is not None and not current.token.expired(
+                time.time() + refresh_skew_seconds
+            ):
+                return current.token
+            return await self._refresh_locked(config, subject, current, request)
 
     @staticmethod
     def _parse(response: httpx.Response, previous_refresh: str | None = None) -> OAuthToken:
