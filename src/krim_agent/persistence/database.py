@@ -14,9 +14,12 @@ from pydantic import JsonValue
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -110,6 +113,26 @@ class RunEventRow(Base):
     kind: Mapped[Literal["start", "chunk", "end", "error"]] = mapped_column(String(16))
     data: Mapped[JsonValue] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class OAuthTokenRow(Base):
+    __tablename__ = "oauth_tokens"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_oauth_revision"),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_oauth_lease",
+        ),
+    )
+    scope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(256), primary_key=True)
+    server: Mapped[str] = mapped_column(String(32))
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 class Database:
