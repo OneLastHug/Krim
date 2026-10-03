@@ -36,6 +36,15 @@ class ToolResultPart(StrictModel):
     result: ToolResult
 
 
+class ContextCompactPart(StrictModel):
+    type: Literal["context-compact"] = "context-compact"
+    original_count: int = Field(ge=0)
+    kept_count: int = Field(ge=0)
+    omitted_count: int = Field(ge=0)
+    strategy: str
+    summary: str | None = None
+
+
 class StepFinish(StrictModel):
     type: Literal["step-finish"] = "step-finish"
     step: int = Field(ge=0)
@@ -61,6 +70,7 @@ SDKPart = (
     | TextDelta
     | ToolCallPart
     | ToolResultPart
+    | ContextCompactPart
     | StepFinish
     | StreamFinish
     | StreamError

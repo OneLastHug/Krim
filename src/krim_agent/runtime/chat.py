@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import JsonValue
 
 from krim_agent.config import Settings
+from krim_agent.context_engine import ContextEngine, ContextOptions
 from krim_agent.persistence import KrimRepository
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
@@ -82,6 +83,7 @@ class ChatRuntime:
         self._lock = asyncio.Lock()
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
+        self.context_engine = ContextEngine()
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
         return await self._start(topic_id, request)
@@ -210,7 +212,30 @@ class ChatRuntime:
     async def _loop(self, state: RunState) -> None:
         for _step in range(self.settings.max_steps):
             state.step = _step
-            messages = await self.repository.list_messages(state.run.topic_id)
+            history = await self.repository.list_messages(state.run.topic_id)
+            context = await self.context_engine.prepare_async(
+                history,
+                ContextOptions(
+                    strategy=self.settings.context_strategy,
+                    policy=self.settings.context_policy,
+                    max_messages=self.settings.context_max_messages,
+                    max_chars=self.settings.context_max_chars,
+                    max_tokens=self.settings.context_max_tokens,
+                ),
+            )
+            messages = context.messages
+            if context.compacted:
+                await state.publish(
+                    "chunk",
+                    {
+                        "type": "context_compact",
+                        "original_count": context.original_count,
+                        "kept_count": len(context.messages),
+                        "omitted_count": context.omitted_count,
+                        "strategy": context.strategy,
+                        "summary": context.summary,
+                    },
+                )
             calls: list[ModelToolCall] = []
             async for delta in self.provider.stream(messages, self.tools.definitions):
                 if isinstance(delta, ModelText):
