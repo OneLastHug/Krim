@@ -16,6 +16,7 @@ from krim_agent import __version__
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
+from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -129,7 +130,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         description="Krim Agent 本地 Python 运行时，支持消息分支与持久 SSE；默认离线 provider。",
         responses={
             code: {"model": ErrorResponse}
-            for code in (400, 401, 403, 404, 409, 410, 413, 416, 422, 429, 503)
+            for code in (400, 401, 403, 404, 409, 410, 413, 416, 422, 429, 502, 503, 504)
         },
     )
     app.add_middleware(LocalBoundary, settings=config)
@@ -140,6 +141,17 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:
         return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, exc.status)
+
+    @app.exception_handler(ContextError)
+    async def context_error(_request: Request, exc: ContextError) -> JSONResponse:
+        status = (
+            403
+            if exc.code == "context_denied"
+            else 502
+            if exc.code == "context_summary_failed"
+            else 400
+        )
+        return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status)
 
     @app.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
@@ -199,6 +211,12 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics/{topic_id}/tree")
     async def message_tree(topic_id: str) -> MessageTreeView:
         return await repository.message_tree(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/compact")
+    async def compact_topic(
+        topic_id: str, payload: ContextCompactRequest
+    ) -> ContextCompactResponse:
+        return await service.compact(topic_id, payload)
 
     @app.put("/v1/topics/{topic_id}/branch")
     async def select_branch(topic_id: str, payload: BranchRequest) -> TopicView:

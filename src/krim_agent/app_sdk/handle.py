@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
 from krim_agent.protocol.bridge import Handler
 from krim_agent.protocol.domain import (
@@ -53,6 +54,16 @@ class AppHandle:
 
     async def tree(self, topic_id: str) -> MessageTreeView:
         return MessageTreeView.model_validate(await self._call("chat/tree", {"topic_id": topic_id}))
+
+    async def compact(
+        self, topic_id: str, request: ContextCompactRequest | None = None
+    ) -> ContextCompactResponse:
+        payload = request or ContextCompactRequest()
+        return ContextCompactResponse.model_validate(
+            await self._call(
+                "chat/compact", {"topic_id": topic_id, **payload.model_dump(mode="json")}
+            )
+        )
 
     async def messages(self, topic_id: str) -> list[MessageView]:
         return TypeAdapter(list[MessageView]).validate_python(

@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -153,6 +153,22 @@ class WorkflowCheckpointRow(Base):
     revision: Mapped[int] = mapped_column(Integer, default=0)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class ContextSummaryRow(Base):
+    __tablename__ = "context_summaries"
+    __table_args__ = (UniqueConstraint("topic_id", "branch_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    branch_key: Mapped[str] = mapped_column(String(64))
+    source_until_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_message_ids: Mapped[list[JsonValue]] = mapped_column(JSON)
+    summary: Mapped[str] = mapped_column(Text)
+    strategy: Mapped[str] = mapped_column(String(32))
+    policy: Mapped[str] = mapped_column(String(16))
+    never_update: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
@@ -342,6 +358,13 @@ class KrimRepository:
         if active:
             raise ServiceError("topic_busy", "话题已有活跃运行", 409)
 
+    async def assert_topic_idle(self, topic_id: str) -> None:
+        """在手动压缩前确认话题存在且没有 queued/running 运行。"""
+        async with self.database.write_lock, self.database.sessions() as session:
+            if await session.get(TopicRow, topic_id) is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            await self._require_idle(session, topic_id)
+
     async def _require_boundary(self, session: AsyncSession, message: MessageView | None) -> None:
         if message is None:
             raise ServiceError("message_not_found", "消息不在该话题中", 404)
@@ -368,6 +391,127 @@ class KrimRepository:
         tree = await self.message_tree(topic_id)
         by_id = {message.id: message for message in tree.messages}
         return [by_id[message_id] for message_id in tree.active_path]
+
+    @staticmethod
+    def context_branch_key(messages: list[MessageView]) -> str:
+        return hashlib.sha256(
+            json.dumps([message.id for message in messages], separators=(",", ":")).encode()
+        ).hexdigest()
+
+    async def get_context_summary(self, topic_id: str, branch_key: str) -> ContextSummaryRow | None:
+        async with self.database.write_lock, self.database.sessions() as session:
+            return cast(
+                ContextSummaryRow | None,
+                await session.scalar(
+                    select(ContextSummaryRow).where(
+                        ContextSummaryRow.topic_id == topic_id,
+                        ContextSummaryRow.branch_key == branch_key,
+                    )
+                ),
+            )
+
+    async def match_context_summary(
+        self, topic_id: str, messages: list[MessageView]
+    ) -> ContextSummaryRow | None:
+        identifiers = [message.id for message in messages]
+        async with self.database.write_lock, self.database.sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(ContextSummaryRow).where(ContextSummaryRow.topic_id == topic_id)
+                )
+            )
+            matches = [
+                row
+                for row in rows
+                if row.source_message_ids
+                and row.source_message_ids == identifiers[: len(row.source_message_ids)]
+                and len(row.source_message_ids) < len(messages)
+                and messages[len(row.source_message_ids)].role == "user"
+                and row.source_until_message_id == row.source_message_ids[-1]
+                and row.branch_key
+                == self.context_branch_key(messages[: len(row.source_message_ids)])
+            ]
+            return max(matches, key=lambda row: len(row.source_message_ids), default=None)
+
+    async def save_context_summary(
+        self,
+        topic_id: str,
+        branch_key: str,
+        source_message_ids: list[str],
+        summary: str,
+        strategy: str,
+        policy: str,
+        *,
+        never_update: bool = False,
+        require_idle: bool = False,
+        expected_path_key: str | None = None,
+    ) -> ContextSummaryRow:
+        if not summary.strip() or len(summary.encode("utf-8")) > 65536:
+            raise ServiceError("summary_invalid", "Context 摘要为空或超过大小限制", 400)
+        if policy == "never":
+            raise ServiceError("summary_policy_never", "never 策略不能保存新摘要", 400)
+        if policy not in {"auto", "always"}:
+            raise ServiceError("summary_policy_invalid", "摘要更新策略无效", 400)
+        if strategy not in {"summarize_then_truncate", "annotated_compact"}:
+            raise ServiceError("summary_strategy_invalid", "只有摘要策略可以保存历史摘要", 400)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            if require_idle:
+                await self._require_idle(session, topic_id)
+            tree = MessageTree(await self._messages(session, topic_id))
+            active = tree.active_path(topic.active_branches)
+            if (
+                expected_path_key is not None
+                and self.context_branch_key(active) != expected_path_key
+            ):
+                raise ServiceError("summary_branch_changed", "摘要计算期间活动路径已经变化", 409)
+            if not source_message_ids or source_message_ids != [
+                message.id for message in active[: len(source_message_ids)]
+            ]:
+                raise ServiceError("summary_branch_changed", "摘要来源不属于当前活动路径前缀", 409)
+            prefix = active[: len(source_message_ids)]
+            tree.require_complete_tools(prefix)
+            if (
+                len(source_message_ids) >= len(active)
+                or active[len(source_message_ids)].role != "user"
+            ):
+                raise ServiceError(
+                    "summary_incomplete_group", "摘要不能拆开或省略最新完整消息组", 409
+                )
+            expected_key = self.context_branch_key(active[: len(source_message_ids)])
+            if branch_key != expected_key:
+                raise ServiceError("summary_source_mismatch", "摘要来源哈希不一致", 409)
+            row = await session.scalar(
+                select(ContextSummaryRow).where(
+                    ContextSummaryRow.topic_id == topic_id,
+                    ContextSummaryRow.branch_key == branch_key,
+                )
+            )
+            if row is None:
+                row = ContextSummaryRow(
+                    id=str(uuid4()),
+                    topic_id=topic_id,
+                    branch_key=branch_key,
+                    source_until_message_id=source_message_ids[-1] if source_message_ids else None,
+                    source_message_ids=list(source_message_ids),
+                    summary=summary,
+                    strategy=strategy,
+                    policy=policy,
+                    never_update=never_update,
+                )
+                session.add(row)
+            elif row.never_update:
+                raise ServiceError("summary_frozen", "已有摘要禁止更新", 409)
+            else:
+                row.source_until_message_id = source_message_ids[-1] if source_message_ids else None
+                row.source_message_ids = list(source_message_ids)
+                row.summary, row.strategy, row.policy = summary, strategy, policy
+                row.never_update = never_update
+                row.updated_at = utc_now()
+            await session.flush()
+            return row
 
     async def select_branch(self, topic_id: str, message_id: str) -> TopicView:
         async with self.database.write_lock, self.database.sessions.begin() as session:

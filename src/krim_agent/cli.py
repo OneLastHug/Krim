@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .client import ClientError, KrimClient
+from .context_engine import ContextOptions
 from .protocol.domain import TERMINAL_STATUSES
 from .workflow import WorkflowGraph
 
@@ -23,6 +24,24 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    compact = subparsers.add_parser("compact", help="compact（压缩）：预览或确认持久历史摘要")
+    compact.add_argument("topic_id")
+    compact.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    compact.add_argument(
+        "--strategy",
+        choices=["summarize_then_truncate", "annotated_compact"],
+        default="annotated_compact",
+    )
+    compact.add_argument("--policy", choices=["never", "always", "auto"], default="auto")
+    compact.add_argument("--max-messages", type=int, help="模型输入消息数量预算，包含摘要")
+    compact.add_argument("--max-chars", type=int, help="JSON 请求文本字符预算")
+    compact.add_argument("--max-tokens", type=int, help="近似 token（词元）预算")
+    compact.add_argument("--expected-branch-key", help="确认时匹配预览中的活动路径标识")
+    compact_mode = compact.add_mutually_exclusive_group()
+    compact_mode.add_argument(
+        "--preview", action="store_true", help="preview（预览）：只读提案，默认行为"
+    )
+    compact_mode.add_argument("--confirm", action="store_true", help="confirm（确认）：保存摘要")
     workflow = subparsers.add_parser("workflow", help="workflow（工作流）：运行与控制持久图")
     workflow.add_argument(
         "action",
@@ -118,6 +137,22 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "compact":
+                print(
+                    client.compact(
+                        args.topic_id,
+                        ContextOptions(
+                            strategy=args.strategy,
+                            policy=args.policy,
+                            max_messages=args.max_messages,
+                            max_chars=args.max_chars,
+                            max_tokens=args.max_tokens,
+                        ),
+                        confirm=args.confirm,
+                        expected_branch_key=args.expected_branch_key,
+                    ).model_dump_json(indent=2)
+                )
+                return
             if args.command == "workflow":
                 if args.action == "list":
                     print(

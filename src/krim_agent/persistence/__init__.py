@@ -1,6 +1,7 @@
 """M1 SQLite 持久化边界。"""
 
 from .database import (
+    ContextSummaryRow,
     Database,
     KrimRepository,
     OAuthTokenRow,
@@ -15,6 +16,7 @@ __all__ = [
     "OAuthTokenRow",
     "WorkflowCheckpointRow",
     "WorkflowRequestRow",
+    "ContextSummaryRow",
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
 ]

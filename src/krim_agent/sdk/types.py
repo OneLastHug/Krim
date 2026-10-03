@@ -43,6 +43,11 @@ class ContextCompactPart(StrictModel):
     omitted_count: int = Field(ge=0)
     strategy: str
     summary: str | None = None
+    status: Literal["completed"] = "completed"
+    persisted: bool = False
+    source_count: int = Field(default=0, ge=0)
+    source_until_message_id: str | None = None
+    source_branch_key: str | None = None
 
 
 class StepFinish(StrictModel):

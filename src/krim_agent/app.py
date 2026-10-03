@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
+from .context_engine import ContextCompactRequest
 from .protocol import InProcessBridge
 from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, TopicCreate
 from .protocol.models import StrictModel
@@ -12,6 +13,10 @@ from .runtime import ChatRuntime
 
 
 class SendRequest(ChatRequest):
+    topic_id: str
+
+
+class CompactTopicRequest(ContextCompactRequest):
     topic_id: str
 
 
@@ -66,6 +71,14 @@ class LocalApp:
             )
             return TypeAdapter(JsonValue).validate_json(value.model_dump_json())
 
+        async def compact(data: JsonValue) -> JsonValue:
+            payload = CompactTopicRequest.model_validate(data)
+            value = await runtime.compact(
+                payload.topic_id,
+                ContextCompactRequest.model_validate(payload.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_json(value.model_dump_json())
+
         async def messages(data: JsonValue) -> JsonValue:
             history = await runtime.repository.list_messages(
                 TopicRequest.model_validate(data).topic_id
@@ -113,6 +126,7 @@ class LocalApp:
         self._app.on("chat/send", send)
         self._app.on("chat/stop", stop)
         self._app.on("chat/tree", tree)
+        self._app.on("chat/compact", compact)
         self._app.on("chat/messages", messages)
         self._app.on("chat/branch", branch)
         self._app.on("chat/edit", edit)

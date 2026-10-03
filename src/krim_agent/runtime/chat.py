@@ -11,8 +11,15 @@ from typing import Literal
 
 from pydantic import JsonValue
 
+from krim_agent.application.context import PersistentContext
 from krim_agent.config import Settings
-from krim_agent.context_engine import ContextEngine, ContextOptions
+from krim_agent.context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextEngine,
+    ContextError,
+    ContextOptions,
+)
 from krim_agent.persistence import KrimRepository
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
@@ -84,6 +91,7 @@ class ChatRuntime:
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
         self.context_engine = ContextEngine()
+        self.persistent_context = PersistentContext(repository, self.context_engine)
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
         return await self._start(topic_id, request)
@@ -98,6 +106,46 @@ class ChatRuntime:
             topic_id, request, action="regenerate", source_message_id=message_id
         )
 
+    async def compact(
+        self, topic_id: str, request: ContextCompactRequest
+    ) -> ContextCompactResponse:
+        if self._closed:
+            raise ServiceError("runtime_closed", "运行时已经关闭", 503)
+        budgets = (request.max_messages, request.max_chars, request.max_tokens)
+        if all(value is None for value in budgets):
+            budgets = (
+                self.settings.context_max_messages,
+                self.settings.context_max_chars,
+                self.settings.context_max_tokens,
+            )
+            if all(value is None for value in budgets):
+                budgets = (20, None, None)
+        outcome = await self.persistent_context.compact(
+            topic_id,
+            ContextOptions(
+                strategy=request.strategy,
+                policy=request.policy,
+                max_messages=budgets[0],
+                max_chars=budgets[1],
+                max_tokens=budgets[2],
+            ),
+            confirm=request.confirm,
+            expected_branch_key=request.expected_branch_key,
+            timeout_seconds=self.settings.run_timeout_seconds,
+        )
+        sources = outcome.result.source_message_ids
+        return ContextCompactResponse(
+            topic_id=topic_id,
+            status=outcome.status,
+            branch_key=outcome.branch_key,
+            source_branch_key=outcome.source_branch_key,
+            source_until_message_id=sources[-1] if sources else None,
+            reason=outcome.reason,
+            persisted=outcome.persisted,
+            options=outcome.options,
+            **outcome.result.model_dump(),
+        )
+
     async def _start(
         self,
         topic_id: str,
@@ -109,6 +157,8 @@ class ChatRuntime:
         async with self._lock:
             if self._closed:
                 raise ServiceError("runtime_closed", "运行时已经关闭", 503)
+            if self.persistent_context.is_busy(topic_id):
+                raise ServiceError("context_busy", "话题正在生成手动压缩结果", 409)
             active = sum(
                 state.task is not None and not state.terminal for state in self._runs.values()
             )
@@ -155,6 +205,9 @@ class ChatRuntime:
             status, error = "failed", str(exc)
             error_code = exc.code
         except ProviderError as exc:
+            status, error = "failed", str(exc)
+            error_code = exc.code
+        except ContextError as exc:
             status, error = "failed", str(exc)
             error_code = exc.code
         except Exception:
@@ -216,7 +269,8 @@ class ChatRuntime:
         for _step in range(self.settings.max_steps):
             state.step = _step
             history = await self.repository.list_messages(state.run.topic_id)
-            context = await self.context_engine.prepare_async(
+            context = await self.persistent_context.prepare(
+                state.run.topic_id,
                 history,
                 ContextOptions(
                     strategy=self.settings.context_strategy,
@@ -237,6 +291,23 @@ class ChatRuntime:
                         "omitted_count": context.omitted_count,
                         "strategy": context.strategy,
                         "summary": context.summary,
+                        "status": "completed",
+                        "persisted": (
+                            context.summary is not None
+                            and context.strategy in {"summarize_then_truncate", "annotated_compact"}
+                            and context.policy != "never"
+                        ),
+                        "source_count": len(context.source_message_ids),
+                        "source_until_message_id": (
+                            context.source_message_ids[-1] if context.source_message_ids else None
+                        ),
+                        "source_branch_key": (
+                            self.repository.context_branch_key(
+                                history[: len(context.source_message_ids)]
+                            )
+                            if context.source_message_ids
+                            else None
+                        ),
                     },
                 )
             calls: list[ModelToolCall] = []
