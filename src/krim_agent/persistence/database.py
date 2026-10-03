@@ -39,9 +39,10 @@ from krim_agent.protocol.domain import (
     RunStatus,
     RunView,
     ServiceError,
+    StreamEventView,
     TopicView,
 )
-from krim_agent.protocol.models import utc_now
+from krim_agent.protocol.models import StreamFrame, utc_now
 from krim_agent.tools.core import ToolAudit
 
 from .migration import upgrade_database
@@ -101,11 +102,25 @@ class ToolAuditRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class RunEventRow(Base):
+    __tablename__ = "run_events"
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True, index=True)
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[Literal["start", "chunk", "end", "error"]] = mapped_column(String(16))
+    data: Mapped[JsonValue] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
         if parsed.drivername != "sqlite+aiosqlite":
             raise ValueError("M1 只支持 sqlite+aiosqlite")
+        self.is_persistent = bool(
+            parsed.database
+            and parsed.database != ":memory:"
+            and parsed.query.get("mode") != "memory"
+        )
         if parsed.database and parsed.database != ":memory:":
             Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_async_engine(url, hide_parameters=True)
@@ -366,6 +381,131 @@ class KrimRepository:
             )
             return [MessageView.model_validate(row) for row in rows]
 
+    async def append_event(self, frame: StreamFrame) -> StreamFrame:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            run = await session.get(RunRow, frame.stream_id)
+            if run is None:
+                raise ServiceError("run_not_found", "运行不存在", 404)
+            existing = await session.get(RunEventRow, (frame.stream_id, frame.seq))
+            if existing is not None:
+                current = StreamFrame(
+                    stream_id=existing.run_id,
+                    seq=existing.seq,
+                    kind=existing.kind,
+                    data=existing.data,
+                    created_at=existing.created_at,
+                )
+                same = current.model_dump(mode="json") == frame.model_dump(mode="json")
+                if frame.kind == "end":
+                    same = current.kind == frame.kind and current.data == frame.data
+                if not same:
+                    raise ServiceError("event_conflict", "流事件序号已经写入不同内容", 409)
+                return current
+            highest = await session.scalar(
+                select(func.max(RunEventRow.seq)).where(RunEventRow.run_id == frame.stream_id)
+            )
+            if highest is not None and frame.seq != highest + 1:
+                raise ServiceError("event_gap", "流事件序号不连续", 409)
+            if highest is None and frame.seq != 0:
+                raise ServiceError("event_gap", "流事件必须从序号 0 开始", 409)
+            last_kind = await session.scalar(
+                select(RunEventRow.kind)
+                .where(RunEventRow.run_id == frame.stream_id)
+                .order_by(RunEventRow.seq.desc())
+                .limit(1)
+            )
+            if last_kind in {"end", "error"}:
+                raise ServiceError("event_after_terminal", "终态帧之后不能追加流事件", 409)
+            if frame.kind in {"end", "error"} and run.status not in TERMINAL_STATUSES:
+                raise ServiceError("run_not_terminal", "必须先保存运行终态再发布终帧", 409)
+            session.add(
+                RunEventRow(
+                    run_id=frame.stream_id,
+                    seq=frame.seq,
+                    kind=frame.kind,
+                    data=frame.data,
+                    created_at=frame.created_at,
+                )
+            )
+            return frame
+
+    async def list_events(self, run_id: str) -> list[StreamFrame]:
+        await self.get_run(run_id)
+        async with self.database.write_lock, self.database.sessions() as session:
+            rows = await session.scalars(
+                select(RunEventRow).where(RunEventRow.run_id == run_id).order_by(RunEventRow.seq)
+            )
+            return [
+                StreamFrame(
+                    stream_id=row.run_id,
+                    seq=row.seq,
+                    kind=row.kind,
+                    data=row.data,
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+
+    async def event_summary(self, run_id: str) -> StreamEventView:
+        events = await self.list_events(run_id)
+        if not events:
+            return StreamEventView(
+                run_id=run_id,
+                first_seq=0,
+                last_seq=-1,
+                count=0,
+                durable=self.database.is_persistent,
+            )
+        return StreamEventView(
+            run_id=run_id,
+            first_seq=events[0].seq,
+            last_seq=events[-1].seq,
+            count=len(events),
+            terminal=events[-1].kind in {"end", "error"},
+            durable=self.database.is_persistent,
+        )
+
+    async def ensure_terminal_event(self, run_id: str) -> list[StreamFrame]:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ServiceError("run_not_found", "运行不存在", 404)
+            rows = await session.scalars(
+                select(RunEventRow).where(RunEventRow.run_id == run_id).order_by(RunEventRow.seq)
+            )
+            events = [
+                StreamFrame(
+                    stream_id=row.run_id,
+                    seq=row.seq,
+                    kind=row.kind,
+                    data=row.data,
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+            if (
+                not events
+                or events[-1].kind in {"end", "error"}
+                or run.status not in TERMINAL_STATUSES
+            ):
+                return events
+            frame = StreamFrame(
+                stream_id=run.id,
+                seq=events[-1].seq + 1,
+                kind="end",
+                data={"status": run.status, "error": run.error},
+            )
+            session.add(
+                RunEventRow(
+                    run_id=run.id,
+                    seq=frame.seq,
+                    kind=frame.kind,
+                    data=frame.data,
+                    created_at=frame.created_at,
+                )
+            )
+            return [*events, frame]
+
     async def set_running(self, run_id: str) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await session.execute(
@@ -406,13 +546,32 @@ class KrimRepository:
 
     async def recover_interrupted(self) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            await session.execute(
-                update(RunRow)
-                .where(RunRow.status.in_(("queued", "running")))
-                .values(
-                    status="interrupted",
-                    error="服务重启；未自动重放工具",
-                    finished_at=utc_now(),
-                    updated_at=utc_now(),
+            rows = list(
+                await session.scalars(
+                    select(RunRow).where(RunRow.status.in_(("queued", "running")))
                 )
             )
+            for row in rows:
+                row.status = "interrupted"
+                row.error = "服务重启；未自动重放工具"
+                row.finished_at = utc_now()
+                row.updated_at = utc_now()
+                highest = await session.scalar(
+                    select(func.max(RunEventRow.seq)).where(RunEventRow.run_id == row.id)
+                )
+                last_kind = await session.scalar(
+                    select(RunEventRow.kind)
+                    .where(RunEventRow.run_id == row.id)
+                    .order_by(RunEventRow.seq.desc())
+                    .limit(1)
+                )
+                if last_kind == "end":
+                    continue
+                session.add(
+                    RunEventRow(
+                        run_id=row.id,
+                        seq=(highest + 1) if highest is not None else 0,
+                        kind="end",
+                        data={"status": "interrupted", "error": row.error},
+                    )
+                )

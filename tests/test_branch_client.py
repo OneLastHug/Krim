@@ -1,36 +1,10 @@
 import asyncio
 import json
-import socket
 import sys
 
 import httpx
-import pytest
-import uvicorn
 
-from krim_agent.api import create_app
 from krim_agent.client import KrimClient
-
-
-@pytest.fixture
-async def server_url(runtime):
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(128)
-    listener.setblocking(False)
-    port = listener.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(create_app(runtime=runtime), log_level="error"))
-    task = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
-        async with asyncio.timeout(10):
-            while not server.started:
-                if task.done():
-                    await task
-                await asyncio.sleep(0.01)
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await asyncio.wait_for(task, 10)
-        listener.close()
 
 
 async def cli(url, *arguments):

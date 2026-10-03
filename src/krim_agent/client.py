@@ -16,6 +16,7 @@ from .protocol.domain import (
     MessageView,
     RegenerateRequest,
     RunView,
+    StreamEventView,
     TopicView,
 )
 from .protocol.models import StreamFrame
@@ -180,4 +181,13 @@ class KrimClient:
                     event_bytes = 0
                     if frame.kind in {"end", "error"}:
                         return
+            if expected == from_seq and from_seq > 0:
+                summary = self.event_summary(run_id)
+                if summary.terminal and from_seq == summary.last_seq + 1:
+                    return
             raise ClientError("SSE 未收到终止帧；运行可能仍在后台执行，请读取运行状态")
+
+    def event_summary(self, run_id: str) -> StreamEventView:
+        response = self._http.get(f"/v1/runs/{run_id}/events/summary")
+        self._check(response)
+        return StreamEventView.model_validate_json(response.content)

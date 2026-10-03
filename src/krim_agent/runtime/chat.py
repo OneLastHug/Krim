@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 class RunState:
     run: RunView
     frames: list[StreamFrame] = field(default_factory=list)
+    event_writer: Callable[[StreamFrame], Awaitable[StreamFrame]] | None = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     started: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
@@ -43,14 +44,26 @@ class RunState:
     draft_calls: list[ModelToolCall] = field(default_factory=list)
     pending_calls: list[ModelToolCall] = field(default_factory=list)
     seen_calls: set[str] = field(default_factory=set)
+    publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
     ) -> None:
-        frame = StreamFrame(stream_id=self.run.id, seq=len(self.frames), kind=kind, data=data)
-        async with self.condition:
-            self.frames.append(frame)
-            self.condition.notify_all()
+        async with self.publish_lock:
+            frame = StreamFrame(stream_id=self.run.id, seq=len(self.frames), kind=kind, data=data)
+
+            async def commit() -> None:
+                stored = await self.event_writer(frame) if self.event_writer is not None else frame
+                async with self.condition:
+                    self.frames.append(stored)
+                    self.condition.notify_all()
+
+            write = asyncio.create_task(commit())
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await write
+                raise
 
 
 class ChatRuntime:
@@ -93,7 +106,9 @@ class ChatRuntime:
         async with self._lock:
             if self._closed:
                 raise ServiceError("runtime_closed", "运行时已经关闭", 503)
-            active = sum(not state.terminal for state in self._runs.values())
+            active = sum(
+                state.task is not None and not state.terminal for state in self._runs.values()
+            )
             run, created = await self.repository.begin_run(
                 topic_id,
                 request,
@@ -103,7 +118,7 @@ class ChatRuntime:
             )
             if not created:
                 return run
-            state = RunState(run)
+            state = RunState(run, event_writer=self.repository.append_event)
             self._runs[run.id] = state
             state.task = asyncio.create_task(self._drive(state), name=f"krim-run-{run.id}")
             await state.started.wait()
@@ -247,26 +262,41 @@ class ChatRuntime:
     async def stop(self, run_id: str) -> RunView:
         async with self._lock:
             run = await self.repository.get_run(run_id)
-            if run.status in TERMINAL_STATUSES:
-                return run
             state = self._runs.get(run_id)
-            if state is None or state.task is None:
-                raise ServiceError("run_unavailable", "运行不在当前进程中", 409)
-            if not state.cancelled and not state.finalizing:
-                await self.repository.request_stop(run_id)
-                state.cancelled = True
-                if not state.finalizing:
-                    state.task.cancel()
-            task = state.task
+            if run.status in TERMINAL_STATUSES:
+                if state is None or state.task is None:
+                    return run
+                task = state.task
+            else:
+                if state is None or state.task is None:
+                    raise ServiceError("run_unavailable", "运行不在当前进程中", 409)
+                if not state.cancelled and not state.finalizing:
+                    await self.repository.request_stop(run_id)
+                    state.cancelled = True
+                    if not state.finalizing:
+                        state.task.cancel()
+                task = state.task
         await asyncio.shield(task)
         return await self.repository.get_run(run_id)
 
     async def stream_state(self, run_id: str, from_seq: int) -> RunState:
-        await self.repository.get_run(run_id)
+        run = await self.repository.get_run(run_id)
         state = self._runs.get(run_id)
-        if state is None:
-            raise ServiceError("stream_gone", "流缓冲已释放；请读取持久化消息", 410)
-        if from_seq < 0 or from_seq > len(state.frames):
+        if state is None or state.task is None:
+            frames = await self.repository.ensure_terminal_event(run_id)
+            if not frames and run.status in TERMINAL_STATUSES:
+                raise ServiceError("stream_gone", "该运行没有可恢复的持久事件", 410)
+            state = RunState(
+                run,
+                frames=frames,
+                event_writer=self.repository.append_event,
+                terminal=bool(frames and frames[-1].kind in {"end", "error"}),
+            )
+            state.started.set()
+            self._runs[run_id] = state
+            self._evict()
+        summary = await self.repository.event_summary(run_id)
+        if from_seq < 0 or from_seq > max(len(state.frames), summary.count):
             raise ServiceError("invalid_cursor", "流游标超出已有事件", 416)
         return state
 
@@ -274,26 +304,38 @@ class ChatRuntime:
         self, state: RunState, from_seq: int = 0, heartbeat: float = 15
     ) -> AsyncIterator[StreamFrame | None]:
         cursor = from_seq
+        heartbeat_at = asyncio.get_running_loop().time()
         while True:
+            if state.task is None and not state.terminal:
+                state.frames = await self.repository.ensure_terminal_event(state.run.id)
+                current_run = await self.repository.get_run(state.run.id)
+                state.terminal = bool(state.frames and state.frames[-1].kind in {"end", "error"})
+                if not state.frames and current_run.status in TERMINAL_STATUSES:
+                    raise ServiceError("stream_gone", "该运行没有可恢复的持久事件", 410)
             async with state.condition:
                 if cursor >= len(state.frames) and not state.terminal:
                     try:
-                        await asyncio.wait_for(state.condition.wait(), timeout=heartbeat)
+                        await asyncio.wait_for(
+                            state.condition.wait(),
+                            timeout=heartbeat if state.task else min(heartbeat, 0.1),
+                        )
                     except TimeoutError:
                         pass
                 frames = state.frames[cursor:]
                 finished = state.terminal
             for frame in frames:
                 cursor = frame.seq + 1
+                heartbeat_at = asyncio.get_running_loop().time()
                 yield frame
             if finished:
                 return
-            if not frames:
+            if not frames and asyncio.get_running_loop().time() - heartbeat_at >= heartbeat:
+                heartbeat_at = asyncio.get_running_loop().time()
                 yield None
 
     async def close(self) -> None:
         self._closed = True
         for state in list(self._runs.values()):
-            if not state.terminal:
+            if state.task is not None and not state.terminal:
                 await self.stop(state.run.id)
         await self.tools.close()
