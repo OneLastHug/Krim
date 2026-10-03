@@ -78,6 +78,7 @@ class RunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     action: Mapped[str] = mapped_column(String(16), default="send")
     source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class MessageRow(Base):
@@ -397,7 +398,11 @@ class KrimRepository:
                 )
                 same = current.model_dump(mode="json") == frame.model_dump(mode="json")
                 if frame.kind == "end":
-                    same = current.kind == frame.kind and current.data == frame.data
+                    current_data = current.data if isinstance(current.data, dict) else {}
+                    frame_data = frame.data if isinstance(frame.data, dict) else {}
+                    same = current.kind == frame.kind and {
+                        key: value for key, value in current_data.items() if value is not None
+                    } == {key: value for key, value in frame_data.items() if value is not None}
                 if not same:
                     raise ServiceError("event_conflict", "流事件序号已经写入不同内容", 409)
                 return current
@@ -493,7 +498,7 @@ class KrimRepository:
                 stream_id=run.id,
                 seq=events[-1].seq + 1,
                 kind="end",
-                data={"status": run.status, "error": run.error},
+                data={"status": run.status, "error": run.error, "code": run.error_code},
             )
             session.add(
                 RunEventRow(
@@ -523,7 +528,13 @@ class KrimRepository:
             )
 
     async def finish(
-        self, run_id: str, status: RunStatus, error: str | None, audits: list[ToolAudit]
+        self,
+        run_id: str,
+        status: RunStatus,
+        error: str | None,
+        audits: list[ToolAudit],
+        *,
+        error_code: str | None = None,
     ) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             for audit in audits:
@@ -535,7 +546,13 @@ class KrimRepository:
             await session.execute(
                 update(RunRow)
                 .where(RunRow.id == run_id)
-                .values(status=status, error=error, finished_at=utc_now(), updated_at=utc_now())
+                .values(
+                    status=status,
+                    error=error,
+                    error_code=error_code,
+                    finished_at=utc_now(),
+                    updated_at=utc_now(),
+                )
             )
 
     async def audits(self, run_id: str) -> list[ToolAudit]:
@@ -554,6 +571,7 @@ class KrimRepository:
             for row in rows:
                 row.status = "interrupted"
                 row.error = "服务重启；未自动重放工具"
+                row.error_code = "interrupted"
                 row.finished_at = utc_now()
                 row.updated_at = utc_now()
                 highest = await session.scalar(
@@ -572,6 +590,6 @@ class KrimRepository:
                         run_id=row.id,
                         seq=(highest + 1) if highest is not None else 0,
                         kind="end",
-                        data={"status": "interrupted", "error": row.error},
+                        data={"status": "interrupted", "error": row.error, "code": "interrupted"},
                     )
                 )

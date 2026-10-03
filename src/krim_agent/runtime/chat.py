@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -45,6 +45,7 @@ class RunState:
     pending_calls: list[ModelToolCall] = field(default_factory=list)
     seen_calls: set[str] = field(default_factory=set)
     publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    step: int = 0
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -135,6 +136,7 @@ class ChatRuntime:
     async def _drive(self, state: RunState) -> None:
         status: RunStatus = "completed"
         error: str | None = None
+        error_code: str | None = None
         state.started.set()
         try:
             await self.repository.set_running(state.run.id)
@@ -143,13 +145,17 @@ class ChatRuntime:
                 await self._loop(state)
         except asyncio.CancelledError:
             status, error = "aborted", "运行已停止"
+            error_code = "cancelled"
         except TimeoutError:
             status, error = "failed", "运行超过时间预算"
+            error_code = "run_timeout"
         except ServiceError as exc:
             status, error = "failed", str(exc)
+            error_code = exc.code
         except Exception:
             logger.exception("运行失败: %s", state.run.id)
             status, error = "failed", "模型或运行时执行失败"
+            error_code = "execution_error"
         finally:
             state.finalizing = True
             try:
@@ -160,6 +166,7 @@ class ChatRuntime:
                         state.draft,
                         {
                             "partial": True,
+                            "step": state.step,
                             "tool_calls": [
                                 call.model_dump(mode="json") for call in state.draft_calls
                             ],
@@ -183,13 +190,18 @@ class ChatRuntime:
                 state.pending_calls.clear()
                 if state.draft:
                     await self.repository.add_message(
-                        state.run, "assistant", state.draft, {"partial": status != "completed"}
+                        state.run,
+                        "assistant",
+                        state.draft,
+                        {"partial": status != "completed", "step": state.step},
                     )
                     state.draft = ""
                 audits = self.tools.audits_for_run(state.run.id)
-                await self.repository.finish(state.run.id, status, error, audits)
+                await self.repository.finish(
+                    state.run.id, status, error, audits, error_code=error_code
+                )
                 self.tools.clear_run_audits(state.run.id)
-                await state.publish("end", {"status": status, "error": error})
+                await state.publish("end", {"status": status, "error": error, "code": error_code})
             finally:
                 state.terminal = True
                 async with state.condition:
@@ -197,6 +209,7 @@ class ChatRuntime:
 
     async def _loop(self, state: RunState) -> None:
         for _step in range(self.settings.max_steps):
+            state.step = _step
             messages = await self.repository.list_messages(state.run.topic_id)
             calls: list[ModelToolCall] = []
             async for delta in self.provider.stream(messages, self.tools.definitions):
@@ -219,12 +232,21 @@ class ChatRuntime:
                 if len(state.frames) >= 2048:
                     raise ServiceError("stream_limit", "流事件超过限制")
             if not calls:
+                if not state.draft:
+                    raise ServiceError("no_output", "模型没有输出文本或工具请求")
+                await self.repository.add_message(
+                    state.run, "assistant", state.draft, {"step": _step, "partial": False}
+                )
+                state.draft = ""
+                await state.publish(
+                    "chunk", {"type": "step_finish", "step": _step, "finish_reason": "stop"}
+                )
                 return
             await self.repository.add_message(
                 state.run,
                 "assistant",
                 state.draft,
-                {"tool_calls": [call.model_dump(mode="json") for call in calls]},
+                {"tool_calls": [call.model_dump(mode="json") for call in calls], "step": _step},
             )
             state.draft = ""
             state.draft_calls.clear()
@@ -257,6 +279,9 @@ class ChatRuntime:
                         **result.model_dump(mode="json"),
                     },
                 )
+            await state.publish(
+                "chunk", {"type": "step_finish", "step": _step, "finish_reason": "tool-calls"}
+            )
         raise ServiceError("step_limit", "模型步骤超过预算")
 
     async def stop(self, run_id: str) -> RunView:
@@ -302,7 +327,7 @@ class ChatRuntime:
 
     async def subscribe(
         self, state: RunState, from_seq: int = 0, heartbeat: float = 15
-    ) -> AsyncIterator[StreamFrame | None]:
+    ) -> AsyncGenerator[StreamFrame | None, None]:
         cursor = from_seq
         heartbeat_at = asyncio.get_running_loop().time()
         while True:

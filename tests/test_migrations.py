@@ -58,7 +58,7 @@ async def test_legacy_m1_database_is_upgraded_without_changing_history(tmp_path)
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0003_stream_events"
+            ).scalar() == "0004_run_error_code"
             assert (
                 await connection.execute(
                     text("SELECT payload FROM tool_audits WHERE call_id='call'")
@@ -105,8 +105,8 @@ async def test_downgrade_refuses_to_erase_branches(repository):
     )
     await repository.add_message(edited, "assistant", "after answer")
     await repository.finish(edited.id, "completed", None, [])
-    async with repository.database.engine.begin() as connection:
-        with pytest.raises(RuntimeError, match="分支"):
+    with pytest.raises(RuntimeError, match="分支"):
+        async with repository.database.engine.begin() as connection:
             await connection.run_sync(
                 lambda sync: command.downgrade(migration_config(sync), "0001_m1")
             )

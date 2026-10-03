@@ -111,3 +111,4 @@ class RunView(View):
     finished_at: datetime | None
     action: Literal["send", "edit", "regenerate"] = "send"
     source_message_id: str | None = None
+    error_code: str | None = None
