@@ -11,7 +11,7 @@ from pydantic import JsonValue
 
 from krim_agent.sdk import PythonAI
 from krim_agent.tools import ToolContext, ToolRegistry
-from krim_agent.tools.core import Policy
+from krim_agent.tools.core import Policy, ToolError
 from krim_agent.workflow.builtins import input_value
 from krim_agent.workflow.runners import ExecutionContext, RunnerBinding
 from krim_agent.workflow.types import NodeOutput, WorkflowError, WorkflowGraph, WorkflowNode
@@ -47,7 +47,12 @@ class WorkflowServices:
             if node.kind == "tool" and self.tools is not None:
                 name = node.config.get("name")
                 if isinstance(name, str):
-                    definition = self.tools.get(name)
+                    try:
+                        definition = self.tools.get(name)
+                    except ToolError:
+                        raise WorkflowError(
+                            "tool_unavailable", "Workflow tool 未注册", node_id=node.id
+                        ) from None
                     bindings[node.id] = RunnerBinding(
                         self.run_tool, retry_safe=definition.risk == "read"
                     )

@@ -143,6 +143,12 @@ class WorkflowHandle:
             result=self._result_value.model_copy(deep=True) if self._result_value else None,
         )
 
+    async def wait_started(self) -> None:
+        """等待生产启动或初始化失败；持久运行的初始行此时已提交。"""
+        await self._started.wait()
+        if self.task.done():
+            await self.task
+
     async def suspend(self) -> WorkflowCheckpointState:
         if self.depth != 0 or self._journal is None:
             raise WorkflowError("checkpoint_required", "只有持久根运行可以移交")
@@ -285,17 +291,18 @@ class WorkflowHandle:
         cursor = from_seq
         while True:
             async with self._condition:
-                if (
-                    cursor == len(self.events_log)
-                    and not self.task.done()
-                    and self.status not in {"completed", "failed", "aborted"}
-                ):
+                terminal = bool(
+                    self.events_log
+                    and self.events_log[-1].type == "end"
+                    and self.events_log[-1].epoch == self.epoch
+                )
+                if cursor == len(self.events_log) and not self.task.done() and not terminal:
                     try:
                         await asyncio.wait_for(self._condition.wait(), heartbeat)
                     except TimeoutError:
                         pass
                 events = self.events_log[cursor:]
-                done = self.status in {"completed", "failed", "aborted"} or self.task.done()
+                done = self.task.done() or terminal
             for event in events:
                 cursor = event.seq + 1
                 yield event.model_copy(deep=True)
@@ -359,6 +366,8 @@ class WorkflowEngine:
         pause_before: set[str] | None = None,
         pause_after: set[str] | None = None,
         checkpoint: WorkflowCheckpointBackend | None = None,
+        run_id: str | None = None,
+        journal: WorkflowJournal | None = None,
     ) -> WorkflowHandle:
         effective = graph.production_projection() if production else graph.model_copy(deep=True)
         effective.validate_graph()
@@ -374,7 +383,8 @@ class WorkflowEngine:
             production=production,
             pause_before=set(pause_before or ()),
             pause_after=set(pause_after or ()),
-            journal=WorkflowJournal(checkpoint) if checkpoint else None,
+            journal=journal or (WorkflowJournal(checkpoint) if checkpoint else None),
+            run_id=run_id,
         )
 
     async def restore(
@@ -621,7 +631,6 @@ class WorkflowEngine:
         try:
             if journal is not None and handle.depth == 0:
                 await journal.acquire()
-            handle._started.set()
             if handle._stop_requested:
                 raise asyncio.CancelledError
             remaining = self.timeout_seconds
@@ -636,6 +645,7 @@ class WorkflowEngine:
                         handle.current_node,
                         {"boundary": handle._paused_boundary, "recovered": True},
                     )
+                    handle._started.set()
                     await handle._resume_event.wait()
                     if handle._paused_boundary == "before" and handle.current_node is not None:
                         handle._input_overrides.setdefault(
@@ -645,13 +655,17 @@ class WorkflowEngine:
                     handle._paused_boundary = None
                     handle.status = "running"
                     await self.publish(handle, "resumed", handle.current_node, {"recovered": True})
+                    handle._started.set()
                 else:
                     handle.status = "running"
                     await self.publish(
                         handle,
-                        "resumed" if handle._restored else "start",
-                        data={"recovered": True} if handle._restored else handle.input_value,
+                        "resumed" if handle._restored and handle.events_log else "start",
+                        data={"recovered": True}
+                        if handle._restored and handle.events_log
+                        else handle.input_value,
                     )
+                    handle._started.set()
                 while any(value == "pending" for value in handle.node_statuses.values()):
                     progressed = False
                     for node in handle.graph.nodes:

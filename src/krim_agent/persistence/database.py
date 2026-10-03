@@ -157,6 +157,15 @@ class WorkflowCheckpointRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class WorkflowRequestRow(Base):
+    __tablename__ = "workflow_requests"
+    scope: Mapped[str] = mapped_column(String(128), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_checkpoints.run_id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)

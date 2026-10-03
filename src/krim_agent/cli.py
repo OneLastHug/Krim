@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+from pathlib import Path
 
 import httpx
 from pydantic import ValidationError
@@ -11,6 +13,7 @@ from pydantic import ValidationError
 from . import __version__
 from .client import ClientError, KrimClient
 from .protocol.domain import TERMINAL_STATUSES
+from .workflow import WorkflowGraph
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +23,22 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    workflow = subparsers.add_parser("workflow", help="workflow（工作流）：运行与控制持久图")
+    workflow.add_argument(
+        "action",
+        choices=["run", "list", "get", "events", "pause", "resume", "restore", "stop", "rerun"],
+    )
+    workflow.add_argument("value", nargs="?", help="run 时为 JSON/文件路径，其余动作为 run_id")
+    workflow.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    workflow.add_argument("--input", default="null", help="run 输入 JSON")
+    workflow.add_argument("--idempotency-key", help="Workflow 请求幂等键")
+    workflow.add_argument("--pause-before", action="append", default=[], help="节点前暂停")
+    workflow.add_argument("--pause-after", action="append", default=[], help="节点后暂停")
+    workflow.add_argument("--from-seq", type=int, default=0, help="事件起始序号")
+    workflow.add_argument("--node", help="rerun 节点 ID")
+    workflow.add_argument("--override", help="resume/rerun 输入 JSON")
+    workflow.add_argument("--allow-side-effects", action="store_true")
+    workflow.add_argument("--completed-outputs", help="恢复时已完成 NodeOutput 的 JSON")
     for command, help_text in (
         ("chat", "chat（对话）：发送消息并订阅输出"),
         ("topics", "topics（话题）：列出历史话题"),
@@ -61,6 +80,28 @@ def main() -> None:
     if args.command == "version":
         print(f"Krim Agent {__version__}")
         return
+    if args.command == "workflow" and args.action == "run":
+        if not args.value:
+            parser.error("workflow run 需要 JSON 图或文件路径")
+        try:
+            source = (
+                Path(args.value).read_text("utf-8") if Path(args.value).exists() else args.value
+            )
+            graph = WorkflowGraph.model_validate_json(source)
+            input_value = json.loads(args.input)
+        except (OSError, ValueError) as exc:
+            parser.error(f"Workflow JSON 无效: {exc}")
+        with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            print(
+                client.workflow_run(
+                    graph,
+                    input_value,
+                    idempotency_key=args.idempotency_key,
+                    pause_before=args.pause_before,
+                    pause_after=args.pause_after,
+                ).model_dump_json(indent=2)
+            )
+        return
     if args.command == "serve":
         import uvicorn
 
@@ -77,6 +118,58 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "workflow":
+                if args.action == "list":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.workflows()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    return
+                if not args.value:
+                    parser.error("workflow 操作需要 run_id")
+                run_id = args.value
+                if args.action == "get":
+                    print(client.workflow(run_id).model_dump_json(indent=2))
+                elif args.action == "events":
+                    for event in client.workflow_events(run_id, args.from_seq):
+                        print(event.model_dump_json(exclude_none=True))
+                elif args.action == "pause":
+                    print(client.workflow_pause(run_id).model_dump_json(indent=2))
+                elif args.action == "stop":
+                    print(client.workflow_stop(run_id).model_dump_json(indent=2))
+                elif args.action == "resume":
+                    value = json.loads(args.override) if args.override is not None else None
+                    print(
+                        client.workflow_resume(
+                            run_id, value, override=args.override is not None
+                        ).model_dump_json(indent=2)
+                    )
+                elif args.action == "restore":
+                    outputs = json.loads(args.completed_outputs) if args.completed_outputs else {}
+                    print(
+                        client.workflow_restore(
+                            run_id,
+                            replay_side_effects=args.allow_side_effects,
+                            completed_outputs=outputs,
+                        ).model_dump_json(indent=2)
+                    )
+                elif args.action == "rerun":
+                    if not args.node:
+                        parser.error("workflow rerun 需要 --node")
+                    value = json.loads(args.override) if args.override is not None else None
+                    print(
+                        client.workflow_rerun(
+                            run_id,
+                            args.node,
+                            value,
+                            override=args.override is not None,
+                            allow_side_effects=args.allow_side_effects,
+                        ).model_dump_json(indent=2)
+                    )
+                return
             if args.command == "topics":
                 for topic in client.topics():
                     print(f"{topic.id}\t{topic.title}")

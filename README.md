@@ -16,6 +16,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册和 PKCE exchange 消费；本机 TCP 已验证，401 自动 transport 与浏览器回调仍未完成。
 - 已实现显式 MCP Streamable HTTP OAuth Auth：401 触发受控 PKCE 回调、持久令牌复用和一次请求重放；真实本机 MCP tools/list/call 已验证，宿主仍需提供回调，不自动打开浏览器。
 - 已实现 [Workflow SQLite 检查点](docs/api/workflow-engine.md)：节点事件/输出一致保存、稳定嵌套进度、暂停前后与跨进程恢复、租约/版本保护及副作用裁决；HTTP/client/CLI/UI 仍未完成。
+- 已接通 [Workflow HTTP/client/CLI](docs/api/workflow-http-cli.md)：0007 幂等创建、持久结果、SSE/游标、暂停/继续/停止/恢复/重跑，默认工具/模型复用原权限链；完整浏览器和生产多 worker 未完成。
 
 ## 快速开始
 

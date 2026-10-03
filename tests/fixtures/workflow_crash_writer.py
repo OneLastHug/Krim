@@ -18,7 +18,7 @@ async def main() -> None:
         entered.set()
         await asyncio.Event().wait()
 
-    store = WorkflowCheckpointStore(database, lease_seconds=0.3)
+    store = WorkflowCheckpointStore(database, lease_seconds=2)
     graph = WorkflowGraph(nodes=[WorkflowNode(id="work", kind="tool")])
     handle = WorkflowEngine().execute(
         graph, "process-input", RunnerBinding(runner, retry_safe=True), checkpoint=store

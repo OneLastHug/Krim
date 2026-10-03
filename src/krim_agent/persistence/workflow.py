@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import or_, select, update
@@ -17,9 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from krim_agent.protocol.models import check_json, utc_now
 from krim_agent.workflow.checkpoints import StoredWorkflowCheckpoint
 from krim_agent.workflow.schema import schema_accepts
-from krim_agent.workflow.types import WorkflowCheckpointState, WorkflowError, WorkflowRunCheckpoint
+from krim_agent.workflow.types import (
+    WorkflowCheckpointState,
+    WorkflowError,
+    WorkflowEvent,
+    WorkflowResult,
+    WorkflowRunCheckpoint,
+)
 
-from .database import Database, WorkflowCheckpointRow
+from .database import Database, WorkflowCheckpointRow, WorkflowRequestRow
 
 
 class WorkflowCheckpointError(WorkflowError):
@@ -171,6 +178,59 @@ class WorkflowCheckpointStore:
             )
         return 0
 
+    async def api_lookup(self, key: str, request_hash: str) -> StoredWorkflowCheckpoint | None:
+        async with self._transaction() as session:
+            request = await session.get(WorkflowRequestRow, (self.scope, key))
+            if request is None:
+                return None
+            if request.request_hash != request_hash:
+                raise WorkflowCheckpointError(
+                    "idempotency_conflict", "Workflow 请求幂等键与正文不一致"
+                )
+            row = await session.get(WorkflowCheckpointRow, request.run_id)
+            if row is None:
+                raise WorkflowCheckpointError("checkpoint_corrupt", "Workflow 请求没有匹配检查点")
+            return self._decode(row)
+
+    async def api_request(
+        self, key: str, request_hash: str, state: WorkflowCheckpointState
+    ) -> tuple[StoredWorkflowCheckpoint, bool]:
+        payload = self._payload(state)
+        async with self._transaction() as session:
+            existing = await session.get(WorkflowRequestRow, (self.scope, key))
+            if existing is not None:
+                if existing.request_hash != request_hash:
+                    raise WorkflowCheckpointError(
+                        "idempotency_conflict", "Workflow 请求幂等键与正文不一致"
+                    )
+                row = await session.get(WorkflowCheckpointRow, existing.run_id)
+                if row is None:
+                    raise WorkflowCheckpointError(
+                        "checkpoint_corrupt", "Workflow 请求没有匹配检查点"
+                    )
+                return self._decode(row), False
+            row = WorkflowCheckpointRow(
+                run_id=state.run_id,
+                scope=self.scope,
+                graph_hash=state.graph_hash,
+                status=state.status,
+                payload=payload,
+                revision=0,
+                owner_id=None,
+                lease_expires_at=None,
+            )
+            session.add(row)
+            await session.flush()
+            session.add(
+                WorkflowRequestRow(
+                    scope=self.scope,
+                    idempotency_key=key,
+                    request_hash=request_hash,
+                    run_id=state.run_id,
+                )
+            )
+            return StoredWorkflowCheckpoint(state, 0), True
+
     async def load(self, run_id: str) -> StoredWorkflowCheckpoint:
         async with self._transaction() as session:
             row = await session.get(WorkflowCheckpointRow, run_id)
@@ -270,6 +330,44 @@ class WorkflowCheckpointStore:
                 )
                 .values(owner_id=None, lease_expires_at=None)
             )
+
+    async def abort_cold(self, run_id: str) -> None:
+        owner = str(uuid4())
+        claimed = await self.claim(run_id, owner)
+        state = claimed.state.model_copy(deep=True)
+        state.status = "aborted"
+        state.node_statuses = {
+            key: "aborted" if value == "running" else value
+            for key, value in state.node_statuses.items()
+        }
+        state.result = WorkflowResult(
+            run_id=state.run_id,
+            status="aborted",
+            node_results={
+                key: value.ports.get("out", value.ports)
+                if set(value.ports) == {"out"}
+                else value.ports
+                for key, value in state.node_outputs.items()
+            },
+            node_outputs={key: value.ports for key, value in state.node_outputs.items()},
+            node_statuses=state.node_statuses,
+            epoch=state.epoch,
+            code="cancelled",
+            error="Workflow 已中止",
+        )
+        state.events.append(
+            WorkflowEvent(
+                run_id=state.run_id,
+                seq=len(state.events),
+                epoch=state.epoch,
+                type="end",
+                data={"status": "aborted", "code": "cancelled"},
+            )
+        )
+        try:
+            await self.save(state, owner, claimed.revision)
+        finally:
+            await self.release(run_id, owner)
 
     async def list(self) -> list[StoredWorkflowCheckpoint]:
         async with self._transaction() as session:
