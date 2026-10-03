@@ -6,7 +6,8 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 
 - M1 已在用户授权范围内实现：协议桥、工具执行链、离线 fake provider、SQLite 持久化、HTTP/OpenAPI/SSE、Python 客户端、CLI 和宿主门面。
 - M1 验收证据见 `docs/testing/reports/2026-10-02-m1-test-report.md`；实际结果以报告中的最后一轮记录为准。
-- M2/M3 尚未批准，不把消息树、跨进程续传、SubAgent、Workflow、MCP 和完整前端写成已完成能力。
+- AUTH-004 已批准继续开发 M2/M3，并要求每个已验证功能单独本地提交；消息树、跨进程续传、SubAgent、Workflow、MCP 和完整前端的实际完成状态见需求追踪。
+- M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
 
 ## 快速开始
 
@@ -58,7 +59,7 @@ uv run --no-sync krim serve
 
 ## Git
 
-仓库已初始化并保留可审查工作区。按项目规则，本轮不自动执行 `commit`（提交）或 `push`（推送远程）；查看状态使用：
+仓库已有 M1 提交。AUTH-004 要求每个已完成并验证的功能单独 `commit`（本地提交），说明首行以精炼中文写明“模块：功能”供审计；尚未授权 `push`（推送远程）。查看状态使用：
 
 ```powershell
 # git status 的 status 是“状态”，--short 是简短格式，--branch 显示分支信息。

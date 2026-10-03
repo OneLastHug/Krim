@@ -24,7 +24,7 @@ class TopicCreate(StrictModel):
     title: str = Field(default="新话题", min_length=1, max_length=120)
 
 
-class ChatRequest(StrictModel):
+class TextRequest(StrictModel):
     text: str = Field(min_length=1, max_length=8192)
     idempotency_key: str = Field(min_length=1, max_length=128)
 
@@ -34,6 +34,22 @@ class ChatRequest(StrictModel):
         if not text.strip():
             raise ValueError("消息不能只有空白")
         return text
+
+
+class ChatRequest(TextRequest):
+    parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class EditRequest(TextRequest):
+    pass
+
+
+class RegenerateRequest(StrictModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class BranchRequest(StrictModel):
+    message_id: str = Field(min_length=1, max_length=128)
 
 
 class View(BaseModel):
@@ -52,6 +68,7 @@ class TopicView(View):
     title: str
     created_at: datetime
     updated_at: datetime
+    active_branches: dict[str, str | None] = Field(default_factory=dict)
 
 
 class MessageView(View):
@@ -63,6 +80,13 @@ class MessageView(View):
     content: str
     details: dict[str, JsonValue]
     created_at: datetime
+    parent_id: str | None = None
+
+
+class MessageTreeView(StrictModel):
+    topic: TopicView
+    messages: list[MessageView]
+    active_path: list[str]
 
 
 class RunView(View):
@@ -76,3 +100,5 @@ class RunView(View):
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
+    action: Literal["send", "edit", "regenerate"] = "send"
+    source_message_id: str | None = None

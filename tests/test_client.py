@@ -102,6 +102,9 @@ def test_cli_shows_persisted_reply_if_run_already_finished(monkeypatch, capsys):
         def messages(self, _topic):
             return [SimpleNamespace(run_id=run.id, role="assistant", content="已保存的回复")]
 
+        def run_messages(self, _run):
+            return [SimpleNamespace(run_id=run.id, role="assistant", content="已保存的回复")]
+
     monkeypatch.setattr("krim_agent.cli.KrimClient", CompletedClient)
     monkeypatch.setattr("sys.argv", ["krim", "chat", "hello", "--topic", "topic-fast"])
     main()

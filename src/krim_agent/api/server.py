@@ -16,8 +16,12 @@ from krim_agent import __version__
 from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import (
+    BranchRequest,
     ChatRequest,
+    EditRequest,
+    MessageTreeView,
     MessageView,
+    RegenerateRequest,
     RunView,
     ServiceError,
     TopicCreate,
@@ -136,6 +140,24 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     async def list_messages(topic_id: str) -> MessagesResponse:
         return MessagesResponse(messages=await repository.list_messages(topic_id))
 
+    @app.get("/v1/topics/{topic_id}/tree")
+    async def message_tree(topic_id: str) -> MessageTreeView:
+        return await repository.message_tree(topic_id)
+
+    @app.put("/v1/topics/{topic_id}/branch")
+    async def select_branch(topic_id: str, payload: BranchRequest) -> TopicView:
+        return await repository.select_branch(topic_id, payload.message_id)
+
+    @app.post("/v1/topics/{topic_id}/messages/{message_id}/edit", status_code=202)
+    async def edit_message(topic_id: str, message_id: str, payload: EditRequest) -> RunView:
+        return await service.edit(topic_id, message_id, payload)
+
+    @app.post("/v1/topics/{topic_id}/messages/{message_id}/regenerate", status_code=202)
+    async def regenerate_message(
+        topic_id: str, message_id: str, payload: RegenerateRequest
+    ) -> RunView:
+        return await service.regenerate(topic_id, message_id, payload)
+
     @app.post("/v1/topics/{topic_id}/messages", status_code=202)
     async def send_message(topic_id: str, payload: ChatRequest) -> RunView:
         return await service.start(topic_id, payload)
@@ -147,6 +169,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/runs/{run_id}/audits")
     async def get_audits(run_id: str) -> list[ToolAudit]:
         return await repository.audits(run_id)
+
+    @app.get("/v1/runs/{run_id}/messages")
+    async def run_messages(run_id: str) -> MessagesResponse:
+        return MessagesResponse(messages=await repository.run_messages(run_id))
 
     @app.post("/v1/runs/{run_id}/stop")
     async def stop_run(run_id: str) -> RunView:

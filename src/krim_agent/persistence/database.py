@@ -1,11 +1,13 @@
-"""SQLAlchemy 2 异步 SQLite；SRC-OSS-006，M1 建表而非迁移框架。"""
+"""SQLAlchemy 2 异步 SQLite 与消息树；迁移和分支边界见 ADR-0005。"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -18,18 +20,22 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     select,
     update,
 )
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
+    EditRequest,
+    MessageTreeView,
     MessageView,
+    RegenerateRequest,
     RunStatus,
     RunView,
     ServiceError,
@@ -37,6 +43,9 @@ from krim_agent.protocol.domain import (
 )
 from krim_agent.protocol.models import utc_now
 from krim_agent.tools.core import ToolAudit
+
+from .migration import upgrade_database
+from .tree import ROOT, MessageTree
 
 
 class Base(DeclarativeBase):
@@ -49,6 +58,7 @@ class TopicRow(Base):
     title: Mapped[str] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    active_branches: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
 
 
 class RunRow(Base):
@@ -65,6 +75,8 @@ class RunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    action: Mapped[str] = mapped_column(String(16), default="send")
+    source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class MessageRow(Base):
@@ -78,6 +90,7 @@ class MessageRow(Base):
     content: Mapped[str] = mapped_column(Text)
     details: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id"), index=True)
 
 
 class ToolAuditRow(Base):
@@ -96,13 +109,25 @@ class Database:
         if parsed.database and parsed.database != ":memory:":
             Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_async_engine(url, hide_parameters=True)
+
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def foreign_keys(connection: Any, _record: Any) -> None:
+            # 明确由 SQLAlchemy 开始事务，使 SQLite DDL 也能完整回滚。
+            connection.isolation_level = None
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        @event.listens_for(self.engine.sync_engine, "begin")
+        def begin(connection: Connection) -> None:
+            connection.exec_driver_sql("BEGIN")
+
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
-            await connection.exec_driver_sql("PRAGMA foreign_keys=ON")
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(upgrade_database)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -134,9 +159,32 @@ class KrimRepository:
             return [TopicView.model_validate(row) for row in rows]
 
     async def begin_run(
-        self, topic_id: str, request: ChatRequest, *, allow_new: bool = True
+        self,
+        topic_id: str,
+        request: ChatRequest | EditRequest | RegenerateRequest,
+        *,
+        allow_new: bool = True,
+        action: Literal["send", "edit", "regenerate"] = "send",
+        source_message_id: str | None = None,
     ) -> tuple[RunView, bool]:
-        digest = hashlib.sha256(request.text.encode()).hexdigest()
+        text = "" if isinstance(request, RegenerateRequest) else request.text
+        explicit_parent = request.parent_message_id if isinstance(request, ChatRequest) else None
+        # 保留普通发送的 M1 幂等摘要；分支操作将动作与目标纳入摘要。
+        fingerprint = (
+            text
+            if action == "send" and explicit_parent is None
+            else json.dumps(
+                {
+                    "action": action,
+                    "source": source_message_id,
+                    "parent": explicit_parent,
+                    "text": text,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         async with self.database.write_lock, self.database.sessions.begin() as session:
             topic = await session.get(TopicRow, topic_id)
             if topic is None:
@@ -152,67 +200,156 @@ class KrimRepository:
                 return RunView.model_validate(existing), False
             if not allow_new:
                 raise ServiceError("run_limit", "同时运行数量超过限制", 429)
-            active = await session.scalar(
-                select(RunRow.id).where(
-                    RunRow.topic_id == topic_id, RunRow.status.in_(("queued", "running"))
-                )
-            )
-            if active:
-                raise ServiceError("topic_busy", "话题已有活跃运行", 409)
+            await self._require_idle(session, topic_id)
+            messages = await self._messages(session, topic_id)
+            tree = MessageTree(messages)
+            path = tree.active_path(topic.active_branches)
+            choices = dict(topic.active_branches)
+            parent_id = path[-1].id if path else None
+            input_id = str(uuid4())
+            if action == "send" and explicit_parent is None:
+                tree.require_complete_tools(path)
+            if action == "edit":
+                source = tree.nodes.get(source_message_id or "")
+                if source is None:
+                    raise ServiceError("message_not_found", "消息不在该话题中", 404)
+                if source.role != "user":
+                    raise ServiceError("message_not_editable", "只能编辑用户消息", 409)
+                parent_id = source.parent_id
+                choices = tree.select(source.id, choices)
+            elif action == "regenerate":
+                source = tree.user_ancestor(source_message_id or "")
+                input_id = source.id
+                choices = tree.select(source.id, choices)
+                choices[source.id] = None
+            elif explicit_parent is not None:
+                source = tree.nodes.get(explicit_parent)
+                await self._require_boundary(session, source)
+                choices = tree.select(explicit_parent, choices)
+                parent_id = explicit_parent
             run = RunRow(
                 id=str(uuid4()),
                 topic_id=topic_id,
-                input_message_id=str(uuid4()),
+                input_message_id=input_id,
                 idempotency_key=request.idempotency_key,
                 input_hash=digest,
+                action=action,
+                source_message_id=source_message_id,
             )
             session.add(run)
             await session.flush()
-            highest = await session.scalar(
-                select(func.max(MessageRow.sequence)).where(MessageRow.topic_id == topic_id)
-            )
-            session.add(
-                MessageRow(
-                    id=run.input_message_id,
-                    topic_id=topic_id,
-                    run_id=run.id,
-                    sequence=(highest or 0) + 1,
-                    role="user",
-                    content=request.text,
-                    details={},
+            if action != "regenerate":
+                highest = max((message.sequence for message in messages), default=0)
+                session.add(
+                    MessageRow(
+                        id=run.input_message_id,
+                        topic_id=topic_id,
+                        run_id=run.id,
+                        sequence=highest + 1,
+                        role="user",
+                        content=text,
+                        details={"edited_from": source_message_id} if action == "edit" else {},
+                        parent_id=parent_id,
+                    )
                 )
-            )
+                choices[parent_id or ROOT] = input_id
+            topic.active_branches = choices
             topic.updated_at = utc_now()
             return RunView.model_validate(run), True
 
-    async def list_messages(self, topic_id: str) -> list[MessageView]:
-        await self.get_topic(topic_id)
-        async with self.database.write_lock, self.database.sessions() as session:
-            rows = await session.scalars(
-                select(MessageRow)
-                .where(MessageRow.topic_id == topic_id)
-                .order_by(MessageRow.sequence)
+    async def _messages(self, session: AsyncSession, topic_id: str) -> list[MessageView]:
+        rows = await session.scalars(
+            select(MessageRow).where(MessageRow.topic_id == topic_id).order_by(MessageRow.sequence)
+        )
+        return [MessageView.model_validate(row) for row in rows]
+
+    async def _require_idle(self, session: AsyncSession, topic_id: str) -> None:
+        active = await session.scalar(
+            select(RunRow.id).where(
+                RunRow.topic_id == topic_id, RunRow.status.in_(("queued", "running"))
             )
-            return [MessageView.model_validate(row) for row in rows]
+        )
+        if active:
+            raise ServiceError("topic_busy", "话题已有活跃运行", 409)
+
+    async def _require_boundary(self, session: AsyncSession, message: MessageView | None) -> None:
+        if message is None:
+            raise ServiceError("message_not_found", "消息不在该话题中", 404)
+        if message.role == "tool" or message.details.get("tool_calls"):
+            raise ServiceError("incomplete_tool_group", "不能从工具组中间切换或发送", 409)
+        run = await session.get(RunRow, message.run_id)
+        if run is None or run.status not in TERMINAL_STATUSES:
+            raise ServiceError("message_not_ready", "消息所属运行尚未完成", 409)
+
+    async def message_tree(self, topic_id: str) -> MessageTreeView:
+        async with self.database.write_lock, self.database.sessions() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            messages = await self._messages(session, topic_id)
+            path = MessageTree(messages).active_path(topic.active_branches)
+            return MessageTreeView(
+                topic=TopicView.model_validate(topic),
+                messages=messages,
+                active_path=[message.id for message in path],
+            )
+
+    async def list_messages(self, topic_id: str) -> list[MessageView]:
+        tree = await self.message_tree(topic_id)
+        by_id = {message.id: message for message in tree.messages}
+        return [by_id[message_id] for message_id in tree.active_path]
+
+    async def select_branch(self, topic_id: str, message_id: str) -> TopicView:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            await self._require_idle(session, topic_id)
+            tree = MessageTree(await self._messages(session, topic_id))
+            await self._require_boundary(session, tree.nodes.get(message_id))
+            choices = tree.select(message_id, topic.active_branches)
+            tree.active_path(choices)
+            topic.active_branches = choices
+            topic.updated_at = utc_now()
+            return TopicView.model_validate(topic)
 
     async def add_message(
         self, run: RunView, role: str, content: str, details: dict[str, JsonValue] | None = None
     ) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, run.topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
             highest = await session.scalar(
                 select(func.max(MessageRow.sequence)).where(MessageRow.topic_id == run.topic_id)
             )
+            parent_id = (
+                await session.scalar(
+                    select(MessageRow.id)
+                    .where(MessageRow.run_id == run.id)
+                    .order_by(MessageRow.sequence.desc())
+                    .limit(1)
+                )
+                or run.input_message_id
+            )
+            message_id = str(uuid4())
+            payload = dict(details or {})
+            if run.action == "regenerate":
+                payload["regenerated_from"] = run.source_message_id
             session.add(
                 MessageRow(
-                    id=str(uuid4()),
+                    id=message_id,
                     topic_id=run.topic_id,
                     run_id=run.id,
                     sequence=(highest or 0) + 1,
                     role=role,
                     content=content,
-                    details=details or {},
+                    details=payload,
+                    parent_id=parent_id,
                 )
             )
+            topic.active_branches = {**topic.active_branches, parent_id: message_id}
+            topic.updated_at = utc_now()
 
     async def get_run(self, run_id: str) -> RunView:
         async with self.database.write_lock, self.database.sessions() as session:
@@ -220,6 +357,14 @@ class KrimRepository:
             if row is None:
                 raise ServiceError("run_not_found", "运行不存在", 404)
             return RunView.model_validate(row)
+
+    async def run_messages(self, run_id: str) -> list[MessageView]:
+        await self.get_run(run_id)
+        async with self.database.write_lock, self.database.sessions() as session:
+            rows = await session.scalars(
+                select(MessageRow).where(MessageRow.run_id == run_id).order_by(MessageRow.sequence)
+            )
+            return [MessageView.model_validate(row) for row in rows]
 
     async def set_running(self, run_id: str) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:

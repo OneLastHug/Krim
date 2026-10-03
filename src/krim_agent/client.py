@@ -9,7 +9,15 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter
 
-from .protocol.domain import ChatRequest, MessageView, RunView, TopicView
+from .protocol.domain import (
+    ChatRequest,
+    EditRequest,
+    MessageTreeView,
+    MessageView,
+    RegenerateRequest,
+    RunView,
+    TopicView,
+)
 from .protocol.models import StreamFrame
 
 
@@ -70,8 +78,49 @@ class KrimClient:
         self._check(response)
         return TypeAdapter(list[MessageView]).validate_python(response.json()["messages"])
 
-    def send(self, topic_id: str, text: str, idempotency_key: str | None = None) -> RunView:
-        request = ChatRequest(text=text, idempotency_key=idempotency_key or str(uuid4()))
+    def tree(self, topic_id: str) -> MessageTreeView:
+        response = self._http.get(f"/v1/topics/{topic_id}/tree")
+        self._check(response)
+        return MessageTreeView.model_validate_json(response.content)
+
+    def select_branch(self, topic_id: str, message_id: str) -> TopicView:
+        response = self._http.put(f"/v1/topics/{topic_id}/branch", json={"message_id": message_id})
+        self._check(response)
+        return TopicView.model_validate_json(response.content)
+
+    def edit(
+        self, topic_id: str, message_id: str, text: str, idempotency_key: str | None = None
+    ) -> RunView:
+        request = EditRequest(text=text, idempotency_key=idempotency_key or str(uuid4()))
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/messages/{message_id}/edit", json=request.model_dump()
+        )
+        self._check(response)
+        return RunView.model_validate_json(response.content)
+
+    def regenerate(
+        self, topic_id: str, message_id: str, idempotency_key: str | None = None
+    ) -> RunView:
+        request = RegenerateRequest(idempotency_key=idempotency_key or str(uuid4()))
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/messages/{message_id}/regenerate", json=request.model_dump()
+        )
+        self._check(response)
+        return RunView.model_validate_json(response.content)
+
+    def send(
+        self,
+        topic_id: str,
+        text: str,
+        idempotency_key: str | None = None,
+        *,
+        parent_message_id: str | None = None,
+    ) -> RunView:
+        request = ChatRequest(
+            text=text,
+            idempotency_key=idempotency_key or str(uuid4()),
+            parent_message_id=parent_message_id,
+        )
         response = self._http.post(f"/v1/topics/{topic_id}/messages", json=request.model_dump())
         self._check(response)
         return RunView.model_validate_json(response.content)
@@ -80,6 +129,11 @@ class KrimClient:
         response = self._http.get(f"/v1/runs/{run_id}")
         self._check(response)
         return RunView.model_validate_json(response.content)
+
+    def run_messages(self, run_id: str) -> list[MessageView]:
+        response = self._http.get(f"/v1/runs/{run_id}/messages")
+        self._check(response)
+        return TypeAdapter(list[MessageView]).validate_python(response.json()["messages"])
 
     def stop(self, run_id: str) -> RunView:
         response = self._http.post(f"/v1/runs/{run_id}/stop")
