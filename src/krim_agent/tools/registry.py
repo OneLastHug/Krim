@@ -53,6 +53,16 @@ class ToolRegistry:
     def clear_run_audits(self, run_id: str) -> None:
         self._run_audits.pop(run_id, None)
 
+    def fork(self) -> ToolRegistry:
+        """保留可信定义与全局执行链，隔离审计缓存和观察任务生命周期。"""
+        target = ToolRegistry(max_depth=self.max_depth, default_timeout=self.default_timeout)
+        target.register_many(*self.definitions)
+        target._global_pre = list(self._global_pre)
+        target._global_post = list(self._global_post)
+        target._observers = list(self._observers)
+        target._result_observers = list(self._result_observers)
+        return target
+
     def register(self, definition: ToolDefinition) -> ToolDefinition:
         if definition.name in self._definitions:
             raise ValueError(f"重复工具: {definition.name}")
