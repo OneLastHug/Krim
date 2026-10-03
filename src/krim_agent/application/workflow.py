@@ -75,7 +75,7 @@ class WorkflowServices:
                 self.tools,
                 run_id=context.run_id,
                 topic_id="workflow",
-                call_id=f"{context.node_id}:{context.attempt}",
+                call_id=context.execution_id,
                 timeout=node.timeout_seconds,
                 policy=self.policy,
             ),

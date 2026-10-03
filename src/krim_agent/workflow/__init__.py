@@ -2,6 +2,7 @@
 
 from .engine import WorkflowEngine, WorkflowHandle
 from .types import (
+    WorkflowCheckpointState,
     WorkflowEdge,
     WorkflowError,
     WorkflowEvent,
@@ -21,4 +22,5 @@ __all__ = [
     "WorkflowNode",
     "WorkflowPort",
     "WorkflowResult",
+    "WorkflowCheckpointState",
 ]

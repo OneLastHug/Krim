@@ -16,6 +16,12 @@ class ExecutionContext:
     node_id: str
     attempt: int
     path: str = ""
+    epoch: int = 0
+
+    @property
+    def execution_id(self) -> str:
+        """恢复同一尝试保持不变，显式 rerun 的新 epoch 与旧尝试区分。"""
+        return f"{self.run_id}:{self.epoch}:{self.node_id}:{self.attempt}"
 
 
 Runner = Callable[

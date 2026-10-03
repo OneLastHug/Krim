@@ -135,6 +135,28 @@ class OAuthTokenRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class WorkflowCheckpointRow(Base):
+    __tablename__ = "workflow_checkpoints"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_workflow_revision"),
+        CheckConstraint(
+            "(owner_id IS NULL AND lease_expires_at IS NULL) OR "
+            "(owner_id IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_workflow_lease",
+        ),
+    )
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(128), index=True)
+    graph_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
