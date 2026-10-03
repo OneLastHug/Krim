@@ -268,13 +268,13 @@ async def test_checkpoint_lease_heartbeat_revision_and_history_are_fenced(tmp_pa
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'fenced.sqlite'}")
     await database.initialize()
     try:
-        store = WorkflowCheckpointStore(database, lease_seconds=0.3)
+        store = WorkflowCheckpointStore(database, lease_seconds=2)
         graph = WorkflowGraph(
             nodes=[WorkflowNode(id="value", kind="constant", config={"value": 1})]
         )
         handle = WorkflowEngine().execute(graph, None, checkpoint=store, pause_before={"value"})
         await asyncio.wait_for(paused(handle), 3)
-        await asyncio.sleep(0.45)
+        await asyncio.sleep(2.4)
         with pytest.raises(WorkflowError) as error:
             await store.claim(handle.run_id, "competitor")
         assert error.value.code == "checkpoint_busy"

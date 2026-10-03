@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
+from krim_agent.application.workflow import WorkflowServices
+from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import (
@@ -31,8 +33,17 @@ from krim_agent.protocol.domain import (
 from krim_agent.providers import create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
+from krim_agent.sdk import PythonAI
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
+from krim_agent.workflow import (
+    WorkflowError,
+    WorkflowRerunRequest,
+    WorkflowRestoreRequest,
+    WorkflowResumeRequest,
+    WorkflowRunView,
+    WorkflowStartRequest,
+)
 
 from .boundary import LocalBoundary
 
@@ -81,6 +92,14 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         repository = runtime.repository
         database = repository.database
     service = runtime
+    workflow_service = WorkflowRuntime(
+        database,
+        scope="api",
+        services=WorkflowServices(
+            tools=service.tools.fork(), models={"default": PythonAI(service)}
+        ),
+        max_active_runs=config.max_active_runs,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -91,14 +110,17 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             yield
         finally:
             try:
-                await service.close()
+                await workflow_service.close()
             finally:
-                if owns_database:
-                    try:
-                        await database.close()
-                    finally:
-                        if owned_provider is not None:
-                            await owned_provider.close()
+                try:
+                    await service.close()
+                finally:
+                    if owns_database:
+                        try:
+                            await database.close()
+                        finally:
+                            if owned_provider is not None:
+                                await owned_provider.close()
 
     app = FastAPI(
         title="Krim Agent",
@@ -113,10 +135,34 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.add_middleware(LocalBoundary, settings=config)
     app.state.runtime = service
     app.state.repository = repository
+    app.state.workflow = workflow_service
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:
         return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, exc.status)
+
+    @app.exception_handler(WorkflowError)
+    async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
+        status = (
+            404
+            if exc.code == "checkpoint_missing"
+            else 416
+            if exc.code == "invalid_cursor"
+            else 409
+            if exc.code
+            in {
+                "checkpoint_busy",
+                "workflow_busy",
+                "not_paused",
+                "idempotency_conflict",
+                "workflow_restore_required",
+                "recovery_requires_confirmation",
+            }
+            else 429
+            if exc.code == "workflow_limit"
+            else 400
+        )
+        return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, _exc: RequestValidationError) -> JSONResponse:
@@ -187,6 +233,74 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/runs/{run_id}/messages")
     async def run_messages(run_id: str) -> MessagesResponse:
         return MessagesResponse(messages=await repository.run_messages(run_id))
+
+    @app.post("/v1/workflows/runs", status_code=202)
+    async def start_workflow(payload: WorkflowStartRequest) -> WorkflowRunView:
+        return await workflow_service.start(payload)
+
+    @app.get("/v1/workflows/runs")
+    async def workflow_runs() -> list[WorkflowRunView]:
+        return await workflow_service.list()
+
+    @app.get("/v1/workflows/runs/{run_id}")
+    async def workflow_run(run_id: str) -> WorkflowRunView:
+        return await workflow_service.get(run_id)
+
+    @app.get("/v1/workflows/runs/{run_id}/events")
+    async def workflow_events(
+        run_id: str,
+        from_seq: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        if last_event_id is not None:
+            try:
+                last = int(last_event_id)
+                if last < 0:
+                    raise ValueError
+                from_seq = max(from_seq, last + 1)
+            except ValueError as exc:
+                raise WorkflowError("invalid_cursor", "Last-Event-ID 必须是非负整数") from exc
+        await workflow_service.validate_cursor(run_id, from_seq)
+
+        async def event_stream() -> AsyncIterator[str]:
+            async for event in workflow_service.events(run_id, from_seq):
+                if event is None:
+                    yield ": heartbeat\n\n"
+                else:
+                    payload = event.model_dump_json(exclude_none=True)
+                    for delimiter, escaped in (
+                        ("\u0085", "\\u0085"),
+                        ("\u2028", "\\u2028"),
+                        ("\u2029", "\\u2029"),
+                    ):
+                        payload = payload.replace(delimiter, escaped)
+                    yield (f"id: {event.seq}\nevent: {event.type}\ndata: {payload}\n\n")
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/v1/workflows/runs/{run_id}/pause")
+    async def pause_workflow(run_id: str) -> WorkflowRunView:
+        return await workflow_service.pause(run_id)
+
+    @app.post("/v1/workflows/runs/{run_id}/resume")
+    async def resume_workflow(run_id: str, payload: WorkflowResumeRequest) -> WorkflowRunView:
+        return await workflow_service.resume(run_id, payload)
+
+    @app.post("/v1/workflows/runs/{run_id}/restore", status_code=202)
+    async def restore_workflow(run_id: str, payload: WorkflowRestoreRequest) -> WorkflowRunView:
+        return await workflow_service.restore(run_id, payload)
+
+    @app.post("/v1/workflows/runs/{run_id}/stop")
+    async def stop_workflow(run_id: str) -> WorkflowRunView:
+        return await workflow_service.stop(run_id)
+
+    @app.post("/v1/workflows/runs/{run_id}/rerun")
+    async def rerun_workflow(run_id: str, payload: WorkflowRerunRequest) -> WorkflowRunView:
+        return await workflow_service.rerun(run_id, payload)
 
     @app.post("/v1/runs/{run_id}/stop")
     async def stop_run(run_id: str) -> RunView:

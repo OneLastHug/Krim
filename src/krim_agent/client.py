@@ -20,6 +20,7 @@ from .protocol.domain import (
     TopicView,
 )
 from .protocol.models import StreamFrame
+from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
 
 class ClientError(Exception):
@@ -191,3 +192,139 @@ class KrimClient:
         response = self._http.get(f"/v1/runs/{run_id}/events/summary")
         self._check(response)
         return StreamEventView.model_validate_json(response.content)
+
+    def workflow_run(
+        self,
+        graph: WorkflowGraph,
+        input_value: object = None,
+        *,
+        production: bool = True,
+        pause_before: list[str] | None = None,
+        pause_after: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> WorkflowRunView:
+        response = self._http.post(
+            "/v1/workflows/runs",
+            json={
+                "idempotency_key": idempotency_key or str(uuid4()),
+                "graph": graph.model_dump(mode="json"),
+                "input_value": input_value,
+                "production": production,
+                "pause_before": pause_before or [],
+                "pause_after": pause_after or [],
+            },
+        )
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflow(self, run_id: str) -> WorkflowRunView:
+        response = self._http.get(f"/v1/workflows/runs/{run_id}")
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflows(self) -> list[WorkflowRunView]:
+        response = self._http.get("/v1/workflows/runs")
+        self._check(response)
+        return TypeAdapter(list[WorkflowRunView]).validate_json(response.content)
+
+    def workflow_restore(
+        self,
+        run_id: str,
+        *,
+        replay_side_effects: bool = False,
+        completed_outputs: dict[str, object] | None = None,
+    ) -> WorkflowRunView:
+        response = self._http.post(
+            f"/v1/workflows/runs/{run_id}/restore",
+            json={
+                "replay_side_effects": replay_side_effects,
+                "completed_outputs": completed_outputs or {},
+            },
+        )
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflow_events(self, run_id: str, from_seq: int = 0) -> Iterator[WorkflowEvent]:
+        with self._http.stream(
+            "GET",
+            f"/v1/workflows/runs/{run_id}/events",
+            params={"from_seq": from_seq},
+            timeout=httpx.Timeout(30, read=45),
+        ) as response:
+            self._check(response)
+            data: list[str] = []
+            event_id = ""
+            event_kind = ""
+            expected = from_seq
+            event_bytes = 0
+            for line in response.iter_lines():
+                if len(line.encode("utf-8")) > 131072:
+                    raise ClientError("Workflow SSE 行超过大小限制")
+                if line.startswith("data:"):
+                    event_bytes += len(line.encode("utf-8"))
+                    if event_bytes > 131072:
+                        raise ClientError("Workflow SSE 事件超过大小限制")
+                    data.append(line[5:].lstrip(" "))
+                elif line.startswith("id:"):
+                    event_id = line[3:].strip()
+                elif line.startswith("event:"):
+                    event_kind = line[6:].strip()
+                elif not line and data:
+                    event = WorkflowEvent.model_validate_json("\n".join(data))
+                    if (
+                        event.run_id != run_id
+                        or event.seq != expected
+                        or event_id != str(event.seq)
+                        or event_kind != event.type
+                    ):
+                        raise ClientError("Workflow SSE 帧关联或顺序不正确")
+                    yield event
+                    expected += 1
+                    data, event_id, event_kind = [], "", ""
+                    event_bytes = 0
+                    if event.type == "end":
+                        return
+            current = self.workflow(run_id)
+            if current.status in {"queued", "running"} or current.event_count != expected:
+                raise ClientError("Workflow SSE 不完整；请检查运行状态与游标")
+
+    def workflow_pause(self, run_id: str) -> WorkflowRunView:
+        response = self._http.post(f"/v1/workflows/runs/{run_id}/pause")
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflow_resume(
+        self, run_id: str, input_override: object = None, *, override: bool = False
+    ) -> WorkflowRunView:
+        response = self._http.post(
+            f"/v1/workflows/runs/{run_id}/resume",
+            json={"has_input_override": override, "input_override": input_override},
+        )
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflow_stop(self, run_id: str) -> WorkflowRunView:
+        response = self._http.post(f"/v1/workflows/runs/{run_id}/stop")
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)
+
+    def workflow_rerun(
+        self,
+        run_id: str,
+        node_id: str,
+        input_override: object = None,
+        *,
+        override: bool = False,
+        allow_side_effects: bool = False,
+    ) -> WorkflowRunView:
+        response = self._http.post(
+            f"/v1/workflows/runs/{run_id}/rerun",
+            json={
+                "node_id": node_id,
+                "has_input_override": override,
+                "input_override": input_override,
+                "allow_side_effects": allow_side_effects,
+            },
+        )
+        self._check(response)
+        return WorkflowRunView.model_validate_json(response.content)

@@ -61,7 +61,7 @@ async def test_process_kill_recovers_after_owner_lease_expires(tmp_path):
         run_id = json.loads(line)["run_id"]
         process.kill()
         await process.wait()
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(2.2)
         reader = Path(__file__).parent / "fixtures" / "workflow_restore_worker.py"
         restored = await asyncio.create_subprocess_exec(
             sys.executable,
