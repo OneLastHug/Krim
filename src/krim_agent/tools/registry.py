@@ -34,6 +34,14 @@ GlobalPre = Callable[[ToolDefinition, ToolContext], Awaitable[ShortCircuit | Non
 GlobalPost = Callable[[ToolDefinition, Any, ToolContext], Awaitable[Any]]
 
 
+def _unique_callbacks[Callback](values: list[Callback]) -> list[Callback]:
+    result: list[Callback] = []
+    for value in values:
+        if not any(value is previous for previous in result):
+            result.append(value)
+    return result
+
+
 class ToolRegistry:
     def __init__(self, *, max_depth: int = 8, default_timeout: float = 10) -> None:
         self.max_depth = max_depth
@@ -53,14 +61,26 @@ class ToolRegistry:
     def clear_run_audits(self, run_id: str) -> None:
         self._run_audits.pop(run_id, None)
 
-    def fork(self) -> ToolRegistry:
+    def fork(self, *, controls: ToolRegistry | None = None) -> ToolRegistry:
         """保留可信定义与全局执行链，隔离审计缓存和观察任务生命周期。"""
-        target = ToolRegistry(max_depth=self.max_depth, default_timeout=self.default_timeout)
+        target = ToolRegistry(
+            max_depth=min(self.max_depth, controls.max_depth) if controls else self.max_depth,
+            default_timeout=min(self.default_timeout, controls.default_timeout)
+            if controls
+            else self.default_timeout,
+        )
         target.register_many(*self.definitions)
         target._global_pre = list(self._global_pre)
         target._global_post = list(self._global_post)
         target._observers = list(self._observers)
         target._result_observers = list(self._result_observers)
+        if controls is not None:
+            target._global_pre = _unique_callbacks([*controls._global_pre, *self._global_pre])
+            target._global_post = _unique_callbacks([*self._global_post, *controls._global_post])
+            target._observers = _unique_callbacks([*controls._observers, *self._observers])
+            target._result_observers = _unique_callbacks(
+                [*controls._result_observers, *self._result_observers]
+            )
         return target
 
     def register(self, definition: ToolDefinition) -> ToolDefinition:

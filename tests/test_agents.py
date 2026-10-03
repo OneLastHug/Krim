@@ -272,3 +272,174 @@ async def test_queue_timeout_and_manager_close_are_explicit(repository):
             AgentDefinition(name="closed", provider=FakeProvider(delay=0), tools=builtin_registry())
         )
     assert error.value.code == "manager_closed"
+
+
+async def test_persistent_consumer_cancellation_retains_production_concurrency_slot(repository):
+    manager = AgentManager(repository, max_concurrent=1)
+    provider = WaitingProvider()
+    first = await manager.spawn(
+        AgentDefinition(
+            name="persistent-slot",
+            provider=provider,
+            tools=ToolRegistry(),
+            persistent=True,
+            timeout_seconds=10,
+        )
+    )
+    task = asyncio.create_task(first.execute("保留生产"))
+    await asyncio.wait_for(provider.entered.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (await repository.get_run(first.current_run.id)).status == "running"
+    second = await manager.spawn(
+        AgentDefinition(
+            name="queued-slot",
+            provider=FakeProvider(delay=0),
+            tools=builtin_registry(),
+            timeout_seconds=0.5,
+        )
+    )
+    queued = await second.execute("不能超过生产并发")
+    assert queued.status == "aborted" and queued.run_id is None and queued.code == "timeout"
+    await first.stop()
+    next_handle = await manager.spawn(
+        AgentDefinition(
+            name="after-slot",
+            provider=FakeProvider(delay=0),
+            tools=builtin_registry(),
+            timeout_seconds=10,
+        )
+    )
+    resumed = await next_handle.execute("名额已释放", "after-stop")
+    assert resumed.status == "completed", resumed.model_dump()
+    await manager.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_cancellation_during_start_tracks_accepted_run_and_cleans_up(
+    repository, monkeypatch, persistent
+):
+    manager = AgentManager(repository, max_concurrent=1)
+    provider = WaitingProvider()
+    handle = await manager.spawn(
+        AgentDefinition(
+            name="start-cancel",
+            provider=provider,
+            tools=ToolRegistry(),
+            persistent=persistent,
+            timeout_seconds=10,
+        )
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+    original_start = handle.runtime.start
+
+    async def slow_start(*args, **kwargs):
+        run = await original_start(*args, **kwargs)
+        started.set()
+        await release.wait()
+        return run
+
+    monkeypatch.setattr(handle.runtime, "start", slow_start)
+    task = asyncio.create_task(handle.execute("启动阶段取消"))
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert handle.current_run is not None and handle.turn == 1
+    saved = await repository.get_run(handle.current_run.id)
+    assert saved.status == ("running" if persistent else "aborted")
+    await handle.destroy()
+    assert handle.runtime.production_task(saved.id).done()
+    assert not manager._handles
+    await manager.close()
+
+
+async def test_destroy_cancels_queued_execution_without_creating_orphan_run(
+    repository, monkeypatch
+):
+    manager = AgentManager(repository, max_concurrent=1)
+    provider = WaitingProvider()
+    first = await manager.spawn(
+        AgentDefinition(name="occupy", provider=provider, tools=ToolRegistry(), timeout_seconds=10)
+    )
+    first_task = asyncio.create_task(first.execute("占用名额"))
+    await asyncio.wait_for(provider.entered.wait(), 5)
+    second = await manager.spawn(
+        AgentDefinition(
+            name="queued-destroy",
+            provider=FakeProvider(delay=0),
+            tools=ToolRegistry(),
+            timeout_seconds=10,
+        )
+    )
+    queued = asyncio.Event()
+    acquire = manager._semaphore.acquire
+
+    async def observed_acquire():
+        queued.set()
+        return await acquire()
+
+    monkeypatch.setattr(manager._semaphore, "acquire", observed_acquire)
+    task = asyncio.create_task(second.execute("尚未开始"))
+    await asyncio.wait_for(queued.wait(), 5)
+    assert (await second.destroy()).status == "destroyed"
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert second.current_run is None and not await repository.list_messages(second.topic_id)
+    assert (await repository.get_run(first.current_run.id)).status == "running"
+    await first.stop()
+    await first_task
+    await manager.close()
+
+
+async def test_destroy_live_persistent_agent_waits_for_real_production_terminal(repository):
+    manager = AgentManager(repository, max_concurrent=1)
+    provider = WaitingProvider()
+    handle = await manager.spawn(
+        AgentDefinition(
+            name="persistent-destroy",
+            provider=provider,
+            tools=ToolRegistry(),
+            persistent=True,
+            timeout_seconds=10,
+        )
+    )
+    task = asyncio.create_task(handle.execute("等待显式销毁"))
+    await asyncio.wait_for(provider.entered.wait(), 5)
+    run_id = handle.current_run.id
+    results = await asyncio.gather(handle.destroy(), handle.destroy())
+    assert all(result.status == "destroyed" for result in results)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (await repository.get_run(run_id)).status == "aborted"
+    assert handle.runtime.production_task(run_id).done() and not manager._handles
+    next_handle = await manager.spawn(
+        AgentDefinition(name="after-destroy", provider=FakeProvider(delay=0), tools=ToolRegistry())
+    )
+    assert (await next_handle.execute("可以继续")).status == "completed"
+    await manager.close()
+
+
+async def test_self_destroy_is_rejected_without_deadlock(repository):
+    manager = AgentManager(repository)
+    captured = []
+
+    class SelfDestroyProvider:
+        name = "self-destroy-test"
+
+        async def stream(self, _messages, _tools):
+            with pytest.raises(AgentError) as error:
+                await handle.destroy()
+            captured.append(error.value.code)
+            yield ModelText(text="拒绝自等待后正常结束")
+
+    handle = await manager.spawn(
+        AgentDefinition(name="self-destroy", provider=SelfDestroyProvider(), tools=ToolRegistry())
+    )
+    assert (await handle.execute("自销毁")).status == "completed"
+    assert captured == ["agent_self_destroy"] and not handle.destroyed
+    await manager.close()

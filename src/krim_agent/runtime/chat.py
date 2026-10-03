@@ -33,6 +33,7 @@ from krim_agent.protocol.domain import (
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers import ModelProvider, ModelText, ModelToolCall, ProviderError
 from krim_agent.tools import ToolContext, ToolRegistry
+from krim_agent.tools.core import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +83,16 @@ class ChatRuntime:
         provider: ModelProvider,
         tools: ToolRegistry,
         settings: Settings,
+        *,
+        tool_policy: Policy | None = None,
+        agent_id: str | None = None,
     ) -> None:
         self.repository = repository
         self.provider = provider
         self.tools = tools
         self.settings = settings
+        self.tool_policy = tool_policy
+        self.agent_id = agent_id
         self._lock = asyncio.Lock()
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
@@ -366,6 +372,8 @@ class ChatRuntime:
                         topic_id=state.run.topic_id,
                         timeout=self.settings.tool_timeout_seconds,
                         call_id=call.id,
+                        policy=self.tool_policy,
+                        agent_id=self.agent_id,
                     ),
                 )
                 await self.repository.add_message(
@@ -408,6 +416,11 @@ class ChatRuntime:
                 task = state.task
         await asyncio.shield(task)
         return await self.repository.get_run(run_id)
+
+    def production_task(self, run_id: str) -> asyncio.Task[None] | None:
+        """可信组合层只读借用生产任务，用于资源名额的真实生命周期绑定。"""
+        state = self._runs.get(run_id)
+        return state.task if state is not None else None
 
     async def stream_state(self, run_id: str, from_seq: int) -> RunState:
         run = await self.repository.get_run(run_id)

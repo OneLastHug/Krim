@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import uuid4
 
@@ -12,6 +12,7 @@ from pydantic import Field
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
+from krim_agent.tools.core import Policy
 
 AgentStatus = Literal[
     "queued", "running", "completed", "failed", "aborted", "interrupted", "destroyed"
@@ -47,6 +48,8 @@ class AgentDefinition:
     parent_agent_id: str | None = None
     parent_tool_call_id: str | None = None
     agent_id: str = ""
+    policy: Policy | None = None
+    tool_timeout_seconds: float = 10
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
@@ -57,17 +60,8 @@ class AgentDefinition:
             raise ValueError("timeout_seconds 必须在 0–300 秒之间")
         if not 1 <= self.max_steps <= 32:
             raise ValueError("max_steps 必须在 1–32 之间")
+        if not 0 < self.tool_timeout_seconds <= 120:
+            raise ValueError("tool_timeout_seconds 必须在 0–120 秒之间")
 
     def with_id(self) -> AgentDefinition:
-        return AgentDefinition(
-            name=self.name,
-            provider=self.provider,
-            tools=self.tools,
-            max_turns=self.max_turns,
-            timeout_seconds=self.timeout_seconds,
-            max_steps=self.max_steps,
-            persistent=self.persistent,
-            parent_agent_id=self.parent_agent_id,
-            parent_tool_call_id=self.parent_tool_call_id,
-            agent_id=self.agent_id or str(uuid4()),
-        )
+        return replace(self, agent_id=self.agent_id or str(uuid4()))

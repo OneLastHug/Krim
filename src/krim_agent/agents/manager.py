@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import cast
 
 from krim_agent.config import Settings
@@ -11,7 +12,8 @@ from krim_agent.persistence import KrimRepository
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.runtime import ChatRuntime
-from krim_agent.tools import ToolRegistry
+from krim_agent.tools import ToolContext, ToolRegistry
+from krim_agent.tools.core import Decision, Policy, ToolDefinition
 
 from .types import AgentDefinition, AgentError, AgentStatus, ExecResult
 
@@ -19,6 +21,25 @@ from .types import AgentDefinition, AgentError, AgentStatus, ExecResult
 def copy_tools(source: ToolRegistry) -> ToolRegistry:
     """复制定义本身，避免 Agent 销毁时关闭宿主拥有的 registry。"""
     return source.fork()
+
+
+def inherited_policy(source: Policy | None, parent: Policy | None) -> Policy:
+    async def decide(definition: ToolDefinition, context: ToolContext) -> Decision:
+        caller: Decision = (
+            await parent(definition, context)
+            if parent is not None
+            else "allow"
+            if definition.risk == "read"
+            else "deny"
+        )
+        if caller not in {"allow", "audit"}:
+            return caller
+        own = await source(definition, context) if source is not None else caller
+        if own not in {"allow", "audit"}:
+            return own
+        return "audit" if caller == "audit" or own == "audit" else "allow"
+
+    return decide
 
 
 class AgentHandle:
@@ -38,6 +59,9 @@ class AgentHandle:
         self.current_run: RunView | None = None
         self.destroyed = False
         self._execute_lock = asyncio.Lock()
+        self._consumer: asyncio.Task[ExecResult] | None = None
+        self._destroy_task: asyncio.Task[ExecResult] | None = None
+        self._production: asyncio.Task[None] | None = None
 
     @property
     def parent_tool_call_id(self) -> str | None:
@@ -47,12 +71,20 @@ class AgentHandle:
         if self._execute_lock.locked():
             raise AgentError("agent_busy", "Agent 已有活跃或排队执行")
         async with self._execute_lock:
+            operation = asyncio.create_task(self._consume(prompt, idempotency_key))
+            self._consumer = operation
             try:
-                return await self._execute(prompt, idempotency_key)
-            except asyncio.CancelledError:
-                if self.current_run is not None and not self.definition.persistent:
-                    self.current_run = await asyncio.shield(self.runtime.stop(self.current_run.id))
-                raise
+                return await operation
+            finally:
+                self._consumer = None
+
+    async def _consume(self, prompt: str, idempotency_key: str | None) -> ExecResult:
+        try:
+            return await self._execute(prompt, idempotency_key)
+        except asyncio.CancelledError:
+            if self.current_run is not None and not self.definition.persistent:
+                self.current_run = await asyncio.shield(self.runtime.stop(self.current_run.id))
+            raise
 
     async def _execute(self, prompt: str, idempotency_key: str | None) -> ExecResult:
         if self.destroyed:
@@ -89,10 +121,20 @@ class AgentHandle:
                 idempotency_key=requested_key,
             )
             previous_id = self.current_run.id if self.current_run else None
-            self.current_run = await self.runtime.start(self.topic_id, request)
+            start = asyncio.create_task(self.runtime.start(self.topic_id, request))
+            cancelled = False
+            try:
+                self.current_run = await asyncio.shield(start)
+            except asyncio.CancelledError:
+                self.current_run = await start
+                cancelled = True
             if self.current_run.id != previous_id:
                 self.turn += 1
+            self._production = self.runtime.production_task(self.current_run.id)
             state = await self.runtime.stream_state(self.current_run.id, 0)
+            self._production = state.task
+            if cancelled:
+                raise asyncio.CancelledError
             if state.task is None:
                 raise AgentError("run_unavailable", "Agent 运行任务不可用")
             try:
@@ -113,7 +155,10 @@ class AgentHandle:
                     return await self._completed_result("aborted", "Agent 超过时间预算", "timeout")
             return await self._completed_result()
         finally:
-            self.manager._semaphore.release()
+            if self._production is not None and not self._production.done():
+                self._production.add_done_callback(lambda _task: self.manager._semaphore.release())
+            else:
+                self.manager._semaphore.release()
 
     async def resume(self, prompt: str, idempotency_key: str | None = None) -> ExecResult:
         if self.current_run is None:
@@ -151,11 +196,30 @@ class AgentHandle:
                 yield frame
 
     async def destroy(self) -> ExecResult:
+        if asyncio.current_task() is self._production:
+            raise AgentError("agent_self_destroy", "不能在 Agent 自己的生产任务内等待销毁")
+        if self._destroy_task is not None:
+            return await asyncio.shield(self._destroy_task)
         if self.destroyed:
             return self._result(None, "destroyed", "Agent 已销毁", "agent_destroyed")
-        if self.current_run is not None and self.current_run.status not in TERMINAL_STATUSES:
-            await self.runtime.stop(self.current_run.id)
         self.destroyed = True
+        consumer = self._consumer
+        if consumer is asyncio.current_task():
+            consumer = None
+        if consumer is not None and consumer is not asyncio.current_task():
+            consumer.cancel()
+        self._destroy_task = asyncio.create_task(self._destroy(consumer))
+        try:
+            return await asyncio.shield(self._destroy_task)
+        except asyncio.CancelledError:
+            await self._destroy_task
+            raise
+
+    async def _destroy(self, consumer: asyncio.Task[ExecResult] | None) -> ExecResult:
+        if consumer is not None and consumer is not asyncio.current_task():
+            await asyncio.gather(consumer, return_exceptions=True)
+        if self.current_run is not None and self.current_run.status not in TERMINAL_STATUSES:
+            self.current_run = await self.runtime.stop(self.current_run.id)
         await self.runtime.close()
         self.manager._handles.pop(self.agent_id, None)
         return self._result(self.current_run, "destroyed", "Agent 已销毁", "destroyed")
@@ -222,8 +286,24 @@ class AgentManager:
         self._spawn_lock = asyncio.Lock()
         self._closed = False
 
-    async def spawn(self, definition: AgentDefinition) -> AgentHandle:
+    async def spawn(
+        self, definition: AgentDefinition, *, parent_context: ToolContext | None = None
+    ) -> AgentHandle:
         async with self._spawn_lock:
+            if parent_context is not None:
+                definition = replace(
+                    definition,
+                    parent_agent_id=parent_context.agent_id,
+                    parent_tool_call_id=parent_context.call_id,
+                    policy=inherited_policy(definition.policy, parent_context.policy),
+                    tools=definition.tools.fork(controls=parent_context.registry),
+                    timeout_seconds=min(definition.timeout_seconds, parent_context.timeout),
+                    tool_timeout_seconds=min(
+                        definition.tool_timeout_seconds,
+                        definition.tools.default_timeout,
+                        parent_context.timeout,
+                    ),
+                )
             return await self._spawn(definition)
 
     async def _spawn(self, definition: AgentDefinition) -> AgentHandle:
@@ -249,9 +329,15 @@ class AgentManager:
             database_url=str(database.engine.url),
             max_steps=definition.max_steps,
             run_timeout_seconds=definition.timeout_seconds,
+            tool_timeout_seconds=definition.tool_timeout_seconds,
         )
         runtime = ChatRuntime(
-            self.repository, definition.provider, copy_tools(definition.tools), settings
+            self.repository,
+            definition.provider,
+            copy_tools(definition.tools),
+            settings,
+            tool_policy=definition.policy,
+            agent_id=definition.agent_id,
         )
         topic = await self.repository.create_topic(f"Agent: {definition.name}")
         handle = AgentHandle(self, definition, runtime, topic.id)
