@@ -19,6 +19,7 @@ from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolResult
 
 from .types import (
+    ContextCompactPart,
     FinishReason,
     GenerateResult,
     SDKPart,
@@ -94,6 +95,16 @@ def _part(frame: StreamFrame) -> SDKPart:
                 "tool_call_id": data.get("call_id"),
                 "tool_name": data.get("name"),
                 "result": result,
+            }
+        )
+    if kind == "context_compact":
+        return ContextCompactPart.model_validate(
+            {
+                "original_count": data.get("original_count"),
+                "kept_count": data.get("kept_count"),
+                "omitted_count": data.get("omitted_count"),
+                "strategy": data.get("strategy"),
+                "summary": data.get("summary"),
             }
         )
     if kind == "step_finish":

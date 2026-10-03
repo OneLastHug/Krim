@@ -76,7 +76,7 @@ class MessageView(View):
     topic_id: str
     run_id: str
     sequence: int
-    role: Literal["user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant", "tool"]
     content: str
     details: dict[str, JsonValue]
     created_at: datetime

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -14,6 +15,13 @@ class Settings(BaseModel):
     tool_timeout_seconds: float = Field(default=10, gt=0, le=120)
     run_timeout_seconds: float = Field(default=60, gt=0, le=300)
     max_active_runs: int = Field(default=16, ge=1, le=64)
+    context_strategy: Literal[
+        "truncate", "sliding_window", "summarize_then_truncate", "annotated_compact"
+    ] = "sliding_window"
+    context_policy: Literal["never", "always", "auto"] = "auto"
+    context_max_messages: int | None = Field(default=None, ge=2, le=10000)
+    context_max_chars: int | None = Field(default=None, ge=128, le=10_000_000)
+    context_max_tokens: int | None = Field(default=None, ge=32, le=2_500_000)
 
     @classmethod
     def from_env(cls) -> Settings:
