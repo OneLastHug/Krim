@@ -7,7 +7,16 @@ from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
 from krim_agent.protocol.bridge import Handler
-from krim_agent.protocol.domain import ChatRequest, RunView, ServiceError, TopicView
+from krim_agent.protocol.domain import (
+    ChatRequest,
+    EditRequest,
+    MessageTreeView,
+    MessageView,
+    RegenerateRequest,
+    RunView,
+    ServiceError,
+    TopicView,
+)
 
 
 class AppHandle:
@@ -41,6 +50,45 @@ class AppHandle:
 
     async def stop(self, run_id: str) -> RunView:
         return RunView.model_validate(await self._call("chat/stop", {"run_id": run_id}))
+
+    async def tree(self, topic_id: str) -> MessageTreeView:
+        return MessageTreeView.model_validate(await self._call("chat/tree", {"topic_id": topic_id}))
+
+    async def messages(self, topic_id: str) -> list[MessageView]:
+        return TypeAdapter(list[MessageView]).validate_python(
+            await self._call("chat/messages", {"topic_id": topic_id})
+        )
+
+    async def select_branch(self, topic_id: str, message_id: str) -> TopicView:
+        return TopicView.model_validate(
+            await self._call("chat/branch", {"topic_id": topic_id, "message_id": message_id})
+        )
+
+    async def edit(self, topic_id: str, message_id: str, request: EditRequest) -> RunView:
+        return RunView.model_validate(
+            await self._call(
+                "chat/edit",
+                {
+                    "topic_id": topic_id,
+                    "message_id": message_id,
+                    **request.model_dump(mode="json"),
+                },
+            )
+        )
+
+    async def regenerate(
+        self, topic_id: str, message_id: str, request: RegenerateRequest
+    ) -> RunView:
+        return RunView.model_validate(
+            await self._call(
+                "chat/regenerate",
+                {
+                    "topic_id": topic_id,
+                    "message_id": message_id,
+                    **request.model_dump(mode="json"),
+                },
+            )
+        )
 
     async def events(self, run_id: str) -> AsyncIterator[StreamFrame]:
         async for frame in self._bridge.stream("chat/stream", {"run_id": run_id}):

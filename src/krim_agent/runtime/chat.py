@@ -16,6 +16,8 @@ from krim_agent.persistence import KrimRepository
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
+    EditRequest,
+    RegenerateRequest,
     RunStatus,
     RunView,
     ServiceError,
@@ -68,12 +70,36 @@ class ChatRuntime:
         self._closed = False
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
+        return await self._start(topic_id, request)
+
+    async def edit(self, topic_id: str, message_id: str, request: EditRequest) -> RunView:
+        return await self._start(topic_id, request, action="edit", source_message_id=message_id)
+
+    async def regenerate(
+        self, topic_id: str, message_id: str, request: RegenerateRequest
+    ) -> RunView:
+        return await self._start(
+            topic_id, request, action="regenerate", source_message_id=message_id
+        )
+
+    async def _start(
+        self,
+        topic_id: str,
+        request: ChatRequest | EditRequest | RegenerateRequest,
+        *,
+        action: Literal["send", "edit", "regenerate"] = "send",
+        source_message_id: str | None = None,
+    ) -> RunView:
         async with self._lock:
             if self._closed:
                 raise ServiceError("runtime_closed", "运行时已经关闭", 503)
             active = sum(not state.terminal for state in self._runs.values())
             run, created = await self.repository.begin_run(
-                topic_id, request, allow_new=active < self.settings.max_active_runs
+                topic_id,
+                request,
+                allow_new=active < self.settings.max_active_runs,
+                action=action,
+                source_message_id=source_message_id,
             )
             if not created:
                 return run

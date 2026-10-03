@@ -26,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("messages", "messages（消息）：重新读取持久化历史"),
         ("run", "run（运行）：查看运行状态"),
         ("stop", "stop（停止）：取消并等待持久化"),
+        ("tree", "tree（树）：查看全部消息节点与活动路径"),
+        ("branch", "branch（分支）：切换活动消息分支"),
+        ("edit", "edit（编辑）：创建用户消息的新分支并重新回答"),
+        ("regenerate", "regenerate（重新生成）：保留用户消息并生成新回答"),
     ):
         child = subparsers.add_parser(command, help=help_text)
         child.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
@@ -33,8 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
             child.add_argument("text", help="文本；支持 /add 2 3、/echo 内容")
             child.add_argument("--topic", help="复用话题 ID，不指定则创建新话题")
             child.add_argument("--idempotency-key", help="idempotency（幂等）键，重试时复用")
-        elif command == "messages":
+            child.add_argument("--parent", help="在指定完整消息后创建分支")
+        elif command in {"messages", "tree"}:
             child.add_argument("topic_id")
+        elif command in {"branch", "edit", "regenerate"}:
+            child.add_argument("topic_id")
+            child.add_argument("message_id")
+            if command == "edit":
+                child.add_argument("text")
+            if command != "branch":
+                child.add_argument("--idempotency-key", help="重试时复用的幂等键")
         elif command in {"run", "stop"}:
             child.add_argument("run_id")
     return parser
@@ -68,6 +80,19 @@ def main() -> None:
             elif args.command == "messages":
                 for message in client.messages(args.topic_id):
                     print(f"[{message.sequence} {message.role}] {message.content}")
+            elif args.command == "tree":
+                print(client.tree(args.topic_id).model_dump_json(indent=2))
+            elif args.command == "branch":
+                print(
+                    client.select_branch(args.topic_id, args.message_id).model_dump_json(indent=2)
+                )
+            elif args.command in {"edit", "regenerate"}:
+                run = (
+                    client.edit(args.topic_id, args.message_id, args.text, args.idempotency_key)
+                    if args.command == "edit"
+                    else client.regenerate(args.topic_id, args.message_id, args.idempotency_key)
+                )
+                print(run.model_dump_json(indent=2))
             elif args.command in {"run", "stop"}:
                 run = (
                     client.stop(args.run_id) if args.command == "stop" else client.run(args.run_id)
@@ -75,10 +100,16 @@ def main() -> None:
                 print(run.model_dump_json(indent=2))
             elif args.command == "chat":
                 topic_id = args.topic or client.create_topic(args.text[:80]).id
-                run = client.send(topic_id, args.text, args.idempotency_key)
+                run = (
+                    client.send(
+                        topic_id, args.text, args.idempotency_key, parent_message_id=args.parent
+                    )
+                    if args.parent
+                    else client.send(topic_id, args.text, args.idempotency_key)
+                )
                 print(f"话题 ID: {topic_id}\n运行 ID: {run.id}", flush=True)
                 if run.status in TERMINAL_STATUSES:
-                    for message in client.messages(topic_id):
+                    for message in client.run_messages(run.id):
                         if (
                             message.run_id == run.id
                             and message.role == "assistant"
