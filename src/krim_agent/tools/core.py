@@ -45,6 +45,7 @@ class ToolContext:
     policy: Policy | None = None
     call_id: str = field(default_factory=lambda: str(uuid4()))
     arguments: dict[str, Any] = field(default_factory=dict)
+    agent_id: str | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -55,6 +56,7 @@ class ToolContext:
             timeout=self.timeout,
             policy=self.policy,
             call_id=self.call_id if self.depth == 0 else str(uuid4()),
+            agent_id=self.agent_id,
             arguments=arguments,
         )
 
