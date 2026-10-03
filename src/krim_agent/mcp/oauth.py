@@ -64,6 +64,7 @@ class OAuthConfig(StrictModel):
     server: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     client_id: str = Field(min_length=1, max_length=256)
     issuer: str | None = Field(default=None, min_length=1, max_length=2048)
+    resource: str | None = Field(default=None, min_length=1, max_length=2048)
     client_secret: SecretStr | None = None
     authorization_endpoint: str
     token_endpoint: str
@@ -100,6 +101,12 @@ class OAuthConfig(StrictModel):
                 raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint URL 格式无效") from error
             allowed = self.allowed_hosts or ({parsed.hostname} if parsed.hostname else set())
             validate_oauth_endpoint(value, allowed)
+        if self.resource is not None:
+            try:
+                host = urlsplit(self.resource).hostname
+            except ValueError as error:
+                raise OAuthError("invalid_oauth_resource", "OAuth resource URL 无效") from error
+            validate_oauth_endpoint(self.resource, {host} if host else set(), allow_query=True)
 
 
 class OAuthToken(StrictModel):
@@ -133,22 +140,21 @@ class OAuthStateStore:
         digest = hashlib.sha256(verifier.encode()).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
         state = secrets.token_urlsafe(32)
+        parameters = {
+            "response_type": "code",
+            "client_id": config.client_id,
+            "redirect_uri": config.redirect_uri,
+            "scope": " ".join(config.scopes),
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        if config.resource is not None:
+            parameters["resource"] = config.resource
         request = PKCERequest(
             state=state,
             code_verifier=verifier,
-            authorization_url=config.authorization_endpoint
-            + "?"
-            + urlencode(
-                {
-                    "response_type": "code",
-                    "client_id": config.client_id,
-                    "redirect_uri": config.redirect_uri,
-                    "scope": " ".join(config.scopes),
-                    "state": state,
-                    "code_challenge": challenge,
-                    "code_challenge_method": "S256",
-                }
-            ),
+            authorization_url=config.authorization_endpoint + "?" + urlencode(parameters),
             created_at=time.time(),
         )
         self._states[state] = (config.model_copy(deep=True), request)
@@ -162,6 +168,9 @@ class OAuthStateStore:
         if time.time() - request.created_at > config.state_ttl_seconds:
             raise OAuthError("expired_state", "OAuth state 已过期")
         return config, request
+
+    def discard(self, state: str) -> None:
+        self._states.pop(state, None)
 
 
 @dataclass(frozen=True)
@@ -184,6 +193,8 @@ def token_scope(config: OAuthConfig, subject: str) -> str:
     }
     if config.issuer is not None:
         payload["issuer"] = config.issuer
+    if config.resource is not None:
+        payload["resource"] = config.resource
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -372,6 +383,8 @@ class OAuthClient:
         }
         if config.client_secret is not None:
             form["client_secret"] = config.client_secret.get_secret_value()
+        if config.resource is not None:
+            form["resource"] = config.resource
         async with self.tokens.lock(config, subject):
             current = await self.tokens.read(config, subject)
             response = await request(config.token_endpoint, form)
@@ -405,6 +418,8 @@ class OAuthClient:
         }
         if config.client_secret is not None:
             form["client_secret"] = config.client_secret.get_secret_value()
+        if config.resource is not None:
+            form["resource"] = config.resource
         response = await request(config.token_endpoint, form)
         refreshed = self._parse(response, previous_refresh=token.refresh_token.get_secret_value())
         await self.tokens.write(config, subject, refreshed, expected_revision=current.revision)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 
+import httpx
 from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
@@ -37,14 +39,22 @@ class MCPBridge:
         self._statuses: dict[str, MCPServerStatus] = {}
 
     async def add_server(
-        self, config: MCPServerConfig, *, session_factory: SessionFactory | None = None
+        self,
+        config: MCPServerConfig,
+        *,
+        session_factory: SessionFactory | None = None,
+        auth: httpx.Auth | None = None,
     ) -> MCPServerStatus:
         namespace = config.namespace or config.name
         if config.name in self._connections:
             raise MCPConnectionError("MCP server 名称已存在")
         if config.transport == "streamable_http":
             validate_server_url(config)
-        connection = MCPConnection(config, session_factory)
+        if auth is not None and any(name.lower() == "authorization" for name in config.headers):
+            raise MCPConnectionError("MCP OAuth Auth 不能与静态 Authorization header 同时使用")
+        if auth is not None and config.transport != "streamable_http":
+            raise MCPConnectionError("OAuth Auth 只支持 Streamable HTTP MCP")
+        connection = MCPConnection(config, session_factory, auth)
         self._connections[config.name] = connection
         if not config.enabled:
             status = MCPServerStatus(name=config.name, namespace=namespace, status="disabled")
@@ -105,13 +115,26 @@ class MCPBridge:
                 status="ready",
                 tools=[info.local_name for _definition, info in prepared],
             )
-        except Exception:
+        except asyncio.CancelledError:
+            await asyncio.shield(connection.close())
+            self._statuses[config.name] = MCPServerStatus(
+                name=config.name,
+                namespace=namespace,
+                status="closed",
+                error="MCP 初始化已取消",
+                error_code="cancelled",
+            )
+            raise
+        except Exception as error:
             await connection.close()
             status = MCPServerStatus(
                 name=config.name,
                 namespace=namespace,
                 status="failed",
                 error="MCP 连接、工具发现或命名校验失败",
+                error_code=error.code
+                if isinstance(error, MCPConnectionError)
+                else "mcp_connection_failed",
             )
         self._statuses[config.name] = status
         return status

@@ -17,11 +17,14 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ListToolsResult, PaginatedRequestParams
 from pydantic import JsonValue
 
+from .auth import MCPOAuthAuth
 from .types import MCPServerConfig
 
 
 class MCPConnectionError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str = "mcp_connection_failed") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class MCPSession(Protocol):
@@ -63,13 +66,27 @@ def validate_server_url(config: MCPServerConfig) -> None:
 
 class MCPConnection:
     def __init__(
-        self, config: MCPServerConfig, session_factory: SessionFactory | None = None
+        self,
+        config: MCPServerConfig,
+        session_factory: SessionFactory | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
-        self.config, self.session_factory = config, session_factory
+        self.config, self.session_factory, self.auth = config, session_factory, auth
+        if auth is not None and (
+            config.transport != "streamable_http" or session_factory is not None
+        ):
+            raise MCPConnectionError("OAuth Auth 需要真实 Streamable HTTP transport")
+        if auth is not None and any(name.lower() == "authorization" for name in config.headers):
+            raise MCPConnectionError("OAuth Auth 与静态 Authorization header 冲突")
+        if isinstance(auth, MCPOAuthAuth) and (
+            auth.server != config.name or not auth.matches_endpoint(config.url or "")
+        ):
+            raise MCPConnectionError("OAuth Auth 与 MCP server/endpoint 不一致")
         self._owner: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[_Request | None] = asyncio.Queue(config.max_pending_requests)
         self._ready = asyncio.Event()
         self._failure: str | None = None
+        self._failure_code = "mcp_connection_failed"
         self._closed = False
         self._requests: set[asyncio.Task[None]] = set()
         self.connected = False
@@ -81,9 +98,22 @@ class MCPConnection:
             if self.config.transport == "streamable_http":
                 validate_server_url(self.config)
             self._owner = asyncio.create_task(self._serve(), name=f"krim-mcp-{self.config.name}")
-        await asyncio.wait_for(self._ready.wait(), self.config.request_timeout_seconds)
+        try:
+            await asyncio.wait_for(
+                self._ready.wait(),
+                self.config.initialization_timeout_seconds
+                if self.auth
+                else self.config.request_timeout_seconds,
+            )
+        except (asyncio.CancelledError, TimeoutError):
+            cleanup = asyncio.create_task(self.close())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+            raise
         if self._failure is not None or not self.connected:
-            raise MCPConnectionError(self._failure or "MCP 初始化失败")
+            raise MCPConnectionError(self._failure or "MCP 初始化失败", self._failure_code)
         return self
 
     async def _serve(self) -> None:
@@ -114,6 +144,7 @@ class MCPConnection:
                                 trust_env=False,
                                 follow_redirects=False,
                                 timeout=self.config.request_timeout_seconds,
+                                auth=self.auth,
                             )
                         )
                         read, write, _session_id = await stack.enter_async_context(
@@ -129,12 +160,20 @@ class MCPConnection:
                                 read,
                                 write,
                                 read_timeout_seconds=timedelta(
-                                    seconds=self.config.request_timeout_seconds
+                                    seconds=(
+                                        self.config.initialization_timeout_seconds
+                                        if self.auth
+                                        else self.config.request_timeout_seconds
+                                    )
                                 ),
                             )
                         ),
                     )
-                async with asyncio.timeout(self.config.request_timeout_seconds):
+                async with asyncio.timeout(
+                    self.config.initialization_timeout_seconds
+                    if self.auth
+                    else self.config.request_timeout_seconds
+                ):
                     await session.initialize()
                 self.connected = True
                 self._ready.set()
@@ -162,6 +201,8 @@ class MCPConnection:
                     await asyncio.gather(*self._requests, return_exceptions=True)
         except Exception:
             self._failure = "MCP 连接或初始化失败"
+            if isinstance(self.auth, MCPOAuthAuth) and self.auth.last_error_code is not None:
+                self._failure_code = self.auth.last_error_code
         finally:
             self.connected = False
             self._ready.set()
@@ -217,6 +258,10 @@ class MCPConnection:
             return
         self._closed = True
         if self._owner is not None and not self._owner.done():
-            await self._queue.put(None)
-            await asyncio.shield(self._owner)
+            if not self.connected:
+                self._owner.cancel()
+                await asyncio.gather(self._owner, return_exceptions=True)
+            else:
+                await self._queue.put(None)
+                await asyncio.shield(self._owner)
         self.connected = False
