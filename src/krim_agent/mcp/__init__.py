@@ -2,6 +2,15 @@
 
 from .bridge import MCPBridge
 from .client import MCPConnection, MCPConnectionError, validate_server_url
+from .oauth import (
+    EncryptedTokenStore,
+    OAuthClient,
+    OAuthConfig,
+    OAuthError,
+    OAuthHTTPRequester,
+    OAuthStateStore,
+    OAuthToken,
+)
 from .types import MCPServerConfig, MCPServerStatus, MCPToolInfo
 
 __all__ = [
@@ -12,4 +21,11 @@ __all__ = [
     "MCPServerStatus",
     "MCPToolInfo",
     "validate_server_url",
+    "EncryptedTokenStore",
+    "OAuthClient",
+    "OAuthConfig",
+    "OAuthError",
+    "OAuthHTTPRequester",
+    "OAuthStateStore",
+    "OAuthToken",
 ]
