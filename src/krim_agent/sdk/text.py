@@ -12,7 +12,8 @@ from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import ChatRequest, MessageView, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame, check_json
-from krim_agent.providers import FakeProvider, ModelProvider, ModelToolCall
+from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
+from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.builtins import builtin_registry
@@ -55,6 +56,7 @@ def _finish(frame: StreamFrame) -> StreamFinish:
         "output_limit",
         "stream_limit",
         "tool_limit",
+        "provider_output_limit",
     }:
         reason = "length"
     return StreamFinish(
@@ -215,9 +217,16 @@ class StreamTextResult:
 class PythonAI:
     """借用或装配 Python ChatRuntime 的类型化生成门面。"""
 
-    def __init__(self, runtime: ChatRuntime, *, owned_database: Database | None = None) -> None:
+    def __init__(
+        self,
+        runtime: ChatRuntime,
+        *,
+        owned_database: Database | None = None,
+        owned_provider: OwnedProvider | None = None,
+    ) -> None:
         self.runtime = runtime
         self._owned_database = owned_database
+        self._owned_provider = owned_provider
         self._closed = False
 
     @classmethod
@@ -230,19 +239,29 @@ class PythonAI:
     ) -> PythonAI:
         config = settings or Settings(database_url="sqlite+aiosqlite:///:memory:")
         database = Database(config.database_url)
+        owned_provider: OwnedProvider | None = None
         try:
+            if provider is None:
+                owned_provider = create_provider(config)
+                selected_provider: ModelProvider = owned_provider
+            else:
+                selected_provider = provider
             await database.initialize()
             repository = KrimRepository(database)
             await repository.recover_interrupted()
             runtime = ChatRuntime(
                 repository,
-                provider or FakeProvider(),
+                selected_provider,
                 tools or builtin_registry(config.tool_timeout_seconds),
                 config,
             )
-            return cls(runtime, owned_database=database)
+            return cls(runtime, owned_database=database, owned_provider=owned_provider)
         except BaseException:
-            await database.close()
+            try:
+                await database.close()
+            finally:
+                if owned_provider is not None:
+                    await owned_provider.close()
             raise
 
     async def __aenter__(self) -> PythonAI:
@@ -301,4 +320,8 @@ class PythonAI:
             try:
                 await self.runtime.close()
             finally:
-                await self._owned_database.close()
+                try:
+                    await self._owned_database.close()
+                finally:
+                    if self._owned_provider is not None:
+                        await self._owned_provider.close()

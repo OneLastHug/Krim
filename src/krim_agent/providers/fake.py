@@ -48,3 +48,6 @@ class FakeProvider:
         for position in range(0, len(reply), 16):
             await asyncio.sleep(self.delay)
             yield ModelText(text=reply[position : position + 16])
+
+    async def close(self) -> None:
+        """离线 provider 不持有外部资源。"""

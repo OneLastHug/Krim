@@ -28,7 +28,8 @@ from krim_agent.protocol.domain import (
     TopicCreate,
     TopicView,
 )
-from krim_agent.providers import FakeProvider
+from krim_agent.providers import create_provider
+from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
@@ -68,11 +69,13 @@ class ErrorResponse(BaseModel):
 def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None = None) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
+    owned_provider: OwnedProvider | None = None
     if runtime is None:
         database = Database(config.database_url)
         repository = KrimRepository(database)
+        owned_provider = create_provider(config)
         runtime = ChatRuntime(
-            repository, FakeProvider(), builtin_registry(config.tool_timeout_seconds), config
+            repository, owned_provider, builtin_registry(config.tool_timeout_seconds), config
         )
     else:
         repository = runtime.repository
@@ -81,15 +84,21 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await database.initialize()
-        if owns_database:
-            await repository.recover_interrupted()
         try:
+            await database.initialize()
+            if owns_database:
+                await repository.recover_interrupted()
             yield
         finally:
-            await service.close()
-            if owns_database:
-                await database.close()
+            try:
+                await service.close()
+            finally:
+                if owns_database:
+                    try:
+                        await database.close()
+                    finally:
+                        if owned_provider is not None:
+                            await owned_provider.close()
 
     app = FastAPI(
         title="Krim Agent",
