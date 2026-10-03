@@ -2,6 +2,7 @@
 
 from .bridge import MCPBridge
 from .client import MCPConnection, MCPConnectionError, validate_server_url
+from .discovery import OAuthDiscoveryClient, OAuthMetadata, RegisteredClient
 from .oauth import (
     EncryptedTokenStore,
     OAuthClient,
@@ -12,6 +13,7 @@ from .oauth import (
     OAuthToken,
     OAuthTokenStore,
     TokenSnapshot,
+    validate_oauth_endpoint,
 )
 from .token_store import PersistentEncryptedTokenStore
 from .types import MCPServerConfig, MCPServerStatus, MCPToolInfo
@@ -34,4 +36,8 @@ __all__ = [
     "OAuthTokenStore",
     "TokenSnapshot",
     "PersistentEncryptedTokenStore",
+    "OAuthDiscoveryClient",
+    "OAuthMetadata",
+    "RegisteredClient",
+    "validate_oauth_endpoint",
 ]

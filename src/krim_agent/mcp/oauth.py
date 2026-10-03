@@ -29,9 +29,41 @@ class OAuthError(Exception):
         self.code = code
 
 
+def validate_oauth_endpoint(
+    url: str, allowed_hosts: set[str], *, allow_query: bool = False
+) -> None:
+    """校验授权、metadata 和 token 请求共用的 endpoint 边界。"""
+
+    if len(url) > 2048 or any(character.isspace() or ord(character) < 32 for character in url):
+        raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint 不能包含空白或控制字符")
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port
+    except ValueError as error:
+        raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint URL 格式无效") from error
+    host = parsed.hostname.lower().rstrip(".") if parsed.hostname else ""
+    allowed = {value.lower().rstrip(".") for value in allowed_hosts}
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint 必须包含 http/https 主机")
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or "#" in url
+        or ("?" in url and not allow_query)
+    ):
+        raise OAuthError(
+            "invalid_oauth_endpoint", "OAuth endpoint 不能包含凭证、查询参数或 fragment"
+        )
+    if host not in allowed:
+        raise OAuthError("oauth_host_denied", "OAuth endpoint 不在主机白名单")
+    if parsed.scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+        raise OAuthError("insecure_oauth_endpoint", "非本机 OAuth endpoint 必须使用 HTTPS")
+
+
 class OAuthConfig(StrictModel):
     server: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     client_id: str = Field(min_length=1, max_length=256)
+    issuer: str | None = Field(default=None, min_length=1, max_length=2048)
     client_secret: SecretStr | None = None
     authorization_endpoint: str
     token_endpoint: str
@@ -41,25 +73,33 @@ class OAuthConfig(StrictModel):
     state_ttl_seconds: int = Field(default=600, ge=30, le=3600)
 
     def validate_endpoints(self) -> None:
-        redirect = urlsplit(self.redirect_uri)
+        try:
+            redirect = urlsplit(self.redirect_uri)
+            _ = redirect.port
+        except ValueError as error:
+            raise OAuthError("invalid_redirect_uri", "redirect_uri URL 格式无效") from error
         if redirect.scheme not in {"http", "https"} or not redirect.hostname:
             raise OAuthError("invalid_redirect_uri", "redirect_uri 必须是 http/https URL")
-        if redirect.username or redirect.password or redirect.fragment:
+        if (
+            redirect.username is not None
+            or redirect.password is not None
+            or "#" in self.redirect_uri
+            or len(self.redirect_uri) > 2048
+            or any(character.isspace() for character in self.redirect_uri)
+        ):
             raise OAuthError("invalid_redirect_uri", "redirect_uri 不能包含凭证或 fragment")
-        for value in (self.authorization_endpoint, self.token_endpoint):
-            parsed = urlsplit(value)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise OAuthError(
-                    "invalid_oauth_endpoint", "OAuth endpoint 必须包含 http/https 主机"
-                )
-            if parsed.username or parsed.password or parsed.fragment:
-                raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint 不能包含凭证或 fragment")
-            if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-                raise OAuthError("insecure_oauth_endpoint", "非本机 OAuth endpoint 必须使用 HTTPS")
-            if self.allowed_hosts and parsed.hostname.lower().rstrip(".") not in {
-                host.lower().rstrip(".") for host in self.allowed_hosts
-            }:
-                raise OAuthError("oauth_host_denied", "OAuth endpoint 不在主机白名单")
+        if redirect.scheme == "http" and redirect.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise OAuthError("invalid_redirect_uri", "非本机 redirect_uri 必须使用 HTTPS")
+        endpoints = [self.authorization_endpoint, self.token_endpoint]
+        if self.issuer is not None:
+            endpoints.append(self.issuer)
+        for value in endpoints:
+            try:
+                parsed = urlsplit(value)
+            except ValueError as error:
+                raise OAuthError("invalid_oauth_endpoint", "OAuth endpoint URL 格式无效") from error
+            allowed = self.allowed_hosts or ({parsed.hostname} if parsed.hostname else set())
+            validate_oauth_endpoint(value, allowed)
 
 
 class OAuthToken(StrictModel):
@@ -142,6 +182,8 @@ def token_scope(config: OAuthConfig, subject: str) -> str:
         "redirect_uri": config.redirect_uri,
         "scopes": sorted(set(config.scopes)),
     }
+    if config.issuer is not None:
+        payload["issuer"] = config.issuer
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -264,18 +306,7 @@ class OAuthHTTPRequester:
         await self.close()
 
     async def __call__(self, url: str, form: dict[str, str]) -> httpx.Response:
-        parsed = urlsplit(url)
-        if parsed.hostname is None or parsed.hostname.lower().rstrip(".") not in self.allowed_hosts:
-            raise OAuthError("oauth_host_denied", "令牌 endpoint 不在 requester 白名单")
-        if (
-            parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.scheme not in {"http", "https"}
-        ):
-            raise OAuthError("invalid_oauth_endpoint", "令牌 endpoint 格式无效")
-        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise OAuthError("insecure_oauth_endpoint", "非本机令牌 endpoint 必须 HTTPS")
+        validate_oauth_endpoint(url, self.allowed_hosts)
         try:
             return await self._client.post(url, data=form)
         except httpx.HTTPError as error:
@@ -283,6 +314,45 @@ class OAuthHTTPRequester:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def request_json(
+        self,
+        method: str,
+        url: str,
+        payload: dict[str, object] | None = None,
+        *,
+        max_response_bytes: int = 65536,
+    ) -> httpx.Response:
+        """为 metadata/DCR 复用同一 allowlist、代理和重定向边界。"""
+
+        validate_oauth_endpoint(url, self.allowed_hosts)
+        try:
+            async with self._client.stream(
+                method, url, json=payload, headers={"Accept": "application/json"}
+            ) as response:
+                if 300 <= response.status_code < 400:
+                    raise OAuthError("oauth_redirect", "OAuth metadata 不允许重定向")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_response_bytes:
+                        raise OAuthError(
+                            "metadata_response_limit", "OAuth metadata 响应超过大小限制"
+                        )
+                return httpx.Response(
+                    response.status_code,
+                    headers={
+                        key: value
+                        for key, value in response.headers.items()
+                        if key.lower() not in {"content-encoding", "content-length"}
+                    },
+                    content=bytes(body),
+                    request=response.request,
+                )
+        except httpx.HTTPError as error:
+            raise OAuthError(
+                "metadata_request_failed", "OAuth metadata 请求网络失败或超时"
+            ) from error
 
 
 class OAuthClient:
