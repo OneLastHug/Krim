@@ -233,6 +233,7 @@ class WorkflowEvent(StrictModel):
     node_id: str | None = None
     group_ids: list[str] = Field(default_factory=list)
     data: JsonValue = None
+    source: Literal["runtime", "recovery"] = "runtime"
     created_at: str = Field(default_factory=lambda: utc_now().isoformat())
 
 
@@ -246,3 +247,38 @@ class WorkflowResult(StrictModel):
     error: str | None = None
     code: str | None = None
     epoch: int = 0
+
+
+class WorkflowRunCheckpoint(StrictModel):
+    """一个根或子运行的 JSON 状态；图和 NodeOutput selection 都完整保留。"""
+
+    run_id: str = Field(min_length=1, max_length=128)
+    path: str = Field(default="", max_length=2048)
+    graph: WorkflowGraph
+    input_value: JsonValue = None
+    production: bool = True
+    status: WorkflowStatus
+    epoch: int = Field(default=0, ge=0)
+    node_statuses: dict[str, NodeStatus] = Field(default_factory=dict)
+    node_outputs: dict[str, NodeOutput] = Field(default_factory=dict)
+    node_inputs: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+    current_node: str | None = None
+    paused_boundary: Literal["before", "after"] | None = None
+    pause_before: list[str] = Field(default_factory=list)
+    pause_after: list[str] = Field(default_factory=list)
+    pause_requested: bool = False
+    input_overrides: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+    attempts: dict[str, int] = Field(default_factory=dict)
+    events: list[WorkflowEvent] = Field(default_factory=list)
+    result: WorkflowResult | None = None
+
+
+class WorkflowCheckpointState(WorkflowRunCheckpoint):
+    """根快照和扁平子运行索引；一次原子写入覆盖完整嵌套进度。"""
+
+    schema_version: Literal[1] = 1
+    graph_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    budget_count: int = Field(default=0, ge=0)
+    deadline: float | None = None
+    children: dict[str, WorkflowRunCheckpoint] = Field(default_factory=dict)
+    engine_options: dict[str, JsonValue] = Field(default_factory=dict)
