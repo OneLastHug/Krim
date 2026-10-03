@@ -13,6 +13,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；这些工具仅写入宿主内存并受现有 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
 - 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新已验证，MCP transport 自动授权尚未完成。
+- 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册和 PKCE exchange 消费；本机 TCP 已验证，401 自动 transport 与浏览器回调仍未完成。
 
 ## 快速开始
 
