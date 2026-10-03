@@ -1,5 +1,6 @@
 """官方 MCP Python SDK 的安全工具桥。"""
 
+from .auth import MCPAuthError, MCPOAuthAuth
 from .bridge import MCPBridge
 from .client import MCPConnection, MCPConnectionError, validate_server_url
 from .discovery import OAuthDiscoveryClient, OAuthMetadata, RegisteredClient
@@ -40,4 +41,6 @@ __all__ = [
     "OAuthMetadata",
     "RegisteredClient",
     "validate_oauth_endpoint",
+    "MCPAuthError",
+    "MCPOAuthAuth",
 ]
