@@ -89,6 +89,15 @@ class MessageTreeView(StrictModel):
     active_path: list[str]
 
 
+class StreamEventView(StrictModel):
+    run_id: str
+    first_seq: int
+    last_seq: int
+    count: int
+    durable: bool = True
+    terminal: bool = False
+
+
 class RunView(View):
     id: str
     topic_id: str

@@ -8,6 +8,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M1 验收证据见 `docs/testing/reports/2026-10-02-m1-test-report.md`；实际结果以报告中的最后一轮记录为准。
 - AUTH-004 已批准继续开发 M2/M3，并要求每个已验证功能单独本地提交；消息树、跨进程续传、SubAgent、Workflow、MCP 和完整前端的实际完成状态见需求追踪。
 - M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
+- M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
 
 ## 快速开始
 
@@ -43,7 +44,7 @@ uv run --no-sync krim serve
 - 后端、Agent 运行时、协议、数据库、API 和 CLI 使用 Python。
 - 前端只使用必要的 TypeScript；当前仅有 `frontend/contracts/protocol.test.ts`，用于同一 JSON 向量校验。
 - `FakeProvider` 是离线确定性演示，不是真实模型、不调用商业服务，也不执行网络、Shell 或文件工具。
-- M1 的流事件缓冲只在单进程内存；SQLite 保存消息、运行终态和审计，不承诺跨进程流续传。
+- 当前 SQLite 保存消息、运行终态、审计和 SSE 帧；持久事件支持重启与读进程恢复，活跃生产仍要求单进程，不承诺多 worker 并发生产。
 - 物理工作区仍可能位于旧目录名下；项目文本、Python 包、CLI 和环境变量统一使用 `Krim Agent` / `krim_agent` / `krim` / `KRIM_AGENT_`。
 
 ## 文档入口

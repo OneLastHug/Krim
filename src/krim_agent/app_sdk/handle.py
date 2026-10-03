@@ -90,8 +90,10 @@ class AppHandle:
             )
         )
 
-    async def events(self, run_id: str) -> AsyncIterator[StreamFrame]:
-        async for frame in self._bridge.stream("chat/stream", {"run_id": run_id}):
+    async def events(self, run_id: str, from_seq: int = 0) -> AsyncIterator[StreamFrame]:
+        async for frame in self._bridge.stream(
+            "chat/stream", {"run_id": run_id, "from_seq": from_seq}
+        ):
             if frame.kind == "error":
                 raise ServiceError("stream_error", "宿主流处理失败")
             if frame.kind == "chunk":

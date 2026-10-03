@@ -24,6 +24,7 @@ from krim_agent.protocol.domain import (
     RegenerateRequest,
     RunView,
     ServiceError,
+    StreamEventView,
     TopicCreate,
     TopicView,
 )
@@ -94,7 +95,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         title="Krim Agent",
         version=__version__,
         lifespan=lifespan,
-        description="M1 单进程 Python 离线演示；不是完整 Agent 产品。",
+        description="Krim Agent 本地 Python 运行时，支持消息分支与持久 SSE；默认离线 provider。",
         responses={
             code: {"model": ErrorResponse}
             for code in (400, 401, 403, 404, 409, 410, 413, 416, 422, 429, 503)
@@ -170,6 +171,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     async def get_audits(run_id: str) -> list[ToolAudit]:
         return await repository.audits(run_id)
 
+    @app.get("/v1/runs/{run_id}/events/summary")
+    async def event_summary(run_id: str) -> StreamEventView:
+        return await repository.event_summary(run_id)
+
     @app.get("/v1/runs/{run_id}/messages")
     async def run_messages(run_id: str) -> MessagesResponse:
         return MessagesResponse(messages=await repository.run_messages(run_id))
@@ -178,6 +183,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     async def stop_run(run_id: str) -> RunView:
         return await service.stop(run_id)
 
+    @app.get("/v1/runs/{run_id}/resume")
     @app.get("/v1/runs/{run_id}/events")
     async def run_events(
         run_id: str,

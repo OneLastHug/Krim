@@ -14,7 +14,7 @@ from .protocol.domain import TERMINAL_STATUSES
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="krim", description="Krim Agent 离线 M1")
+    parser = argparse.ArgumentParser(prog="krim", description="Krim Agent 本地对话、分支与持久续传")
     subparsers = parser.add_subparsers(dest="command", required=True)
     serve = subparsers.add_parser("serve", help="serve（提供服务）：启动 Python HTTP/SSE")
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("messages", "messages（消息）：重新读取持久化历史"),
         ("run", "run（运行）：查看运行状态"),
         ("stop", "stop（停止）：取消并等待持久化"),
+        ("resume", "resume（续传）：从持久事件序号继续输出"),
         ("tree", "tree（树）：查看全部消息节点与活动路径"),
         ("branch", "branch（分支）：切换活动消息分支"),
         ("edit", "edit（编辑）：创建用户消息的新分支并重新回答"),
@@ -47,8 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
                 child.add_argument("text")
             if command != "branch":
                 child.add_argument("--idempotency-key", help="重试时复用的幂等键")
-        elif command in {"run", "stop"}:
+        elif command in {"run", "stop", "resume"}:
             child.add_argument("run_id")
+            if command == "resume":
+                child.add_argument("--from-seq", type=int, default=0, help="起始事件序号")
     return parser
 
 
@@ -98,6 +101,11 @@ def main() -> None:
                     client.stop(args.run_id) if args.command == "stop" else client.run(args.run_id)
                 )
                 print(run.model_dump_json(indent=2))
+            elif args.command == "resume":
+                if args.from_seq < 0:
+                    parser.error("from-seq 必须是非负整数")
+                for frame in client.events(args.run_id, args.from_seq):
+                    print(frame.model_dump_json(exclude_none=True))
             elif args.command == "chat":
                 topic_id = args.topic or client.create_topic(args.text[:80]).id
                 run = (

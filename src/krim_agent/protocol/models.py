@@ -88,6 +88,11 @@ class StreamFrame(StrictModel):
     data: JsonValue = None
     created_at: datetime = Field(default_factory=utc_now)
 
+    @field_validator("created_at")
+    @classmethod
+    def normalize_time(cls, value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
     @model_validator(mode="after")
     def validate_data(self) -> StreamFrame:
         check_json(self.data, max_bytes=131072)

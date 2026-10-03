@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncGenerator
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
 from .protocol import InProcessBridge
@@ -17,6 +17,10 @@ class SendRequest(ChatRequest):
 
 class RunRequest(StrictModel):
     run_id: str
+
+
+class StreamRequest(RunRequest):
+    from_seq: int = Field(default=0, ge=0)
 
 
 class TopicRequest(StrictModel):
@@ -99,9 +103,9 @@ class LocalApp:
             return TypeAdapter(JsonValue).validate_json(run.model_dump_json())
 
         async def events(data: JsonValue) -> AsyncGenerator[JsonValue, None]:
-            run_id = RunRequest.model_validate(data).run_id
-            state = await runtime.stream_state(run_id, 0)
-            async for frame in runtime.subscribe(state):
+            request = StreamRequest.model_validate(data)
+            state = await runtime.stream_state(request.run_id, request.from_seq)
+            async for frame in runtime.subscribe(state, request.from_seq):
                 if frame is not None:
                     yield TypeAdapter(JsonValue).validate_json(frame.model_dump_json())
 

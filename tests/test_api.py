@@ -150,7 +150,9 @@ async def test_restart_restores_messages_without_replaying_tools(runtime, reposi
         )
         assert repeat.json()["id"] == abandoned.id and repeat.json()["status"] == "interrupted"
         assert len((await client.get(f"/v1/runs/{run.id}/audits")).json()) == 1
-        assert (await client.get(f"/v1/runs/{run.id}/events")).status_code == 410
+        replay = await client.get(f"/v1/runs/{run.id}/events")
+        assert replay.status_code == 200
+        assert parse_sse(replay.text)[-1].data["status"] == "completed"
 
 
 class GatedProvider:

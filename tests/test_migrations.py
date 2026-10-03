@@ -4,13 +4,9 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect, text
 
-from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.migration import migration_config
 from krim_agent.protocol.domain import ChatRequest, EditRequest
-from krim_agent.providers import FakeProvider
-from krim_agent.runtime import ChatRuntime
-from krim_agent.tools.builtins import builtin_registry
 
 
 async def test_legacy_m1_database_is_upgraded_without_changing_history(tmp_path):
@@ -62,7 +58,7 @@ async def test_legacy_m1_database_is_upgraded_without_changing_history(tmp_path)
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0002_message_tree"
+            ).scalar() == "0003_stream_events"
             assert (
                 await connection.execute(
                     text("SELECT payload FROM tool_audits WHERE call_id='call'")
@@ -94,15 +90,21 @@ async def test_unknown_schema_is_rejected_without_overwriting_data(tmp_path):
         await database.close()
 
 
-async def test_downgrade_refuses_to_erase_branches(runtime, repository):
+async def test_downgrade_refuses_to_erase_branches(repository):
     topic = await repository.create_topic("回退保护")
-    run = await runtime.start(topic.id, ChatRequest(text="before", idempotency_key="original"))
-    state = await runtime.stream_state(run.id, 0)
-    await state.task
-    edited = await runtime.edit(
-        topic.id, run.input_message_id, EditRequest(text="after", idempotency_key="edit")
+    run, _created = await repository.begin_run(
+        topic.id, ChatRequest(text="before", idempotency_key="original")
     )
-    await (await runtime.stream_state(edited.id, 0)).task
+    await repository.add_message(run, "assistant", "before answer")
+    await repository.finish(run.id, "completed", None, [])
+    edited, _created = await repository.begin_run(
+        topic.id,
+        EditRequest(text="after", idempotency_key="edit"),
+        action="edit",
+        source_message_id=run.input_message_id,
+    )
+    await repository.add_message(edited, "assistant", "after answer")
+    await repository.finish(edited.id, "completed", None, [])
     async with repository.database.engine.begin() as connection:
         with pytest.raises(RuntimeError, match="分支"):
             await connection.run_sync(
@@ -115,11 +117,13 @@ async def test_linear_history_can_downgrade_and_upgrade_again(tmp_path):
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'roundtrip.sqlite'}")
     await database.initialize()
     repository = KrimRepository(database)
-    runtime = ChatRuntime(repository, FakeProvider(delay=0), builtin_registry(), Settings())
     try:
         topic = await repository.create_topic("线性回退")
-        run = await runtime.start(topic.id, ChatRequest(text="hello", idempotency_key="one"))
-        await (await runtime.stream_state(run.id, 0)).task
+        run, _created = await repository.begin_run(
+            topic.id, ChatRequest(text="hello", idempotency_key="one")
+        )
+        await repository.add_message(run, "assistant", "[fake] 收到：hello")
+        await repository.finish(run.id, "completed", None, [])
         async with database.engine.begin() as connection:
             await connection.run_sync(
                 lambda sync: command.downgrade(migration_config(sync), "0001_m1")
@@ -127,5 +131,4 @@ async def test_linear_history_can_downgrade_and_upgrade_again(tmp_path):
         await database.initialize()
         assert (await repository.list_messages(topic.id))[-1].content == "[fake] 收到：hello"
     finally:
-        await runtime.close()
         await database.close()
