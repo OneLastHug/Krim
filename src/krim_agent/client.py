@@ -9,6 +9,7 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter
 
+from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .protocol.domain import (
     ChatRequest,
     EditRequest,
@@ -84,6 +85,24 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/tree")
         self._check(response)
         return MessageTreeView.model_validate_json(response.content)
+
+    def compact(
+        self,
+        topic_id: str,
+        options: ContextOptions | None = None,
+        *,
+        confirm: bool = False,
+        expected_branch_key: str | None = None,
+    ) -> ContextCompactResponse:
+        values = options.model_dump() if options is not None else {}
+        request = ContextCompactRequest(
+            **values, confirm=confirm, expected_branch_key=expected_branch_key
+        )
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/compact", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return ContextCompactResponse.model_validate_json(response.content)
 
     def select_branch(self, topic_id: str, message_id: str) -> TopicView:
         response = self._http.put(f"/v1/topics/{topic_id}/branch", json={"message_id": message_id})

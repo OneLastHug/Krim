@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.config import Settings
+from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import ChatRequest, MessageView, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame, check_json
@@ -107,6 +108,11 @@ def _part(frame: StreamFrame) -> SDKPart:
                 "omitted_count": data.get("omitted_count"),
                 "strategy": data.get("strategy"),
                 "summary": data.get("summary"),
+                "status": data.get("status", "completed"),
+                "persisted": data.get("persisted", False),
+                "source_count": data.get("source_count", 0),
+                "source_until_message_id": data.get("source_until_message_id"),
+                "source_branch_key": data.get("source_branch_key"),
             }
         )
     if kind == "step_finish":
@@ -311,6 +317,13 @@ class PythonAI:
             parent_message_id=parent_message_id,
         )
         return await stream.collect()
+
+    async def compact(
+        self, topic_id: str, request: ContextCompactRequest | None = None
+    ) -> ContextCompactResponse:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return await self.runtime.compact(topic_id, request or ContextCompactRequest())
 
     async def close(self) -> None:
         if self._closed:
