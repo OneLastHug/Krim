@@ -10,6 +10,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
 - M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
+- 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；这些工具仅写入宿主内存并受现有 write 权限/审计链约束。
 
 ## 快速开始
 

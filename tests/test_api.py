@@ -114,7 +114,14 @@ async def test_authentication_is_required_when_configured():
         assert (await client.get("/openapi.json")).status_code == 401
         authorized = await client.get("/v1/tools", headers={"Authorization": "Bearer test-key"})
         assert authorized.status_code == 200
-        assert {item["name"] for item in authorized.json()["tools"]} == {"add", "echo"}
+        assert {item["name"] for item in authorized.json()["tools"]} == {
+            "add",
+            "echo",
+            "plan",
+            "todo",
+            "question",
+            "skills",
+        }
 
 
 async def test_restart_restores_messages_without_replaying_tools(runtime, repository):
