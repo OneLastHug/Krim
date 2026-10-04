@@ -29,6 +29,48 @@ async def test_defaults_validation_and_normalization():
     await registry.close()
 
 
+async def test_declared_output_schema_is_exposed_and_enforced_at_consumer_boundary():
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "integer", "minimum": 0}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+
+    @tool(name="typed_result", risk="read", output_schema=schema)
+    async def typed_result() -> dict[str, int]:
+        return {"value": 3}
+
+    @tool(name="bad_result", risk="read", output_schema=schema)
+    async def bad_result() -> dict[str, str]:
+        return {"value": "three"}
+
+    registry = ToolRegistry()
+    registry.register_many(typed_result, bad_result)
+    info = registry.get("typed_result").schema()
+    assert info.output_schema == schema
+    assert await registry.call_tool("typed_result", {}) == {"value": 3}
+    accepted = await registry.invoke("typed_result", {}, ToolContext(registry))
+    assert accepted.data == {"value": 3} and not accepted.is_error
+    rejected = await registry.invoke("bad_result", {}, ToolContext(registry))
+    assert rejected.is_error and rejected.code == "invalid_output_schema"
+    # 原始 call_tool 保留 Python 嵌套调用语义；invoke 才是模型/Workflow 消费边界。
+    assert await registry.call_tool("bad_result", {}) == {"value": "three"}
+    await registry.close()
+
+
+async def test_output_schema_rejects_remote_reference_at_definition_time():
+    with pytest.raises(ValueError, match="本地引用"):
+
+        @tool(
+            name="remote_schema",
+            risk="read",
+            output_schema={"$ref": "https://example.invalid/schema.json"},
+        )
+        async def remote_schema() -> str:
+            return "unsafe"
+
+
 async def test_permission_runs_before_pre_short_circuit():
     seen = []
 

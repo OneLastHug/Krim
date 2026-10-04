@@ -11,6 +11,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
 - M2 已接通 [持久审批与用户问答](docs/api/user-interactions.md)：SQLite 0009 保存单次 tool call/参数请求，HTTP、Python client、CLI、AppHandle、SDK 和浏览器可批准、拒绝或提交真实答案；子 Agent 权限交集、停止/超时/重启取消和旧事件不重放已验证，完整权限作用域、租户和多 worker 仍未完成。
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
+- 已接通 [Python Tool SDK 输出合约](docs/sdk/python-tools.md)：函数/类/Pydantic/JSON output_schema、最终消费校验、MCP 输出声明与一次失败审计；raw call_tool 保留原始返回值，按需发现继续实施。
 - 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；跨进程句柄、动态模型/目录持久化和成本预算未完成。
 - 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标、浏览器卡片与关闭回收；重启后句柄不恢复但持久 run 可查询，跨进程接管和目录持久化未完成。
 - 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认、Agent 目录执行和审批/问答卡片；完整 Workflow 产品、Host SDK/iframe、附件和剩余 M3 UI 未完成。

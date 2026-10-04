@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.protocol.models import check_json
 
@@ -121,6 +121,15 @@ class ToolRegistry:
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: ToolContext | None = None
     ) -> Any:
+        return await self._execute(name, arguments, context, lambda _definition, value: value)
+
+    async def _execute[Result](
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: ToolContext | None,
+        consume: Callable[[ToolDefinition, Any], Result],
+    ) -> Result:
         parent = context or ToolContext(self, timeout=self.default_timeout)
         try:
             definition = self.get(name)
@@ -189,7 +198,7 @@ class ToolRegistry:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
-                return result
+                return consume(definition, result)
         except ValidationError as exc:
             code = "invalid_input"
             raise ToolError(code, "工具参数校验失败") from exc
@@ -225,15 +234,7 @@ class ToolRegistry:
         self, name: str, arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
         try:
-            raw = await self.call_tool(name, arguments, context)
-            encoded = json.dumps(raw, ensure_ascii=False, allow_nan=False)
-            data: JsonValue = TypeAdapter(JsonValue).validate_json(encoded)
-            check_json(data)
-            text = raw if isinstance(raw, str) else encoded
-            result = ToolResult(content=[TextContent(text=text)], data=data)
-        except (TypeError, ValueError):
-            error = ToolError("invalid_output", "工具结果不是有效的有限 JSON")
-            result = self._error_result(error)
+            result = await self._execute(name, arguments, context, self._normalize)
         except ToolError as error:
             result = self._error_result(error)
         for observer in tuple(self._result_observers):
@@ -245,6 +246,24 @@ class ToolRegistry:
             )
             self._schedule(partial(observer, snapshot))
         return result
+
+    @staticmethod
+    def _normalize(definition: ToolDefinition, raw: Any) -> ToolResult:
+        try:
+            value = (
+                raw.model_dump(mode="json", by_alias=True) if isinstance(raw, BaseModel) else raw
+            )
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            data: JsonValue = TypeAdapter(JsonValue).validate_json(encoded)
+            check_json(data)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ToolError("invalid_output", "工具结果不是有效的有限 JSON") from error
+        try:
+            definition.validate_output(data)
+        except ValueError as error:
+            raise ToolError("invalid_output_schema", "工具结果不符合声明的输出 Schema") from error
+        text = raw if isinstance(raw, str) else encoded
+        return ToolResult(content=[TextContent(text=text)], data=data)
 
     @staticmethod
     def _error_result(error: ToolError) -> ToolResult:
