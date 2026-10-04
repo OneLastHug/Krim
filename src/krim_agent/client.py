@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
+from .interactions import InteractionReply, InteractionView
 from .protocol.domain import (
     ChatRequest,
     EditRequest,
@@ -87,6 +88,23 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/tree")
         self._check(response)
         return MessageTreeView.model_validate_json(response.content)
+
+    def interactions(self, run_id: str, *, pending_only: bool = False) -> list[InteractionView]:
+        response = self._http.get(
+            f"/v1/runs/{run_id}/interactions", params={"pending_only": str(pending_only).lower()}
+        )
+        self._check(response)
+        return TypeAdapter(list[InteractionView]).validate_json(response.content)
+
+    def respond_interaction(
+        self, run_id: str, interaction_id: str, request: InteractionReply
+    ) -> InteractionView:
+        response = self._http.post(
+            f"/v1/runs/{run_id}/interactions/{interaction_id}/respond",
+            json=request.model_dump(mode="json", exclude_none=True),
+        )
+        self._check(response)
+        return InteractionView.model_validate_json(response.content)
 
     def agents_catalog(self) -> list[AgentDescriptor]:
         response = self._http.get("/v1/agents/catalog")

@@ -47,6 +47,16 @@ export interface CompactResponse {
   omitted_count: number;
   messages: MessageView[];
 }
+export interface InteractionView {
+  id: string;
+  run_id: string;
+  tool_name: string;
+  kind: "approval" | "question";
+  payload: Record<string, unknown>;
+  status: "pending" | "approved" | "denied" | "answered" | "cancelled" | "expired";
+  response: Record<string, unknown> | null;
+  expires_at: number;
+}
 export interface AgentDescriptor {
   name: string;
   description: string;

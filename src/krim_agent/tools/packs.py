@@ -100,6 +100,12 @@ def builtin_pack(
 
     async def question(args: BaseModel, _context: ToolContext) -> object:
         payload = QuestionInput.model_validate(args)
+        if _context.question_handler is not None:
+            async with _context.human_wait():
+                answer = await _context.question_handler(
+                    payload.question, payload.options, _context
+                )
+            return {"status": "answered", "question": payload.question, "answer": answer}
         async with state.lock:
             if len(state.pending_questions) >= 128:
                 raise ToolError("question_limit", "待处理问题超过容量")

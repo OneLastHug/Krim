@@ -24,6 +24,7 @@ from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
+from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -210,6 +211,20 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/tools")
     async def list_tools() -> ToolsResponse:
         return ToolsResponse(tools=service.tools.list_tools())
+
+    @app.get("/v1/runs/{run_id}/interactions")
+    async def run_interactions(run_id: str, pending_only: bool = False) -> list[InteractionView]:
+        return await repository.list_interactions(run_id, pending_only=pending_only)
+
+    @app.get("/v1/runs/{run_id}/interactions/{interaction_id}")
+    async def interaction(run_id: str, interaction_id: str) -> InteractionView:
+        return await repository.get_interaction(run_id, interaction_id)
+
+    @app.post("/v1/runs/{run_id}/interactions/{interaction_id}/respond")
+    async def interaction_respond(
+        run_id: str, interaction_id: str, request: InteractionReply
+    ) -> InteractionView:
+        return await service.interactions.reply(run_id, interaction_id, request)
 
     @app.get("/v1/agents/catalog")
     async def agent_catalog() -> list[AgentDescriptor]:

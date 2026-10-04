@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from . import __version__
 from .client import ClientError, KrimClient
 from .context_engine import ContextOptions
+from .interactions import InteractionReply
 from .protocol.domain import TERMINAL_STATUSES
 from .workflow import WorkflowGraph
 
@@ -24,6 +25,17 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    interaction = subparsers.add_parser(
+        "interaction", help="interaction（用户交互）：读取审批/问题和提交回应"
+    )
+    interaction.add_argument("action", choices=["list", "approve", "deny", "answer"])
+    interaction.add_argument("run_id")
+    interaction.add_argument("interaction_id", nargs="?")
+    interaction.add_argument("answer", nargs="?")
+    interaction.add_argument(
+        "--pending", action="store_true", help="pending（待处理）：只列出当前待回应请求"
+    )
+    interaction.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     agent = subparsers.add_parser("agent", help="agent（Agent）：目录、执行与持久事件")
     agent.add_argument(
         "action",
@@ -157,6 +169,36 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "interaction":
+                if args.action == "list":
+                    print(
+                        json.dumps(
+                            [
+                                item.model_dump(mode="json")
+                                for item in client.interactions(
+                                    args.run_id, pending_only=args.pending
+                                )
+                            ],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    if not args.interaction_id:
+                        parser.error("interaction 回应需要 interaction_id")
+                    if args.action == "answer" and not args.answer:
+                        parser.error("interaction answer 需要真实答案")
+                    print(
+                        client.respond_interaction(
+                            args.run_id,
+                            args.interaction_id,
+                            InteractionReply(
+                                action=args.action,
+                                answer=args.answer if args.action == "answer" else None,
+                            ),
+                        ).model_dump_json(indent=2)
+                    )
+                return
             if args.command == "agent":
                 if args.action == "catalog":
                     print(

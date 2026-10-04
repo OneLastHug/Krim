@@ -4,8 +4,10 @@ const state = {
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
     compactPreview: null, agents: [], handles: [],
     workflowGraph: { nodes: [], edges: [], output_node: null }, workflowRun: null, workflowSelected: [],
+    interactions: [], interactionRuns: new Set(),
 };
 const $ = (id) => document.getElementById(id);
+let interactionLoadVersion = 0;
 const text = (id) => $(id);
 const labels = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
@@ -139,6 +141,101 @@ function renderCompact(result) {
     $("compact-sources").textContent = `来源 ${result.source_message_ids.length} 条历史消息；${result.persisted ? "已保存" : "尚未保存"}`;
     $("compact-summary").textContent = result.summary || result.reason || "没有需要压缩的历史";
     $("compact-confirm").disabled = state.busy || result.status !== "proposed";
+}
+function renderInteractions() {
+    const root = $("interactions");
+    root.replaceChildren();
+    for (const interaction of state.interactions.filter((item) => item.status === "pending")) {
+        const card = document.createElement("div");
+        card.className = "interaction-card";
+        card.dataset.interactionId = interaction.id;
+        const title = document.createElement("strong");
+        title.textContent = interaction.kind === "approval" ? `工具执行需要批准：${interaction.tool_name}` : "请回答问题";
+        const detail = document.createElement("p");
+        detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || "问题");
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        card.append(title, detail);
+        if (interaction.kind === "approval") {
+            for (const [action, label] of [["approve", "批准此次调用"], ["deny", "拒绝此次调用"]]) {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "secondary";
+                button.textContent = label;
+                button.onclick = () => void replyInteraction(interaction, action);
+                actions.append(button);
+            }
+        }
+        else {
+            const input = document.createElement("input");
+            input.type = "text";
+            input.maxLength = 4000;
+            input.placeholder = "输入真实答案";
+            input.setAttribute("aria-label", "用户答案");
+            if (Array.isArray(interaction.payload.options)) {
+                const options = document.createElement("div");
+                options.className = "actions";
+                for (const value of interaction.payload.options) {
+                    if (typeof value !== "string")
+                        continue;
+                    const choice = document.createElement("button");
+                    choice.type = "button";
+                    choice.className = "secondary";
+                    choice.textContent = value;
+                    choice.onclick = () => { input.value = value; input.focus(); };
+                    options.append(choice);
+                }
+                card.append(options);
+            }
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "primary";
+            button.textContent = "提交答案";
+            button.onclick = () => void replyInteraction(interaction, "answer", input.value);
+            card.append(input);
+            actions.append(button);
+        }
+        card.append(actions);
+        root.append(card);
+    }
+}
+async function loadInteractions() {
+    const version = ++interactionLoadVersion;
+    const ids = new Set(state.interactionRuns);
+    if (state.runId)
+        ids.add(state.runId);
+    for (const agent of state.handles)
+        if (agent.current_run_id)
+            ids.add(agent.current_run_id);
+    const values = await Promise.all([...ids].map((id) => requestJson(`/v1/runs/${encodeURIComponent(id)}/interactions?pending_only=true`)));
+    if (version !== interactionLoadVersion)
+        return;
+    const next = values.flat();
+    if (JSON.stringify(next) !== JSON.stringify(state.interactions)) {
+        state.interactions = next;
+        renderInteractions();
+    }
+}
+async function replyInteraction(interaction, action, answer) {
+    if (action === "answer" && !answer?.trim()) {
+        showNotice("请输入真实答案", true);
+        return;
+    }
+    const card = [...$("interactions").querySelectorAll(".interaction-card")].find((item) => item.dataset.interactionId === interaction.id);
+    card?.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    try {
+        await requestJson(`/v1/runs/${encodeURIComponent(interaction.run_id)}/interactions/${encodeURIComponent(interaction.id)}/respond`, { method: "POST", body: JSON.stringify({ action, ...(action === "answer" ? { answer } : {}) }) });
+        state.interactions = state.interactions.filter((item) => item.id !== interaction.id);
+        renderInteractions();
+        showNotice(action === "answer" ? "答案已提交，继续生成" : action === "approve" ? "此次工具调用已批准" : "此次工具调用已拒绝");
+    }
+    catch (error) {
+        showNotice(errorText(error), true);
+        await loadInteractions();
+    }
+    finally {
+        card?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+    }
 }
 function renderAgents() {
     const select = $("agent-kind");
@@ -483,6 +580,10 @@ async function loadTopic(topicId) {
         state.cursor = 0;
         state.disconnected = false;
         state.streamText = "";
+        state.interactionRuns.clear();
+        state.interactions = [];
+        interactionLoadVersion += 1;
+        renderInteractions();
     }
     state.topicId = topicId;
     const topic = state.topics.find((item) => item.id === topicId);
@@ -511,6 +612,7 @@ async function loadTopic(topicId) {
         }
     }
     disableComposer(state.busy);
+    await loadInteractions();
 }
 async function loadTopics() {
     state.topics = (await requestJson("/v1/topics")).topics;
@@ -522,6 +624,7 @@ async function loadAgents() {
     state.agents = await requestJson("/v1/agents/catalog");
     state.handles = await requestJson("/v1/agents");
     renderAgents();
+    await loadInteractions();
 }
 async function createTopic() {
     if (state.busy)
@@ -553,6 +656,7 @@ async function consume(runId, fromSeq = 0) {
     renderMessages();
     const controller = new AbortController();
     state.streamAbort = controller;
+    const interactionTimer = setInterval(() => void loadInteractions().catch(() => undefined), 500);
     try {
         state.cursor = await consumeEvents(runId, fromSeq, (frame) => {
             state.cursor = frame.seq + 1;
@@ -562,6 +666,12 @@ async function consume(runId, fromSeq = 0) {
             }
             if (frame.kind === "chunk" && frame.data?.type === "context_compact")
                 showNotice("上下文已压缩并继续生成");
+            if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
+                const interaction = frame.data.interaction;
+                if (interaction?.run_id)
+                    state.interactionRuns.add(interaction.run_id);
+                void loadInteractions().catch(() => undefined);
+            }
             if (frame.kind === "end")
                 showNotice(`生成${statuses[String(frame.data?.status)] || "结束"}`);
         }, controller.signal);
@@ -571,8 +681,13 @@ async function consume(runId, fromSeq = 0) {
         throw error;
     }
     finally {
+        clearInterval(interactionTimer);
+        interactionLoadVersion += 1;
         state.streaming = false;
         state.streamAbort = null;
+        state.interactions = [];
+        state.interactionRuns.clear();
+        renderInteractions();
         disableComposer(false);
         renderTopics();
         renderMessages();

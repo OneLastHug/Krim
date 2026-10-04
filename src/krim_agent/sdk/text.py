@@ -24,6 +24,7 @@ from .types import (
     ContextCompactPart,
     FinishReason,
     GenerateResult,
+    InteractionPart,
     SDKPart,
     StepFinish,
     StepResult,
@@ -79,6 +80,8 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "interaction_request":
+        return InteractionPart.model_validate({"interaction": data.get("interaction")})
     if kind == "text_delta":
         return TextDelta.model_validate({"text": data.get("text")})
     if kind == "tool_call":

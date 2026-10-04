@@ -48,6 +48,11 @@ h2 { font-size: 1rem; }
 .message.tool { color: #4e5a70; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.86rem; }
 .role { display: block; margin-bottom: 4px; font-size: 0.68rem; font-weight: 700; opacity: 0.7; }
 .notice { min-height: 28px; padding: 0 24px 10px; color: var(--muted); font-size: 0.84rem; }
+.interactions { display: grid; gap: 8px; padding: 0 24px 12px; }
+.interaction-card { border: 1px solid #efc76c; border-radius: 10px; padding: 11px; background: #fff8e8; }
+.interaction-card strong { display: block; margin-bottom: 4px; }
+.interaction-card p { margin: 0 0 8px; white-space: pre-wrap; }
+.interaction-card input { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 7px; margin-bottom: 7px; }
 .notice.error { color: var(--danger); }
 .composer { padding: 16px 24px 22px; border-top: 1px solid var(--line); }
 .composer-footer { margin-top: 10px; }

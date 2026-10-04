@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import JsonValue
 
 from krim_agent.application.context import PersistentContext
+from krim_agent.application.interactions import InteractionService
 from krim_agent.config import Settings
 from krim_agent.context_engine import (
     ContextCompactRequest,
@@ -33,7 +34,15 @@ from krim_agent.protocol.domain import (
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers import ModelProvider, ModelText, ModelToolCall, ProviderError
 from krim_agent.tools import ToolContext, ToolRegistry
-from krim_agent.tools.core import Policy
+from krim_agent.tools.core import (
+    ApprovalHandler,
+    Decision,
+    InteractionPublisher,
+    Policy,
+    QuestionHandler,
+    ToolDefinition,
+    ToolExecutionBudget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +95,26 @@ class ChatRuntime:
         *,
         tool_policy: Policy | None = None,
         agent_id: str | None = None,
+        approval_handler: ApprovalHandler | None = None,
+        question_handler: QuestionHandler | None = None,
+        interaction_publisher: InteractionPublisher | None = None,
+        execution_timeouts: tuple[ToolExecutionBudget, ...] = (),
     ) -> None:
         self.repository = repository
         self.provider = provider
         self.tools = tools
         self.settings = settings
         self.tool_policy = tool_policy
+        if self.tool_policy is None and settings.interactive_tools:
+            self.tool_policy = self._confirm_writes
         self.agent_id = agent_id
+        self.interactions = InteractionService(
+            repository, seconds=settings.interaction_timeout_seconds
+        )
+        self.approval_handler = approval_handler or self.interactions.approve
+        self.question_handler = question_handler or self.interactions.question
+        self.interaction_publisher = interaction_publisher
+        self.execution_timeouts = execution_timeouts
         self._lock = asyncio.Lock()
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
@@ -101,6 +123,10 @@ class ChatRuntime:
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
         return await self._start(topic_id, request)
+
+    @staticmethod
+    async def _confirm_writes(definition: ToolDefinition, _context: ToolContext) -> Decision:
+        return "allow" if definition.risk == "read" else "ask"
 
     async def edit(self, topic_id: str, message_id: str, request: EditRequest) -> RunView:
         return await self._start(topic_id, request, action="edit", source_message_id=message_id)
@@ -362,6 +388,12 @@ class ChatRuntime:
             state.draft = ""
             state.draft_calls.clear()
             state.pending_calls = list(calls)
+
+            async def publish_interaction(data: dict[str, JsonValue]) -> None:
+                await state.publish("chunk", data)
+                if self.interaction_publisher is not None:
+                    await self.interaction_publisher(data)
+
             for call in calls:
                 result = await self.tools.invoke(
                     call.name,
@@ -374,6 +406,10 @@ class ChatRuntime:
                         call_id=call.id,
                         policy=self.tool_policy,
                         agent_id=self.agent_id,
+                        approval_handler=self.approval_handler,
+                        question_handler=self.question_handler,
+                        interaction_publisher=publish_interaction,
+                        execution_timeouts=self.execution_timeouts,
                     ),
                 )
                 await self.repository.add_message(

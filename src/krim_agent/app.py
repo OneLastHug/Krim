@@ -6,6 +6,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
 from .context_engine import ContextCompactRequest
+from .interactions import InteractionReply
 from .protocol import InProcessBridge
 from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, TopicCreate
 from .protocol.models import StrictModel
@@ -22,6 +23,15 @@ class CompactTopicRequest(ContextCompactRequest):
 
 class RunRequest(StrictModel):
     run_id: str
+
+
+class InteractionListRequest(RunRequest):
+    pending_only: bool = False
+
+
+class InteractionReplyRequest(InteractionReply):
+    run_id: str
+    interaction_id: str
 
 
 class StreamRequest(RunRequest):
@@ -115,6 +125,26 @@ class LocalApp:
             run = await runtime.stop(RunRequest.model_validate(data).run_id)
             return TypeAdapter(JsonValue).validate_json(run.model_dump_json())
 
+        async def interactions(data: JsonValue) -> JsonValue:
+            request = InteractionListRequest.model_validate(data)
+            values = await runtime.repository.list_interactions(
+                request.run_id, pending_only=request.pending_only
+            )
+            return TypeAdapter(JsonValue).validate_python(
+                [value.model_dump(mode="json") for value in values]
+            )
+
+        async def respond(data: JsonValue) -> JsonValue:
+            request = InteractionReplyRequest.model_validate(data)
+            value = await runtime.interactions.reply(
+                request.run_id,
+                request.interaction_id,
+                InteractionReply.model_validate(
+                    request.model_dump(exclude={"run_id", "interaction_id"})
+                ),
+            )
+            return TypeAdapter(JsonValue).validate_json(value.model_dump_json())
+
         async def events(data: JsonValue) -> AsyncGenerator[JsonValue, None]:
             request = StreamRequest.model_validate(data)
             state = await runtime.stream_state(request.run_id, request.from_seq)
@@ -125,6 +155,8 @@ class LocalApp:
         self._app.on("topic/create", create_topic)
         self._app.on("chat/send", send)
         self._app.on("chat/stop", stop)
+        self._app.on("interaction/list", interactions)
+        self._app.on("interaction/respond", respond)
         self._app.on("chat/tree", tree)
         self._app.on("chat/compact", compact)
         self._app.on("chat/messages", messages)

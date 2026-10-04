@@ -3,6 +3,7 @@
 from .database import (
     ContextSummaryRow,
     Database,
+    InteractionRow,
     KrimRepository,
     OAuthTokenRow,
     WorkflowCheckpointRow,
@@ -17,6 +18,7 @@ __all__ = [
     "WorkflowCheckpointRow",
     "WorkflowRequestRow",
     "ContextSummaryRow",
+    "InteractionRow",
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
 ]

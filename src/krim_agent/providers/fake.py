@@ -43,6 +43,9 @@ class FakeProvider:
             if text.startswith("/echo "):
                 yield ModelToolCall(name="echo", arguments={"text": text[6:]})
                 return
+            if text.startswith("/question "):
+                yield ModelToolCall(name="question", arguments={"question": text[10:]})
+                return
             reply = "[fake] 收到：" + text
         reply = reply[:8192]
         for position in range(0, len(reply), 16):
