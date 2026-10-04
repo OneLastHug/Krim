@@ -9,6 +9,8 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter
 
+from .agents import AgentDescriptor
+from .application.agents import AgentPromptRequest, AgentView
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .protocol.domain import (
     ChatRequest,
@@ -85,6 +87,109 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/tree")
         self._check(response)
         return MessageTreeView.model_validate_json(response.content)
+
+    def agents_catalog(self) -> list[AgentDescriptor]:
+        response = self._http.get("/v1/agents/catalog")
+        self._check(response)
+        return TypeAdapter(list[AgentDescriptor]).validate_json(response.content)
+
+    def agents(self) -> list[AgentView]:
+        response = self._http.get("/v1/agents")
+        self._check(response)
+        return TypeAdapter(list[AgentView]).validate_json(response.content)
+
+    def agent_spawn(self, name: str) -> AgentView:
+        response = self._http.post("/v1/agents", json={"name": name})
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent(self, agent_id: str) -> AgentView:
+        response = self._http.get(f"/v1/agents/{agent_id}")
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_execute(
+        self, agent_id: str, prompt: str, idempotency_key: str | None = None
+    ) -> AgentView:
+        request = AgentPromptRequest(prompt=prompt, idempotency_key=idempotency_key)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/execute",
+            json=request.model_dump(exclude_none=True),
+            timeout=httpx.Timeout(30, read=330),
+        )
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_resume(
+        self, agent_id: str, prompt: str, idempotency_key: str | None = None
+    ) -> AgentView:
+        request = AgentPromptRequest(prompt=prompt, idempotency_key=idempotency_key)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/resume",
+            json=request.model_dump(exclude_none=True),
+            timeout=httpx.Timeout(30, read=330),
+        )
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_stop(self, agent_id: str) -> AgentView:
+        response = self._http.post(f"/v1/agents/{agent_id}/stop")
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_destroy(self, agent_id: str) -> AgentView:
+        response = self._http.delete(f"/v1/agents/{agent_id}")
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_events(self, agent_id: str, from_seq: int = 0) -> Iterator[StreamFrame]:
+        with self._http.stream(
+            "GET",
+            f"/v1/agents/{agent_id}/events",
+            params={"from_seq": from_seq},
+            timeout=httpx.Timeout(30, read=45),
+        ) as response:
+            self._check(response)
+            run_id = response.headers.get("x-krim-agent-run-id")
+            if not run_id:
+                raise ClientError("Agent SSE 缺少运行关联")
+            data: list[str] = []
+            event_id = ""
+            event_kind = ""
+            expected = from_seq
+            event_bytes = 0
+            for line in response.iter_lines():
+                if len(line.encode("utf-8")) > 131072:
+                    raise ClientError("Agent SSE 行超过大小限制")
+                if line.startswith("data:"):
+                    event_bytes += len(line.encode("utf-8"))
+                    if event_bytes > 131072:
+                        raise ClientError("Agent SSE 事件超过大小限制")
+                    data.append(line[5:].lstrip(" "))
+                elif line.startswith("id:"):
+                    event_id = line[3:].strip()
+                elif line.startswith("event:"):
+                    event_kind = line[6:].strip()
+                elif not line and data:
+                    frame = StreamFrame.model_validate_json("\n".join(data))
+                    if (
+                        frame.stream_id != run_id
+                        or frame.seq != expected
+                        or event_id != str(frame.seq)
+                        or event_kind != frame.kind
+                    ):
+                        raise ClientError("Agent SSE 帧顺序或关联不正确")
+                    yield frame
+                    expected += 1
+                    data, event_id, event_kind = [], "", ""
+                    event_bytes = 0
+                    if frame.kind in {"end", "error"}:
+                        return
+            if expected == from_seq and from_seq > 0:
+                summary = self.event_summary(run_id)
+                if summary.terminal and from_seq == summary.last_seq + 1:
+                    return
+            raise ClientError("Agent SSE 未收到终止帧")
 
     def compact(
         self,

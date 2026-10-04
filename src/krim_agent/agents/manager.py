@@ -62,6 +62,7 @@ class AgentHandle:
         self._consumer: asyncio.Task[ExecResult] | None = None
         self._destroy_task: asyncio.Task[ExecResult] | None = None
         self._production: asyncio.Task[None] | None = None
+        self.pending_start = False
 
     @property
     def parent_tool_call_id(self) -> str | None:
@@ -107,12 +108,17 @@ class AgentHandle:
         if self.turn >= self.definition.max_turns:
             return self._result(active, "failed", "Agent 超过轮次预算", "max_turns")
         started_at = asyncio.get_running_loop().time()
+        self.pending_start = True
         try:
             await asyncio.wait_for(
                 self.manager._semaphore.acquire(), timeout=self.definition.timeout_seconds
             )
         except TimeoutError:
+            self.pending_start = False
             return self._result(None, "aborted", "Agent 排队超过时间预算", "timeout")
+        except BaseException:
+            self.pending_start = False
+            raise
         try:
             if self.destroyed:
                 raise AgentError("agent_destroyed", "Agent 已销毁")
@@ -130,6 +136,7 @@ class AgentHandle:
                 cancelled = True
             if self.current_run.id != previous_id:
                 self.turn += 1
+            self.pending_start = False
             self._production = self.runtime.production_task(self.current_run.id)
             state = await self.runtime.stream_state(self.current_run.id, 0)
             self._production = state.task
@@ -155,6 +162,7 @@ class AgentHandle:
                     return await self._completed_result("aborted", "Agent 超过时间预算", "timeout")
             return await self._completed_result()
         finally:
+            self.pending_start = False
             if self._production is not None and not self._production.done():
                 self._production.add_done_callback(lambda _task: self.manager._semaphore.release())
             else:
@@ -179,8 +187,16 @@ class AgentHandle:
         return await self._completed_result()
 
     async def stop(self) -> ExecResult:
+        if asyncio.current_task() is self._production:
+            raise AgentError("agent_self_stop", "不能在 Agent 自己的生产任务内等待停止")
         if self.destroyed:
             return self._result(None, "destroyed", "Agent 已销毁", "agent_destroyed")
+        if self.pending_start and self._consumer is not None:
+            consumer = self._consumer
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            if self.current_run is None:
+                return self._result(None, "aborted", "Agent 排队或启动等待已停止", "cancelled")
         if self.current_run is None:
             return self._result(None, "aborted", "Agent 没有运行", "not_started")
         run = await self.runtime.stop(self.current_run.id)

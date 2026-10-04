@@ -21,6 +21,10 @@ class Settings(BaseModel):
     tool_timeout_seconds: float = Field(default=10, gt=0, le=120)
     run_timeout_seconds: float = Field(default=60, gt=0, le=300)
     max_active_runs: int = Field(default=16, ge=1, le=64)
+    agent_max_agents: int = Field(default=32, ge=1, le=1024)
+    agent_max_concurrent: int = Field(default=8, ge=1, le=64)
+    agent_max_recursion_depth: int = Field(default=4, ge=1, le=16)
+    agent_max_turns: int = Field(default=8, ge=1, le=128)
     context_strategy: Literal[
         "truncate", "sliding_window", "summarize_then_truncate", "annotated_compact"
     ] = "sliding_window"

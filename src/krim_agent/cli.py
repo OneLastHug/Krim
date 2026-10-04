@@ -24,6 +24,26 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    agent = subparsers.add_parser("agent", help="agent（Agent）：目录、执行与持久事件")
+    agent.add_argument(
+        "action",
+        choices=[
+            "catalog",
+            "list",
+            "get",
+            "spawn",
+            "execute",
+            "resume",
+            "events",
+            "stop",
+            "destroy",
+        ],
+    )
+    agent.add_argument("value", nargs="?", help="Agent ID 或 spawn 时的目录名称")
+    agent.add_argument("prompt", nargs="?", help="execute/resume 的 prompt（提示）")
+    agent.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    agent.add_argument("--idempotency-key", help="重试去重键")
+    agent.add_argument("--from-seq", type=int, default=0, help="events 起始序号")
     compact = subparsers.add_parser("compact", help="compact（压缩）：预览或确认持久历史摘要")
     compact.add_argument("topic_id")
     compact.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
@@ -137,6 +157,47 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "agent":
+                if args.action == "catalog":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.agents_catalog()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                elif args.action == "list":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.agents()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    if not args.value:
+                        parser.error("agent 操作需要 Agent ID 或目录名称")
+                    if args.action == "spawn":
+                        print(client.agent_spawn(args.value).model_dump_json(indent=2))
+                    elif args.action == "get":
+                        print(client.agent(args.value).model_dump_json(indent=2))
+                    elif args.action in {"execute", "resume"}:
+                        if not args.prompt:
+                            parser.error("agent execute/resume 需要 prompt")
+                        view = (
+                            client.agent_execute(args.value, args.prompt, args.idempotency_key)
+                            if args.action == "execute"
+                            else client.agent_resume(args.value, args.prompt, args.idempotency_key)
+                        )
+                        print(view.model_dump_json(indent=2))
+                    elif args.action == "events":
+                        for frame in client.agent_events(args.value, args.from_seq):
+                            print(frame.model_dump_json(exclude_none=True))
+                    elif args.action == "stop":
+                        print(client.agent_stop(args.value).model_dump_json(indent=2))
+                    elif args.action == "destroy":
+                        print(client.agent_destroy(args.value).model_dump_json(indent=2))
+                return
             if args.command == "compact":
                 print(
                     client.compact(
