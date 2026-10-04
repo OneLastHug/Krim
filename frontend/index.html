@@ -82,6 +82,21 @@
         <div id="notice" class="notice" role="status"></div>
         <section id="interactions" class="interactions" aria-label="待处理用户交互"></section>
         <form id="composer" class="composer">
+          <details class="prompt-context-panel"><summary>引用与背景上下文</summary>
+            <div class="prompt-context-inputs">
+              <label for="mention-label">引用名称</label><input id="mention-label" maxlength="120" placeholder="例如：设计文档" />
+              <label for="mention-content">引用内容</label><textarea id="mention-content" rows="2" maxlength="8192" placeholder="明确提供要交给模型的内容"></textarea>
+              <button id="mention-add" class="secondary" type="button">添加引用</button>
+              <div id="mention-list" class="prompt-chips" aria-label="引用目录"></div>
+              <button id="mention-clear" class="secondary" type="button">清空引用目录</button>
+              <label for="context-tag-name">背景标签名称</label><input id="context-tag-name" maxlength="120" placeholder="例如：工作区" />
+              <label for="context-tag-content">背景标签内容</label><textarea id="context-tag-content" rows="2" maxlength="8192" placeholder="作为背景数据随消息提交"></textarea>
+              <button id="context-tag-add" class="secondary" type="button">保存背景标签</button>
+              <div id="context-tag-list" class="prompt-chips" aria-label="背景标签目录"></div>
+              <button id="context-tag-clear" class="secondary" type="button">清空背景标签</button>
+            </div>
+          </details>
+          <div id="mention-draft" class="prompt-chips" aria-label="本次引用"></div>
           <label class="sr-only" for="prompt">发送消息</label><textarea id="prompt" rows="3" maxlength="8192" placeholder="输入消息，或试试 /add 2 3"></textarea>
           <div class="composer-footer"><span id="composer-mode" class="muted">Enter 发送 · Shift+Enter 换行</span><div class="actions"><button id="edit-cancel" class="secondary" type="button" hidden>取消编辑</button><button id="send" class="primary" type="submit">发送</button></div></div>
         </form>

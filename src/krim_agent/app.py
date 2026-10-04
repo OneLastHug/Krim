@@ -7,6 +7,15 @@ from pydantic import Field, JsonValue, TypeAdapter
 from .app_sdk import AppHandle
 from .context_engine import ContextCompactRequest
 from .interactions import InteractionReply
+from .prompt_context import (
+    ContextTagAddRequest,
+    ContextTagInput,
+    ContextTagRemoveRequest,
+    MentionAddRequest,
+    MentionInput,
+    MentionRemoveRequest,
+    PromptContextRequest,
+)
 from .protocol import InProcessBridge
 from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, TopicCreate
 from .protocol.models import StrictModel
@@ -152,6 +161,49 @@ class LocalApp:
                 if frame is not None:
                     yield TypeAdapter(JsonValue).validate_json(frame.model_dump_json())
 
+        async def get_context(data: JsonValue) -> JsonValue:
+            payload = PromptContextRequest.model_validate(data)
+            value = await runtime.repository.get_prompt_context(payload.topic_id)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def add_mention(data: JsonValue) -> JsonValue:
+            payload = MentionAddRequest.model_validate(data)
+            value = await runtime.repository.add_mention(
+                payload.topic_id,
+                MentionInput.model_validate(payload.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def remove_mention(data: JsonValue) -> JsonValue:
+            payload = MentionRemoveRequest.model_validate(data)
+            value = await runtime.repository.remove_mention(payload.topic_id, payload.mention_id)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def clear_mentions(data: JsonValue) -> JsonValue:
+            value = await runtime.repository.remove_mention(
+                PromptContextRequest.model_validate(data).topic_id
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def add_tag(data: JsonValue) -> JsonValue:
+            payload = ContextTagAddRequest.model_validate(data)
+            value = await runtime.repository.add_context_tag(
+                payload.topic_id,
+                ContextTagInput.model_validate(payload.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def remove_tag(data: JsonValue) -> JsonValue:
+            payload = ContextTagRemoveRequest.model_validate(data)
+            value = await runtime.repository.remove_context_tag(payload.topic_id, payload.name)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def clear_tags(data: JsonValue) -> JsonValue:
+            value = await runtime.repository.remove_context_tag(
+                PromptContextRequest.model_validate(data).topic_id
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
         self._app.on("topic/create", create_topic)
         self._app.on("chat/send", send)
         self._app.on("chat/stop", stop)
@@ -164,6 +216,14 @@ class LocalApp:
         self._app.on("chat/edit", edit)
         self._app.on("chat/regenerate", regenerate)
         self._app.on_stream("chat/stream", events)
+        self._app.on("mention/get", get_context)
+        self._app.on("mention/add", add_mention)
+        self._app.on("mention/remove", remove_mention)
+        self._app.on("mention/clear", clear_mentions)
+        self._app.on("context/getTags", get_context)
+        self._app.on("context/addTag", add_tag)
+        self._app.on("context/removeTag", remove_tag)
+        self._app.on("context/clearTags", clear_tags)
 
     async def close(self) -> None:
         await self.handle.destroy()

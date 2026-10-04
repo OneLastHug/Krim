@@ -6,6 +6,7 @@ import os
 import sys
 
 from krim_agent.app_sdk import RemoteHostHandle
+from krim_agent.prompt_context import ContextTagInput, MentionInput
 
 
 async def main() -> None:
@@ -14,6 +15,22 @@ async def main() -> None:
     ) as host:
         state = await host.state()
         assert state.connected and state.iframe
+        if len(sys.argv) > 3 and sys.argv[3] == "prompt-context":
+            assert state.topic_id is not None
+            reference = await host.add_mention(
+                state.topic_id, MentionInput(label="宿主引用", content="Python 提供的引用")
+            )
+            context = await host.add_context_tag(
+                state.topic_id, ContextTagInput(name="宿主背景", content="Python 提供的背景")
+            )
+            assert any(mention.id == reference.id for mention in context.mentions)
+            assert (await host.prompt_context(state.topic_id)).context_tags
+            print(
+                json.dumps(
+                    {"topic_id": state.topic_id, "mention_id": reference.id}, ensure_ascii=False
+                )
+            )
+            return
         theme = await host.set_theme("dark")
         assert theme.theme == "dark"
         width = await host.resize(840)

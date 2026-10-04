@@ -7,6 +7,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.interactions import InteractionReply, InteractionView
+from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
 from krim_agent.protocol.bridge import Handler
 from krim_agent.protocol.domain import (
@@ -43,6 +44,43 @@ class AppHandle:
 
     async def create_topic(self, title: str = "新话题") -> TopicView:
         return TopicView.model_validate(await self._call("topic/create", {"title": title}))
+
+    async def prompt_context(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(await self._call("mention/get", {"topic_id": topic_id}))
+
+    async def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
+        return MentionRef.model_validate(
+            await self._call(
+                "mention/add", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def remove_mention(self, topic_id: str, mention_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("mention/remove", {"topic_id": topic_id, "mention_id": mention_id})
+        )
+
+    async def clear_mentions(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("mention/clear", {"topic_id": topic_id})
+        )
+
+    async def add_context_tag(self, topic_id: str, request: ContextTagInput) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call(
+                "context/addTag", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def remove_context_tag(self, topic_id: str, name: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("context/removeTag", {"topic_id": topic_id, "name": name})
+        )
+
+    async def clear_context_tags(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("context/clearTags", {"topic_id": topic_id})
+        )
 
     async def send(self, topic_id: str, request: ChatRequest) -> RunView:
         data: JsonValue = TypeAdapter(JsonValue).validate_python(

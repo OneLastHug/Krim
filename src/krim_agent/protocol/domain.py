@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
+from krim_agent.prompt_context import MentionOccurrence
+
 from .models import StrictModel
 
 RunStatus = Literal["queued", "running", "completed", "failed", "aborted", "interrupted"]
@@ -38,10 +40,11 @@ class TextRequest(StrictModel):
 
 class ChatRequest(TextRequest):
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    mentions: list[MentionOccurrence] = Field(default_factory=list, max_length=32)
 
 
 class EditRequest(TextRequest):
-    pass
+    mentions: list[MentionOccurrence] = Field(default_factory=list, max_length=32)
 
 
 class RegenerateRequest(StrictModel):

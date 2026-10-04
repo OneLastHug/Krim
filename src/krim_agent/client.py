@@ -13,6 +13,13 @@ from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .interactions import InteractionReply, InteractionView
+from .prompt_context import (
+    ContextTagInput,
+    MentionInput,
+    MentionOccurrence,
+    MentionRef,
+    PromptContext,
+)
 from .protocol.domain import (
     ChatRequest,
     EditRequest,
@@ -88,6 +95,38 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/tree")
         self._check(response)
         return MessageTreeView.model_validate_json(response.content)
+
+    def prompt_context(self, topic_id: str) -> PromptContext:
+        response = self._http.get(f"/v1/topics/{topic_id}/prompt-context")
+        self._check(response)
+        return PromptContext.model_validate_json(response.content)
+
+    def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/mentions", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return MentionRef.model_validate_json(response.content)
+
+    def remove_mention(self, topic_id: str, mention_id: str | None = None) -> PromptContext:
+        path = f"/v1/topics/{topic_id}/mentions" + (f"/{mention_id}" if mention_id else "")
+        response = self._http.delete(path)
+        self._check(response)
+        return PromptContext.model_validate_json(response.content)
+
+    def add_context_tag(self, topic_id: str, request: ContextTagInput) -> PromptContext:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/context-tags", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return PromptContext.model_validate_json(response.content)
+
+    def remove_context_tag(self, topic_id: str, name: str | None = None) -> PromptContext:
+        response = self._http.delete(
+            f"/v1/topics/{topic_id}/context-tags", params={"name": name} if name is not None else {}
+        )
+        self._check(response)
+        return PromptContext.model_validate_json(response.content)
 
     def interactions(self, run_id: str, *, pending_only: bool = False) -> list[InteractionView]:
         response = self._http.get(
@@ -233,9 +272,17 @@ class KrimClient:
         return TopicView.model_validate_json(response.content)
 
     def edit(
-        self, topic_id: str, message_id: str, text: str, idempotency_key: str | None = None
+        self,
+        topic_id: str,
+        message_id: str,
+        text: str,
+        idempotency_key: str | None = None,
+        *,
+        mentions: list[MentionOccurrence] | None = None,
     ) -> RunView:
-        request = EditRequest(text=text, idempotency_key=idempotency_key or str(uuid4()))
+        request = EditRequest(
+            text=text, idempotency_key=idempotency_key or str(uuid4()), mentions=mentions or []
+        )
         response = self._http.post(
             f"/v1/topics/{topic_id}/messages/{message_id}/edit", json=request.model_dump()
         )
@@ -259,11 +306,13 @@ class KrimClient:
         idempotency_key: str | None = None,
         *,
         parent_message_id: str | None = None,
+        mentions: list[MentionOccurrence] | None = None,
     ) -> RunView:
         request = ChatRequest(
             text=text,
             idempotency_key=idempotency_key or str(uuid4()),
             parent_message_id=parent_message_id,
+            mentions=mentions or [],
         )
         response = self._http.post(f"/v1/topics/{topic_id}/messages", json=request.model_dump())
         self._check(response)

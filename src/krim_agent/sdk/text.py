@@ -11,6 +11,7 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.prompt_context import MentionOccurrence
 from krim_agent.protocol.domain import ChatRequest, MessageView, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame, check_json
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
@@ -298,6 +299,7 @@ class PythonAI:
         topic_id: str | None = None,
         idempotency_key: str | None = None,
         parent_message_id: str | None = None,
+        mentions: list[MentionOccurrence] | None = None,
     ) -> StreamTextResult:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
@@ -305,6 +307,7 @@ class PythonAI:
             text=prompt,
             idempotency_key=idempotency_key or str(uuid4()),
             parent_message_id=parent_message_id,
+            mentions=mentions or [],
         )
         topic = topic_id or (await self.runtime.repository.create_topic(prompt[:80])).id
         run = await self.runtime.start(topic, request)
@@ -317,12 +320,14 @@ class PythonAI:
         topic_id: str | None = None,
         idempotency_key: str | None = None,
         parent_message_id: str | None = None,
+        mentions: list[MentionOccurrence] | None = None,
     ) -> GenerateResult:
         stream = await self.stream_text(
             prompt,
             topic_id=topic_id,
             idempotency_key=idempotency_key,
             parent_message_id=parent_message_id,
+            mentions=mentions,
         )
         return await stream.collect()
 
