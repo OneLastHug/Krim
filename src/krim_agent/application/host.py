@@ -18,6 +18,7 @@ from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFr
 HOST_UI_CHANNELS = frozenset(
     {
         "host/get-state",
+        "host/request",
         "host/set-locale",
         "host/resize",
         "host/prompt",
@@ -39,6 +40,16 @@ HOST_UI_CHANNELS = frozenset(
         "skill/inject",
         "skill/remove",
         "skill/read",
+    }
+)
+
+HOST_CALLBACK_CHANNELS = frozenset(
+    {
+        "checkpoint/create",
+        "checkpoint/rollback",
+        "checkpoint/canRollback",
+        "changeList/invoke",
+        "host/callback",
     }
 )
 
@@ -132,9 +143,20 @@ class HostSessions:
             session.condition.notify_all()
 
     async def command(self, identifier: str, command: HostCommand) -> ChannelResult:
+        return await self._request(identifier, command, "app")
+
+    async def request(self, identifier: str, command: HostCommand) -> ChannelResult:
+        if command.envelope.kind != "call":
+            raise ServiceError("host_channel_invalid", "App 回程必须是 call", 422)
+        return await self._request(identifier, command, "host")
+
+    async def _request(
+        self, identifier: str, command: HostCommand, target: HostSide
+    ) -> ChannelResult:
         session = self.session(identifier)
         envelope = command.envelope
-        if envelope.kind not in {"call", "notify"} or envelope.channel not in HOST_UI_CHANNELS:
+        allowed = HOST_UI_CHANNELS if target == "app" else HOST_CALLBACK_CHANNELS
+        if envelope.kind not in {"call", "notify"} or envelope.channel not in allowed:
             raise ServiceError("host_channel_invalid", "宿主控制信道或方向无效", 422)
         if not session.connected:
             raise ServiceError("host_not_ready", "宿主 iframe 尚未就绪", 409)
@@ -149,22 +171,45 @@ class HostSessions:
             future: asyncio.Future[ChannelResult] | None = None
             if envelope.kind == "call":
                 future = asyncio.get_running_loop().create_future()
-                session.pending[envelope.id] = PendingHostCall(envelope.channel, "app", future)
+                session.pending[envelope.id] = PendingHostCall(envelope.channel, target, future)
         try:
-            await self.publish(session, "app", envelope)
+            await self.publish(session, target, envelope)
             if envelope.kind == "notify":
                 return ChannelResult(ok=True, data=None)
             async with asyncio.timeout(command.timeout_seconds):
                 assert future is not None
                 return await future
         except TimeoutError as error:
-            raise ServiceError("host_timeout", "宿主 iframe 回执超时", 504) from error
+            raise ServiceError("host_timeout", "宿主执行回执超时", 504) from error
         finally:
             session.pending.pop(envelope.id, None)
             if future is not None and not future.done():
                 future.cancel()
+            if future is not None and future.cancelled() and not session.closed:
+                await self.publish(
+                    session,
+                    target,
+                    ProtocolEnvelope(kind="cancel", id=envelope.id, channel=envelope.channel),
+                )
 
-    async def reply(self, identifier: str, envelope: ProtocolEnvelope) -> ChannelResult:
+    async def cancel(self, identifier: str, request_id: str) -> ChannelResult:
+        session = self.session(identifier)
+        async with session.condition:
+            pending = session.pending.get(request_id)
+            if pending is None:
+                raise ServiceError("host_reply_gone", "宿主请求已处理或不存在", 409)
+            if not pending.future.done():
+                pending.future.set_exception(ServiceError("host_cancelled", "宿主请求已取消", 409))
+        await self.publish(
+            session,
+            pending.target,
+            ProtocolEnvelope(kind="cancel", id=request_id, channel=pending.channel),
+        )
+        return ChannelResult(ok=True)
+
+    async def reply(
+        self, identifier: str, envelope: ProtocolEnvelope, side: HostSide = "app"
+    ) -> ChannelResult:
         session = self.session(identifier)
         if envelope.kind != "reply":
             raise ServiceError("host_reply_invalid", "需要宿主回复信封", 422)
@@ -178,6 +223,8 @@ class HostSessions:
                 raise ServiceError("host_reply_gone", "宿主请求已处理或不存在", 409)
             if pending.channel != envelope.channel:
                 raise ServiceError("host_reply_mismatch", "宿主回复信道不匹配", 409)
+            if pending.target != side:
+                raise ServiceError("host_reply_side", "宿主回复方向不匹配", 409)
             pending.future.set_result(result)
         return ChannelResult(ok=True, data=None)
 
@@ -202,7 +249,9 @@ class HostSessions:
                 continue
             for frame in frames:
                 cursor = frame.seq + 1
-                if side == "app":
+                if side == "app" or (
+                    isinstance(frame.data, dict) and frame.data.get("kind") == "call"
+                ):
                     envelope = ProtocolEnvelope.model_validate(frame.data)
                     if envelope.id in session.delivered or (
                         envelope.kind == "call" and envelope.id not in session.pending
