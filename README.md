@@ -27,6 +27,8 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已实现 [Workflow SQLite 检查点](docs/api/workflow-engine.md)：节点事件/输出一致保存、稳定嵌套进度、暂停前后与跨进程恢复、租约/版本保护及副作用裁决；已接通管理面和基础浏览器，完整复杂图/生产协同未完成。
 - 已接通 [Workflow HTTP/client/CLI](docs/api/workflow-http-cli.md)：0007 幂等创建、持久结果、SSE/游标、暂停/继续/停止/恢复/重跑，默认工具/模型复用原权限链；完整浏览器和生产多 worker 未完成。
 
+已接通 [Change List 持久清单与真实宿主执行](docs/api/change-list.md)：0013、revision/幂等、单条/批量 undo/keep、Python callback、异常/超时/重启后的 uncertain、可信 resolve 和点击通知；REST/client/Local/Remote Host/浏览器均有实际文件资源验证。Checkpoint、生产租约和 M2/M3 整体验收仍未完成。
+
 ## 快速开始
 
 ```powershell

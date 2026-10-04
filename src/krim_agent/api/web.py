@@ -24,6 +24,7 @@ PUBLIC_UI_PATHS = frozenset(
         "/ui/skills-ui.js",
         "/ui/links.js",
         "/ui/drag-drop.js",
+        "/ui/change-list-ui.js",
     }
 )
 _CSP = (
@@ -55,6 +56,7 @@ def mount_browser_ui(app: FastAPI) -> None:
         "skills-ui.js": "text/javascript",
         "links.js": "text/javascript",
         "drag-drop.js": "text/javascript",
+        "change-list-ui.js": "text/javascript",
     }
 
     @app.get("/", include_in_schema=False)

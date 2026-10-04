@@ -11,13 +11,13 @@ async def test_app_to_python_request_uses_real_callback_reply_and_side_binding(s
         sid = (await api.post("/v1/host/sessions")).json()["id"]
         await api.post(f"/v1/host/sessions/{sid}/ready")
         async with RemoteHostHandle(server_url, sid) as host:
-            host.on_request("changeList/invoke", lambda data: {"done": True, "data": data})
+            host.on_request("host/callback", lambda data: {"done": True, "data": data})
             command = {
                 "envelope": {
                     "protocol_version": 2,
                     "kind": "call",
                     "id": "app-call",
-                    "channel": "changeList/invoke",
+                    "channel": "host/callback",
                     "data": {"item_id": "change", "action": "undo"},
                 },
                 "timeout_seconds": 3,
@@ -59,7 +59,7 @@ async def test_app_to_python_request_rejects_unknown_channel_and_cancel_cleans_c
             "protocol_version": 2,
             "kind": "call",
             "id": "cancel-me",
-            "channel": "changeList/invoke",
+            "channel": "host/callback",
             "data": {},
         },
         "timeout_seconds": 5,

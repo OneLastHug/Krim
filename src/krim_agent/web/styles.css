@@ -97,6 +97,14 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .compact-panel pre { white-space: pre-wrap; max-height: 200px; overflow: auto; font: inherit; font-size: 0.85rem; }
 .workflow-panel { margin: 0 24px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcff; flex-shrink: 0; }
 .workflow-panel summary { cursor: pointer; padding: 10px 14px; color: var(--accent); font-weight: 700; }
+.change-list-panel { margin: 0 24px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); flex-shrink: 0; }
+.change-list-panel summary { cursor: pointer; padding: 10px 14px; color: var(--accent); font-weight: 700; }
+.change-list-panel[open] { max-height: 55vh; overflow: auto; padding-bottom: 12px; }
+.change-list-panel > .actions, .change-list-panel > p, .change-list-panel > .stack, #change-results { margin: 8px 14px; }
+.change-card { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.change-card p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.change-title { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
+.change-card > .actions { margin-top: 8px; }
 .workflow-grid { display: grid; gap: 8px; padding: 0 14px 14px; }
 .workflow-grid textarea, .workflow-grid input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.76rem; }
 .workflow-events { min-height: 72px; max-height: 150px; overflow: auto; margin: 0; white-space: pre-wrap; font-size: 0.75rem; color: #4e5a70; }

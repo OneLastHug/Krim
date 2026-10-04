@@ -23,6 +23,7 @@ import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
 import { DragDropUI } from "./drag-drop.js";
+import { ChangeListUI } from "./change-list-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 
 type State = {
@@ -64,6 +65,7 @@ const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
+const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000));
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";
@@ -78,6 +80,7 @@ function redrawLocale(): void {
   promptContextUI.refreshLocale();
   skillsUI.refreshLocale();
   dragDropUI.refreshLocale();
+  changeListUI.refreshLocale();
   $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
   $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
   $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -123,6 +126,11 @@ function setupHostBridge(): void {
     const request = hostObject(data);
     if (typeof request.channel !== "string" || !["checkpoint/create", "checkpoint/rollback", "checkpoint/canRollback", "changeList/invoke", "host/callback"].includes(request.channel)) throw new Error("宿主回程信道无效");
     return hostEndpoint.request(request.channel, request.data ?? null);
+  });
+  hostEndpoint.on("host/set-session", (data) => {
+    const id = hostObject(data).session_id;
+    if (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) throw new Error("Host session 无效");
+    changeListUI.setSession(id); return { session_id: id };
   });
   hostEndpoint.on("host/set-key", async (data) => {
     const key = hostObject(data).key;
@@ -174,12 +182,14 @@ function setupHostBridge(): void {
   }
   for (const channel of ["skill/list", "skill/inject", "skill/remove", "skill/read"]) hostEndpoint.on(channel, (data) => skillsUI.bridge(channel, data));
   for (const channel of ["drag/enter", "drag/leave", "drag/drop"]) hostEndpoint.on(channel, (data) => dragDropUI.bridge(channel, data));
+  for (const channel of ["changeList/get", "changeList/sync", "changeList/clear"]) hostEndpoint.on(channel, (data) => changeListUI.bridge(channel, data));
   hostEndpoint.announceReady({ protocol_version: 2, channels: [
     "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
     "mention/get", "mention/add", "mention/remove", "mention/clear",
     "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
     "skill/list", "skill/inject", "skill/remove", "skill/read",
     "drag/enter", "drag/leave", "drag/drop",
+    "host/set-session", "changeList/get", "changeList/sync", "changeList/clear",
   ] });
 }
 
@@ -429,6 +439,7 @@ async function loadTopic(topicId: string): Promise<void> {
   await loadInteractions();
   await promptContextUI.selectTopic(topicId);
   await skillsUI.selectTopic(topicId);
+  await changeListUI.selectTopic(topicId);
   if (state.topicId === topicId) await restoreLocale(tree.topic.locale);
 }
 async function loadTopics(): Promise<void> {

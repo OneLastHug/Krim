@@ -6,6 +6,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.change_list import (
+    ChangeExecution,
+    ChangeInvoke,
+    ChangeItemClick,
+    ChangeListView,
+    ChangeOperation,
+    ChangeReceipt,
+    ChangeSync,
+)
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.interactions import InteractionReply, InteractionView
@@ -49,8 +58,78 @@ class AppHandle:
 
         return self.on("link/navigate", consume)
 
+    def on_change_invoke(
+        self, handler: Callable[[ChangeExecution], Awaitable[ChangeReceipt]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            receipt = await handler(ChangeExecution.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(receipt.model_dump(mode="json"))
+
+        return self.on("changeList/invoke", consume)
+
+    def on_change_click(
+        self, handler: Callable[[ChangeItemClick], object | Awaitable[object]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            value = handler(ChangeItemClick.model_validate(data))
+            if inspect.isawaitable(value):
+                await value
+            return None
+
+        return self.on("changeList/item/click", consume)
+
+    async def change_list(self, topic_id: str) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call("changeList/get", {"topic_id": topic_id})
+        )
+
+    async def sync_changes(self, topic_id: str, request: ChangeSync) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call(
+                "changeList/sync", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def clear_changes(self, topic_id: str, revision: int) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call("changeList/clear", {"topic_id": topic_id, "revision": revision})
+        )
+
+    async def invoke_change(self, topic_id: str, request: ChangeInvoke) -> ChangeOperation:
+        result = await self._bridge.emit(
+            "changeList/apply",
+            {"topic_id": topic_id, **request.model_dump(mode="json")},
+            timeout=request.timeout_seconds + 2,
+        )
+        if not result.ok:
+            raise ServiceError("channel_error", result.error or "变更调用失败")
+        return ChangeOperation.model_validate_json(json.dumps(result.data, ensure_ascii=False))
+
+    async def click_change(self, topic_id: str, revision: int, item_id: str) -> ChangeItemClick:
+        return ChangeItemClick.model_validate(
+            await self._call(
+                "changeList/click", {"topic_id": topic_id, "revision": revision, "item_id": item_id}
+            )
+        )
+
     async def emit(self, channel: str, data: JsonValue = None) -> ChannelResult:
         return await self._bridge.emit(channel, data)
+
+    async def change_operation(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        value = await self._call(
+            "changeList/operation", {"topic_id": topic_id, "operation_id": operation_id}
+        )
+        return ChangeOperation.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def cancel_change(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        value = await self._call(
+            "changeList/cancel", {"topic_id": topic_id, "operation_id": operation_id}
+        )
+        return ChangeOperation.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def resolve_change(self, receipt: ChangeReceipt) -> ChangeOperation:
+        value = await self._call("changeList/resolve", receipt.model_dump(mode="json"))
+        return ChangeOperation.model_validate_json(json.dumps(value, ensure_ascii=False))
 
     async def _call(self, channel: str, data: JsonValue) -> JsonValue:
         result = await self.emit(channel, data)

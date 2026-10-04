@@ -9,7 +9,7 @@ await mkdir(target, { recursive: true });
 for (const file of ["index.html", "host.html", "styles.css"]) {
   await copyFile(resolve(root, file), resolve(target, file));
 }
-for (const file of ["api", "app", "host", "host-shell", "prompt-context", "prompt-context-ui", "i18n", "skills-ui", "links", "drag-drop"]) {
+for (const file of ["api", "app", "host", "host-shell", "prompt-context", "prompt-context-ui", "i18n", "skills-ui", "links", "drag-drop", "change-list-ui"]) {
   const source = await readFile(resolve(root, `src/${file}.ts`), "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },

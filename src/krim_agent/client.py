@@ -11,6 +11,16 @@ from pydantic import TypeAdapter
 
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
+from .change_list import (
+    ChangeClick,
+    ChangeInvoke,
+    ChangeItemClick,
+    ChangeListView,
+    ChangeOperation,
+    ChangeReceipt,
+    ChangeRevision,
+    ChangeSync,
+)
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .drag import DragPreview, DragState
 from .interactions import InteractionReply, InteractionView
@@ -103,6 +113,62 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/skills")
         self._check(response)
         return SkillCatalogView.model_validate_json(response.content)
+
+    def change_list(self, topic_id: str) -> ChangeListView:
+        response = self._http.get(f"/v1/topics/{topic_id}/change-list")
+        self._check(response)
+        return ChangeListView.model_validate_json(response.content)
+
+    def sync_changes(self, topic_id: str, request: ChangeSync) -> ChangeListView:
+        response = self._http.put(
+            f"/v1/topics/{topic_id}/change-list", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return ChangeListView.model_validate_json(response.content)
+
+    def clear_changes(self, topic_id: str, revision: int) -> ChangeListView:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/change-list/clear",
+            json=ChangeRevision(revision=revision).model_dump(mode="json"),
+        )
+        self._check(response)
+        return ChangeListView.model_validate_json(response.content)
+
+    def invoke_change(self, topic_id: str, request: ChangeInvoke) -> ChangeOperation:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/change-list/invoke",
+            json=request.model_dump(mode="json"),
+            timeout=request.timeout_seconds + 2,
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    def change_operation(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        response = self._http.get(f"/v1/topics/{topic_id}/change-list/operations/{operation_id}")
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    def resolve_change(self, receipt: ChangeReceipt) -> ChangeOperation:
+        response = self._http.post(
+            f"/v1/topics/{receipt.topic_id}/change-list/operations/{receipt.operation_id}/resolve",
+            json=receipt.model_dump(mode="json"),
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    def cancel_change(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/change-list/operations/{operation_id}/cancel"
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    def click_change(self, topic_id: str, request: ChangeClick) -> ChangeItemClick:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/change-list/click", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return ChangeItemClick.model_validate_json(response.content)
 
     def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
         response = self._http.post(

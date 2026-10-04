@@ -91,6 +91,7 @@ async function connect(): Promise<void> {
       void consumeCommands(created.id, pump).catch((error: unknown) => { if (!pump?.signal.aborted) status(error instanceof Error ? error.message : "Host 控制断开"); });
     }
     await requestJson(`/v1/host/sessions/${sessionId}/ready`, { method: "POST" });
+    await target().call("host/set-session", { session_id: sessionId });
     input("host-key").value = ""; output(connected); status("iframe 已连接", true);
   } catch (error) { status(error instanceof Error ? error.message : "连接失败"); }
 }
@@ -104,9 +105,18 @@ function bind(): void {
     if (!sessionId) { output(data); status("收到链接通知", true); return; }
     void requestJson(`/v1/host/sessions/${sessionId}/notify`, { method: "POST", body: JSON.stringify({ protocol_version: 2, kind: "notify", id: crypto.randomUUID(), channel: "link/navigate", data }) }).then(() => { output(data); status("收到链接通知", true); }).catch(() => status("链接通知被服务拒绝"));
   });
+  client.on("changeList/item/click", (data) => {
+    if (sessionId) void requestJson(`/v1/host/sessions/${sessionId}/notify`, { method: "POST", body: JSON.stringify({ protocol_version: 2, kind: "notify", id: crypto.randomUUID(), channel: "changeList/item/click", data }) }).catch(() => status("变更点击通知被服务拒绝"));
+  });
   for (const channel of ["checkpoint/create", "checkpoint/rollback", "checkpoint/canRollback", "changeList/invoke", "host/callback"]) {
     client.onCall(channel, async (data, requestId) => {
       if (!sessionId) throw new Error("Python Host session 尚未建立");
+      if (channel === "changeList/invoke") {
+        if (data === null || typeof data !== "object" || Array.isArray(data) || typeof data.topic_id !== "string") throw new Error("变更执行需要话题 ID");
+        const { topic_id: topicId, ...business } = data as Record<string, HostJson>;
+        const response = await requestJson<HostJson>(`/v1/topics/${encodeURIComponent(topicId as string)}/change-list/invoke`, { method: "POST", body: JSON.stringify({ ...business, host_session_id: sessionId }) });
+        return response;
+      }
       const response = await requestJson<{ ok: boolean; data: HostJson; error: string | null }>(`/v1/host/sessions/${sessionId}/requests`, { method: "POST", body: JSON.stringify({ envelope: { protocol_version: 2, kind: "call", id: requestId, channel, data }, timeout_seconds: 10 }) });
       if (!response.ok) throw new Error(response.error || "宿主执行失败");
       return response.data;

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.change_list import ChangeItemClick
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.link import LinkNavigate
 from krim_agent.protocol.domain import ServiceError
@@ -18,6 +19,7 @@ from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFr
 HOST_UI_CHANNELS = frozenset(
     {
         "host/get-state",
+        "host/set-session",
         "host/request",
         "host/set-locale",
         "host/resize",
@@ -40,6 +42,9 @@ HOST_UI_CHANNELS = frozenset(
         "skill/inject",
         "skill/remove",
         "skill/read",
+        "changeList/get",
+        "changeList/sync",
+        "changeList/clear",
     }
 )
 
@@ -276,18 +281,34 @@ class HostSessions:
             "host/state",
             "host/sidebar",
             "link/navigate",
+            "changeList/item/click",
         }:
             raise ServiceError("host_notification_invalid", "宿主通知信道无效", 422)
-        if envelope.channel == "link/navigate":
+        if envelope.channel in {"link/navigate", "changeList/item/click"}:
             try:
-                navigation = LinkNavigate.model_validate(envelope.data)
+                navigation = (
+                    LinkNavigate.model_validate(envelope.data)
+                    if envelope.channel == "link/navigate"
+                    else ChangeItemClick.model_validate(envelope.data)
+                )
             except ValueError as error:
-                raise ServiceError("link_invalid", "Link 通知 URL 无效", 422) from error
+                code = (
+                    "link_invalid"
+                    if envelope.channel == "link/navigate"
+                    else "host_notification_invalid"
+                )
+                raise ServiceError(code, "宿主通知内容无效", 422) from error
             if not session.connected:
                 raise ServiceError("host_not_ready", "宿主 iframe 尚未就绪", 409)
             async with session.condition:
                 if envelope.id in session.notifications:
-                    raise ServiceError("link_duplicate", "Link 通知 ID 已使用", 409)
+                    raise ServiceError(
+                        "link_duplicate"
+                        if envelope.channel == "link/navigate"
+                        else "change_click_duplicate",
+                        "宿主通知 ID 已使用",
+                        409,
+                    )
                 if len(session.notifications) >= 512:
                     raise ServiceError("host_notification_limit", "宿主通知超过上限", 429)
                 session.notifications.add(envelope.id)

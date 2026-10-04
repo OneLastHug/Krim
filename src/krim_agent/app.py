@@ -5,11 +5,26 @@ from collections.abc import AsyncGenerator
 from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
+from .application.change_lists import ChangeListService
+from .change_list import (
+    ChangeClearRequest,
+    ChangeClickRequest,
+    ChangeExecution,
+    ChangeInvoke,
+    ChangeInvokeRequest,
+    ChangeItemClick,
+    ChangeOperationRequest,
+    ChangeReceipt,
+    ChangeSync,
+    ChangeSyncRequest,
+    ChangeTopic,
+)
 from .context_engine import ContextCompactRequest
 from .drag import DragDropRequest, DragEnterRequest, DragPreview, DragState
 from .interactions import InteractionReply
 from .link import LinkNavigate
 from .locale import LocaleChange
+from .persistence.change_lists import ChangeListRepository
 from .prompt_context import (
     ContextTagAddRequest,
     ContextTagInput,
@@ -20,7 +35,7 @@ from .prompt_context import (
     PromptContextRequest,
 )
 from .protocol import InProcessBridge
-from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, TopicCreate
+from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, ServiceError, TopicCreate
 from .protocol.models import StrictModel
 from .runtime import ChatRuntime
 from .skills import (
@@ -84,11 +99,79 @@ class LocalApp:
         host, self._app = InProcessBridge.pair()
         self.handle = AppHandle(host)
         self.runtime = runtime
+        self.change_repository = ChangeListRepository(runtime.repository.database)
+        self.changes = ChangeListService(self.change_repository)
+
+        async def get_changes(data: JsonValue) -> JsonValue:
+            value = await self.change_repository.get(ChangeTopic.model_validate(data).topic_id)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def sync_changes(data: JsonValue) -> JsonValue:
+            request = ChangeSyncRequest.model_validate(data)
+            value = await self.change_repository.sync(
+                request.topic_id,
+                ChangeSync.model_validate(request.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def clear_changes(data: JsonValue) -> JsonValue:
+            request = ChangeClearRequest.model_validate(data)
+            value = await self.change_repository.sync(
+                request.topic_id, ChangeSync(revision=request.revision)
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def apply_changes(data: JsonValue) -> JsonValue:
+            payload = ChangeInvokeRequest.model_validate(data)
+            request = ChangeInvoke.model_validate(payload.model_dump(exclude={"topic_id"}))
+
+            async def execute(execution: ChangeExecution) -> ChangeReceipt:
+                result = await self._app.emit(
+                    "changeList/invoke",
+                    TypeAdapter(JsonValue).validate_python(execution.model_dump(mode="json")),
+                    timeout=request.timeout_seconds,
+                )
+                if not result.ok:
+                    raise ServiceError("executor_failed", "宿主执行未返回有效业务回执", 502)
+                return ChangeReceipt.model_validate(result.data)
+
+            value = await self.changes.invoke(payload.topic_id, request, execute)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def click_change(data: JsonValue) -> JsonValue:
+            request = ChangeClickRequest.model_validate(data)
+            current = await self.change_repository.get(request.topic_id)
+            if current.revision != request.revision:
+                raise ServiceError("change_revision_conflict", "变更清单版本已更新", 409)
+            item = next((item for item in current.items if item.id == request.item_id), None)
+            if item is None:
+                raise ServiceError("change_item_not_found", "变更条目不在该话题中", 404)
+            click = ChangeItemClick(topic_id=request.topic_id, revision=current.revision, item=item)
+            value: JsonValue = TypeAdapter(JsonValue).validate_python(click.model_dump(mode="json"))
+            self._app.notify("changeList/item/click", value)
+            return value
 
         async def create_topic(data: JsonValue) -> JsonValue:
             payload = TopicCreate.model_validate(data)
             topic = await runtime.repository.create_topic(payload.title, payload.locale)
             return TypeAdapter(JsonValue).validate_json(topic.model_dump_json())
+
+        async def get_change_operation(data: JsonValue) -> JsonValue:
+            request = ChangeOperationRequest.model_validate(data)
+            operation = await self.change_repository.operation(
+                request.topic_id, request.operation_id
+            )
+            return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
+
+        async def cancel_change(data: JsonValue) -> JsonValue:
+            request = ChangeOperationRequest.model_validate(data)
+            operation = await self.changes.cancel(request.topic_id, request.operation_id)
+            return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
+
+        async def resolve_change(data: JsonValue) -> JsonValue:
+            receipt = ChangeReceipt.model_validate(data)
+            operation = await self.change_repository.settle(receipt, resolve=True)
+            return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
 
         async def locale_change(data: JsonValue) -> JsonValue:
             payload = LocaleTopicRequest.model_validate(data)
@@ -272,6 +355,14 @@ class LocalApp:
             return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
         self._app.on("topic/create", create_topic)
+        self._app.on("changeList/get", get_changes)
+        self._app.on("changeList/sync", sync_changes)
+        self._app.on("changeList/clear", clear_changes)
+        self._app.on("changeList/apply", apply_changes)
+        self._app.on("changeList/click", click_change)
+        self._app.on("changeList/operation", get_change_operation)
+        self._app.on("changeList/cancel", cancel_change)
+        self._app.on("changeList/resolve", resolve_change)
         self._app.on("skill/list", list_skills)
         self._app.on("skill/inject", inject_skills)
         self._app.on("skill/remove", remove_skill)
@@ -307,5 +398,6 @@ class LocalApp:
         )
 
     async def close(self) -> None:
+        await self.changes.close()
         await self.handle.destroy()
         await self._app.close()
