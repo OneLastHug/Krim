@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, JsonValue, create_model
 
 from krim_agent.protocol.models import StrictModel
 
+from .output import OutputContract, OutputSchema, WireOutputSchema
+
 if TYPE_CHECKING:
     from .registry import ToolRegistry
 
@@ -130,6 +132,10 @@ class ToolDefinition:
     risk: Risk = "write"
     pre_execute: PreHook | None = None
     post_execute: PostHook | None = None
+    output_schema: OutputSchema | None = None
+    _output_contract: OutputContract | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name) is None:
@@ -137,6 +143,15 @@ class ToolDefinition:
         if self.risk not in {"read", "write"}:
             raise ValueError("不支持的风险等级")
         Draft202012Validator.check_schema(self.parameters.model_json_schema())
+        if self.output_schema is not None:
+            object.__setattr__(self, "_output_contract", OutputContract(self.output_schema))
+            if not isinstance(self.output_schema, type):
+                assert self._output_contract is not None
+                object.__setattr__(self, "output_schema", self._output_contract.schema())
+
+    def validate_output(self, value: JsonValue) -> None:
+        if self._output_contract is not None:
+            self._output_contract.validate(value)
 
     def schema(self) -> ToolInfo:
         return ToolInfo(
@@ -144,6 +159,7 @@ class ToolDefinition:
             description=self.description,
             risk=self.risk,
             input_schema=self.parameters.model_json_schema(),
+            output_schema=self._output_contract.schema() if self._output_contract else None,
         )
 
 
@@ -152,17 +168,29 @@ class ToolBase(ABC):
     description: str
     parameters: type[BaseModel]
     risk: Risk = "write"
+    output_schema: OutputSchema | None = None
 
     @abstractmethod
     async def execute(self, arguments: BaseModel, context: ToolContext) -> Any:
         raise NotImplementedError
 
     def definition(self) -> ToolDefinition:
-        return ToolDefinition(self.name, self.description, self.parameters, self.execute, self.risk)
+        return ToolDefinition(
+            self.name,
+            self.description,
+            self.parameters,
+            self.execute,
+            self.risk,
+            output_schema=self.output_schema,
+        )
 
 
 def tool(
-    *, name: str | None = None, description: str = "", risk: Risk = "write"
+    *,
+    name: str | None = None,
+    description: str = "",
+    risk: Risk = "write",
+    output_schema: OutputSchema | None = None,
 ) -> Callable[[Callable[..., Awaitable[Any]]], ToolDefinition]:
     def decorate(function: Callable[..., Awaitable[Any]]) -> ToolDefinition:
         if not inspect.iscoroutinefunction(function):
@@ -204,6 +232,7 @@ def tool(
             parameters,
             executor,
             risk,
+            output_schema=output_schema,
         )
 
     return decorate
@@ -219,6 +248,7 @@ class ToolInfo(StrictModel):
     description: str
     risk: Risk
     input_schema: dict[str, JsonValue]
+    output_schema: WireOutputSchema | None = None
 
 
 class ToolResult(StrictModel):

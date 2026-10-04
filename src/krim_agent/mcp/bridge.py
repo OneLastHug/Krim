@@ -92,7 +92,15 @@ class MCPBridge:
                 readonly = remote.name in config.readonly_tools
                 schema = TypeAdapter(dict[str, JsonValue]).validate_python(remote.inputSchema)
                 definition = self._definition(
-                    connection, local, remote.name, description, readonly, schema
+                    connection,
+                    local,
+                    remote.name,
+                    description,
+                    readonly,
+                    schema,
+                    TypeAdapter(dict[str, JsonValue]).validate_python(remote.outputSchema)
+                    if remote.outputSchema is not None
+                    else None,
                 )
                 prepared.append(
                     (
@@ -147,6 +155,7 @@ class MCPBridge:
         description: str,
         readonly: bool,
         schema: dict[str, JsonValue],
+        output_schema: dict[str, JsonValue] | None = None,
     ) -> ToolDefinition:
         parameters = arguments_model(f"MCP_{local}_Input", schema)
 
@@ -163,7 +172,12 @@ class MCPBridge:
             return _tool_result(result)
 
         return ToolDefinition(
-            local, description, parameters, execute, "read" if readonly else "write"
+            local,
+            description,
+            parameters,
+            execute,
+            "read" if readonly else "write",
+            output_schema=output_schema,
         )
 
     def statuses(self) -> list[MCPServerStatus]:
