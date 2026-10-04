@@ -23,6 +23,7 @@ from .core import (
     ToolContext,
     ToolDefinition,
     ToolError,
+    ToolExecutionBudget,
     ToolInfo,
     ToolObservation,
     ToolResult,
@@ -142,8 +143,11 @@ class ToolRegistry:
         child = parent.child(dict(arguments))
         decision: Decision = "deny"
         code: str | None = None
+        budget: ToolExecutionBudget | None = None
         try:
-            async with asyncio.timeout(child.timeout):
+            async with asyncio.timeout(child.timeout) as execution_timeout:
+                budget = ToolExecutionBudget(execution_timeout)
+                child.execution_timeouts = (*child.execution_timeouts, budget)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
                 child.arguments = parsed.model_dump(by_alias=True)
                 original_arguments = copy.deepcopy(child.arguments)
@@ -154,6 +158,10 @@ class ToolRegistry:
                     if definition.risk == "read"
                     else "deny"
                 )
+                if decision == "ask" and child.approval_handler is not None:
+                    async with child.human_wait():
+                        allowed = await child.approval_handler(definition, child)
+                    decision = "allow" if allowed else "deny"
                 if decision not in {"allow", "audit"}:
                     code = "approval_required" if decision == "ask" else "permission_denied"
                     raise ToolError(code, f"工具没有执行许可: {name}")
@@ -167,6 +175,10 @@ class ToolRegistry:
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
                 if child.arguments != original_arguments and parent.policy is not None:
                     decision = await parent.policy(definition, child)
+                    if decision == "ask" and child.approval_handler is not None:
+                        async with child.human_wait():
+                            allowed = await child.approval_handler(definition, child)
+                        decision = "allow" if allowed else "deny"
                     if decision not in {"allow", "audit"}:
                         code = "approval_required" if decision == "ask" else "permission_denied"
                         raise ToolError(code, "中间件修改后的参数没有执行许可")
@@ -194,6 +206,8 @@ class ToolRegistry:
             code = "execution_error"
             raise ToolError(code, f"工具执行失败: {name}") from exc
         finally:
+            if budget is not None:
+                budget.active = False
             self._observe(
                 ToolAudit(
                     call_id=child.call_id,

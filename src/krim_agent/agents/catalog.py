@@ -153,7 +153,6 @@ class AgentCatalog:
                 parent_agent_id=context.agent_id,
                 parent_tool_call_id=context.call_id,
                 persistent=False,
-                timeout_seconds=min(entry.definition.timeout_seconds, context.timeout),
                 tool_timeout_seconds=min(entry.definition.tool_timeout_seconds, context.timeout),
             )
             try:

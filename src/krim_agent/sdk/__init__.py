@@ -5,6 +5,7 @@ from .types import (
     ContextCompactPart,
     FinishReason,
     GenerateResult,
+    InteractionPart,
     SDKPart,
     StepFinish,
     StepResult,
@@ -18,6 +19,7 @@ from .types import (
 
 __all__ = [
     "ContextCompactPart",
+    "InteractionPart",
     "FinishReason",
     "GenerateResult",
     "PythonAI",

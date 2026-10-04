@@ -1,6 +1,6 @@
 # Krim Agent
 
-Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部名称已统一为 `Krim Agent`；基础 TypeScript 浏览器界面由 Python 同源托管，完整 Workflow/iframe Host SDK/审批等产品能力仍在开发。
+Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部名称已统一为 `Krim Agent`；基础 TypeScript 浏览器界面由 Python 同源托管，完整 Workflow/iframe Host SDK 和生产权限能力仍在开发。
 
 ## 当前状态
 
@@ -9,18 +9,19 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - AUTH-004 已批准继续开发 M2/M3，并要求每个已验证功能单独本地提交；消息树、跨进程续传、SubAgent、Workflow、MCP 和完整前端的实际完成状态见需求追踪。
 - M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
 - M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
+- M2 已接通 [持久审批与用户问答](docs/api/user-interactions.md)：SQLite 0009 保存单次 tool call/参数请求，HTTP、Python client、CLI、AppHandle、SDK 和浏览器可批准、拒绝或提交真实答案；子 Agent 权限交集、停止/超时/重启取消和旧事件不重放已验证，完整权限作用域、租户和多 worker 仍未完成。
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
-- 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消和资源回收；HTTP/CLI/UI、动态模型选择、跨进程句柄和成本预算未完成。
-- 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标与关闭回收；重启后句柄不恢复但持久 run 可查询，浏览器 UI、跨进程接管和目录持久化未完成。
-- 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认和 Agent 目录执行；Workflow 图、Host SDK/iframe、审批、附件和完整产品 UI 未完成。
+- 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；跨进程句柄、动态模型/目录持久化和成本预算未完成。
+- 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标、浏览器卡片与关闭回收；重启后句柄不恢复但持久 run 可查询，跨进程接管和目录持久化未完成。
+- 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认、Agent 目录执行和审批/问答卡片；完整 Workflow 产品、Host SDK/iframe、附件和剩余 M3 UI 未完成。
 - 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
 - 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。真实 tokenizer、mid-stream、持久提案和完整确认 UI 未完成。
-- 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；这些工具仅写入宿主内存并受现有 write 权限/审计链约束。
+- 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
-- 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新已验证，MCP transport 自动授权尚未完成。
-- 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册和 PKCE exchange 消费；本机 TCP 已验证，401 自动 transport 与浏览器回调仍未完成。
+- 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新及显式 MCP HTTP Auth 已验证，浏览器/跨进程授权状态未完成。
+- 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册、PKCE exchange 与显式 401 Auth；本机 TCP 已验证，浏览器回调仍未完成。
 - 已实现显式 MCP Streamable HTTP OAuth Auth：401 触发受控 PKCE 回调、持久令牌复用和一次请求重放；真实本机 MCP tools/list/call 已验证，宿主仍需提供回调，不自动打开浏览器。
-- 已实现 [Workflow SQLite 检查点](docs/api/workflow-engine.md)：节点事件/输出一致保存、稳定嵌套进度、暂停前后与跨进程恢复、租约/版本保护及副作用裁决；HTTP/client/CLI/UI 仍未完成。
+- 已实现 [Workflow SQLite 检查点](docs/api/workflow-engine.md)：节点事件/输出一致保存、稳定嵌套进度、暂停前后与跨进程恢复、租约/版本保护及副作用裁决；已接通管理面和基础浏览器，完整复杂图/生产协同未完成。
 - 已接通 [Workflow HTTP/client/CLI](docs/api/workflow-http-cli.md)：0007 幂等创建、持久结果、SSE/游标、暂停/继续/停止/恢复/重跑，默认工具/模型复用原权限链；完整浏览器和生产多 worker 未完成。
 
 ## 快速开始

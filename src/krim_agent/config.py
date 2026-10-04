@@ -19,6 +19,8 @@ class Settings(BaseModel):
     provider_max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     max_steps: int = Field(default=8, ge=1, le=32)
     tool_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    interactive_tools: bool = False
+    interaction_timeout_seconds: float = Field(default=120, gt=0, le=300)
     run_timeout_seconds: float = Field(default=60, gt=0, le=300)
     max_active_runs: int = Field(default=16, ge=1, le=64)
     agent_max_agents: int = Field(default=32, ge=1, le=1024)

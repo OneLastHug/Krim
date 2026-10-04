@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue
 
+from krim_agent.interactions import InteractionView
 from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelToolCall
@@ -56,6 +57,11 @@ class StepFinish(StrictModel):
     finish_reason: Literal["stop", "tool-calls"]
 
 
+class InteractionPart(StrictModel):
+    type: Literal["interaction-request"] = "interaction-request"
+    interaction: InteractionView
+
+
 class StreamFinish(StrictModel):
     type: Literal["finish"] = "finish"
     finish_reason: FinishReason
@@ -76,6 +82,7 @@ SDKPart = (
     | ToolCallPart
     | ToolResultPart
     | ContextCompactPart
+    | InteractionPart
     | StepFinish
     | StreamFinish
     | StreamError

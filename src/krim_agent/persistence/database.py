@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -32,6 +33,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from krim_agent.interactions import InteractionKind, InteractionView
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -169,6 +171,24 @@ class ContextSummaryRow(Base):
     strategy: Mapped[str] = mapped_column(String(32))
     policy: Mapped[str] = mapped_column(String(16))
     never_update: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class InteractionRow(Base):
+    __tablename__ = "interaction_requests"
+    __table_args__ = (UniqueConstraint("run_id", "call_id", "kind", "arguments_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    call_id: Mapped[str] = mapped_column(String(128))
+    tool_name: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))
+    arguments_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    response: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    expires_at: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
@@ -513,6 +533,134 @@ class KrimRepository:
             await session.flush()
             return row
 
+    async def create_interaction(
+        self,
+        topic_id: str,
+        run_id: str,
+        call_id: str,
+        tool_name: str,
+        kind: InteractionKind,
+        arguments_hash: str,
+        payload: dict[str, JsonValue],
+        *,
+        timeout_seconds: float = 300,
+    ) -> InteractionView:
+        if kind not in {"approval", "question"}:
+            raise ServiceError("interaction_kind_invalid", "交互类型无效", 400)
+        if not 0 < timeout_seconds <= 3600:
+            raise ServiceError("interaction_timeout_invalid", "交互超时无效", 400)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            run = await session.get(RunRow, run_id)
+            if topic is None or run is None or run.topic_id != topic_id:
+                raise ServiceError("run_not_found", "交互所属运行不存在", 404)
+            if run.status not in {"queued", "running"} or run.stop_requested:
+                raise ServiceError("interaction_run_closed", "运行已结束或正在停止", 409)
+            existing = await session.scalar(
+                select(InteractionRow).where(
+                    InteractionRow.run_id == run_id,
+                    InteractionRow.call_id == call_id,
+                    InteractionRow.kind == kind,
+                    InteractionRow.arguments_hash == arguments_hash,
+                )
+            )
+            if existing is not None:
+                if existing.tool_name != tool_name or existing.payload != payload:
+                    raise ServiceError("interaction_conflict", "相同交互来源不能改写请求", 409)
+                if existing.status == "pending" and existing.expires_at <= time.time():
+                    existing.status = "expired"
+                    existing.updated_at = utc_now()
+                return InteractionView.model_validate(existing)
+            row = InteractionRow(
+                id=str(uuid4()),
+                topic_id=topic_id,
+                run_id=run_id,
+                call_id=call_id,
+                tool_name=tool_name,
+                kind=kind,
+                arguments_hash=arguments_hash,
+                payload=payload,
+                status="pending",
+                response=None,
+                expires_at=time.time() + timeout_seconds,
+            )
+            session.add(row)
+            await session.flush()
+            return InteractionView.model_validate(row)
+
+    async def list_interactions(
+        self, run_id: str, *, pending_only: bool = False
+    ) -> list[InteractionView]:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ServiceError("run_not_found", "运行不存在", 404)
+            query = select(InteractionRow).where(InteractionRow.run_id == run_id)
+            if pending_only:
+                query = query.where(InteractionRow.status == "pending")
+            rows = list(
+                await session.scalars(query.order_by(InteractionRow.created_at, InteractionRow.id))
+            )
+            now = time.time()
+            for row in rows:
+                if row.status == "pending" and (
+                    row.expires_at <= now or run.status in TERMINAL_STATUSES or run.stop_requested
+                ):
+                    row.status = "expired" if row.expires_at <= now else "cancelled"
+                    row.updated_at = utc_now()
+            return [
+                InteractionView.model_validate(row)
+                for row in rows
+                if not pending_only or row.status == "pending"
+            ]
+
+    async def get_interaction(self, run_id: str, interaction_id: str) -> InteractionView:
+        rows = await self.list_interactions(run_id)
+        result = next((row for row in rows if row.id == interaction_id), None)
+        if result is None:
+            raise ServiceError("interaction_not_found", "交互请求不存在", 404)
+        return result
+
+    async def close_interaction(
+        self, run_id: str, interaction_id: str, *, expired: bool = False
+    ) -> None:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            row = await session.get(InteractionRow, interaction_id)
+            if row is not None and row.run_id == run_id and row.status == "pending":
+                row.status = "expired" if expired else "cancelled"
+                row.updated_at = utc_now()
+
+    async def reply_interaction(
+        self,
+        run_id: str,
+        interaction_id: str,
+        status: str,
+        response: dict[str, JsonValue] | None,
+    ) -> InteractionView:
+        await self.get_interaction(run_id, interaction_id)
+        if status not in {"approved", "denied", "answered", "cancelled"}:
+            raise ServiceError("interaction_status_invalid", "交互回应状态无效", 400)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            row = await session.get(InteractionRow, interaction_id)
+            if row is None or row.run_id != run_id:
+                raise ServiceError("interaction_not_found", "交互请求不存在", 404)
+            if row.status != "pending":
+                raise ServiceError("interaction_not_pending", "交互请求已经处理", 409)
+            if row.expires_at <= time.time():
+                raise ServiceError("interaction_expired", "交互请求已经过期", 409)
+            run = await session.get(RunRow, run_id)
+            if run is None or run.status in TERMINAL_STATUSES or run.stop_requested:
+                raise ServiceError("interaction_run_closed", "交互所属运行已经关闭", 409)
+            if (row.kind == "approval" and status == "answered") or (
+                row.kind == "question" and status in {"approved", "denied"}
+            ):
+                raise ServiceError("interaction_reply_invalid", "回应与交互类型不匹配", 422)
+            row.status = status
+            row.response = response
+            row.updated_at = utc_now()
+            await session.flush()
+            return InteractionView.model_validate(row)
+
     async def select_branch(self, topic_id: str, message_id: str) -> TopicView:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             topic = await session.get(TopicRow, topic_id)
@@ -735,6 +883,11 @@ class KrimRepository:
         error_code: str | None = None,
     ) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
+            await session.execute(
+                update(InteractionRow)
+                .where(InteractionRow.run_id == run_id, InteractionRow.status == "pending")
+                .values(status="cancelled", updated_at=utc_now())
+            )
             for audit in audits:
                 session.add(
                     ToolAuditRow(
@@ -767,6 +920,11 @@ class KrimRepository:
                 )
             )
             for row in rows:
+                await session.execute(
+                    update(InteractionRow)
+                    .where(InteractionRow.run_id == row.id, InteractionRow.status == "pending")
+                    .values(status="cancelled", updated_at=utc_now())
+                )
                 row.status = "interrupted"
                 row.error = "服务重启；未自动重放工具"
                 row.error_code = "interrupted"

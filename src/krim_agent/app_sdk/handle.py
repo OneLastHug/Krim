@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
+from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
 from krim_agent.protocol.bridge import Handler
 from krim_agent.protocol.domain import (
@@ -51,6 +52,27 @@ class AppHandle:
 
     async def stop(self, run_id: str) -> RunView:
         return RunView.model_validate(await self._call("chat/stop", {"run_id": run_id}))
+
+    async def interactions(
+        self, run_id: str, *, pending_only: bool = False
+    ) -> list[InteractionView]:
+        return TypeAdapter(list[InteractionView]).validate_python(
+            await self._call("interaction/list", {"run_id": run_id, "pending_only": pending_only})
+        )
+
+    async def respond_interaction(
+        self, run_id: str, interaction_id: str, request: InteractionReply
+    ) -> InteractionView:
+        return InteractionView.model_validate(
+            await self._call(
+                "interaction/respond",
+                {
+                    "run_id": run_id,
+                    "interaction_id": interaction_id,
+                    **request.model_dump(mode="json"),
+                },
+            )
+        )
 
     async def tree(self, topic_id: str) -> MessageTreeView:
         return MessageTreeView.model_validate(await self._call("chat/tree", {"topic_id": topic_id}))

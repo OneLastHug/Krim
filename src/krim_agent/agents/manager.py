@@ -32,11 +32,13 @@ def inherited_policy(source: Policy | None, parent: Policy | None) -> Policy:
             if definition.risk == "read"
             else "deny"
         )
-        if caller not in {"allow", "audit"}:
+        if caller not in {"allow", "audit", "ask"}:
             return caller
         own = await source(definition, context) if source is not None else caller
-        if own not in {"allow", "audit"}:
+        if own not in {"allow", "audit", "ask"}:
             return own
+        if caller == "ask" or own == "ask":
+            return "ask"
         return "audit" if caller == "audit" or own == "audit" else "allow"
 
     return decide
@@ -313,16 +315,21 @@ class AgentManager:
                     parent_tool_call_id=parent_context.call_id,
                     policy=inherited_policy(definition.policy, parent_context.policy),
                     tools=definition.tools.fork(controls=parent_context.registry),
-                    timeout_seconds=min(definition.timeout_seconds, parent_context.timeout),
+                    timeout_seconds=definition.timeout_seconds
+                    if parent_context.approval_handler is not None
+                    and any(budget.active for budget in parent_context.execution_timeouts)
+                    else min(definition.timeout_seconds, parent_context.timeout),
                     tool_timeout_seconds=min(
                         definition.tool_timeout_seconds,
                         definition.tools.default_timeout,
                         parent_context.timeout,
                     ),
                 )
-            return await self._spawn(definition)
+            return await self._spawn(definition, parent_context)
 
-    async def _spawn(self, definition: AgentDefinition) -> AgentHandle:
+    async def _spawn(
+        self, definition: AgentDefinition, parent_context: ToolContext | None = None
+    ) -> AgentHandle:
         if self._closed:
             raise AgentError("manager_closed", "AgentManager 已关闭")
         if len(self._handles) >= self.max_agents:
@@ -354,6 +361,14 @@ class AgentManager:
             settings,
             tool_policy=definition.policy,
             agent_id=definition.agent_id,
+            approval_handler=parent_context.approval_handler if parent_context else None,
+            question_handler=parent_context.question_handler if parent_context else None,
+            interaction_publisher=parent_context.interaction_publisher
+            if parent_context and not definition.persistent
+            else None,
+            execution_timeouts=parent_context.execution_timeouts
+            if parent_context and not definition.persistent
+            else (),
         )
         topic = await self.repository.create_topic(f"Agent: {definition.name}")
         handle = AgentHandle(self, definition, runtime, topic.id)

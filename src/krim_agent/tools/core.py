@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, get_type_hints
 from uuid import uuid4
@@ -22,6 +24,9 @@ Risk = Literal["read", "write"]
 Decision = Literal["allow", "deny", "ask", "audit"]
 Policy = Callable[["ToolDefinition", "ToolContext"], Awaitable[Decision]]
 Executor = Callable[[BaseModel, "ToolContext"], Awaitable[Any]]
+ApprovalHandler = Callable[["ToolDefinition", "ToolContext"], Awaitable[bool]]
+QuestionHandler = Callable[[str, list[str], "ToolContext"], Awaitable[str]]
+InteractionPublisher = Callable[[dict[str, JsonValue]], Awaitable[None]]
 
 
 class ToolError(Exception):
@@ -36,6 +41,33 @@ class ShortCircuit:
 
 
 @dataclass
+class ToolExecutionBudget:
+    deadline: asyncio.Timeout
+    active: bool = True
+    waiters: int = 0
+    remaining: float | None = None
+
+    def pause(self) -> bool:
+        if not self.active or self.deadline.expired():
+            return False
+        if self.waiters == 0:
+            when = self.deadline.when()
+            if when is None:
+                return False
+            self.remaining = max(0.0, when - asyncio.get_running_loop().time())
+            self.deadline.reschedule(None)
+        self.waiters += 1
+        return True
+
+    def resume(self) -> None:
+        self.waiters -= 1
+        if self.waiters == 0 and self.active and not self.deadline.expired():
+            assert self.remaining is not None
+            self.deadline.reschedule(asyncio.get_running_loop().time() + self.remaining)
+            self.remaining = None
+
+
+@dataclass
 class ToolContext:
     registry: ToolRegistry
     run_id: str = "local"
@@ -46,6 +78,12 @@ class ToolContext:
     call_id: str = field(default_factory=lambda: str(uuid4()))
     arguments: dict[str, Any] = field(default_factory=dict)
     agent_id: str | None = None
+    approval_handler: ApprovalHandler | None = None
+    question_handler: QuestionHandler | None = None
+    interaction_publisher: InteractionPublisher | None = None
+    execution_timeouts: tuple[ToolExecutionBudget, ...] = ()
+    # 来源由宿主/模型运行时设置，不能从工具参数伪造。
+    origin: Literal["model", "host"] = "model"
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -57,11 +95,26 @@ class ToolContext:
             policy=self.policy,
             call_id=self.call_id if self.depth == 0 else str(uuid4()),
             agent_id=self.agent_id,
+            approval_handler=self.approval_handler,
+            question_handler=self.question_handler,
+            interaction_publisher=self.interaction_publisher,
+            execution_timeouts=self.execution_timeouts,
+            origin=self.origin,
             arguments=arguments,
         )
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         return await self.registry.call_tool(name, arguments, self)
+
+    @asynccontextmanager
+    async def human_wait(self) -> AsyncIterator[None]:
+        """只暂停借用的工具 deadline；运行/Agent 总预算和交互独立预算仍生效。"""
+        budgets = [budget for budget in self.execution_timeouts if budget.pause()]
+        try:
+            yield
+        finally:
+            for budget in reversed(budgets):
+                budget.resume()
 
 
 PreHook = Callable[[ToolContext], Awaitable[ShortCircuit | None]]

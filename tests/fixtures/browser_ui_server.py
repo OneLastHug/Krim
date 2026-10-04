@@ -17,6 +17,8 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{Path(directory) / 'browser.sqlite'}",
         api_key=SecretStr("browser-test-key"),
+        interactive_tools=True,
+        run_timeout_seconds=120,
     )
     runtime = ChatRuntime(
         KrimRepository(Database(settings.database_url)),

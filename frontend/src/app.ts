@@ -1,6 +1,7 @@
 import {
   AgentDescriptor,
   AgentView,
+  InteractionView,
   CompactResponse,
   MessageTreeView,
   MessageView,
@@ -34,6 +35,8 @@ type State = {
   workflowGraph: WorkflowGraph;
   workflowRun: WorkflowRunView | null;
   workflowSelected: string[];
+  interactions: InteractionView[];
+  interactionRuns: Set<string>;
   agents: AgentDescriptor[];
   handles: AgentView[];
 };
@@ -42,8 +45,10 @@ const state: State = {
   streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
   compactPreview: null, agents: [], handles: [],
   workflowGraph: { nodes: [], edges: [], output_node: null }, workflowRun: null, workflowSelected: [],
+  interactions: [], interactionRuns: new Set(),
 };
 const $ = (id: string): HTMLElement => document.getElementById(id)!;
+let interactionLoadVersion = 0;
 const text = (id: string): HTMLInputElement | HTMLTextAreaElement => $(id) as HTMLInputElement;
 const labels: Record<string, string> = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses: Record<string, string> = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
@@ -129,6 +134,51 @@ function renderCompact(result: CompactResponse | null): void {
   $("compact-summary").textContent = result.summary || result.reason || "没有需要压缩的历史";
   ($("compact-confirm") as HTMLButtonElement).disabled = state.busy || result.status !== "proposed";
 }
+function renderInteractions(): void {
+  const root = $("interactions"); root.replaceChildren();
+  for (const interaction of state.interactions.filter((item) => item.status === "pending")) {
+    const card = document.createElement("div"); card.className = "interaction-card"; card.dataset.interactionId = interaction.id;
+    const title = document.createElement("strong"); title.textContent = interaction.kind === "approval" ? `工具执行需要批准：${interaction.tool_name}` : "请回答问题";
+    const detail = document.createElement("p"); detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || "问题");
+    const actions = document.createElement("div"); actions.className = "actions"; card.append(title, detail);
+    if (interaction.kind === "approval") {
+      for (const [action, label] of [["approve", "批准此次调用"], ["deny", "拒绝此次调用"]] as const) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = label; button.onclick = () => void replyInteraction(interaction, action); actions.append(button);
+      }
+    } else {
+      const input = document.createElement("input"); input.type = "text"; input.maxLength = 4000; input.placeholder = "输入真实答案"; input.setAttribute("aria-label", "用户答案");
+      if (Array.isArray(interaction.payload.options)) {
+        const options = document.createElement("div"); options.className = "actions";
+        for (const value of interaction.payload.options) {
+          if (typeof value !== "string") continue;
+          const choice = document.createElement("button"); choice.type = "button"; choice.className = "secondary"; choice.textContent = value; choice.onclick = () => { input.value = value; input.focus(); }; options.append(choice);
+        }
+        card.append(options);
+      }
+      const button = document.createElement("button"); button.type = "button"; button.className = "primary"; button.textContent = "提交答案"; button.onclick = () => void replyInteraction(interaction, "answer", input.value); card.append(input); actions.append(button);
+    }
+    card.append(actions); root.append(card);
+  }
+}
+async function loadInteractions(): Promise<void> {
+  const version = ++interactionLoadVersion;
+  const ids = new Set(state.interactionRuns); if (state.runId) ids.add(state.runId);
+  for (const agent of state.handles) if (agent.current_run_id) ids.add(agent.current_run_id);
+  const values = await Promise.all([...ids].map((id) => requestJson<InteractionView[]>(`/v1/runs/${encodeURIComponent(id)}/interactions?pending_only=true`)));
+  if (version !== interactionLoadVersion) return;
+  const next = values.flat();
+  if (JSON.stringify(next) !== JSON.stringify(state.interactions)) { state.interactions = next; renderInteractions(); }
+}
+async function replyInteraction(interaction: InteractionView, action: "approve" | "deny" | "answer", answer?: string): Promise<void> {
+  if (action === "answer" && !answer?.trim()) { showNotice("请输入真实答案", true); return; }
+  const card = [...$("interactions").querySelectorAll<HTMLElement>(".interaction-card")].find((item) => item.dataset.interactionId === interaction.id);
+  card?.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = true; });
+  try {
+    await requestJson<InteractionView>(`/v1/runs/${encodeURIComponent(interaction.run_id)}/interactions/${encodeURIComponent(interaction.id)}/respond`, { method: "POST", body: JSON.stringify({ action, ...(action === "answer" ? { answer } : {}) }) });
+    state.interactions = state.interactions.filter((item) => item.id !== interaction.id); renderInteractions(); showNotice(action === "answer" ? "答案已提交，继续生成" : action === "approve" ? "此次工具调用已批准" : "此次工具调用已拒绝");
+  } catch (error) { showNotice(errorText(error), true); await loadInteractions(); }
+  finally { card?.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = false; }); }
+}
 function renderAgents(): void {
   const select = $("agent-kind") as HTMLSelectElement; select.replaceChildren();
   for (const agent of state.agents) { const option = document.createElement("option"); option.value = agent.name; option.textContent = `${agent.name} · ${agent.risk === "read" ? "只读任务" : "受控任务"}`; select.append(option); }
@@ -211,7 +261,7 @@ async function loadWorkflowRun(): Promise<void> { const id = ($("workflow-run-li
 async function loadTopic(topicId: string): Promise<void> {
   if (state.streaming) return;
   const switched = state.topicId !== topicId;
-  if (switched) { state.runId = null; state.cursor = 0; state.disconnected = false; state.streamText = ""; }
+  if (switched) { state.runId = null; state.cursor = 0; state.disconnected = false; state.streamText = ""; state.interactionRuns.clear(); state.interactions = []; interactionLoadVersion += 1; renderInteractions(); }
   state.topicId = topicId;
   const topic = state.topics.find((item) => item.id === topicId);
   $("topic-heading").textContent = topic?.title || "话题";
@@ -230,6 +280,7 @@ async function loadTopic(topicId: string): Promise<void> {
     }
   }
   disableComposer(state.busy);
+  await loadInteractions();
 }
 async function loadTopics(): Promise<void> {
   state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; renderTopics();
@@ -237,7 +288,7 @@ async function loadTopics(): Promise<void> {
 }
 async function loadAgents(): Promise<void> {
   state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog");
-  state.handles = await requestJson<AgentView[]>("/v1/agents"); renderAgents();
+  state.handles = await requestJson<AgentView[]>("/v1/agents"); renderAgents(); await loadInteractions();
 }
 async function createTopic(): Promise<void> {
   if (state.busy) return;
@@ -254,15 +305,21 @@ async function consume(runId: string, fromSeq = 0): Promise<void> {
   if (fromSeq === 0) state.streamText = "";
   disableComposer(true); renderTopics(); renderMessages();
   const controller = new AbortController(); state.streamAbort = controller;
+  const interactionTimer = setInterval(() => void loadInteractions().catch(() => undefined), 500);
   try {
     state.cursor = await consumeEvents(runId, fromSeq, (frame: StreamFrame) => {
       state.cursor = frame.seq + 1;
       if (frame.kind === "chunk" && frame.data?.type === "text_delta") { state.streamText += String(frame.data.text || ""); renderMessages(); }
       if (frame.kind === "chunk" && frame.data?.type === "context_compact") showNotice("上下文已压缩并继续生成");
+      if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
+        const interaction = frame.data.interaction as InteractionView | undefined;
+        if (interaction?.run_id) state.interactionRuns.add(interaction.run_id);
+        void loadInteractions().catch(() => undefined);
+      }
       if (frame.kind === "end") showNotice(`生成${statuses[String(frame.data?.status)] || "结束"}`);
     }, controller.signal);
   } catch (error) { state.disconnected = true; throw error; }
-  finally { state.streaming = false; state.streamAbort = null; disableComposer(false); renderTopics(); renderMessages(); }
+  finally { clearInterval(interactionTimer); interactionLoadVersion += 1; state.streaming = false; state.streamAbort = null; state.interactions = []; state.interactionRuns.clear(); renderInteractions(); disableComposer(false); renderTopics(); renderMessages(); }
   if (state.topicId) await loadTopic(state.topicId);
 }
 async function sendMessage(event: SubmitEvent): Promise<void> {
