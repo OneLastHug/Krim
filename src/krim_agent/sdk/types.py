@@ -69,6 +69,14 @@ class ToolDiscoveryPart(StrictModel):
     call_id: str
 
 
+class SkillLoadedPart(StrictModel):
+    type: Literal["skill-loaded"] = "skill-loaded"
+    name: str
+    resource: str | None = None
+    step: int = Field(ge=0)
+    call_id: str
+
+
 class StreamFinish(StrictModel):
     type: Literal["finish"] = "finish"
     finish_reason: FinishReason
@@ -91,6 +99,7 @@ SDKPart = (
     | ContextCompactPart
     | InteractionPart
     | ToolDiscoveryPart
+    | SkillLoadedPart
     | StepFinish
     | StreamFinish
     | StreamError

@@ -29,6 +29,10 @@ HOST_UI_CHANNELS = frozenset(
         "context/addTag",
         "context/removeTag",
         "context/clearTags",
+        "skill/list",
+        "skill/inject",
+        "skill/remove",
+        "skill/read",
     }
 )
 

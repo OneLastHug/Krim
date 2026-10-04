@@ -121,6 +121,7 @@ async def test_authentication_is_required_when_configured():
             "todo",
             "question",
             "skills",
+            "read_skill",
         }
 
 

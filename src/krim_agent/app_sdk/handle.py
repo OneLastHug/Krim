@@ -21,6 +21,7 @@ from krim_agent.protocol.domain import (
     ServiceError,
     TopicView,
 )
+from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 
 
 class AppHandle:
@@ -57,6 +58,33 @@ class AppHandle:
 
     async def prompt_context(self, topic_id: str) -> PromptContext:
         return PromptContext.model_validate(await self._call("mention/get", {"topic_id": topic_id}))
+
+    async def skills(self, topic_id: str) -> SkillCatalogView:
+        return SkillCatalogView.model_validate(
+            await self._call("skill/list", {"topic_id": topic_id})
+        )
+
+    async def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
+        return SkillCatalogView.model_validate(
+            await self._call(
+                "skill/inject", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def remove_skill(self, topic_id: str, name: str | None = None) -> SkillCatalogView:
+        return SkillCatalogView.model_validate(
+            await self._call("skill/remove", {"topic_id": topic_id, "name": name})
+        )
+
+    async def read_skill(
+        self, topic_id: str, name: str, resource: str | None = None
+    ) -> SkillReadResult:
+        request = SkillReadInput(name=name, resource=resource)
+        return SkillReadResult.model_validate(
+            await self._call(
+                "skill/read", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
 
     async def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
         return MentionRef.model_validate(

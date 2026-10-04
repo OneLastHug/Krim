@@ -371,6 +371,9 @@ class AgentManager:
             else (),
         )
         topic = await self.repository.create_topic(f"Agent: {definition.name}")
+        if parent_context is not None and parent_context.skill_snapshot is not None:
+            for batch in parent_context.skill_snapshot.batches():
+                await self.repository.inject_skills(topic.id, batch)
         handle = AgentHandle(self, definition, runtime, topic.id)
         self._handles[handle.agent_id] = handle
         return handle

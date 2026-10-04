@@ -69,7 +69,8 @@ async def request_part(runtime, run, *, from_seq=0):
 async def wait(runtime, run):
     task = runtime.production_task(run.id)
     assert task is not None
-    await asyncio.wait_for(asyncio.shield(task), 5)
+    # 子 Agent 回程包含父流、审批和收尾；观察窗口不替代产品超时。
+    await asyncio.wait_for(asyncio.shield(task), 10)
     return await runtime.repository.get_run(run.id)
 
 
@@ -319,7 +320,7 @@ async def test_restart_cancels_pending_and_preserves_reply_history_and_downgrade
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0011_locale"
+            ).scalar() == "0012_skills"
         assert (await repository.get_interaction(run.id, request.id)).status == "cancelled"
     finally:
         await reopened.close()

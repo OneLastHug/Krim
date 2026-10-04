@@ -33,6 +33,7 @@ from .protocol.domain import (
     TopicView,
 )
 from .protocol.models import StreamFrame
+from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
 
@@ -96,6 +97,33 @@ class KrimClient:
         response = self._http.get("/v1/topics")
         self._check(response)
         return TypeAdapter(list[TopicView]).validate_python(response.json()["topics"])
+
+    def skills(self, topic_id: str) -> SkillCatalogView:
+        response = self._http.get(f"/v1/topics/{topic_id}/skills")
+        self._check(response)
+        return SkillCatalogView.model_validate_json(response.content)
+
+    def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/skills", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return SkillCatalogView.model_validate_json(response.content)
+
+    def remove_skill(self, topic_id: str, name: str | None = None) -> SkillCatalogView:
+        path = f"/v1/topics/{topic_id}/skills" + (f"/{name}" if name else "")
+        response = self._http.delete(path)
+        self._check(response)
+        return SkillCatalogView.model_validate_json(response.content)
+
+    def read_skill(self, topic_id: str, name: str, resource: str | None = None) -> SkillReadResult:
+        request = SkillReadInput(name=name, resource=resource)
+        response = self._http.get(
+            f"/v1/topics/{topic_id}/skills/{request.name}",
+            params={"resource": request.resource} if request.resource else {},
+        )
+        self._check(response)
+        return SkillReadResult.model_validate_json(response.content)
 
     def messages(self, topic_id: str) -> list[MessageView]:
         response = self._http.get(f"/v1/topics/{topic_id}/messages")
@@ -290,9 +318,13 @@ class KrimClient:
         idempotency_key: str | None = None,
         *,
         mentions: list[MentionOccurrence] | None = None,
+        skill_names: list[str] | None = None,
     ) -> RunView:
         request = EditRequest(
-            text=text, idempotency_key=idempotency_key or str(uuid4()), mentions=mentions or []
+            text=text,
+            idempotency_key=idempotency_key or str(uuid4()),
+            mentions=mentions or [],
+            skill_names=skill_names or [],
         )
         response = self._http.post(
             f"/v1/topics/{topic_id}/messages/{message_id}/edit", json=request.model_dump()
@@ -318,12 +350,14 @@ class KrimClient:
         *,
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
+        skill_names: list[str] | None = None,
     ) -> RunView:
         request = ChatRequest(
             text=text,
             idempotency_key=idempotency_key or str(uuid4()),
             parent_message_id=parent_message_id,
             mentions=mentions or [],
+            skill_names=skill_names or [],
         )
         response = self._http.post(f"/v1/topics/{topic_id}/messages", json=request.model_dump())
         self._check(response)

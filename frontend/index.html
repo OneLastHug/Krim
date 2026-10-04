@@ -82,6 +82,24 @@
         <div id="notice" class="notice" role="status"></div>
         <section id="interactions" class="interactions" aria-label="待处理用户交互" data-i18n-aria-label="待处理用户交互"></section>
         <form id="composer" class="composer">
+          <details class="skill-panel"><summary data-i18n="技能目录">技能目录</summary>
+            <div class="prompt-context-inputs">
+              <label for="skill-name" data-i18n="技能名称">技能名称</label><input id="skill-name" maxlength="64" placeholder="code-review" />
+              <label for="skill-description" data-i18n="技能用途">技能用途</label><textarea id="skill-description" rows="2" maxlength="1024"></textarea>
+              <label for="skill-content" data-i18n="技能正文">技能正文</label><textarea id="skill-content" rows="3" maxlength="8192"></textarea>
+              <label for="skill-loading" data-i18n="加载方式">加载方式</label><select id="skill-loading"><option value="deferred" data-i18n="按需读取">按需读取</option><option value="always" data-i18n="每次发送载入">每次发送载入</option></select>
+              <label for="skill-license" data-i18n="许可标识">许可标识</label><input id="skill-license" maxlength="200" />
+              <label for="skill-compatibility" data-i18n="兼容说明">兼容说明</label><input id="skill-compatibility" maxlength="500" />
+              <label for="skill-resource-path" data-i18n="文本资源名称">文本资源名称</label><input id="skill-resource-path" maxlength="256" placeholder="references/guide.md" />
+              <label for="skill-resource-content" data-i18n="文本资源内容">文本资源内容</label><textarea id="skill-resource-content" rows="2" maxlength="8192"></textarea>
+              <button id="skill-resource-add" class="secondary" type="button" data-i18n="添加文本资源">添加文本资源</button><div id="skill-resource-draft" class="prompt-chips"></div>
+              <button id="skill-save" class="secondary" type="button" data-i18n="保存技能">保存技能</button>
+              <div id="skill-list" class="stack" aria-label="技能目录" data-i18n-aria-label="技能目录"></div>
+              <button id="skill-clear" class="secondary" type="button" data-i18n="清空技能目录">清空技能目录</button>
+              <pre id="skill-preview"></pre><p id="skill-load-state" role="status"></p>
+            </div>
+          </details>
+          <p id="skill-selection" class="muted"></p>
           <details class="prompt-context-panel"><summary data-i18n="引用与背景上下文">引用与背景上下文</summary>
             <div class="prompt-context-inputs">
               <label for="mention-label" data-i18n="引用名称">引用名称</label><input id="mention-label" maxlength="120" placeholder="例如：设计文档" data-i18n-placeholder="例如：设计文档" />

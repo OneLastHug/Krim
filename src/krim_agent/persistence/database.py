@@ -58,6 +58,13 @@ from krim_agent.protocol.domain import (
     TopicView,
 )
 from krim_agent.protocol.models import StreamFrame, utc_now
+from krim_agent.skills import (
+    SkillBatch,
+    SkillCatalog,
+    SkillCatalogView,
+    SkillReadResult,
+    SkillSnapshot,
+)
 from krim_agent.tools.core import ToolAudit
 
 from .migration import upgrade_database
@@ -77,6 +84,7 @@ class TopicRow(Base):
     active_branches: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
     prompt_context: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
     locale: Mapped[str] = mapped_column(String(16), default="zh-CN")
+    skills: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
 
 
 class RunRow(Base):
@@ -294,6 +302,72 @@ class KrimRepository:
                 raise ServiceError("topic_not_found", "话题不存在", 404)
             return PromptContext.model_validate(topic.prompt_context)
 
+    async def skill_catalog(self, topic_id: str) -> SkillCatalogView:
+        async with self.database.write_lock, self.database.sessions() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            return SkillCatalog.model_validate(topic.skills).view()
+
+    async def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
+        request = SkillBatch.model_validate(request.model_dump(mode="json"))
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            current = {
+                skill.name: skill for skill in SkillCatalog.model_validate(topic.skills).skills
+            }
+            current.update({skill.name: skill.model_copy(deep=True) for skill in request.skills})
+            try:
+                catalog = SkillCatalog(skills=list(current.values()))
+            except ValueError as error:
+                raise ServiceError("skill_limit", "技能目录超过容量或大小边界", 422) from error
+            topic.skills = TypeAdapter(dict[str, JsonValue]).validate_python(
+                catalog.model_dump(mode="json")
+            )
+            topic.updated_at = utc_now()
+            return catalog.view()
+
+    async def remove_skill(self, topic_id: str, name: str | None = None) -> SkillCatalogView:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            catalog = SkillCatalog.model_validate(topic.skills)
+            if name is not None and not any(skill.name == name for skill in catalog.skills):
+                raise ServiceError("skill_not_found", "技能不在该话题目录中", 404)
+            catalog = SkillCatalog(
+                skills=[skill for skill in catalog.skills if skill.name != name] if name else []
+            )
+            topic.skills = TypeAdapter(dict[str, JsonValue]).validate_python(
+                catalog.model_dump(mode="json")
+            )
+            topic.updated_at = utc_now()
+            return catalog.view()
+
+    async def read_skill(
+        self, topic_id: str, name: str, resource: str | None = None
+    ) -> SkillReadResult:
+        async with self.database.write_lock, self.database.sessions() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            try:
+                return SkillCatalog.model_validate(topic.skills).read(name, resource)
+            except KeyError as error:
+                raise ServiceError(str(error.args[0]), "技能或资源不在该话题目录中", 404) from error
+
+    async def run_skill_snapshot(self, run_id: str) -> SkillSnapshot:
+        async with self.database.write_lock, self.database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ServiceError("run_not_found", "运行不存在", 404)
+            message = await session.get(MessageRow, run.input_message_id)
+            if message is None or message.topic_id != run.topic_id:
+                raise ServiceError("run_input_invalid", "运行输入消息不可用", 409)
+            return SkillSnapshot.model_validate(message.details.get("skills_snapshot", {}))
+
     async def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             topic = await session.get(TopicRow, topic_id)
@@ -409,12 +483,19 @@ class KrimRepository:
             )
         )
         occurrences = request.mentions if isinstance(request, (ChatRequest, EditRequest)) else []
+        skill_names = request.skill_names if isinstance(request, (ChatRequest, EditRequest)) else []
         if occurrences:
             fingerprint = json.dumps(
                 {
                     "base": fingerprint,
                     "mentions": [item.model_dump(mode="json") for item in occurrences],
                 },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        if skill_names:
+            fingerprint = json.dumps(
+                {"base": fingerprint, "skill_names": skill_names},
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -474,12 +555,24 @@ class KrimRepository:
             await session.flush()
             if action != "regenerate":
                 snapshot = self._prompt_snapshot(topic, text, occurrences)
+                try:
+                    skill_snapshot = SkillSnapshot.model_validate(
+                        {**topic.skills, "selected_names": skill_names}
+                    )
+                except ValueError as error:
+                    raise ServiceError(
+                        "skill_selection_invalid", "本次技能选择不在目录中或重复", 422
+                    ) from error
                 input_details: dict[str, JsonValue] = (
                     {"edited_from": source_message_id} if action == "edit" else {}
                 )
                 if snapshot.mentions or snapshot.context_tags:
                     input_details["prompt_context"] = TypeAdapter(JsonValue).validate_python(
                         snapshot.model_dump(mode="json")
+                    )
+                if skill_snapshot.skills:
+                    input_details["skills_snapshot"] = TypeAdapter(JsonValue).validate_python(
+                        skill_snapshot.model_dump(mode="json")
                     )
                 highest = max((message.sequence for message in messages), default=0)
                 session.add(

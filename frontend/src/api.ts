@@ -29,6 +29,9 @@ export interface MentionRef {
 export interface MentionOccurrence { mention_id: string; start: number; end: number; }
 export interface ContextTag { name: string; content: string; metadata: Record<string, unknown>; }
 export interface PromptContext { mentions: MentionRef[]; context_tags: ContextTag[]; }
+export interface SkillSummary { name: string; description: string; loading: "deferred" | "always"; license: string | null; compatibility: string | null; metadata: Record<string, string>; allowed_tools: string[]; resource_paths: string[]; digest: string; }
+export interface SkillCatalog { skills: SkillSummary[]; }
+export interface SkillReadResult { name: string; resource: string | null; content: string; }
 export interface MessageTreeView {
   topic: TopicView;
   messages: MessageView[];

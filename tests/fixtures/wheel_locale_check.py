@@ -19,7 +19,7 @@ from krim_agent.protocol.domain import ChatRequest
 from krim_agent.providers import FakeProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools.builtins import builtin_registry
-from krim_agent.ui_locale import locale_resources
+from krim_agent.ui_locale import TRANSLATIONS, locale_resources
 
 
 async def main() -> None:
@@ -50,7 +50,7 @@ async def main() -> None:
                 assert topic["locale"] == "en-US"
                 value = (await client.get("/v1/locales?locale=en-GB")).json()
                 assert value["requested"] == "en-GB" and value["strings"]["发送"] == "Send"
-                assert len(value["strings"]) == 171
+                assert len(value["strings"]) == len(TRANSLATIONS)
                 assert (
                     await local.handle.set_topic_locale(topic["id"], "zh-CN")
                 ).effective == "zh-CN"
@@ -86,7 +86,7 @@ async def main() -> None:
                 async with database.engine.connect() as connection:
                     assert (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
-                    ).scalar() == "0011_locale"
+                    ).scalar() == "0012_skills"
             await database.close()
             reopened = Database(url)
             try:
@@ -100,9 +100,9 @@ async def main() -> None:
                     {
                         "import": "site-packages",
                         "langcodes": "3.5.1",
-                        "head": "0011_locale",
+                        "head": "0012_skills",
                         "locale": "en-US",
-                        "resources": 171,
+                        "resources": len(TRANSLATIONS),
                         "assets": assets,
                     },
                     ensure_ascii=False,
