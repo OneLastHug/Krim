@@ -9,6 +9,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from krim_agent.config import Settings
 
+from .web import PUBLIC_UI_PATHS
+
 
 def local_host(host: str | None) -> bool:
     return host in {"localhost", "127.0.0.1", "::1"}
@@ -45,7 +47,8 @@ class LocalBoundary:
         if origin and origin != expected_origin:
             await reject("origin_denied", "不允许跨站请求", 403)
             return
-        if self.key and scope["path"] != "/healthz":
+        public_ui = scope["method"] in {"GET", "HEAD"} and scope["path"] in PUBLIC_UI_PATHS
+        if self.key and scope["path"] != "/healthz" and not public_ui:
             actual = headers.get("authorization", "")
             if not secrets.compare_digest(actual.encode(), f"Bearer {self.key}".encode()):
                 await reject("unauthorized", "需要有效的 Bearer API Key", 401)

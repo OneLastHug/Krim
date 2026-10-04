@@ -54,6 +54,7 @@ from krim_agent.workflow import (
 )
 
 from .boundary import LocalBoundary
+from .web import mount_browser_ui
 
 
 class TopicsResponse(BaseModel):
@@ -149,6 +150,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.repository = repository
     app.state.workflow = workflow_service
     app.state.agents = agent_service
+    mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:

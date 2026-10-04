@@ -1,6 +1,6 @@
 # Krim Agent
 
-Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部名称已统一为 `Krim Agent`；前端只保留协议向量所需的 TypeScript 校验薄层，当前不包含完整浏览器 UI。
+Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部名称已统一为 `Krim Agent`；基础 TypeScript 浏览器界面由 Python 同源托管，完整 Workflow/iframe Host SDK/审批等产品能力仍在开发。
 
 ## 当前状态
 
@@ -12,6 +12,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
 - 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消和资源回收；HTTP/CLI/UI、动态模型选择、跨进程句柄和成本预算未完成。
 - 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标与关闭回收；重启后句柄不恢复但持久 run 可查询，浏览器 UI、跨进程接管和目录持久化未完成。
+- 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认和 Agent 目录执行；Workflow 图、Host SDK/iframe、审批、附件和完整产品 UI 未完成。
 - 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。真实 tokenizer、mid-stream、持久提案和完整确认 UI 未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；这些工具仅写入宿主内存并受现有 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
@@ -33,6 +34,8 @@ uv run --no-sync krim serve
 
 默认只绑定 `127.0.0.1:8765`。无 `KRIM_AGENT_API_KEY` 时拒绝非本机 Host；配置 API Key 后，除健康检查外需要 `Authorization: Bearer <key>`。
 
+启动后访问 `http://127.0.0.1:8765/ui/` 可使用基础浏览器 AgentApp。配置访问密钥时，静态页面可加载，但业务请求仍需在页面输入 Key；它只保存在当前页面内存。前端构建和浏览器验证说明见 [开发指南](docs/development/browser-ui.md)。
+
 也可以直接使用内置解释器和项目环境：
 
 ```powershell
@@ -53,7 +56,7 @@ uv run --no-sync krim serve
 ## 技术边界
 
 - 后端、Agent 运行时、协议、数据库、API 和 CLI 使用 Python。
-- 前端只使用必要的 TypeScript；当前仅有 `frontend/contracts/protocol.test.ts`，用于同一 JSON 向量校验。
+- 前端只使用 TypeScript；`frontend` 通过固定依赖生成静态 HTML/JS/CSS，由 Python 服务托管，浏览器端不运行 Node 业务服务。
 - `FakeProvider` 是离线确定性演示，不是真实模型、不调用商业服务，也不执行网络、Shell 或文件工具。
 - 默认 Provider 为 fake；仅当宿主配置 `KRIM_AGENT_PROVIDER=openai-compatible` 和模型端点时按配置发请求。模型端点密钥与 Krim API 访问密钥独立。
 - 当前 SQLite 保存消息、运行终态、审计和 SSE 帧；持久事件支持重启与读进程恢复，活跃生产仍要求单进程，不承诺多 worker 并发生产。
