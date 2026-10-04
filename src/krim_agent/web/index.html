@@ -44,6 +44,40 @@
           <button id="compact-confirm" class="secondary" type="button" disabled>确认压缩</button>
         </div>
         <section id="compact-panel" class="compact-panel" hidden aria-label="上下文压缩预览"><h3 id="compact-title"></h3><p id="compact-sources" class="muted"></p><pre id="compact-summary"></pre></section>
+        <details class="workflow-panel">
+          <summary>Workflow 运行面板</summary>
+          <div class="workflow-grid">
+            <div class="workflow-toolbar"><button id="workflow-add-constant" class="secondary" type="button">添加常量节点</button><button id="workflow-add-output" class="secondary" type="button">添加输出节点</button><button id="workflow-connect" class="secondary" type="button">连接选中节点</button></div>
+            <svg id="workflow-svg" class="workflow-svg" viewBox="0 0 720 210" role="img" aria-label="Workflow 图预览"></svg>
+            <div id="workflow-selection" class="workflow-selection muted">点击图中的节点编辑配置</div>
+            <div class="workflow-properties">
+              <label for="workflow-node-id">节点 ID</label><input id="workflow-node-id" />
+              <label for="workflow-node-kind">节点类型</label><select id="workflow-node-kind"><option>constant</option><option>input</option><option>output</option><option>set</option><option>branch</option><option>switch</option><option>aggregate</option><option>tool</option><option>agent</option><option>classifier</option><option>summary</option><option>validator</option><option>enumerator</option><option>sub_workflow</option><option>loop</option><option>fanout</option><option>retry</option><option>image_preview</option><option>model_preview</option><option>code</option></select>
+              <label for="workflow-node-config">节点配置 JSON</label><textarea id="workflow-node-config" rows="3">{}</textarea>
+              <label for="workflow-input-ports">输入端口 JSON（留空使用默认）</label><textarea id="workflow-input-ports" rows="2"></textarea>
+              <label for="workflow-output-ports">输出端口 JSON（留空使用默认）</label><textarea id="workflow-output-ports" rows="2"></textarea>
+              <label><input id="workflow-developer-only" type="checkbox" /> 仅开发节点</label>
+              <div class="actions"><button id="workflow-save-node" class="secondary" type="button">保存节点</button><button id="workflow-delete-node" class="secondary" type="button">删除节点</button></div>
+              <label for="workflow-edge-source-port">来源端口</label><input id="workflow-edge-source-port" value="out" />
+              <label for="workflow-edge-target-port">目标端口</label><input id="workflow-edge-target-port" value="in" />
+              <label for="workflow-edge-when">条件选择（可空）</label><input id="workflow-edge-when" />
+              <select id="workflow-edge-list" aria-label="Workflow 边"></select><button id="workflow-delete-edge" class="secondary" type="button">删除边</button>
+            </div>
+            <label for="workflow-json">图 JSON</label>
+            <textarea id="workflow-json" rows="6">{"nodes":[{"id":"start","kind":"constant","config":{"value":2}},{"id":"finish","kind":"output"}],"edges":[{"source":"start","target":"finish"}],"output_node":"finish"}</textarea>
+            <label for="workflow-input">输入 JSON</label>
+            <input id="workflow-input" value="null" />
+            <label for="workflow-pause-before">节点前暂停（逗号分隔）</label><input id="workflow-pause-before" />
+            <label for="workflow-pause-after">节点后暂停（逗号分隔）</label><input id="workflow-pause-after" />
+            <label><input id="workflow-production" type="checkbox" checked /> 生产视图（移除开发节点）</label>
+            <label for="workflow-override">覆盖输入 JSON</label><input id="workflow-override" value="null" /><label><input id="workflow-has-override" type="checkbox" /> 应用覆盖输入</label>
+            <label><input id="workflow-allow-effects" type="checkbox" /> 允许明确重放副作用</label>
+            <div class="actions"><button id="workflow-run" class="secondary" type="button">运行 Workflow</button><button id="workflow-pause" class="secondary" type="button" disabled>暂停</button><button id="workflow-resume" class="secondary" type="button" disabled>继续</button><button id="workflow-stop" class="secondary" type="button" disabled>停止</button><button id="workflow-rerun" class="secondary" type="button">重跑选中节点</button><button id="workflow-restore" class="secondary" type="button">恢复运行</button></div>
+            <label for="workflow-run-list">持久运行</label><select id="workflow-run-list"></select><button id="workflow-load-run" class="secondary" type="button">读取所选运行</button>
+            <p id="workflow-status" class="muted" role="status"></p>
+            <pre id="workflow-events" class="workflow-events"></pre>
+          </div>
+        </details>
         <div id="messages" class="messages" aria-live="polite"><div class="empty">选择或新建一个话题，开始对话。</div></div>
         <div id="notice" class="notice" role="status"></div>
         <form id="composer" class="composer">

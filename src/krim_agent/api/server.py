@@ -46,6 +46,7 @@ from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
 from krim_agent.workflow import (
     WorkflowError,
+    WorkflowGraph,
     WorkflowRerunRequest,
     WorkflowRestoreRequest,
     WorkflowResumeRequest,
@@ -350,6 +351,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/workflows/runs/{run_id}")
     async def workflow_run(run_id: str) -> WorkflowRunView:
         return await workflow_service.get(run_id)
+
+    @app.get("/v1/workflows/runs/{run_id}/graph")
+    async def workflow_graph(run_id: str) -> WorkflowGraph:
+        return await workflow_service.graph(run_id)
 
     @app.get("/v1/workflows/runs/{run_id}/events")
     async def workflow_events(

@@ -86,3 +86,63 @@ export async function consumeEvents(runId, fromSeq, onFrame, signal) {
         throw new Error("连接已断开，可从已保存的游标继续读取");
     return cursor;
 }
+export async function consumeWorkflowEvents(runId, fromSeq, onEvent) {
+    const path = "/v1/workflows/runs/" + encodeURIComponent(runId);
+    const response = await fetch(path + "/events?from_seq=" + fromSeq, { headers: headers() });
+    if (!response.ok)
+        throw new Error("Workflow 请求失败，请检查权限、状态或游标");
+    if (!response.body)
+        throw new Error("浏览器未提供 Workflow 流");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let buffer = "", cursor = fromSeq, epoch = -1;
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+            if (buffer.length > 262144)
+                throw new Error("Workflow 流帧超过大小限制");
+            for (const block of blocks) {
+                let id = "", kind = "";
+                const lines = [];
+                for (const line of block.split("\n")) {
+                    if (line.startsWith("data:"))
+                        lines.push(line.slice(5).trimStart());
+                    if (line.startsWith("id:"))
+                        id = line.slice(3).trim();
+                    if (line.startsWith("event:"))
+                        kind = line.slice(6).trim();
+                }
+                if (!lines.length)
+                    continue;
+                const data = lines.join("\n");
+                if (new TextEncoder().encode(data).length > 131072)
+                    throw new Error("Workflow 流事件超过大小限制");
+                const event = JSON.parse(data);
+                if (event.run_id !== runId || event.seq !== cursor || id !== String(cursor) || kind !== event.type
+                    || !Number.isSafeInteger(event.epoch) || event.epoch < epoch) {
+                    throw new Error("Workflow 事件关联、代次或游标不正确");
+                }
+                epoch = event.epoch;
+                cursor += 1;
+                onEvent(event);
+                if (event.type === "end") {
+                    await reader.cancel();
+                    return cursor;
+                }
+            }
+            if (done)
+                break;
+        }
+    }
+    finally {
+        reader.releaseLock();
+    }
+    const current = await requestJson(path);
+    if (["queued", "running"].includes(current.status) || current.event_count !== cursor) {
+        throw new Error("Workflow 流连接已断开，可从游标继续");
+    }
+    return cursor;
+}
