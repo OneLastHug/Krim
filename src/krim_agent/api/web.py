@@ -7,7 +7,18 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 
 PUBLIC_UI_PATHS = frozenset(
-    {"/", "/ui", "/ui/", "/ui/index.html", "/ui/styles.css", "/ui/app.js", "/ui/api.js"}
+    {
+        "/",
+        "/ui",
+        "/ui/",
+        "/ui/index.html",
+        "/ui/host.html",
+        "/ui/styles.css",
+        "/ui/app.js",
+        "/ui/api.js",
+        "/ui/host.js",
+        "/ui/host-shell.js",
+    }
 )
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -26,9 +37,12 @@ def mount_browser_ui(app: FastAPI) -> None:
     directory = Path(__file__).resolve().parents[1] / "web"
     resources = {
         "index.html": "text/html",
+        "host.html": "text/html",
         "styles.css": "text/css",
         "app.js": "text/javascript",
         "api.js": "text/javascript",
+        "host.js": "text/javascript",
+        "host-shell.js": "text/javascript",
     }
 
     @app.get("/", include_in_schema=False)

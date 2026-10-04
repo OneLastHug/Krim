@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Krim Agent Host</title><link rel="stylesheet" href="/ui/styles.css" /></head>
+  <body>
+    <main class="host-shell">
+      <header class="host-toolbar">
+        <strong>Krim Agent Host SDK</strong>
+        <span id="host-status" class="badge">等待 iframe</span>
+        <label>访问密钥 <input id="host-key" type="password" autocomplete="off" /></label>
+        <button id="host-connect" class="primary" type="button">连接 iframe</button>
+        <button id="host-state" class="secondary" type="button">读取状态</button>
+        <button id="host-dark" class="secondary" type="button">深色主题</button>
+        <button id="host-resize" class="secondary" type="button">调整宽度</button>
+        <button id="host-toggle" class="secondary" type="button">隐藏侧栏</button>
+        <button id="host-destroy" class="secondary" type="button">销毁 iframe</button>
+        <span>Python 控制会话：<code id="host-session"></code></span>
+      </header>
+      <div class="host-controls">
+        <input id="host-prompt" value="由宿主插入的 Prompt" maxlength="8192" />
+        <button id="host-replace" class="secondary" type="button">替换 Prompt</button>
+        <button id="host-append" class="secondary" type="button">追加 Prompt</button>
+        <pre id="host-output" aria-live="polite"></pre>
+      </div>
+      <section id="host-panel"><iframe id="agent-frame" title="Krim Agent iframe" src="/ui/"></iframe></section>
+    </main>
+    <script type="module" src="/ui/host-shell.js"></script>
+  </body>
+</html>

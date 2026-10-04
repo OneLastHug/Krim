@@ -25,6 +25,11 @@ async def test_static_browser_agent_app_assets_are_same_origin_and_safe(api):
     assert "consumeEvents" in api_script.text and "textContent" in script.text
     assert "database" not in script.text.lower()
     assert (await api.get("/ui/../pyproject.toml")).status_code in {404, 400}
+    host = await api.get("/ui/host.html")
+    host_script = await api.get("/ui/host-shell.js")
+    host_sdk = await api.get("/ui/host.js")
+    assert host.status_code == host_script.status_code == host_sdk.status_code == 200
+    assert "iframe" in host.text and "HostClient" in host_sdk.text
 
 
 async def test_static_assets_are_public_but_business_api_still_requires_bearer_key(tmp_path):

@@ -20,10 +20,12 @@ from krim_agent.application.agents import (
     AgentSpawnRequest,
     AgentView,
 )
+from krim_agent.application.host import HostSessions
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
+from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import (
@@ -39,6 +41,7 @@ from krim_agent.protocol.domain import (
     TopicCreate,
     TopicView,
 )
+from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope
 from krim_agent.providers import create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
@@ -112,6 +115,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         max_active_runs=config.max_active_runs,
     )
     agent_service = AgentService(service, config)
+    host_sessions = HostSessions()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -121,6 +125,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
                 await repository.recover_interrupted()
             yield
         finally:
+            await host_sessions.shutdown()
             try:
                 await workflow_service.close()
             finally:
@@ -152,6 +157,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.repository = repository
     app.state.workflow = workflow_service
     app.state.agents = agent_service
+    app.state.host_sessions = host_sessions
     mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
@@ -211,6 +217,57 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/tools")
     async def list_tools() -> ToolsResponse:
         return ToolsResponse(tools=service.tools.list_tools())
+
+    @app.post("/v1/host/sessions", status_code=201)
+    async def create_host_session() -> HostSessionView:
+        return await host_sessions.create()
+
+    @app.get("/v1/host/sessions/{session_id}")
+    async def host_session(session_id: str) -> HostSessionView:
+        return host_sessions.session(session_id).view()
+
+    @app.post("/v1/host/sessions/{session_id}/ready")
+    async def host_ready(session_id: str) -> HostSessionView:
+        return await host_sessions.mark_ready(session_id)
+
+    @app.post("/v1/host/sessions/{session_id}/commands")
+    async def host_command(session_id: str, request: HostCommand) -> ChannelResult:
+        return await host_sessions.command(session_id, request)
+
+    @app.post("/v1/host/sessions/{session_id}/reply")
+    async def host_reply(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
+        return await host_sessions.reply(session_id, envelope)
+
+    @app.post("/v1/host/sessions/{session_id}/notify")
+    async def host_notify(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
+        await host_sessions.notify(session_id, envelope)
+        return ChannelResult(ok=True, data=None)
+
+    @app.delete("/v1/host/sessions/{session_id}")
+    async def host_close(session_id: str) -> ChannelResult:
+        await host_sessions.close(session_id)
+        return ChannelResult(ok=True, data=None)
+
+    @app.get("/v1/host/sessions/{session_id}/events")
+    async def host_events(
+        session_id: str, side: HostSide = "app", from_seq: int = Query(default=0, ge=0)
+    ) -> StreamingResponse:
+        session = host_sessions.session(session_id)
+        if from_seq > len(session.frames[side]):
+            raise ServiceError("host_cursor_invalid", "宿主事件游标无效", 416)
+
+        async def stream() -> AsyncIterator[str]:
+            async for frame in host_sessions.events(session_id, side, from_seq):
+                if frame is None:
+                    yield ": heartbeat\n\n"
+                else:
+                    yield (
+                        f"id: {frame.seq}\nevent: {frame.kind}\ndata: {frame.model_dump_json()}\n\n"
+                    )
+
+        return StreamingResponse(
+            stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+        )
 
     @app.get("/v1/runs/{run_id}/interactions")
     async def run_interactions(run_id: str, pending_only: bool = False) -> list[InteractionView]:
