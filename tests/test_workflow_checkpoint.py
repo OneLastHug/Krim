@@ -175,7 +175,7 @@ async def test_live_lease_blocks_another_producer_and_downgrade_keeps_data(tmp_p
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'lease.sqlite'}")
     await database.initialize()
     try:
-        store = WorkflowCheckpointStore(database, lease_seconds=0.5)
+        store = WorkflowCheckpointStore(database, lease_seconds=2)
         graph = WorkflowGraph(
             nodes=[WorkflowNode(id="value", kind="constant", config={"value": 1})]
         )
@@ -184,13 +184,17 @@ async def test_live_lease_blocks_another_producer_and_downgrade_keeps_data(tmp_p
         with pytest.raises(WorkflowError) as error:
             await store.claim(handle.run_id, "other-owner")
         assert error.value.code == "checkpoint_busy"
+        # 迁移按操作规程停止生产后执行；活跃心跳不应与 DDL 抢 SQLite 写锁。
+        saved = await handle.suspend()
         with pytest.raises(RuntimeError, match="Workflow 检查点"):
             async with database.engine.begin() as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(store_config(sync), "0005_oauth_tokens")
                 )
-        await handle.resume()
-        assert (await handle.wait()).output == 1
+        restored = await WorkflowEngine().restore(store, handle.run_id)
+        await asyncio.wait_for(paused(restored, len(saved.events)), 3)
+        await restored.resume()
+        assert (await restored.wait()).output == 1
     finally:
         await database.close()
 
