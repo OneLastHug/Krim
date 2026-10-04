@@ -346,6 +346,11 @@ class KrimClient:
         self._check(response)
         return WorkflowRunView.model_validate_json(response.content)
 
+    def workflow_graph(self, run_id: str) -> WorkflowGraph:
+        response = self._http.get(f"/v1/workflows/runs/{run_id}/graph")
+        self._check(response)
+        return WorkflowGraph.model_validate_json(response.content)
+
     def workflows(self) -> list[WorkflowRunView]:
         response = self._http.get("/v1/workflows/runs")
         self._check(response)

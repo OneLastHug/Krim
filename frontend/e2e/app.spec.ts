@@ -139,3 +139,63 @@ test("移动端消息与任务界面可操作且不会执行输入 HTML", async 
   await expect(page.locator("#injected")).toHaveCount(0);
   expect(await page.evaluate(() => Reflect.get(window, "attacked"))).toBeUndefined();
 });
+
+test("Workflow 图节点/边编辑、持久运行和重新读取", async ({ page }) => {
+  await page.getByText("Workflow 运行面板").click();
+  await expect(page.locator("#workflow-svg .workflow-node")).toHaveCount(2);
+  await page.locator('[data-workflow-node="start"]').click();
+  await page.getByLabel("节点配置 JSON").fill('{"value":3}');
+  await page.getByRole("button", { name: "保存节点" }).click();
+  await expect(page.locator('[data-workflow-node="start"]')).toContainText("constant");
+  await page.getByRole("button", { name: "运行 Workflow" }).click();
+  await expect(page.locator("#workflow-status")).toContainText("completed");
+  await expect(page.locator("#workflow-status")).toContainText("输出 3");
+  await expect(page.locator("#workflow-events")).toContainText("node_end");
+  const options = await page.locator("#workflow-run-list option").count();
+  expect(options).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "读取所选运行" }).click();
+  await expect(page.locator("#workflow-svg .workflow-node")).toHaveCount(2);
+});
+
+test("Workflow 图支持增删节点和命名端口连接", async ({ page }) => {
+  await page.getByText("Workflow 运行面板").click();
+  await page.getByRole("button", { name: "添加常量节点" }).click();
+  await expect(page.locator("#workflow-svg .workflow-node")).toHaveCount(3);
+  await page.locator('[data-workflow-node="start"]').click();
+  await page.locator('[data-workflow-node="constant_1"]').click();
+  await page.locator("#workflow-edge-source-port").fill("out");
+  await page.locator("#workflow-edge-target-port").fill("in");
+  await page.getByRole("button", { name: "连接选中节点" }).click();
+  await expect(page.locator("#workflow-svg .workflow-edge")).toHaveCount(2);
+  await page.locator("#workflow-edge-list").selectOption("1");
+  await page.getByRole("button", { name: "删除边" }).click();
+  await expect(page.locator("#workflow-svg .workflow-edge")).toHaveCount(1);
+  await page.locator('[data-workflow-node="start"]').click();
+  await page.getByRole("button", { name: "删除节点" }).click();
+  await expect(page.locator("#workflow-svg .workflow-node")).toHaveCount(2);
+});
+
+test("Workflow 暂停、覆盖输入、继续与重跑", async ({ page, request }) => {
+  await page.getByText("Workflow 运行面板").click();
+  const graph = { nodes: [{ id: "start", kind: "input", config: {} }, { id: "finish", kind: "output", config: {} }], edges: [{ source: "start", target: "finish" }], output_node: "finish" };
+  await page.locator("#workflow-json").fill(JSON.stringify(graph));
+  await page.locator("#workflow-input").fill("1");
+  await page.locator("#workflow-pause-before").fill("finish");
+  await page.getByRole("button", { name: "运行 Workflow" }).click();
+  await expect(page.locator("#workflow-status")).toContainText("paused");
+  await page.locator("#workflow-override").fill("9");
+  await page.locator("#workflow-has-override").check();
+  await page.locator("#workflow-resume").click();
+  await expect(page.locator("#workflow-status")).toContainText("completed");
+  await expect(page.locator("#workflow-status")).toContainText("输出 9");
+  const runId = await page.locator("#workflow-run-list").inputValue();
+  const before = await (await request.get(`/v1/workflows/runs/${runId}`)).json();
+  await page.locator('[data-workflow-node="finish"]').click();
+  const rerunResponse = page.waitForResponse((response) => response.url().endsWith(`/v1/workflows/runs/${runId}/rerun`) && response.request().method() === "POST");
+  await page.locator("#workflow-rerun").click();
+  expect((await (await rerunResponse).json()).epoch).toBeGreaterThan(before.epoch);
+  await expect(page.locator("#workflow-status")).toContainText("completed");
+  const finished = await (await request.get(`/v1/workflows/runs/${runId}`)).json();
+  expect(finished.status).toBe("completed");
+  expect(finished.epoch).toBeGreaterThan(before.epoch);
+});

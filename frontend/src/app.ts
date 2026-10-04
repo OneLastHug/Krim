@@ -7,6 +7,10 @@ import {
   RunView,
   StreamFrame,
   TopicView,
+  WorkflowEvent,
+  WorkflowGraph,
+  WorkflowRunView,
+  consumeWorkflowEvents,
   consumeEvents,
   errorText,
   requestJson,
@@ -27,6 +31,9 @@ type State = {
   streamAbort: AbortController | null;
   editingMessageId: string | null;
   compactPreview: CompactResponse | null;
+  workflowGraph: WorkflowGraph;
+  workflowRun: WorkflowRunView | null;
+  workflowSelected: string[];
   agents: AgentDescriptor[];
   handles: AgentView[];
 };
@@ -34,6 +41,7 @@ const state: State = {
   topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
   streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
   compactPreview: null, agents: [], handles: [],
+  workflowGraph: { nodes: [], edges: [], output_node: null }, workflowRun: null, workflowSelected: [],
 };
 const $ = (id: string): HTMLElement => document.getElementById(id)!;
 const text = (id: string): HTMLInputElement | HTMLTextAreaElement => $(id) as HTMLInputElement;
@@ -139,6 +147,67 @@ function renderAgents(): void {
     root.append(card);
   }
 }
+function graphFromEditor(): WorkflowGraph {
+  const value = JSON.parse(text("workflow-json").value) as WorkflowGraph;
+  if (!Array.isArray(value.nodes) || !Array.isArray(value.edges)) throw new Error("Workflow 图需要 nodes 和 edges 数组");
+  return value;
+}
+function writeGraph(graph: WorkflowGraph): void { state.workflowGraph = graph; text("workflow-json").value = JSON.stringify(graph, null, 2); renderWorkflowGraph(); }
+function renderWorkflowGraph(): void {
+  const svg = $("workflow-svg"); svg.replaceChildren();
+  let graph: WorkflowGraph;
+  try { graph = graphFromEditor(); } catch { $("workflow-selection").textContent = "图 JSON 无效，修正后才能运行"; return; }
+  state.workflowGraph = graph;
+  const ns = "http://www.w3.org/2000/svg"; const defs = document.createElementNS(ns, "defs"); const marker = document.createElementNS(ns, "marker"); marker.id = "workflow-arrow"; marker.setAttribute("markerWidth", "8"); marker.setAttribute("markerHeight", "8"); marker.setAttribute("refX", "7"); marker.setAttribute("refY", "3"); marker.setAttribute("orient", "auto"); const arrow = document.createElementNS(ns, "path"); arrow.setAttribute("d", "M0,0 L0,6 L7,3 z"); arrow.setAttribute("fill", "#aebbd6"); marker.append(arrow); defs.append(marker); svg.append(defs);
+  const positions = new Map<string, { x: number; y: number }>(); graph.nodes.forEach((node, index) => positions.set(node.id, { x: 28 + (index % 4) * 170, y: 28 + Math.floor(index / 4) * 82 }));
+  for (const edge of graph.edges) { const source = positions.get(edge.source); const target = positions.get(edge.target); if (!source || !target) continue; const line = document.createElementNS(ns, "line"); line.classList.add("workflow-edge"); line.setAttribute("x1", String(source.x + 130)); line.setAttribute("y1", String(source.y + 22)); line.setAttribute("x2", String(target.x)); line.setAttribute("y2", String(target.y + 22)); svg.append(line); }
+  for (const node of graph.nodes) { const position = positions.get(node.id)!; const group = document.createElementNS(ns, "g"); group.classList.add("workflow-node"); group.setAttribute("data-workflow-node", node.id); if (state.workflowSelected.includes(node.id)) group.classList.add("selected"); group.setAttribute("transform", `translate(${position.x},${position.y})`); const rect = document.createElementNS(ns, "rect"); rect.setAttribute("width", "130"); rect.setAttribute("height", "44"); const title = document.createElementNS(ns, "text"); title.setAttribute("x", "9"); title.setAttribute("y", "19"); title.textContent = node.id; const kind = document.createElementNS(ns, "text"); kind.setAttribute("x", "9"); kind.setAttribute("y", "35"); kind.textContent = node.kind; group.append(rect, title, kind); group.addEventListener("click", () => selectWorkflowNode(node.id)); svg.append(group); }
+  renderWorkflowProperties(graph);
+  $("workflow-selection").textContent = state.workflowSelected.length ? `已选：${state.workflowSelected.join(" → ")}；再次点击可取消` : "点击图中的节点编辑配置";
+}
+function renderWorkflowProperties(graph: WorkflowGraph): void {
+  const selected = state.workflowSelected[0]; const node = graph.nodes.find((item) => item.id === selected);
+  text("workflow-node-id").value = node?.id || ""; ($( "workflow-node-kind") as HTMLSelectElement).value = node?.kind || "constant";
+  text("workflow-node-config").value = JSON.stringify(node?.config || {}, null, 2); text("workflow-input-ports").value = node?.input_ports ? JSON.stringify(node.input_ports, null, 2) : ""; text("workflow-output-ports").value = node?.output_ports ? JSON.stringify(node.output_ports, null, 2) : ""; (text("workflow-developer-only") as HTMLInputElement).checked = Boolean(node?.developer_only);
+  const edges = $("workflow-edge-list") as HTMLSelectElement; edges.replaceChildren(); graph.edges.forEach((edge, index) => { const option = document.createElement("option"); option.value = String(index); option.textContent = `${edge.source}:${edge.source_port || "out"} → ${edge.target}:${edge.target_port || "in"}${edge.when ? ` [${edge.when}]` : ""}`; edges.append(option); });
+}
+function selectWorkflowNode(nodeId: string): void { if (state.workflowSelected.includes(nodeId)) state.workflowSelected = state.workflowSelected.filter((id) => id !== nodeId); else { if (state.workflowSelected.length >= 2) state.workflowSelected = []; state.workflowSelected.push(nodeId); } renderWorkflowGraph(); workflowView(); }
+function addWorkflowNode(kind: "constant" | "output"): void { try { const graph = graphFromEditor(); const base = kind === "constant" ? "constant" : "output"; let index = 1; while (graph.nodes.some((node) => node.id === `${base}_${index}`)) index += 1; graph.nodes.push({ id: `${base}_${index}`, kind, config: kind === "constant" ? { value: 1 } : {} }); writeGraph(graph); } catch (error) { showNotice(errorText(error), true); } }
+function connectWorkflowNodes(): void { try { const graph = graphFromEditor(); if (state.workflowSelected.length !== 2) throw new Error("请先选择两个节点作为来源和目标"); const source = state.workflowSelected[0]!; const target = state.workflowSelected[1]!; const source_port = text("workflow-edge-source-port").value.trim() || "out"; const target_port = text("workflow-edge-target-port").value.trim() || "in"; const when = text("workflow-edge-when").value.trim() || null; if (!graph.edges.some((edge) => edge.source === source && edge.target === target && (edge.source_port || "out") === source_port && (edge.target_port || "in") === target_port && (edge.when || null) === when)) graph.edges.push({ source, target, source_port, target_port, when }); writeGraph(graph); } catch (error) { showNotice(errorText(error), true); } }
+function saveWorkflowNode(): void { try { const graph = graphFromEditor(); const oldId = state.workflowSelected[0]; const id = text("workflow-node-id").value.trim(); if (!oldId || !id) throw new Error("请先选择节点并填写 ID"); if (graph.nodes.some((node) => node.id === id && node.id !== oldId)) throw new Error("节点 ID 重复"); const node = graph.nodes.find((item) => item.id === oldId)!; node.id = id; node.kind = ($("workflow-node-kind") as HTMLSelectElement).value; node.config = JSON.parse(text("workflow-node-config").value || "{}"); node.developer_only = (text("workflow-developer-only") as HTMLInputElement).checked; node.input_ports = text("workflow-input-ports").value.trim() ? JSON.parse(text("workflow-input-ports").value) : null; node.output_ports = text("workflow-output-ports").value.trim() ? JSON.parse(text("workflow-output-ports").value) : null; graph.edges.forEach((edge) => { if (edge.source === oldId) edge.source = id; if (edge.target === oldId) edge.target = id; }); state.workflowSelected = [id]; writeGraph(graph); } catch (error) { showNotice(errorText(error), true); } }
+function deleteWorkflowNode(): void { try { const graph = graphFromEditor(); const id = state.workflowSelected[0]; if (!id) throw new Error("请先选择节点"); graph.nodes = graph.nodes.filter((node) => node.id !== id); graph.edges = graph.edges.filter((edge) => edge.source !== id && edge.target !== id); state.workflowSelected = []; writeGraph(graph); } catch (error) { showNotice(errorText(error), true); } }
+function deleteWorkflowEdge(): void { try { const graph = graphFromEditor(); const index = Number(($("workflow-edge-list") as HTMLSelectElement).value); if (!Number.isInteger(index) || !graph.edges[index]) throw new Error("请先选择边"); graph.edges.splice(index, 1); writeGraph(graph); } catch (error) { showNotice(errorText(error), true); } }
+function workflowView(): void { const run = state.workflowRun; const status = $("workflow-status"); status.textContent = run ? `运行 ${run.status}${run.current_node ? ` · 当前节点 ${run.current_node}` : ""}${run.output !== null && run.output !== undefined ? ` · 输出 ${JSON.stringify(run.output)}` : ""}` : "尚未运行"; for (const [id, value] of Object.entries(run?.node_statuses || {})) { const node = document.querySelector(`[data-workflow-node="${CSS.escape(id)}"]`); if (node) node.setAttribute("data-status", value); } $("workflow-pause").toggleAttribute("disabled", !run || !["queued", "running"].includes(run.status)); $("workflow-resume").toggleAttribute("disabled", !run || run.status !== "paused"); $("workflow-stop").toggleAttribute("disabled", !run || !["queued", "running", "paused"].includes(run.status)); $("workflow-rerun").toggleAttribute("disabled", !run || !state.workflowSelected.length); $("workflow-restore").toggleAttribute("disabled", !run || !["paused", "queued", "running"].includes(run.status)); }
+async function loadWorkflowRuns(): Promise<void> { const runs = await requestJson<WorkflowRunView[]>("/v1/workflows/runs"); const select = $("workflow-run-list") as HTMLSelectElement; select.replaceChildren(); for (const run of runs) { const option = document.createElement("option"); option.value = run.run_id; option.textContent = `${run.run_id.slice(0, 8)} · ${run.status}`; select.append(option); } }
+function recordWorkflowEvent(event: WorkflowEvent): void {
+  const run = state.workflowRun;
+  if (!run || run.run_id !== event.run_id) return;
+  const log = $("workflow-events");
+  log.textContent += `${event.seq} ${event.type}${event.node_id ? ` ${event.node_id}` : ""}\n`;
+  if (log.textContent.length > 100000) log.textContent = log.textContent.slice(-80000);
+  run.event_count = event.seq + 1; run.epoch = event.epoch;
+  if (event.node_id && event.type === "node_start") { run.node_statuses[event.node_id] = "running"; run.current_node = event.node_id; }
+  if (event.node_id && event.type === "node_end") { run.node_statuses[event.node_id] = "completed"; if (event.data && typeof event.data === "object" && !Array.isArray(event.data)) run.node_outputs[event.node_id] = event.data as Record<string, unknown>; }
+  if (event.node_id && event.type === "node_skip") run.node_statuses[event.node_id] = "skipped";
+  if (event.type === "paused") { run.status = "paused"; run.current_node = event.node_id; }
+  if (event.type === "start" || event.type === "resumed") run.status = "running";
+  if (event.type === "end" && event.data && typeof event.data === "object") { const data = event.data as { status?: WorkflowRunView["status"] }; if (data.status) run.status = data.status; }
+  workflowView();
+}
+async function runWorkflow(): Promise<void> { try { const graph = graphFromEditor(); const input = JSON.parse(text("workflow-input").value || "null"); const pauseBefore = text("workflow-pause-before").value.split(",").map((value) => value.trim()).filter(Boolean); const pauseAfter = text("workflow-pause-after").value.split(",").map((value) => value.trim()).filter(Boolean); const run = await requestJson<WorkflowRunView>("/v1/workflows/runs", { method: "POST", body: JSON.stringify({ idempotency_key: idempotency(), graph, input_value: input, production: (text("workflow-production") as HTMLInputElement).checked, pause_before: pauseBefore, pause_after: pauseAfter }) }); state.workflowRun = run; workflowView(); await loadWorkflowRuns(); ($( "workflow-run-list") as HTMLSelectElement).value = run.run_id; $("workflow-events").textContent = ""; await consumeWorkflowEvents(run.run_id, 0, (event: WorkflowEvent) => { recordWorkflowEvent(event); }); state.workflowRun = await requestJson<WorkflowRunView>(`/v1/workflows/runs/${run.run_id}`); workflowView(); await loadWorkflowRuns(); ($( "workflow-run-list") as HTMLSelectElement).value = run.run_id; } catch (error) { showNotice(errorText(error), true); } }
+async function workflowControl(action: "pause" | "resume" | "stop"): Promise<void> { if (!state.workflowRun) return; try { const endpoint = `/v1/workflows/runs/${state.workflowRun.run_id}/${action}`; const body = action === "resume" ? { has_input_override: (text("workflow-has-override") as HTMLInputElement).checked, input_override: JSON.parse(text("workflow-override").value || "null") } : undefined; state.workflowRun = await requestJson<WorkflowRunView>(endpoint, { method: "POST", body: body ? JSON.stringify(body) : undefined }); workflowView(); await loadWorkflowRuns(); } catch (error) { showNotice(errorText(error), true); } }
+async function rerunWorkflow(): Promise<void> {
+  if (!state.workflowRun || !state.workflowSelected[0]) return;
+  const runId = state.workflowRun.run_id;
+  const timer = setInterval(() => void requestJson<WorkflowRunView>(`/v1/workflows/runs/${runId}`).then((run) => { if (state.workflowRun?.run_id === runId) { state.workflowRun = run; workflowView(); } }).catch(() => undefined), 250);
+  try {
+    state.workflowRun = await requestJson<WorkflowRunView>(`/v1/workflows/runs/${runId}/rerun`, { method: "POST", body: JSON.stringify({ node_id: state.workflowSelected[0], has_input_override: (text("workflow-has-override") as HTMLInputElement).checked, input_override: JSON.parse(text("workflow-override").value || "null"), allow_side_effects: (text("workflow-allow-effects") as HTMLInputElement).checked }) });
+    workflowView(); await loadWorkflowRuns();
+  } catch (error) { showNotice(errorText(error), true); }
+  finally { clearInterval(timer); }
+}
+async function restoreWorkflow(): Promise<void> { if (!state.workflowRun) return; try { state.workflowRun = await requestJson<WorkflowRunView>(`/v1/workflows/runs/${state.workflowRun.run_id}/restore`, { method: "POST", body: JSON.stringify({ replay_side_effects: (text("workflow-allow-effects") as HTMLInputElement).checked }) }); workflowView(); await consumeWorkflowEvents(state.workflowRun.run_id, state.workflowRun.event_count, () => undefined); } catch (error) { showNotice(errorText(error), true); } }
+async function loadWorkflowRun(): Promise<void> { const id = ($("workflow-run-list") as HTMLSelectElement).value; if (!id) return; try { state.workflowRun = await requestJson<WorkflowRunView>(`/v1/workflows/runs/${id}`); const graph = await requestJson<WorkflowGraph>(`/v1/workflows/runs/${id}/graph`); writeGraph(graph); workflowView(); } catch (error) { showNotice(errorText(error), true); } }
 async function loadTopic(topicId: string): Promise<void> {
   if (state.streaming) return;
   const switched = state.topicId !== topicId;
@@ -267,7 +336,8 @@ function setup(): void {
   $("compact-preview").addEventListener("click", () => void compact(false)); $("compact-confirm").addEventListener("click", () => void compact(true)); $("run-stop").addEventListener("click", () => void stopRun()); $("run-resume").addEventListener("click", () => void resumeRun()); $("agent-create").addEventListener("click", () => void createAgent()); $("branch-select").addEventListener("change", (event) => void selectBranch((event.target as HTMLSelectElement).value));
   $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; text("prompt").value = ""; $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; }); $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; }); $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
   text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });
+  text("workflow-json").addEventListener("input", () => renderWorkflowGraph()); $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant")); $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output")); $("workflow-connect").addEventListener("click", () => connectWorkflowNodes()); $("workflow-run").addEventListener("click", () => void runWorkflow()); $("workflow-pause").addEventListener("click", () => void workflowControl("pause")); $("workflow-resume").addEventListener("click", () => void workflowControl("resume")); $("workflow-stop").addEventListener("click", () => void workflowControl("stop")); $("workflow-save-node").addEventListener("click", () => saveWorkflowNode()); $("workflow-delete-node").addEventListener("click", () => deleteWorkflowNode()); $("workflow-delete-edge").addEventListener("click", () => deleteWorkflowEdge()); $("workflow-rerun").addEventListener("click", () => void rerunWorkflow()); $("workflow-restore").addEventListener("click", () => void restoreWorkflow()); $("workflow-load-run").addEventListener("click", () => void loadWorkflowRun()); renderWorkflowGraph(); workflowView();
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
 }
-async function boot(): Promise<void> { try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); renderTopics(); renderAgents(); if (!state.topicId && state.topics[0]) await loadTopic(state.topics[0].id); $("connection").textContent = "本地服务已连接"; $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = "需要连接"; $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
+async function boot(): Promise<void> { try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); renderTopics(); renderAgents(); if (!state.topicId && state.topics[0]) await loadTopic(state.topics[0].id); $("connection").textContent = "本地服务已连接"; $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = "需要连接"; $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
 setup(); void boot();

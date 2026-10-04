@@ -68,6 +68,24 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .compact-panel { padding: 16px 24px; background: #f2f6ff; border-bottom: 1px solid #d8e2ff; }
 .compact-panel h3 { margin: 0 0 8px; font-size: 0.9rem; }
 .compact-panel pre { white-space: pre-wrap; max-height: 200px; overflow: auto; font: inherit; font-size: 0.85rem; }
+.workflow-panel { margin: 0 24px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcff; }
+.workflow-panel summary { cursor: pointer; padding: 10px 14px; color: var(--accent); font-weight: 700; }
+.workflow-grid { display: grid; gap: 8px; padding: 0 14px 14px; }
+.workflow-grid textarea, .workflow-grid input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.76rem; }
+.workflow-events { min-height: 72px; max-height: 150px; overflow: auto; margin: 0; white-space: pre-wrap; font-size: 0.75rem; color: #4e5a70; }
+.workflow-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-svg { width: 100%; min-height: 170px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.workflow-node { cursor: pointer; }
+.workflow-node rect { fill: #eef3ff; stroke: #7d96ea; stroke-width: 1.5; rx: 7; }
+.workflow-node.selected rect { fill: #dbe5ff; stroke: #315bd1; stroke-width: 2.5; }
+.workflow-node text { fill: var(--ink); font-size: 12px; pointer-events: none; }
+.workflow-edge { stroke: #aebbd6; stroke-width: 1.5; marker-end: url(#workflow-arrow); }
+.workflow-selection { padding: 7px 0; }
+.workflow-properties { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.workflow-panel[open] { max-height: calc(100vh - 260px); overflow: auto; flex: 1 1 auto; }
+.workflow-node[data-status="completed"] rect { fill: #e6f8ee; stroke: #41a775; }
+.workflow-node[data-status="running"] rect { fill: #fff4d9; stroke: #dfaf35; }
+.workflow-node[data-status="failed"] rect { fill: #fff0f0; stroke: #cd6b6b; }
 .message-controls { display: flex; gap: 6px; margin-top: 9px; }
 .message-controls button { border: 0; background: rgb(255 255 255 / 55%); color: var(--ink); border-radius: 6px; padding: 4px 7px; font-size: 0.7rem; }
 .message.streaming { border: 1px solid #bfcff8; background: #f3f6ff; }

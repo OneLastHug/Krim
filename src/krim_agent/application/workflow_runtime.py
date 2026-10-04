@@ -19,7 +19,7 @@ from krim_agent.workflow.api import (
     checkpoint_view,
 )
 from krim_agent.workflow.durable import WorkflowJournal
-from krim_agent.workflow.types import WorkflowCheckpointState, WorkflowError
+from krim_agent.workflow.types import WorkflowCheckpointState, WorkflowError, WorkflowGraph
 
 from .workflow import WorkflowServices
 
@@ -113,6 +113,9 @@ class WorkflowRuntime:
 
     async def get(self, run_id: str) -> WorkflowRunView:
         return checkpoint_view(await self.state(run_id))
+
+    async def graph(self, run_id: str) -> WorkflowGraph:
+        return (await self.state(run_id)).graph.model_copy(deep=True)
 
     async def list(self) -> list[WorkflowRunView]:
         return [checkpoint_view(item.state) for item in await self.store.list()]
