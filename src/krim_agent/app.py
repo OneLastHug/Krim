@@ -7,6 +7,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 from .app_sdk import AppHandle
 from .context_engine import ContextCompactRequest
 from .interactions import InteractionReply
+from .link import LinkNavigate
 from .locale import LocaleChange
 from .prompt_context import (
     ContextTagAddRequest,
@@ -270,6 +271,12 @@ class LocalApp:
         self._app.on("context/addTag", add_tag)
         self._app.on("context/removeTag", remove_tag)
         self._app.on("context/clearTags", clear_tags)
+
+    def navigate_link(self, navigation: LinkNavigate) -> None:
+        checked = LinkNavigate.model_validate(navigation.model_dump(mode="json"))
+        self._app.notify(
+            "link/navigate", TypeAdapter(JsonValue).validate_python(checked.model_dump(mode="json"))
+        )
 
     async def close(self) -> None:
         await self.handle.destroy()

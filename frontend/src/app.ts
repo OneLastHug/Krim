@@ -19,6 +19,7 @@ import {
   setApiKey,
 } from "./api.js";
 import { HostEndpoint, type HostJson } from "./host.js";
+import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
@@ -220,7 +221,7 @@ function renderMessages(): void {
   for (const message of state.messages) {
     const node = document.createElement("article"); node.className = `message ${message.role}`;
     const role = document.createElement("span"); role.className = "role"; role.textContent = t(labels[message.role] || message.role);
-    const content = document.createElement("div"); content.textContent = message.content;
+    const content = document.createElement("div"); appendLinks(content, message.content, message.topic_id, message.id, (data) => hostEndpoint.notify("link/navigate", data));
     node.append(role, content);
     if (message.role === "tool" || (Array.isArray(message.details.tool_calls) && message.details.tool_calls.length > 0)) {
       node.classList.add("tool-card");
@@ -535,7 +536,7 @@ function setup(): void {
   text("workflow-json").addEventListener("input", () => renderWorkflowGraph()); $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant")); $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output")); $("workflow-connect").addEventListener("click", () => connectWorkflowNodes()); $("workflow-run").addEventListener("click", () => void runWorkflow()); $("workflow-pause").addEventListener("click", () => void workflowControl("pause")); $("workflow-resume").addEventListener("click", () => void workflowControl("resume")); $("workflow-stop").addEventListener("click", () => void workflowControl("stop")); $("workflow-save-node").addEventListener("click", () => saveWorkflowNode()); $("workflow-delete-node").addEventListener("click", () => deleteWorkflowNode()); $("workflow-delete-edge").addEventListener("click", () => deleteWorkflowEdge()); $("workflow-rerun").addEventListener("click", () => void rerunWorkflow()); $("workflow-restore").addEventListener("click", () => void restoreWorkflow()); $("workflow-load-run").addEventListener("click", () => void loadWorkflowRun()); renderWorkflowGraph(); workflowView();
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
 }
-async function boot(): Promise<void> { try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); await restoreLocale(currentLocale()); renderTopics(); renderAgents(); if (!state.topicId && state.topics[0]) { const selected = new URLSearchParams(location.search).get("topic"); await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id); } $("connection").textContent = t("本地服务已连接"); $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = t("需要连接"); $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
+async function boot(): Promise<void> { clearLinkCache(); try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); await restoreLocale(currentLocale()); renderTopics(); renderAgents(); if (!state.topicId && state.topics[0]) { const selected = new URLSearchParams(location.search).get("topic"); await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id); } $("connection").textContent = t("本地服务已连接"); $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = t("需要连接"); $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
 setupHostBridge();
 setup();
 void boot();

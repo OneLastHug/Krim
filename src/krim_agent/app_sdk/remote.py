@@ -18,6 +18,7 @@ from krim_agent.host import (
     HostUIState,
     HostWidthResult,
 )
+from krim_agent.link import LinkNavigate
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import ServiceError
@@ -25,6 +26,7 @@ from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFr
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 
 HostNotification = Callable[[JsonValue], object | Awaitable[object]]
+LinkNotification = Callable[[LinkNavigate], object | Awaitable[object]]
 
 
 class RemoteHostHandle:
@@ -47,6 +49,7 @@ class RemoteHostHandle:
         )
         self._closed = False
         self._handlers: dict[str, HostNotification] = {}
+        self._seen_links: set[str] = set()
 
     async def __aenter__(self) -> RemoteHostHandle:
         await self.status()
@@ -212,6 +215,14 @@ class RemoteHostHandle:
 
         return remove
 
+    def on_link(self, handler: LinkNotification) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> None:
+            value = handler(LinkNavigate.model_validate(data))
+            if inspect.isawaitable(value):
+                await value
+
+        return self.on("link/navigate", consume)
+
     async def events(self, from_seq: int = 0) -> AsyncIterator[ProtocolEnvelope]:
         if self._closed:
             raise ConnectionError("RemoteHostHandle 已关闭")
@@ -234,6 +245,11 @@ class RemoteHostHandle:
                 if envelope.kind != "notify":
                     raise ServiceError("host_stream_invalid", "宿主事件不是通知")
                 handler = self._handlers.get(envelope.channel)
+                if envelope.channel == "link/navigate":
+                    if envelope.id in self._seen_links:
+                        handler = None
+                    else:
+                        self._seen_links.add(envelope.id)
                 if handler is not None:
                     result = handler(envelope.data)
                     if inspect.isawaitable(result):
@@ -252,4 +268,5 @@ class RemoteHostHandle:
             return
         self._closed = True
         self._handlers.clear()
+        self._seen_links.clear()
         await self._http.aclose()

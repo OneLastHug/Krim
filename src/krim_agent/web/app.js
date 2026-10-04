@@ -1,5 +1,6 @@
 import { consumeWorkflowEvents, consumeEvents, errorText, requestJson, setApiKey, } from "./api.js";
 import { HostEndpoint } from "./host.js";
+import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
@@ -233,7 +234,7 @@ function renderMessages() {
         role.className = "role";
         role.textContent = t(labels[message.role] || message.role);
         const content = document.createElement("div");
-        content.textContent = message.content;
+        appendLinks(content, message.content, message.topic_id, message.id, (data) => hostEndpoint.notify("link/navigate", data));
         node.append(role, content);
         if (message.role === "tool" || (Array.isArray(message.details.tool_calls) && message.details.tool_calls.length > 0)) {
             node.classList.add("tool-card");
@@ -1074,7 +1075,7 @@ function setup() {
         $("composer").requestSubmit();
     } });
 }
-async function boot() { try {
+async function boot() { clearLinkCache(); try {
     const health = await requestJson("/healthz");
     $("model-label").textContent = health.provider;
     state.topics = (await requestJson("/v1/topics")).topics;
