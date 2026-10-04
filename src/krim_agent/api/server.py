@@ -13,6 +13,13 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
+from krim_agent.agents import AgentDescriptor
+from krim_agent.application.agents import (
+    AgentPromptRequest,
+    AgentService,
+    AgentSpawnRequest,
+    AgentView,
+)
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
@@ -101,6 +108,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         ),
         max_active_runs=config.max_active_runs,
     )
+    agent_service = AgentService(service, config)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -114,14 +122,17 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
                 await workflow_service.close()
             finally:
                 try:
-                    await service.close()
+                    await agent_service.close()
                 finally:
-                    if owns_database:
-                        try:
-                            await database.close()
-                        finally:
-                            if owned_provider is not None:
-                                await owned_provider.close()
+                    try:
+                        await service.close()
+                    finally:
+                        if owns_database:
+                            try:
+                                await database.close()
+                            finally:
+                                if owned_provider is not None:
+                                    await owned_provider.close()
 
     app = FastAPI(
         title="Krim Agent",
@@ -137,6 +148,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.runtime = service
     app.state.repository = repository
     app.state.workflow = workflow_service
+    app.state.agents = agent_service
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:
@@ -195,6 +207,79 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/tools")
     async def list_tools() -> ToolsResponse:
         return ToolsResponse(tools=service.tools.list_tools())
+
+    @app.get("/v1/agents/catalog")
+    async def agent_catalog() -> list[AgentDescriptor]:
+        return agent_service.catalog_views()
+
+    @app.post("/v1/agents", status_code=201)
+    async def spawn_agent(payload: AgentSpawnRequest) -> AgentView:
+        return await agent_service.spawn(payload.name)
+
+    @app.get("/v1/agents")
+    async def list_agents() -> list[AgentView]:
+        return await agent_service.views()
+
+    @app.get("/v1/agents/{agent_id}")
+    async def get_agent(agent_id: str) -> AgentView:
+        return await agent_service.get(agent_id)
+
+    @app.post("/v1/agents/{agent_id}/execute")
+    async def execute_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
+        return await agent_service.execute(agent_id, payload)
+
+    @app.post("/v1/agents/{agent_id}/resume")
+    async def resume_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
+        return await agent_service.resume(agent_id, payload)
+
+    @app.post("/v1/agents/{agent_id}/stop")
+    async def stop_agent(agent_id: str) -> AgentView:
+        return await agent_service.stop(agent_id)
+
+    @app.delete("/v1/agents/{agent_id}")
+    async def destroy_agent(agent_id: str) -> AgentView:
+        return await agent_service.destroy(agent_id)
+
+    @app.get("/v1/agents/{agent_id}/events")
+    async def agent_events(
+        agent_id: str,
+        from_seq: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        if last_event_id is not None:
+            try:
+                cursor = int(last_event_id)
+                if cursor < 0:
+                    raise ValueError
+                from_seq = max(from_seq, cursor + 1)
+            except ValueError as exc:
+                raise ServiceError("invalid_cursor", "Last-Event-ID 必须是非负整数", 416) from exc
+
+        handle, state = await agent_service.stream_state(agent_id, from_seq)
+
+        async def event_stream() -> AsyncIterator[str]:
+            async for frame in handle.runtime.subscribe(state, from_seq):
+                if frame is None:
+                    yield ": heartbeat\n\n"
+                else:
+                    payload = frame.model_dump_json(exclude_none=True)
+                    for delimiter, escaped in (
+                        ("\u0085", "\\u0085"),
+                        ("\u2028", "\\u2028"),
+                        ("\u2029", "\\u2029"),
+                    ):
+                        payload = payload.replace(delimiter, escaped)
+                    yield f"id: {frame.seq}\nevent: {frame.kind}\ndata: {payload}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Krim-Agent-Run-ID": state.run.id,
+            },
+        )
 
     @app.post("/v1/topics", status_code=201)
     async def create_topic(payload: TopicCreate) -> TopicView:
