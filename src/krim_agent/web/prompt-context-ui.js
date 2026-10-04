@@ -53,6 +53,15 @@ export class PromptContextUI {
         prompt.setSelectionRange(result.cursor, result.cursor);
         this.render();
     }
+    async acceptDrop(topicId, reference) {
+        if (topicId !== this.topicId || this.busy)
+            return false;
+        await this.load();
+        if (topicId !== this.topicId || this.busy)
+            return false;
+        this.insert(reference);
+        return true;
+    }
     async load() {
         const id = this.topicId;
         if (!id)

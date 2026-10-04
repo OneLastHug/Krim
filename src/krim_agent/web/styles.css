@@ -59,6 +59,8 @@ h2 { font-size: 1rem; }
 .interaction-card input { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 7px; margin-bottom: 7px; }
 .notice.error { color: var(--danger); }
 .composer { padding: 16px 24px 22px; border-top: 1px solid var(--line); }
+.composer.drag-active { outline: 2px solid var(--accent); outline-offset: -2px; }
+.drag-preview { padding: 8px; margin-bottom: 8px; background: var(--accent-soft); color: var(--accent); border-radius: 8px; }
 .prompt-context-panel, .skill-panel { margin-bottom: 12px; color: var(--muted); }
 .prompt-context-panel summary, .skill-panel summary { cursor: pointer; font-weight: 700; margin-bottom: 8px; }
 .skill-card { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }

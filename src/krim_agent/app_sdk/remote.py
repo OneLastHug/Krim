@@ -10,6 +10,7 @@ from uuid import uuid4
 import httpx
 from pydantic import JsonValue
 
+from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import (
     HostCommand,
     HostSessionView,
@@ -175,6 +176,21 @@ class RemoteHostHandle:
             await self._call(
                 "mention/add", {"topic_id": topic_id, **request.model_dump(mode="json")}
             )
+        )
+
+    async def drag_enter(self, topic_id: str, preview: DragPreview) -> DragState:
+        return DragState.model_validate(
+            await self._call(
+                "drag/enter", {"topic_id": topic_id, **preview.model_dump(mode="json")}
+            )
+        )
+
+    async def drag_leave(self, topic_id: str) -> DragState:
+        return DragState.model_validate(await self._call("drag/leave", {"topic_id": topic_id}))
+
+    async def drag_drop(self, topic_id: str, request: MentionInput) -> MentionRef:
+        return MentionRef.model_validate(
+            await self._call("drag/drop", {"topic_id": topic_id, **request.model_dump(mode="json")})
         )
 
     async def remove_mention(self, topic_id: str, mention_id: str) -> PromptContext:

@@ -25,6 +25,7 @@ from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
+from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
@@ -424,6 +425,20 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @app.post("/v1/topics/{topic_id}/mentions", status_code=201)
     async def add_mention(topic_id: str, payload: MentionInput) -> MentionRef:
+        return await repository.add_mention(topic_id, payload)
+
+    @app.post("/v1/topics/{topic_id}/drag/enter")
+    async def drag_enter(topic_id: str, payload: DragPreview) -> DragState:
+        await repository.get_topic(topic_id)
+        return DragState(active=True, preview=payload)
+
+    @app.post("/v1/topics/{topic_id}/drag/leave")
+    async def drag_leave(topic_id: str) -> DragState:
+        await repository.get_topic(topic_id)
+        return DragState(active=False)
+
+    @app.post("/v1/topics/{topic_id}/drag/drop", status_code=201)
+    async def drag_drop(topic_id: str, payload: MentionInput) -> MentionRef:
         return await repository.add_mention(topic_id, payload)
 
     @app.delete("/v1/topics/{topic_id}/mentions/{mention_id}")

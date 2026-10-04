@@ -22,6 +22,7 @@ import { HostEndpoint, type HostJson } from "./host.js";
 import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
+import { DragDropUI } from "./drag-drop.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 
 type State = {
@@ -62,6 +63,7 @@ const idempotency = (): string => crypto.randomUUID?.() || `${Date.now()}-${Math
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
+const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";
@@ -75,6 +77,7 @@ function redrawLocale(): void {
   renderCompact(state.compactPreview); renderInteractions(); workflowView();
   promptContextUI.refreshLocale();
   skillsUI.refreshLocale();
+  dragDropUI.refreshLocale();
   $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
   $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
   $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -165,11 +168,13 @@ function setupHostBridge(): void {
     hostEndpoint.on(channel, (data) => promptContextUI.bridge(channel, data));
   }
   for (const channel of ["skill/list", "skill/inject", "skill/remove", "skill/read"]) hostEndpoint.on(channel, (data) => skillsUI.bridge(channel, data));
+  for (const channel of ["drag/enter", "drag/leave", "drag/drop"]) hostEndpoint.on(channel, (data) => dragDropUI.bridge(channel, data));
   hostEndpoint.announceReady({ protocol_version: 2, channels: [
     "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
     "mention/get", "mention/add", "mention/remove", "mention/clear",
     "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
     "skill/list", "skill/inject", "skill/remove", "skill/read",
+    "drag/enter", "drag/leave", "drag/drop",
   ] });
 }
 
@@ -182,6 +187,7 @@ function disableComposer(value: boolean): void {
   state.busy = value;
   promptContextUI.setBusy(value);
   skillsUI.setBusy(value);
+  dragDropUI.setBusy(value);
   ($("send") as HTMLButtonElement).disabled = value;
   text("prompt").disabled = value;
   ($("compact-preview") as HTMLButtonElement).disabled = value || !state.topicId;
@@ -395,6 +401,7 @@ async function loadTopic(topicId: string): Promise<void> {
   const switched = state.topicId !== topicId;
   if (switched) { state.runId = null; state.cursor = 0; state.disconnected = false; state.streamText = ""; state.interactionRuns.clear(); state.interactions = []; interactionLoadVersion += 1; renderInteractions(); }
   state.topicId = topicId;
+  dragDropUI.selectTopic(topicId);
   const topic = state.topics.find((item) => item.id === topicId);
   $("topic-heading").textContent = topic?.title || t("话题");
   const [messages, tree] = await Promise.all([

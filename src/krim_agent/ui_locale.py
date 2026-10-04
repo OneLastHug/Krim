@@ -4,6 +4,21 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "松开以添加引用：{label}": "Drop to add a reference: {label}",
+    "文本文件": "Text file",
+    "拖入链接": "Dropped link",
+    "拖入文本": "Dropped text",
+    "一次只能拖入一个文本文件": "Drop one text file at a time",
+    "只接受有限 UTF-8 文本文件": "Only bounded UTF-8 text files are accepted",
+    "文件不是有效 UTF-8 文本": "The file is not valid UTF-8 text",
+    "文件内容为空或超过文本边界": "The file is empty or exceeds the text limit",
+    "拖入引用超过大小边界": "The dropped reference exceeds the size limit",
+    "拖入引用需要对象": "The dropped reference must be an object",
+    "一次只能拖入一个链接": "Drop one link at a time",
+    "拖入文本为空或超过边界": "The dropped text is empty or exceeds the limit",
+    "拖放需要明确文本或文本文件": "Drop explicit text or a text file",
+    "当前话题不可拖放": "The current topic cannot accept a drop",
+    "拖放信道无效": "Invalid drag and drop channel",
     "技能目录": "Skill catalog",
     "技能名称": "Skill name",
     "技能用途": "Skill purpose",

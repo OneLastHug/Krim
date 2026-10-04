@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
+from krim_agent.drag import DragPreview, DragState
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkNavigate
 from krim_agent.locale import LocaleChange, LocaleView
@@ -104,6 +105,21 @@ class AppHandle:
             await self._call(
                 "mention/add", {"topic_id": topic_id, **request.model_dump(mode="json")}
             )
+        )
+
+    async def drag_enter(self, topic_id: str, preview: DragPreview) -> DragState:
+        return DragState.model_validate(
+            await self._call(
+                "drag/enter", {"topic_id": topic_id, **preview.model_dump(mode="json")}
+            )
+        )
+
+    async def drag_leave(self, topic_id: str) -> DragState:
+        return DragState.model_validate(await self._call("drag/leave", {"topic_id": topic_id}))
+
+    async def drag_drop(self, topic_id: str, request: MentionInput) -> MentionRef:
+        return MentionRef.model_validate(
+            await self._call("drag/drop", {"topic_id": topic_id, **request.model_dump(mode="json")})
         )
 
     async def remove_mention(self, topic_id: str, mention_id: str) -> PromptContext:
