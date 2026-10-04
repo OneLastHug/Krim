@@ -21,6 +21,8 @@ class MCPServerConfig(StrictModel):
     allowed_hosts: set[str] = Field(default_factory=set)
     headers: dict[str, SecretStr] = Field(default_factory=dict)
     readonly_tools: set[str] = Field(default_factory=set)
+    deferred_tools: set[str] = Field(default_factory=set)
+    always_load_tools: set[str] = Field(default_factory=set)
     enabled: bool = True
     request_timeout_seconds: float = Field(default=10, gt=0, le=120)
     initialization_timeout_seconds: float = Field(default=120, gt=0, le=600)

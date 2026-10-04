@@ -62,6 +62,13 @@ class InteractionPart(StrictModel):
     interaction: InteractionView
 
 
+class ToolDiscoveryPart(StrictModel):
+    type: Literal["tool-discovery"] = "tool-discovery"
+    tools: list[str]
+    step: int = Field(ge=0)
+    call_id: str
+
+
 class StreamFinish(StrictModel):
     type: Literal["finish"] = "finish"
     finish_reason: FinishReason
@@ -83,6 +90,7 @@ SDKPart = (
     | ToolResultPart
     | ContextCompactPart
     | InteractionPart
+    | ToolDiscoveryPart
     | StepFinish
     | StreamFinish
     | StreamError
