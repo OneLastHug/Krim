@@ -27,6 +27,7 @@ from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
+from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
@@ -246,6 +247,19 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     async def host_notify(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
         await host_sessions.notify(session_id, envelope)
         return ChannelResult(ok=True, data=None)
+
+    @app.post("/v1/links/resolve")
+    async def resolve_link(payload: LinkResolve, request: Request) -> LinkTarget:
+        try:
+            origin = str(request.base_url)
+            base = payload.base_url or origin
+            if link_origin(base) != link_origin(origin):
+                raise ValueError("base 不属于当前服务 Origin")
+            normalized = normalize_link(payload.url, base_url=base)
+            external = link_origin(normalized) != link_origin(origin)
+            return LinkTarget(url=normalized, external=external)
+        except ValueError:
+            raise ServiceError("link_invalid", "Link URL 无效或不在 Web 白名单", 422) from None
 
     @app.delete("/v1/host/sessions/{session_id}")
     async def host_close(session_id: str) -> ChannelResult:

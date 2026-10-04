@@ -1,12 +1,14 @@
 """运行时无关的语义化宿主 API，只依赖内部协议。"""
 
+import inspect
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.interactions import InteractionReply, InteractionView
+from krim_agent.link import LinkNavigate
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
@@ -34,6 +36,17 @@ class AppHandle:
 
     def on(self, channel: str, handler: Handler) -> Callable[[], None]:
         return self._bridge.on(channel, handler)
+
+    def on_link(
+        self, handler: Callable[[LinkNavigate], object | Awaitable[object]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            value = handler(LinkNavigate.model_validate(data))
+            if inspect.isawaitable(value):
+                await value
+            return None
+
+        return self.on("link/navigate", consume)
 
     async def emit(self, channel: str, data: JsonValue = None) -> ChannelResult:
         return await self._bridge.emit(channel, data)

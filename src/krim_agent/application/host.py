@@ -8,7 +8,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import uuid4
 
+from pydantic import JsonValue, TypeAdapter
+
 from krim_agent.host import HostCommand, HostSessionView, HostSide
+from krim_agent.link import LinkNavigate
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFrame
 
@@ -54,6 +57,7 @@ class HostSession:
     pending: dict[str, PendingHostCall] = field(default_factory=dict)
     seen: set[str] = field(default_factory=set)
     delivered: set[str] = field(default_factory=set)
+    notifications: set[str] = field(default_factory=set)
     frames: dict[HostSide, list[StreamFrame]] = field(
         default_factory=lambda: {"host": [], "app": []}
     )
@@ -216,8 +220,32 @@ class HostSessions:
 
     async def notify(self, identifier: str, envelope: ProtocolEnvelope) -> None:
         session = self.session(identifier)
-        if envelope.kind != "notify" or envelope.channel not in {"host/state", "host/sidebar"}:
+        if envelope.kind != "notify" or envelope.channel not in {
+            "host/state",
+            "host/sidebar",
+            "link/navigate",
+        }:
             raise ServiceError("host_notification_invalid", "宿主通知信道无效", 422)
+        if envelope.channel == "link/navigate":
+            try:
+                navigation = LinkNavigate.model_validate(envelope.data)
+            except ValueError as error:
+                raise ServiceError("link_invalid", "Link 通知 URL 无效", 422) from error
+            if not session.connected:
+                raise ServiceError("host_not_ready", "宿主 iframe 尚未就绪", 409)
+            async with session.condition:
+                if envelope.id in session.notifications:
+                    raise ServiceError("link_duplicate", "Link 通知 ID 已使用", 409)
+                if len(session.notifications) >= 512:
+                    raise ServiceError("host_notification_limit", "宿主通知超过上限", 429)
+                session.notifications.add(envelope.id)
+            envelope = envelope.model_copy(
+                update={
+                    "data": TypeAdapter(JsonValue).validate_python(
+                        navigation.model_dump(mode="json")
+                    )
+                }
+            )
         await self.publish(session, "host", envelope)
 
     async def close(self, identifier: str) -> None:

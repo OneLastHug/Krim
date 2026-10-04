@@ -139,6 +139,14 @@ function bind() {
         if (sessionId)
             void requestJson(`/v1/host/sessions/${sessionId}/notify`, { method: "POST", body: JSON.stringify({ protocol_version: 2, kind: "notify", id: crypto.randomUUID(), channel: "host/state", data }) }).catch(() => undefined);
     });
+    client.on("link/navigate", (data) => {
+        if (!sessionId) {
+            output(data);
+            status("收到链接通知", true);
+            return;
+        }
+        void requestJson(`/v1/host/sessions/${sessionId}/notify`, { method: "POST", body: JSON.stringify({ protocol_version: 2, kind: "notify", id: crypto.randomUUID(), channel: "link/navigate", data }) }).then(() => { output(data); status("收到链接通知", true); }).catch(() => status("链接通知被服务拒绝"));
+    });
     void client.call("host/get-state").then(() => status("iframe 已就绪", true)).catch(() => status("等待 iframe 就绪"));
 }
 frame.addEventListener("load", bind);
