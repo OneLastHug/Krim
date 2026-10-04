@@ -18,6 +18,7 @@ from krim_agent.host import (
     HostUIState,
     HostWidthResult,
 )
+from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFrame
@@ -121,6 +122,19 @@ class RemoteHostHandle:
 
     async def notice(self, message: str) -> JsonValue:
         return await self._call("host/notice", {"message": message})
+
+    async def set_topic_locale(self, topic_id: str, locale: str) -> LocaleView:
+        request = LocaleChange(locale=locale)
+        response = await self._http.patch(
+            f"/v1/topics/{topic_id}/locale", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return LocaleView.model_validate_json(response.content)
+
+    async def set_locale(self, locale: str) -> LocaleView:
+        return LocaleView.model_validate(
+            await self._call("host/set-locale", LocaleChange(locale=locale).model_dump(mode="json"))
+        )
 
     async def prompt_context(self, topic_id: str) -> PromptContext:
         return PromptContext.model_validate(await self._call("mention/get", {"topic_id": topic_id}))

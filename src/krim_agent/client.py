@@ -13,6 +13,7 @@ from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .interactions import InteractionReply, InteractionView
+from .locale import LocaleChange, LocaleView
 from .prompt_context import (
     ContextTagInput,
     MentionInput,
@@ -28,6 +29,7 @@ from .protocol.domain import (
     RegenerateRequest,
     RunView,
     StreamEventView,
+    TopicCreate,
     TopicView,
 )
 from .protocol.models import StreamFrame
@@ -76,10 +78,19 @@ class KrimClient:
             return
         raise ClientError(f"HTTP 请求失败: {response.status_code}；请检查服务、权限或运行状态")
 
-    def create_topic(self, title: str = "新话题") -> TopicView:
-        response = self._http.post("/v1/topics", json={"title": title})
+    def create_topic(self, title: str = "新话题", *, locale: str = "zh-CN") -> TopicView:
+        request = TopicCreate(title=title, locale=locale)
+        response = self._http.post("/v1/topics", json=request.model_dump(mode="json"))
         self._check(response)
         return TopicView.model_validate_json(response.content)
+
+    def set_topic_locale(self, topic_id: str, locale: str) -> LocaleView:
+        response = self._http.patch(
+            f"/v1/topics/{topic_id}/locale",
+            json=LocaleChange(locale=locale).model_dump(mode="json"),
+        )
+        self._check(response)
+        return LocaleView.model_validate_json(response.content)
 
     def topics(self) -> list[TopicView]:
         response = self._http.get("/v1/topics")

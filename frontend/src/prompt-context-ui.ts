@@ -1,6 +1,7 @@
 /** 引用目录与草稿 chip UI；目录、ID、位置和快照由 Python API 复核。 */
 import { requestJson, errorText, type MentionOccurrence, type MentionRef, type PromptContext } from "./api.js";
 import { insertMention, shiftOccurrences } from "./prompt-context.js";
+import { t } from "./i18n.js";
 import type { HostJson } from "./host.js";
 const node = (id: string): HTMLElement => document.getElementById(id)!;
 const input = (id: string): HTMLInputElement | HTMLTextAreaElement => node(id) as HTMLInputElement | HTMLTextAreaElement;
@@ -18,6 +19,7 @@ export class PromptContextUI {
     node("context-tag-clear").addEventListener("click", () => void this.change("context/clearTags"));
     this.render();
   }
+  refreshLocale(): void { this.render(); }
   get occurrences(): MentionOccurrence[] { return this.selected.map((value) => ({ ...value })); }
   setBusy(value: boolean): void { this.busy = value; this.render(); }
   async selectTopic(id: string): Promise<void> {
@@ -55,19 +57,19 @@ export class PromptContextUI {
     } catch (error) { this.notice(errorText(error), true); }
   }
   async bridge(channel: string, data: HostJson): Promise<HostJson> {
-    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("上下文参数需要对象");
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error(t("上下文参数需要对象"));
     const { topic_id: id, ...payload } = data;
-    if (typeof id !== "string" || !id) throw new Error("需要话题 ID");
+    if (typeof id !== "string" || !id) throw new Error(t("需要话题 ID"));
     const base = `/v1/topics/${encodeURIComponent(id)}`;
     let value: HostJson;
     if (channel === "mention/get" || channel === "context/getTags") value = await requestJson<HostJson>(base + "/prompt-context");
     else if (channel === "mention/add") value = await requestJson<HostJson>(base + "/mentions", { method: "POST", body: JSON.stringify(payload) });
-    else if (channel === "mention/remove") { if (typeof payload.mention_id !== "string") throw new Error("需要引用 ID"); value = await requestJson<HostJson>(base + "/mentions/" + encodeURIComponent(payload.mention_id), { method: "DELETE" }); }
+    else if (channel === "mention/remove") { if (typeof payload.mention_id !== "string") throw new Error(t("需要引用 ID")); value = await requestJson<HostJson>(base + "/mentions/" + encodeURIComponent(payload.mention_id), { method: "DELETE" }); }
     else if (channel === "mention/clear") value = await requestJson<HostJson>(base + "/mentions", { method: "DELETE" });
     else if (channel === "context/addTag") value = await requestJson<HostJson>(base + "/context-tags", { method: "POST", body: JSON.stringify(payload) });
-    else if (channel === "context/removeTag") { if (typeof payload.name !== "string") throw new Error("需要背景标签名称"); value = await requestJson<HostJson>(base + "/context-tags?name=" + encodeURIComponent(payload.name), { method: "DELETE" }); }
+    else if (channel === "context/removeTag") { if (typeof payload.name !== "string") throw new Error(t("需要背景标签名称")); value = await requestJson<HostJson>(base + "/context-tags?name=" + encodeURIComponent(payload.name), { method: "DELETE" }); }
     else if (channel === "context/clearTags") value = await requestJson<HostJson>(base + "/context-tags", { method: "DELETE" });
-    else throw new Error("上下文信道无效");
+    else throw new Error(t("上下文信道无效"));
     if (id === this.topicId) await this.load();
     return value;
   }
@@ -75,21 +77,21 @@ export class PromptContextUI {
     const references = node("mention-list"); references.replaceChildren();
     for (const reference of this.context.mentions) {
       const chip = document.createElement("div"); chip.className = "prompt-chip";
-      const insert = document.createElement("button"); insert.type = "button"; insert.className = "secondary"; insert.textContent = `插入 @${reference.label}`; insert.disabled = this.busy; insert.onclick = () => this.insert(reference);
-      const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary"; remove.textContent = "删除引用"; remove.disabled = this.busy; remove.onclick = () => void this.change("mention/remove", { mention_id: reference.id });
+      const insert = document.createElement("button"); insert.type = "button"; insert.className = "secondary"; insert.textContent = t("插入 @{label}", { label: reference.label }); insert.disabled = this.busy; insert.onclick = () => this.insert(reference);
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary"; remove.textContent = t("删除引用"); remove.disabled = this.busy; remove.onclick = () => void this.change("mention/remove", { mention_id: reference.id });
       chip.append(insert, remove); references.append(chip);
     }
     const tags = node("context-tag-list"); tags.replaceChildren();
     for (const tag of this.context.context_tags) {
       const chip = document.createElement("div"); chip.className = "prompt-chip";
       const title = document.createElement("span"); title.textContent = tag.name;
-      const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary"; remove.textContent = "删除背景标签"; remove.disabled = this.busy; remove.onclick = () => void this.change("context/removeTag", { name: tag.name });
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary"; remove.textContent = t("删除背景标签"); remove.disabled = this.busy; remove.onclick = () => void this.change("context/removeTag", { name: tag.name });
       chip.append(title, remove); tags.append(chip);
     }
     const draft = node("mention-draft"); draft.replaceChildren();
     for (const occurrence of this.selected) {
       const reference = this.context.mentions.find((item) => item.id === occurrence.mention_id); if (!reference) continue;
-      const chip = document.createElement("span"); chip.className = "prompt-chip"; chip.textContent = `本次引用：${reference.label}`; draft.append(chip);
+      const chip = document.createElement("span"); chip.className = "prompt-chip"; chip.textContent = t("本次引用：{label}", { label: reference.label }); draft.append(chip);
     }
     for (const id of ["mention-add", "mention-clear", "context-tag-add", "context-tag-clear"]) (node(id) as HTMLButtonElement).disabled = this.busy || !this.topicId;
   }

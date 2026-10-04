@@ -1,6 +1,7 @@
 import { consumeWorkflowEvents, consumeEvents, errorText, requestJson, setApiKey, } from "./api.js";
 import { HostEndpoint } from "./host.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
+import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
@@ -12,10 +13,64 @@ const $ = (id) => document.getElementById(id);
 let interactionLoadVersion = 0;
 const text = (id) => $(id);
 const labels = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
-const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
+const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁", paused: "已暂停" };
 const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
+let localeChangeQueue = Promise.resolve();
+let localeLoadVersion = 0;
+let lastNotice = "";
+let lastNoticeError = false;
+let lastNoticeLocal = true;
+let workflowRuns = [];
+const localStatus = (status) => t(statuses[status] || status);
+function redrawLocale() {
+    renderTopics();
+    renderBranchSelect();
+    renderMessages();
+    renderAgents();
+    renderCompact(state.compactPreview);
+    renderInteractions();
+    workflowView();
+    promptContextUI.refreshLocale();
+    $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
+    $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
+    $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
+    renderWorkflowSelection();
+    renderWorkflowRuns();
+    showNotice(lastNotice, lastNoticeError, lastNoticeLocal);
+}
+async function restoreLocale(locale) {
+    const version = ++localeLoadVersion;
+    const bundle = await loadLocale(locale);
+    if (version !== localeLoadVersion)
+        return;
+    applyLocale(bundle);
+    redrawLocale();
+}
+function changeLocale(locale) {
+    const topicId = state.topicId;
+    const run = localeChangeQueue.catch(() => undefined).then(async () => {
+        const bundle = await loadLocale(locale);
+        const result = topicId ? await requestJson(`/v1/topics/${encodeURIComponent(topicId)}/locale`, { method: "PATCH", body: JSON.stringify({ locale }) }) : { requested: bundle.requested, effective: bundle.effective, fallback_chain: bundle.fallback_chain };
+        if (topicId)
+            state.topics = (await requestJson("/v1/topics")).topics;
+        const topic = state.topics.find((item) => item.id === topicId);
+        if (topic)
+            topic.locale = result.effective;
+        if (state.tree?.topic.id === topicId)
+            state.tree.topic.locale = result.effective;
+        if (state.topicId === topicId) {
+            localeLoadVersion += 1;
+            applyLocale(bundle);
+            redrawLocale();
+        }
+        hostEndpoint.notify("host/state", { connected: $("connection").classList.contains("ready"), topic_id: state.topicId, run_id: state.runId, iframe: window.parent !== window, locale: currentLocale() });
+        return result;
+    });
+    localeChangeQueue = run;
+    return run;
+}
 function hostObject(data) {
     if (typeof data === "object" && data !== null && !Array.isArray(data))
         return data;
@@ -39,10 +94,9 @@ function setupHostBridge() {
     });
     hostEndpoint.on("host/set-locale", (data) => {
         const locale = hostObject(data).locale;
-        if (typeof locale !== "string" || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(locale))
+        if (typeof locale !== "string")
             throw new Error("locale 无效");
-        document.documentElement.lang = locale;
-        return { locale };
+        return changeLocale(locale).then((result) => result);
     });
     hostEndpoint.on("host/resize", (data) => {
         const width = hostObject(data).width;
@@ -76,7 +130,7 @@ function setupHostBridge() {
         const message = hostObject(data).message;
         if (typeof message !== "string" || message.length > 1024)
             throw new Error("通知无效");
-        showNotice(message);
+        showNotice(message, false, false);
         return { shown: true };
     });
     for (const channel of [
@@ -91,9 +145,13 @@ function setupHostBridge() {
             "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
         ] });
 }
-function showNotice(message = "", error = false) {
+function showNotice(message = "", error = false, local = true) {
+    lastNotice = message;
+    lastNoticeError = error;
+    lastNoticeLocal = local;
+    const value = typeof message === "function" ? message() : local ? t(message) : message;
     const node = $("notice");
-    node.textContent = message;
+    node.textContent = value;
     node.className = error ? "notice error" : "notice";
 }
 function disableComposer(value) {
@@ -115,7 +173,10 @@ function renderTopics() {
     const root = $("topics");
     root.replaceChildren();
     if (!state.topics.length) {
-        root.innerHTML = '<p class="muted">还没有话题</p>';
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = t("还没有话题");
+        root.append(empty);
         return;
     }
     for (const topic of state.topics) {
@@ -126,7 +187,7 @@ function renderTopics() {
         const strong = document.createElement("strong");
         strong.textContent = topic.title;
         const small = document.createElement("small");
-        small.textContent = new Date(topic.updated_at).toLocaleString("zh-CN");
+        small.textContent = localDate(topic.updated_at);
         button.append(strong, small);
         button.addEventListener("click", () => void loadTopic(topic.id).catch((error) => showNotice(errorText(error), true)));
         root.append(button);
@@ -137,14 +198,14 @@ function renderBranchSelect() {
     select.replaceChildren();
     const current = document.createElement("option");
     current.value = "";
-    current.textContent = "当前活动分支";
+    current.textContent = t("当前活动分支");
     select.append(current);
     for (const message of state.tree?.messages || []) {
         if (message.role === "tool" || (Array.isArray(message.details.tool_calls) && message.details.tool_calls.length > 0))
             continue;
         const option = document.createElement("option");
         option.value = message.id;
-        option.textContent = `${message.sequence} · ${labels[message.role] || message.role} · ${message.content.slice(0, 40)}`;
+        option.textContent = `${message.sequence} · ${t(labels[message.role] || message.role)} · ${message.content.slice(0, 40)}`;
         select.append(option);
     }
 }
@@ -152,7 +213,10 @@ function renderMessages() {
     const root = $("messages");
     root.replaceChildren();
     if (!state.messages.length && !state.streaming) {
-        root.innerHTML = '<div class="empty">发送第一条消息，开始本地对话。</div>';
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = t("发送第一条消息，开始本地对话。");
+        root.append(empty);
         return;
     }
     for (const message of state.messages) {
@@ -160,7 +224,7 @@ function renderMessages() {
         node.className = `message ${message.role}`;
         const role = document.createElement("span");
         role.className = "role";
-        role.textContent = labels[message.role] || message.role;
+        role.textContent = t(labels[message.role] || message.role);
         const content = document.createElement("div");
         content.textContent = message.content;
         node.append(role, content);
@@ -168,7 +232,7 @@ function renderMessages() {
             node.classList.add("tool-card");
             const details = document.createElement("details");
             const title = document.createElement("summary");
-            title.textContent = message.role === "tool" ? "查看工具结果" : "查看工具调用";
+            title.textContent = message.role === "tool" ? t("查看工具结果") : t("查看工具调用");
             const output = document.createElement("pre");
             output.textContent = message.role === "tool" ? message.content : JSON.stringify(message.details.tool_calls, null, 2);
             details.append(title, output);
@@ -180,7 +244,7 @@ function renderMessages() {
             if (message.role === "user") {
                 const edit = document.createElement("button");
                 edit.type = "button";
-                edit.textContent = "编辑";
+                edit.textContent = t("编辑");
                 edit.onclick = () => beginEdit(message);
                 edit.disabled = state.busy;
                 controls.append(edit);
@@ -188,7 +252,7 @@ function renderMessages() {
             else {
                 const regenerate = document.createElement("button");
                 regenerate.type = "button";
-                regenerate.textContent = "重新生成";
+                regenerate.textContent = t("重新生成");
                 regenerate.onclick = () => regenerateMessage(message.id);
                 regenerate.disabled = state.busy;
                 controls.append(regenerate);
@@ -202,7 +266,7 @@ function renderMessages() {
         node.className = "message assistant streaming";
         const role = document.createElement("span");
         role.className = "role";
-        role.textContent = state.streaming ? "助手（生成中）" : "助手（连接中断，可继续读取）";
+        role.textContent = state.streaming ? t("助手（生成中）") : t("助手（连接中断，可继续读取）");
         const content = document.createElement("div");
         content.textContent = state.streamText || "……";
         node.append(role, content);
@@ -218,22 +282,23 @@ function renderCompact(result) {
         return;
     }
     panel.hidden = false;
-    $("compact-title").textContent = `${result.status === "proposed" ? "压缩预览" : result.status === "completed" ? "摘要已保存" : "暂无需压缩的历史"} · 覆盖 ${result.omitted_count} 条`;
-    $("compact-sources").textContent = `来源 ${result.source_message_ids.length} 条历史消息；${result.persisted ? "已保存" : "尚未保存"}`;
-    $("compact-summary").textContent = result.summary || result.reason || "没有需要压缩的历史";
+    $("compact-title").textContent = t("{status} · 覆盖 {count} 条", { status: t(result.status === "proposed" ? "压缩预览" : result.status === "completed" ? "摘要已保存" : "暂无需压缩的历史"), count: result.omitted_count });
+    $("compact-sources").textContent = t("来源 {count} 条历史消息；{saved}", { count: result.source_message_ids.length, saved: t(result.persisted ? "已保存" : "尚未保存") });
+    $("compact-summary").textContent = result.summary || result.reason || t("没有需要压缩的历史");
     $("compact-confirm").disabled = state.busy || result.status !== "proposed";
 }
 function renderInteractions() {
     const root = $("interactions");
+    const answers = new Map([...root.querySelectorAll(".interaction-card")].map((card) => [card.dataset.interactionId, card.querySelector("input")?.value || ""]));
     root.replaceChildren();
     for (const interaction of state.interactions.filter((item) => item.status === "pending")) {
         const card = document.createElement("div");
         card.className = "interaction-card";
         card.dataset.interactionId = interaction.id;
         const title = document.createElement("strong");
-        title.textContent = interaction.kind === "approval" ? `工具执行需要批准：${interaction.tool_name}` : "请回答问题";
+        title.textContent = interaction.kind === "approval" ? t("工具执行需要批准：{tool}", { tool: interaction.tool_name || "" }) : t("请回答问题");
         const detail = document.createElement("p");
-        detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || "问题");
+        detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || t("问题"));
         const actions = document.createElement("div");
         actions.className = "actions";
         card.append(title, detail);
@@ -242,7 +307,7 @@ function renderInteractions() {
                 const button = document.createElement("button");
                 button.type = "button";
                 button.className = "secondary";
-                button.textContent = label;
+                button.textContent = t(label);
                 button.onclick = () => void replyInteraction(interaction, action);
                 actions.append(button);
             }
@@ -251,8 +316,9 @@ function renderInteractions() {
             const input = document.createElement("input");
             input.type = "text";
             input.maxLength = 4000;
-            input.placeholder = "输入真实答案";
-            input.setAttribute("aria-label", "用户答案");
+            input.placeholder = t("输入真实答案");
+            input.setAttribute("aria-label", t("用户答案"));
+            input.value = answers.get(interaction.id) || "";
             if (Array.isArray(interaction.payload.options)) {
                 const options = document.createElement("div");
                 options.className = "actions";
@@ -271,7 +337,7 @@ function renderInteractions() {
             const button = document.createElement("button");
             button.type = "button";
             button.className = "primary";
-            button.textContent = "提交答案";
+            button.textContent = t("提交答案");
             button.onclick = () => void replyInteraction(interaction, "answer", input.value);
             card.append(input);
             actions.append(button);
@@ -320,13 +386,16 @@ async function replyInteraction(interaction, action, answer) {
 }
 function renderAgents() {
     const select = $("agent-kind");
+    const selected = select.value;
     select.replaceChildren();
     for (const agent of state.agents) {
         const option = document.createElement("option");
         option.value = agent.name;
-        option.textContent = `${agent.name} · ${agent.risk === "read" ? "只读任务" : "受控任务"}`;
+        option.textContent = `${agent.name} · ${agent.risk === "read" ? t("只读任务") : t("受控任务")}`;
         select.append(option);
     }
+    if (state.agents.some((agent) => agent.name === selected))
+        select.value = selected;
     $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
     const root = $("agents");
     root.replaceChildren();
@@ -334,7 +403,7 @@ function renderAgents() {
         const card = document.createElement("div");
         card.className = "agent-card";
         const title = document.createElement("strong");
-        title.textContent = `${agent.name} · ${statuses[agent.status] || agent.status}`;
+        title.textContent = `${agent.name} · ${localStatus(agent.status)}`;
         const id = document.createElement("small");
         id.textContent = agent.agent_id;
         const actions = document.createElement("div");
@@ -342,19 +411,19 @@ function renderAgents() {
         const resume = document.createElement("button");
         resume.className = "secondary";
         resume.type = "button";
-        resume.textContent = "继续任务";
+        resume.textContent = t("继续任务");
         resume.disabled = ["created", "queued", "running"].includes(agent.status);
         resume.onclick = () => void resumeAgent(agent.agent_id);
         const stop = document.createElement("button");
         stop.className = "secondary";
         stop.type = "button";
-        stop.textContent = "停止";
+        stop.textContent = t("停止");
         stop.disabled = !["queued", "running"].includes(agent.status);
         stop.onclick = () => stopAgent(agent.agent_id);
         const destroy = document.createElement("button");
         destroy.className = "secondary";
         destroy.type = "button";
-        destroy.textContent = "销毁";
+        destroy.textContent = t("销毁");
         destroy.onclick = () => destroyAgent(agent.agent_id);
         actions.append(resume, stop, destroy);
         card.append(title, id, actions);
@@ -369,7 +438,7 @@ function renderAgents() {
 function graphFromEditor() {
     const value = JSON.parse(text("workflow-json").value);
     if (!Array.isArray(value.nodes) || !Array.isArray(value.edges))
-        throw new Error("Workflow 图需要 nodes 和 edges 数组");
+        throw new Error(t("Workflow 图需要 nodes 和 edges 数组"));
     return value;
 }
 function writeGraph(graph) { state.workflowGraph = graph; text("workflow-json").value = JSON.stringify(graph, null, 2); renderWorkflowGraph(); }
@@ -381,7 +450,7 @@ function renderWorkflowGraph() {
         graph = graphFromEditor();
     }
     catch {
-        $("workflow-selection").textContent = "图 JSON 无效，修正后才能运行";
+        $("workflow-selection").textContent = t("图 JSON 无效，修正后才能运行");
         return;
     }
     state.workflowGraph = graph;
@@ -439,7 +508,17 @@ function renderWorkflowGraph() {
         svg.append(group);
     }
     renderWorkflowProperties(graph);
-    $("workflow-selection").textContent = state.workflowSelected.length ? `已选：${state.workflowSelected.join(" → ")}；再次点击可取消` : "点击图中的节点编辑配置";
+    renderWorkflowSelection();
+}
+function renderWorkflowSelection() {
+    try {
+        graphFromEditor();
+    }
+    catch {
+        $("workflow-selection").textContent = t("图 JSON 无效，修正后才能运行");
+        return;
+    }
+    $("workflow-selection").textContent = state.workflowSelected.length ? t("已选：{nodes}；再次点击可取消", { nodes: state.workflowSelected.join(" → ") }) : t("点击图中的节点编辑配置");
 }
 function renderWorkflowProperties(graph) {
     const selected = state.workflowSelected[0];
@@ -476,7 +555,7 @@ catch (error) {
 function connectWorkflowNodes() { try {
     const graph = graphFromEditor();
     if (state.workflowSelected.length !== 2)
-        throw new Error("请先选择两个节点作为来源和目标");
+        throw new Error(t("请先选择两个节点作为来源和目标"));
     const source = state.workflowSelected[0];
     const target = state.workflowSelected[1];
     const source_port = text("workflow-edge-source-port").value.trim() || "out";
@@ -494,9 +573,9 @@ function saveWorkflowNode() { try {
     const oldId = state.workflowSelected[0];
     const id = text("workflow-node-id").value.trim();
     if (!oldId || !id)
-        throw new Error("请先选择节点并填写 ID");
+        throw new Error(t("请先选择节点并填写 ID"));
     if (graph.nodes.some((node) => node.id === id && node.id !== oldId))
-        throw new Error("节点 ID 重复");
+        throw new Error(t("节点 ID 重复"));
     const node = graph.nodes.find((item) => item.id === oldId);
     node.id = id;
     node.kind = $("workflow-node-kind").value;
@@ -517,7 +596,7 @@ function deleteWorkflowNode() { try {
     const graph = graphFromEditor();
     const id = state.workflowSelected[0];
     if (!id)
-        throw new Error("请先选择节点");
+        throw new Error(t("请先选择节点"));
     graph.nodes = graph.nodes.filter((node) => node.id !== id);
     graph.edges = graph.edges.filter((edge) => edge.source !== id && edge.target !== id);
     state.workflowSelected = [];
@@ -530,24 +609,26 @@ function deleteWorkflowEdge() { try {
     const graph = graphFromEditor();
     const index = Number($("workflow-edge-list").value);
     if (!Number.isInteger(index) || !graph.edges[index])
-        throw new Error("请先选择边");
+        throw new Error(t("请先选择边"));
     graph.edges.splice(index, 1);
     writeGraph(graph);
 }
 catch (error) {
     showNotice(errorText(error), true);
 } }
-function workflowView() { const run = state.workflowRun; const status = $("workflow-status"); status.textContent = run ? `运行 ${run.status}${run.current_node ? ` · 当前节点 ${run.current_node}` : ""}${run.output !== null && run.output !== undefined ? ` · 输出 ${JSON.stringify(run.output)}` : ""}` : "尚未运行"; for (const [id, value] of Object.entries(run?.node_statuses || {})) {
+function workflowView() { const run = state.workflowRun; const status = $("workflow-status"); status.textContent = run ? t("运行 {status}", { status: localStatus(run.status) }) + (run.current_node ? t(" · 当前节点 {node}", { node: run.current_node }) : "") + (run.output !== null && run.output !== undefined ? t(" · 输出 {output}", { output: JSON.stringify(run.output) }) : "") : t("尚未运行"); for (const [id, value] of Object.entries(run?.node_statuses || {})) {
     const node = document.querySelector(`[data-workflow-node="${CSS.escape(id)}"]`);
     if (node)
         node.setAttribute("data-status", value);
 } $("workflow-pause").toggleAttribute("disabled", !run || !["queued", "running"].includes(run.status)); $("workflow-resume").toggleAttribute("disabled", !run || run.status !== "paused"); $("workflow-stop").toggleAttribute("disabled", !run || !["queued", "running", "paused"].includes(run.status)); $("workflow-rerun").toggleAttribute("disabled", !run || !state.workflowSelected.length); $("workflow-restore").toggleAttribute("disabled", !run || !["paused", "queued", "running"].includes(run.status)); }
-async function loadWorkflowRuns() { const runs = await requestJson("/v1/workflows/runs"); const select = $("workflow-run-list"); select.replaceChildren(); for (const run of runs) {
+function renderWorkflowRuns() { const select = $("workflow-run-list"); const selected = select.value; select.replaceChildren(); for (const run of workflowRuns) {
     const option = document.createElement("option");
     option.value = run.run_id;
-    option.textContent = `${run.run_id.slice(0, 8)} · ${run.status}`;
+    option.textContent = t("{id} · {status}", { id: run.run_id.slice(0, 8), status: localStatus(run.status) });
     select.append(option);
-} }
+} if (workflowRuns.some((run) => run.run_id === selected))
+    select.value = selected; }
+async function loadWorkflowRuns() { workflowRuns = await requestJson("/v1/workflows/runs"); renderWorkflowRuns(); }
 function recordWorkflowEvent(event) {
     const run = state.workflowRun;
     if (!run || run.run_id !== event.run_id)
@@ -668,13 +749,16 @@ async function loadTopic(topicId) {
     }
     state.topicId = topicId;
     const topic = state.topics.find((item) => item.id === topicId);
-    $("topic-heading").textContent = topic?.title || "话题";
+    $("topic-heading").textContent = topic?.title || t("话题");
     const [messages, tree] = await Promise.all([
         requestJson(`/v1/topics/${encodeURIComponent(topicId)}/messages`),
         requestJson(`/v1/topics/${encodeURIComponent(topicId)}/tree`),
     ]);
     if (state.topicId !== topicId)
         return;
+    const url = new URL(location.href);
+    url.searchParams.set("topic", topicId);
+    history.replaceState(null, "", url);
     state.messages = messages.messages;
     state.tree = tree;
     state.compactPreview = null;
@@ -682,6 +766,7 @@ async function loadTopic(topicId) {
     renderBranchSelect();
     renderMessages();
     renderCompact(null);
+    state.topics = state.topics.map((item) => item.id === topicId ? tree.topic : item);
     if (switched && state.messages.at(-1)) {
         const latest = state.messages.at(-1);
         const run = await requestJson(`/v1/runs/${encodeURIComponent(latest.run_id)}`);
@@ -695,6 +780,8 @@ async function loadTopic(topicId) {
     disableComposer(state.busy);
     await loadInteractions();
     await promptContextUI.selectTopic(topicId);
+    if (state.topicId === topicId)
+        await restoreLocale(tree.topic.locale);
 }
 async function loadTopics() {
     state.topics = (await requestJson("/v1/topics")).topics;
@@ -713,8 +800,8 @@ async function createTopic() {
         return;
     disableComposer(true);
     try {
-        const title = text("topic-title").value.trim() || "新话题";
-        const topic = await requestJson("/v1/topics", { method: "POST", body: JSON.stringify({ title }) });
+        const title = text("topic-title").value.trim() || t("新话题");
+        const topic = await requestJson("/v1/topics", { method: "POST", body: JSON.stringify({ title, locale: currentLocale() }) });
         text("topic-title").value = "";
         state.topics.unshift(topic);
         await loadTopic(topic.id);
@@ -755,7 +842,7 @@ async function consume(runId, fromSeq = 0) {
                 void loadInteractions().catch(() => undefined);
             }
             if (frame.kind === "end")
-                showNotice(`生成${statuses[String(frame.data?.status)] || "结束"}`);
+                showNotice(() => t("生成{status}", { status: localStatus(String(frame.data?.status || "结束")) }));
         }, controller.signal);
     }
     catch (error) {
@@ -793,7 +880,7 @@ async function sendMessage(event) {
         state.editingMessageId = null;
         promptContextUI.setText("", true);
         $("edit-cancel").hidden = true;
-        $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行";
+        $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
         await loadTopic(run.topic_id);
         await consume(run.id);
     }
@@ -816,7 +903,7 @@ async function selectBranch(messageId) {
     }
 }
 function beginEdit(message) { if (state.busy)
-    return; state.editingMessageId = message.id; promptContextUI.setText(message.content, true); $("edit-cancel").hidden = false; $("composer-mode").textContent = "编辑后会创建新分支，原消息保留"; text("prompt").focus(); }
+    return; state.editingMessageId = message.id; promptContextUI.setText(message.content, true); $("edit-cancel").hidden = false; $("composer-mode").textContent = t("编辑后会创建新分支，原消息保留"); text("prompt").focus(); }
 async function regenerateMessage(messageId) {
     if (!state.topicId || state.busy)
         return;
@@ -841,7 +928,7 @@ async function stopRun() {
         for (let attempt = 0; attempt < 20; attempt += 1) {
             const run = await requestJson(`/v1/runs/${encodeURIComponent(runId)}`);
             if (["completed", "failed", "aborted", "interrupted"].includes(run.status)) {
-                showNotice(run.status === "aborted" ? "已停止：终态已保存" : `运行${statuses[run.status] || run.status}`);
+                showNotice(() => run.status === "aborted" ? t("已停止：终态已保存") : t("运行{status}", { status: localStatus(run.status) }));
                 return;
             }
             await new Promise((resolve) => setTimeout(resolve, 50));
@@ -892,7 +979,7 @@ async function createAgent() {
         state.handles = [...state.handles.filter((item) => item.agent_id !== agent.agent_id), result];
         text("agent-prompt").value = "";
         renderAgents();
-        showNotice(`Agent ${statuses[result.status] || result.status}`);
+        showNotice(() => t("Agent {status}", { status: localStatus(result.status) }));
     }
     catch (error) {
         showNotice(errorText(error), true);
@@ -913,7 +1000,7 @@ async function resumeAgent(agentId) {
         const agent = await requestJson(`/v1/agents/${agentId}/resume`, { method: "POST", body: JSON.stringify({ prompt, idempotency_key: idempotency() }) });
         state.handles = state.handles.map((item) => item.agent_id === agentId ? agent : item);
         renderAgents();
-        showNotice(`Agent ${agent.status}`);
+        showNotice(() => t("Agent {status}", { status: localStatus(agent.status) }));
     }
     catch (error) {
         showNotice(errorText(error), true);
@@ -941,6 +1028,7 @@ catch (error) {
 async function refresh() { if (state.topicId)
     await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents()]); }
 function setup() {
+    $("locale-select").addEventListener("change", (event) => { void changeLocale(event.target.value).catch((error) => { $("locale-select").value = currentLocale(); showNotice(errorText(error), true); }); });
     $("new-topic").addEventListener("click", () => void createTopic());
     $("refresh").addEventListener("click", () => void refresh());
     $("composer").addEventListener("submit", (event) => void sendMessage(event));
@@ -950,7 +1038,7 @@ function setup() {
     $("run-resume").addEventListener("click", () => void resumeRun());
     $("agent-create").addEventListener("click", () => void createAgent());
     $("branch-select").addEventListener("change", (event) => void selectBranch(event.target.value));
-    $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; });
+    $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); });
     $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; });
     $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
     text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });
@@ -982,18 +1070,21 @@ async function boot() { try {
     state.agents = await requestJson("/v1/agents/catalog");
     state.handles = await requestJson("/v1/agents");
     await loadWorkflowRuns();
+    await restoreLocale(currentLocale());
     renderTopics();
     renderAgents();
-    if (!state.topicId && state.topics[0])
-        await loadTopic(state.topics[0].id);
-    $("connection").textContent = "本地服务已连接";
+    if (!state.topicId && state.topics[0]) {
+        const selected = new URLSearchParams(location.search).get("topic");
+        await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id);
+    }
+    $("connection").textContent = t("本地服务已连接");
     $("connection").classList.add("ready");
     $("key-form").hidden = true;
     text("api-key").value = "";
     showNotice();
 }
 catch (error) {
-    $("connection").textContent = "需要连接";
+    $("connection").textContent = t("需要连接");
     $("connection").classList.remove("ready");
     showNotice(errorText(error), true);
     $("key-form").hidden = false;

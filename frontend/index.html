@@ -8,97 +8,97 @@
   </head>
   <body>
     <header class="topbar">
-      <div><p class="eyebrow">YOUR WORKSPACE</p><h1>Krim Agent</h1></div>
-      <div class="actions"><span id="model-label" class="muted"></span><span id="connection" class="badge" role="status">连接中</span><button id="key-toggle" class="secondary" type="button">访问密钥</button></div>
+      <div><p class="eyebrow" data-i18n="你的工作区">你的工作区</p><h1>Krim Agent</h1></div>
+      <div class="actions"><label class="sr-only" for="locale-select" data-i18n="语言">语言</label><select id="locale-select" aria-label="语言" data-i18n-aria-label="语言"><option value="zh-CN">中文</option><option value="en-US">English</option></select><span id="model-label" class="muted"></span><span id="connection" class="badge" role="status" data-i18n="连接中">连接中</span><button id="key-toggle" class="secondary" type="button" data-i18n="访问密钥">访问密钥</button></div>
     </header>
     <form id="key-form" class="key-panel" hidden>
-      <label for="api-key">服务访问密钥</label>
-      <input id="api-key" type="password" autocomplete="off" placeholder="输入服务的 API Key" />
-      <button class="primary" type="submit">连接</button>
-      <span class="muted">密钥仅用于当前页面的同源请求。</span>
+      <label for="api-key" data-i18n="服务访问密钥">服务访问密钥</label>
+      <input id="api-key" type="password" autocomplete="off" placeholder="输入服务的 API Key" data-i18n-placeholder="输入服务的 API Key" />
+      <button class="primary" type="submit" data-i18n="连接">连接</button>
+      <span class="muted" data-i18n="密钥仅用于当前页面的同源请求。">密钥仅用于当前页面的同源请求。</span>
     </form>
     <main class="layout">
-      <aside class="sidebar" aria-label="话题和 Agent">
+      <aside class="sidebar" aria-label="话题和 Agent" data-i18n-aria-label="话题和 Agent">
         <section class="panel">
-          <div class="panel-heading"><h2>话题</h2><button id="new-topic" class="icon-button" type="button" title="新建话题" aria-label="新建话题">+</button></div>
-          <label class="sr-only" for="topic-title">新话题标题</label><input id="topic-title" class="compact-input" placeholder="新话题标题" maxlength="120" />
+          <div class="panel-heading"><h2 data-i18n="话题">话题</h2><button id="new-topic" class="icon-button" type="button" title="新建话题" aria-label="新建话题" data-i18n-title="新建话题" data-i18n-aria-label="新建话题">+</button></div>
+          <label class="sr-only" for="topic-title" data-i18n="新话题标题">新话题标题</label><input id="topic-title" class="compact-input" placeholder="新话题标题" maxlength="120" data-i18n-placeholder="新话题标题" />
           <div id="topics" class="stack"></div>
         </section>
         <section class="panel">
           <div class="panel-heading"><h2>Agent</h2><span id="agent-count" class="muted">0</span></div>
-          <label class="sr-only" for="agent-kind">Agent 目录</label><select id="agent-kind" class="compact-input"></select>
-          <label class="sr-only" for="agent-prompt">Agent 任务</label><textarea id="agent-prompt" rows="2" maxlength="8192" placeholder="交给 Agent 的任务"></textarea>
-          <button id="agent-create" class="secondary" type="button">创建 Agent</button>
+          <label class="sr-only" for="agent-kind" data-i18n="Agent 目录">Agent 目录</label><select id="agent-kind" class="compact-input"></select>
+          <label class="sr-only" for="agent-prompt" data-i18n="Agent 任务">Agent 任务</label><textarea id="agent-prompt" rows="2" maxlength="8192" placeholder="交给 Agent 的任务" data-i18n-placeholder="交给 Agent 的任务"></textarea>
+          <button id="agent-create" class="secondary" type="button" data-i18n="创建 Agent">创建 Agent</button>
           <div id="agents" class="stack" aria-live="polite"></div>
         </section>
       </aside>
-      <section class="conversation" aria-label="对话">
+      <section class="conversation" aria-label="对话" data-i18n-aria-label="对话">
         <div class="conversation-heading">
-          <div><p class="eyebrow">CONVERSATION</p><h2 id="topic-heading">请选择话题</h2></div>
-          <div class="actions"><button id="refresh" class="secondary" type="button">刷新</button><button id="run-stop" class="secondary" type="button" disabled>停止</button><button id="run-resume" class="secondary" type="button" disabled>继续读取</button></div>
+          <div><p class="eyebrow" data-i18n="对话">对话</p><h2 id="topic-heading" data-i18n="请选择话题">请选择话题</h2></div>
+          <div class="actions"><button id="refresh" class="secondary" type="button" data-i18n="刷新">刷新</button><button id="run-stop" class="secondary" type="button" disabled data-i18n="停止">停止</button><button id="run-resume" class="secondary" type="button" disabled data-i18n="继续读取">继续读取</button></div>
         </div>
         <div class="context-bar">
-          <label for="branch-select">消息分支</label><select id="branch-select"><option value="">当前活动分支</option></select>
-          <label for="compact-budget">保留预算</label><input id="compact-budget" type="number" value="20" min="2" max="10000" />
-          <button id="compact-preview" class="secondary" type="button" disabled>预览压缩</button>
-          <button id="compact-confirm" class="secondary" type="button" disabled>确认压缩</button>
+          <label for="branch-select" data-i18n="消息分支">消息分支</label><select id="branch-select"><option value="" data-i18n="当前活动分支">当前活动分支</option></select>
+          <label for="compact-budget" data-i18n="保留预算">保留预算</label><input id="compact-budget" type="number" value="20" min="2" max="10000" />
+          <button id="compact-preview" class="secondary" type="button" disabled data-i18n="预览压缩">预览压缩</button>
+          <button id="compact-confirm" class="secondary" type="button" disabled data-i18n="确认压缩">确认压缩</button>
         </div>
-        <section id="compact-panel" class="compact-panel" hidden aria-label="上下文压缩预览"><h3 id="compact-title"></h3><p id="compact-sources" class="muted"></p><pre id="compact-summary"></pre></section>
+        <section id="compact-panel" class="compact-panel" hidden aria-label="上下文压缩预览" data-i18n-aria-label="上下文压缩预览"><h3 id="compact-title"></h3><p id="compact-sources" class="muted"></p><pre id="compact-summary"></pre></section>
         <details class="workflow-panel">
-          <summary>Workflow 运行面板</summary>
+          <summary data-i18n="Workflow 运行面板">Workflow 运行面板</summary>
           <div class="workflow-grid">
-            <div class="workflow-toolbar"><button id="workflow-add-constant" class="secondary" type="button">添加常量节点</button><button id="workflow-add-output" class="secondary" type="button">添加输出节点</button><button id="workflow-connect" class="secondary" type="button">连接选中节点</button></div>
-            <svg id="workflow-svg" class="workflow-svg" viewBox="0 0 720 210" role="img" aria-label="Workflow 图预览"></svg>
-            <div id="workflow-selection" class="workflow-selection muted">点击图中的节点编辑配置</div>
+            <div class="workflow-toolbar"><button id="workflow-add-constant" class="secondary" type="button" data-i18n="添加常量节点">添加常量节点</button><button id="workflow-add-output" class="secondary" type="button" data-i18n="添加输出节点">添加输出节点</button><button id="workflow-connect" class="secondary" type="button" data-i18n="连接选中节点">连接选中节点</button></div>
+            <svg id="workflow-svg" class="workflow-svg" viewBox="0 0 720 210" role="img" aria-label="Workflow 图预览" data-i18n-aria-label="Workflow 图预览"></svg>
+            <div id="workflow-selection" class="workflow-selection muted" data-i18n="点击图中的节点编辑配置">点击图中的节点编辑配置</div>
             <div class="workflow-properties">
-              <label for="workflow-node-id">节点 ID</label><input id="workflow-node-id" />
-              <label for="workflow-node-kind">节点类型</label><select id="workflow-node-kind"><option>constant</option><option>input</option><option>output</option><option>set</option><option>branch</option><option>switch</option><option>aggregate</option><option>tool</option><option>agent</option><option>classifier</option><option>summary</option><option>validator</option><option>enumerator</option><option>sub_workflow</option><option>loop</option><option>fanout</option><option>retry</option><option>image_preview</option><option>model_preview</option><option>code</option></select>
-              <label for="workflow-node-config">节点配置 JSON</label><textarea id="workflow-node-config" rows="3">{}</textarea>
-              <label for="workflow-input-ports">输入端口 JSON（留空使用默认）</label><textarea id="workflow-input-ports" rows="2"></textarea>
-              <label for="workflow-output-ports">输出端口 JSON（留空使用默认）</label><textarea id="workflow-output-ports" rows="2"></textarea>
-              <label><input id="workflow-developer-only" type="checkbox" /> 仅开发节点</label>
-              <div class="actions"><button id="workflow-save-node" class="secondary" type="button">保存节点</button><button id="workflow-delete-node" class="secondary" type="button">删除节点</button></div>
-              <label for="workflow-edge-source-port">来源端口</label><input id="workflow-edge-source-port" value="out" />
-              <label for="workflow-edge-target-port">目标端口</label><input id="workflow-edge-target-port" value="in" />
-              <label for="workflow-edge-when">条件选择（可空）</label><input id="workflow-edge-when" />
-              <select id="workflow-edge-list" aria-label="Workflow 边"></select><button id="workflow-delete-edge" class="secondary" type="button">删除边</button>
+              <label for="workflow-node-id" data-i18n="节点 ID">节点 ID</label><input id="workflow-node-id" />
+              <label for="workflow-node-kind" data-i18n="节点类型">节点类型</label><select id="workflow-node-kind"><option>constant</option><option>input</option><option>output</option><option>set</option><option>branch</option><option>switch</option><option>aggregate</option><option>tool</option><option>agent</option><option>classifier</option><option>summary</option><option>validator</option><option>enumerator</option><option>sub_workflow</option><option>loop</option><option>fanout</option><option>retry</option><option>image_preview</option><option>model_preview</option><option>code</option></select>
+              <label for="workflow-node-config" data-i18n="节点配置 JSON">节点配置 JSON</label><textarea id="workflow-node-config" rows="3">{}</textarea>
+              <label for="workflow-input-ports" data-i18n="输入端口 JSON（留空使用默认）">输入端口 JSON（留空使用默认）</label><textarea id="workflow-input-ports" rows="2"></textarea>
+              <label for="workflow-output-ports" data-i18n="输出端口 JSON（留空使用默认）">输出端口 JSON（留空使用默认）</label><textarea id="workflow-output-ports" rows="2"></textarea>
+              <label><input id="workflow-developer-only" type="checkbox" /> <span data-i18n="仅开发节点">仅开发节点</span></label>
+              <div class="actions"><button id="workflow-save-node" class="secondary" type="button" data-i18n="保存节点">保存节点</button><button id="workflow-delete-node" class="secondary" type="button" data-i18n="删除节点">删除节点</button></div>
+              <label for="workflow-edge-source-port" data-i18n="来源端口">来源端口</label><input id="workflow-edge-source-port" value="out" />
+              <label for="workflow-edge-target-port" data-i18n="目标端口">目标端口</label><input id="workflow-edge-target-port" value="in" />
+              <label for="workflow-edge-when" data-i18n="条件选择（可空）">条件选择（可空）</label><input id="workflow-edge-when" />
+              <select id="workflow-edge-list" aria-label="Workflow 边" data-i18n-aria-label="Workflow 边"></select><button id="workflow-delete-edge" class="secondary" type="button" data-i18n="删除边">删除边</button>
             </div>
-            <label for="workflow-json">图 JSON</label>
+            <label for="workflow-json" data-i18n="图 JSON">图 JSON</label>
             <textarea id="workflow-json" rows="6">{"nodes":[{"id":"start","kind":"constant","config":{"value":2}},{"id":"finish","kind":"output"}],"edges":[{"source":"start","target":"finish"}],"output_node":"finish"}</textarea>
-            <label for="workflow-input">输入 JSON</label>
+            <label for="workflow-input" data-i18n="输入 JSON">输入 JSON</label>
             <input id="workflow-input" value="null" />
-            <label for="workflow-pause-before">节点前暂停（逗号分隔）</label><input id="workflow-pause-before" />
-            <label for="workflow-pause-after">节点后暂停（逗号分隔）</label><input id="workflow-pause-after" />
-            <label><input id="workflow-production" type="checkbox" checked /> 生产视图（移除开发节点）</label>
-            <label for="workflow-override">覆盖输入 JSON</label><input id="workflow-override" value="null" /><label><input id="workflow-has-override" type="checkbox" /> 应用覆盖输入</label>
-            <label><input id="workflow-allow-effects" type="checkbox" /> 允许明确重放副作用</label>
-            <div class="actions"><button id="workflow-run" class="secondary" type="button">运行 Workflow</button><button id="workflow-pause" class="secondary" type="button" disabled>暂停</button><button id="workflow-resume" class="secondary" type="button" disabled>继续</button><button id="workflow-stop" class="secondary" type="button" disabled>停止</button><button id="workflow-rerun" class="secondary" type="button">重跑选中节点</button><button id="workflow-restore" class="secondary" type="button">恢复运行</button></div>
-            <label for="workflow-run-list">持久运行</label><select id="workflow-run-list"></select><button id="workflow-load-run" class="secondary" type="button">读取所选运行</button>
+            <label for="workflow-pause-before" data-i18n="节点前暂停（逗号分隔）">节点前暂停（逗号分隔）</label><input id="workflow-pause-before" />
+            <label for="workflow-pause-after" data-i18n="节点后暂停（逗号分隔）">节点后暂停（逗号分隔）</label><input id="workflow-pause-after" />
+            <label><input id="workflow-production" type="checkbox" checked /> <span data-i18n="生产视图（移除开发节点）">生产视图（移除开发节点）</span></label>
+            <label for="workflow-override" data-i18n="覆盖输入 JSON">覆盖输入 JSON</label><input id="workflow-override" value="null" /><label><input id="workflow-has-override" type="checkbox" /> <span data-i18n="应用覆盖输入">应用覆盖输入</span></label>
+            <label><input id="workflow-allow-effects" type="checkbox" /> <span data-i18n="允许明确重放副作用">允许明确重放副作用</span></label>
+            <div class="actions"><button id="workflow-run" class="secondary" type="button" data-i18n="运行 Workflow">运行 Workflow</button><button id="workflow-pause" class="secondary" type="button" disabled data-i18n="暂停">暂停</button><button id="workflow-resume" class="secondary" type="button" disabled data-i18n="继续">继续</button><button id="workflow-stop" class="secondary" type="button" disabled data-i18n="停止">停止</button><button id="workflow-rerun" class="secondary" type="button" data-i18n="重跑选中节点">重跑选中节点</button><button id="workflow-restore" class="secondary" type="button" data-i18n="恢复运行">恢复运行</button></div>
+            <label for="workflow-run-list" data-i18n="持久运行">持久运行</label><select id="workflow-run-list"></select><button id="workflow-load-run" class="secondary" type="button" data-i18n="读取所选运行">读取所选运行</button>
             <p id="workflow-status" class="muted" role="status"></p>
             <pre id="workflow-events" class="workflow-events"></pre>
           </div>
         </details>
-        <div id="messages" class="messages" aria-live="polite"><div class="empty">选择或新建一个话题，开始对话。</div></div>
+        <div id="messages" class="messages" aria-live="polite"><div class="empty" data-i18n="选择或新建一个话题，开始对话。">选择或新建一个话题，开始对话。</div></div>
         <div id="notice" class="notice" role="status"></div>
-        <section id="interactions" class="interactions" aria-label="待处理用户交互"></section>
+        <section id="interactions" class="interactions" aria-label="待处理用户交互" data-i18n-aria-label="待处理用户交互"></section>
         <form id="composer" class="composer">
-          <details class="prompt-context-panel"><summary>引用与背景上下文</summary>
+          <details class="prompt-context-panel"><summary data-i18n="引用与背景上下文">引用与背景上下文</summary>
             <div class="prompt-context-inputs">
-              <label for="mention-label">引用名称</label><input id="mention-label" maxlength="120" placeholder="例如：设计文档" />
-              <label for="mention-content">引用内容</label><textarea id="mention-content" rows="2" maxlength="8192" placeholder="明确提供要交给模型的内容"></textarea>
-              <button id="mention-add" class="secondary" type="button">添加引用</button>
-              <div id="mention-list" class="prompt-chips" aria-label="引用目录"></div>
-              <button id="mention-clear" class="secondary" type="button">清空引用目录</button>
-              <label for="context-tag-name">背景标签名称</label><input id="context-tag-name" maxlength="120" placeholder="例如：工作区" />
-              <label for="context-tag-content">背景标签内容</label><textarea id="context-tag-content" rows="2" maxlength="8192" placeholder="作为背景数据随消息提交"></textarea>
-              <button id="context-tag-add" class="secondary" type="button">保存背景标签</button>
-              <div id="context-tag-list" class="prompt-chips" aria-label="背景标签目录"></div>
-              <button id="context-tag-clear" class="secondary" type="button">清空背景标签</button>
+              <label for="mention-label" data-i18n="引用名称">引用名称</label><input id="mention-label" maxlength="120" placeholder="例如：设计文档" data-i18n-placeholder="例如：设计文档" />
+              <label for="mention-content" data-i18n="引用内容">引用内容</label><textarea id="mention-content" rows="2" maxlength="8192" placeholder="明确提供要交给模型的内容" data-i18n-placeholder="明确提供要交给模型的内容"></textarea>
+              <button id="mention-add" class="secondary" type="button" data-i18n="添加引用">添加引用</button>
+              <div id="mention-list" class="prompt-chips" aria-label="引用目录" data-i18n-aria-label="引用目录"></div>
+              <button id="mention-clear" class="secondary" type="button" data-i18n="清空引用目录">清空引用目录</button>
+              <label for="context-tag-name" data-i18n="背景标签名称">背景标签名称</label><input id="context-tag-name" maxlength="120" placeholder="例如：工作区" data-i18n-placeholder="例如：工作区" />
+              <label for="context-tag-content" data-i18n="背景标签内容">背景标签内容</label><textarea id="context-tag-content" rows="2" maxlength="8192" placeholder="作为背景数据随消息提交" data-i18n-placeholder="作为背景数据随消息提交"></textarea>
+              <button id="context-tag-add" class="secondary" type="button" data-i18n="保存背景标签">保存背景标签</button>
+              <div id="context-tag-list" class="prompt-chips" aria-label="背景标签目录" data-i18n-aria-label="背景标签目录"></div>
+              <button id="context-tag-clear" class="secondary" type="button" data-i18n="清空背景标签">清空背景标签</button>
             </div>
           </details>
-          <div id="mention-draft" class="prompt-chips" aria-label="本次引用"></div>
-          <label class="sr-only" for="prompt">发送消息</label><textarea id="prompt" rows="3" maxlength="8192" placeholder="输入消息，或试试 /add 2 3"></textarea>
-          <div class="composer-footer"><span id="composer-mode" class="muted">Enter 发送 · Shift+Enter 换行</span><div class="actions"><button id="edit-cancel" class="secondary" type="button" hidden>取消编辑</button><button id="send" class="primary" type="submit">发送</button></div></div>
+          <div id="mention-draft" class="prompt-chips" aria-label="本次引用" data-i18n-aria-label="本次引用"></div>
+          <label class="sr-only" for="prompt" data-i18n="发送消息">发送消息</label><textarea id="prompt" rows="3" maxlength="8192" placeholder="输入消息，或试试 /add 2 3" data-i18n-placeholder="输入消息，或试试 /add 2 3"></textarea>
+          <div class="composer-footer"><span id="composer-mode" class="muted" data-i18n="Enter 发送 · Shift+Enter 换行">Enter 发送 · Shift+Enter 换行</span><div class="actions"><button id="edit-cancel" class="secondary" type="button" hidden data-i18n="取消编辑">取消编辑</button><button id="send" class="primary" type="submit" data-i18n="发送">发送</button></div></div>
         </form>
       </section>
     </main>

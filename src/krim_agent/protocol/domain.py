@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
+from krim_agent.locale import LocaleChange, LocaleTag
 from krim_agent.prompt_context import MentionOccurrence
 
 from .models import StrictModel
@@ -22,8 +23,9 @@ class ServiceError(Exception):
         self.status = status
 
 
-class TopicCreate(StrictModel):
+class TopicCreate(LocaleChange):
     title: str = Field(default="新话题", min_length=1, max_length=120)
+    locale: str = Field(default="zh-CN", min_length=2, max_length=64)
 
 
 class TextRequest(StrictModel):
@@ -72,6 +74,7 @@ class TopicView(View):
     created_at: datetime
     updated_at: datetime
     active_branches: dict[str, str | None] = Field(default_factory=dict)
+    locale: LocaleTag = "zh-CN"
 
 
 class MessageView(View):

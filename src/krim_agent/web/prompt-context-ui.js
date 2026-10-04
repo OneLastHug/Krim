@@ -1,6 +1,7 @@
 /** 引用目录与草稿 chip UI；目录、ID、位置和快照由 Python API 复核。 */
 import { requestJson, errorText } from "./api.js";
 import { insertMention, shiftOccurrences } from "./prompt-context.js";
+import { t } from "./i18n.js";
 const node = (id) => document.getElementById(id);
 const input = (id) => node(id);
 export class PromptContextUI {
@@ -19,6 +20,7 @@ export class PromptContextUI {
         node("context-tag-clear").addEventListener("click", () => void this.change("context/clearTags"));
         this.render();
     }
+    refreshLocale() { this.render(); }
     get occurrences() { return this.selected.map((value) => ({ ...value })); }
     setBusy(value) { this.busy = value; this.render(); }
     async selectTopic(id) {
@@ -82,10 +84,10 @@ export class PromptContextUI {
     }
     async bridge(channel, data) {
         if (!data || typeof data !== "object" || Array.isArray(data))
-            throw new Error("上下文参数需要对象");
+            throw new Error(t("上下文参数需要对象"));
         const { topic_id: id, ...payload } = data;
         if (typeof id !== "string" || !id)
-            throw new Error("需要话题 ID");
+            throw new Error(t("需要话题 ID"));
         const base = `/v1/topics/${encodeURIComponent(id)}`;
         let value;
         if (channel === "mention/get" || channel === "context/getTags")
@@ -94,7 +96,7 @@ export class PromptContextUI {
             value = await requestJson(base + "/mentions", { method: "POST", body: JSON.stringify(payload) });
         else if (channel === "mention/remove") {
             if (typeof payload.mention_id !== "string")
-                throw new Error("需要引用 ID");
+                throw new Error(t("需要引用 ID"));
             value = await requestJson(base + "/mentions/" + encodeURIComponent(payload.mention_id), { method: "DELETE" });
         }
         else if (channel === "mention/clear")
@@ -103,13 +105,13 @@ export class PromptContextUI {
             value = await requestJson(base + "/context-tags", { method: "POST", body: JSON.stringify(payload) });
         else if (channel === "context/removeTag") {
             if (typeof payload.name !== "string")
-                throw new Error("需要背景标签名称");
+                throw new Error(t("需要背景标签名称"));
             value = await requestJson(base + "/context-tags?name=" + encodeURIComponent(payload.name), { method: "DELETE" });
         }
         else if (channel === "context/clearTags")
             value = await requestJson(base + "/context-tags", { method: "DELETE" });
         else
-            throw new Error("上下文信道无效");
+            throw new Error(t("上下文信道无效"));
         if (id === this.topicId)
             await this.load();
         return value;
@@ -123,13 +125,13 @@ export class PromptContextUI {
             const insert = document.createElement("button");
             insert.type = "button";
             insert.className = "secondary";
-            insert.textContent = `插入 @${reference.label}`;
+            insert.textContent = t("插入 @{label}", { label: reference.label });
             insert.disabled = this.busy;
             insert.onclick = () => this.insert(reference);
             const remove = document.createElement("button");
             remove.type = "button";
             remove.className = "secondary";
-            remove.textContent = "删除引用";
+            remove.textContent = t("删除引用");
             remove.disabled = this.busy;
             remove.onclick = () => void this.change("mention/remove", { mention_id: reference.id });
             chip.append(insert, remove);
@@ -145,7 +147,7 @@ export class PromptContextUI {
             const remove = document.createElement("button");
             remove.type = "button";
             remove.className = "secondary";
-            remove.textContent = "删除背景标签";
+            remove.textContent = t("删除背景标签");
             remove.disabled = this.busy;
             remove.onclick = () => void this.change("context/removeTag", { name: tag.name });
             chip.append(title, remove);
@@ -159,7 +161,7 @@ export class PromptContextUI {
                 continue;
             const chip = document.createElement("span");
             chip.className = "prompt-chip";
-            chip.textContent = `本次引用：${reference.label}`;
+            chip.textContent = t("本次引用：{label}", { label: reference.label });
             draft.append(chip);
         }
         for (const id of ["mention-add", "mention-clear", "context-tag-add", "context-tag-clear"])

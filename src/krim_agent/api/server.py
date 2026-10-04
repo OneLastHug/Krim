@@ -27,6 +27,7 @@ from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
+from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
@@ -49,6 +50,7 @@ from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
+from krim_agent.ui_locale import LocaleResources, locale_resources
 from krim_agent.workflow import (
     WorkflowError,
     WorkflowGraph,
@@ -359,11 +361,23 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @app.post("/v1/topics", status_code=201)
     async def create_topic(payload: TopicCreate) -> TopicView:
-        return await repository.create_topic(payload.title)
+        return await repository.create_topic(payload.title, payload.locale)
 
     @app.get("/v1/topics")
     async def list_topics() -> TopicsResponse:
         return TopicsResponse(topics=await repository.list_topics())
+
+    @app.get("/v1/locales")
+    async def get_locale_resources(locale: str = "zh-CN") -> LocaleResources:
+        try:
+            payload = LocaleChange(locale=locale)
+        except ValueError:
+            raise ServiceError("locale_invalid", "Locale 标签无效", 422) from None
+        return locale_resources(payload.locale)
+
+    @app.patch("/v1/topics/{topic_id}/locale")
+    async def change_locale(topic_id: str, payload: LocaleChange) -> LocaleView:
+        return await repository.set_topic_locale(topic_id, payload.locale)
 
     @app.get("/v1/topics/{topic_id}/prompt-context")
     async def prompt_context(topic_id: str) -> PromptContext:

@@ -5,7 +5,9 @@ export interface TopicView {
   created_at: string;
   updated_at: string;
   active_branches: Record<string, string | null>;
+  locale: "zh-CN" | "en-US";
 }
+export interface LocaleView { requested: string; effective: "zh-CN" | "en-US"; fallback_chain: string[]; }
 export interface MessageView {
   id: string;
   topic_id: string;
