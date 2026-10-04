@@ -48,6 +48,7 @@ from krim_agent.providers import create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
+from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
 from krim_agent.ui_locale import LocaleResources, locale_resources
@@ -382,6 +383,30 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics/{topic_id}/prompt-context")
     async def prompt_context(topic_id: str) -> PromptContext:
         return await repository.get_prompt_context(topic_id)
+
+    @app.get("/v1/topics/{topic_id}/skills")
+    async def skills(topic_id: str) -> SkillCatalogView:
+        return await repository.skill_catalog(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/skills")
+    async def inject_skills(topic_id: str, payload: SkillBatch) -> SkillCatalogView:
+        return await repository.inject_skills(topic_id, payload)
+
+    @app.get("/v1/topics/{topic_id}/skills/{name}")
+    async def read_skill(topic_id: str, name: str, resource: str | None = None) -> SkillReadResult:
+        try:
+            payload = SkillReadInput(name=name, resource=resource)
+        except ValueError:
+            raise ServiceError("skill_input_invalid", "技能名称或资源键无效", 422) from None
+        return await repository.read_skill(topic_id, payload.name, payload.resource)
+
+    @app.delete("/v1/topics/{topic_id}/skills/{name}")
+    async def remove_skill(topic_id: str, name: str) -> SkillCatalogView:
+        return await repository.remove_skill(topic_id, name)
+
+    @app.delete("/v1/topics/{topic_id}/skills")
+    async def clear_skills(topic_id: str) -> SkillCatalogView:
+        return await repository.remove_skill(topic_id)
 
     @app.post("/v1/topics/{topic_id}/mentions", status_code=201)
     async def add_mention(topic_id: str, payload: MentionInput) -> MentionRef:

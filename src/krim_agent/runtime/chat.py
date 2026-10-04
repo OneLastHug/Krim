@@ -33,6 +33,8 @@ from krim_agent.protocol.domain import (
 )
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers import ModelProvider, ModelText, ModelToolCall, ProviderError
+from krim_agent.runtime.skills import definition as skill_tool_definition
+from krim_agent.skills import SkillReadResult, SkillSnapshot
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import (
     ApprovalHandler,
@@ -66,6 +68,7 @@ class RunState:
     publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     step: int = 0
     discovery: ToolDiscovery | None = None
+    skill_snapshot: SkillSnapshot | None = None
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -122,6 +125,18 @@ class ChatRuntime:
         self._closed = False
         self.context_engine = ContextEngine()
         self.persistent_context = PersistentContext(repository, self.context_engine)
+        existing_skill_tool = next(
+            (
+                definition
+                for definition in self.tools.definitions
+                if definition.name == "read_skill"
+            ),
+            None,
+        )
+        if existing_skill_tool is not None and existing_skill_tool is not skill_tool_definition():
+            raise ValueError("read_skill 是运行时保留工具名称")
+        if existing_skill_tool is None:
+            self.tools.register(skill_tool_definition())
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
         return await self._start(topic_id, request)
@@ -227,6 +242,12 @@ class ChatRuntime:
         try:
             await self.repository.set_running(state.run.id)
             await state.publish("start", {"provider": self.provider.name})
+            snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
+            try:
+                state.skill_snapshot = await asyncio.shield(snapshot)
+            except asyncio.CancelledError:
+                await snapshot
+                raise
             async with asyncio.timeout(self.settings.run_timeout_seconds):
                 await self._loop(state)
         except asyncio.CancelledError:
@@ -300,8 +321,14 @@ class ChatRuntime:
                     state.condition.notify_all()
 
     async def _loop(self, state: RunState) -> None:
+        assert state.skill_snapshot is not None
         try:
-            state.discovery = ToolDiscovery(self.tools.definitions)
+            definitions = [
+                definition
+                for definition in self.tools.definitions
+                if definition.name != "read_skill" or state.skill_snapshot.skills
+            ]
+            state.discovery = ToolDiscovery(definitions)
         except ValueError as error:
             raise ServiceError(
                 "tool_catalog_conflict", "工具目录与按需搜索名称冲突", 409
@@ -421,6 +448,9 @@ class ChatRuntime:
                         interaction_publisher=publish_interaction,
                         execution_timeouts=self.execution_timeouts,
                         model_tools=tool_step.bindings(),
+                        skill_snapshot=state.skill_snapshot.model_copy(deep=True)
+                        if state.skill_snapshot
+                        else None,
                     ),
                 )
                 await self.repository.add_message(
@@ -450,6 +480,27 @@ class ChatRuntime:
                             "call_id": call.id,
                         },
                     )
+                if (
+                    call.name == "read_skill"
+                    and not result.is_error
+                    and isinstance(result.data, dict)
+                ):
+                    loaded = SkillReadResult.model_validate(result.data)
+                    try:
+                        expected = state.skill_snapshot.read(loaded.name, loaded.resource)
+                    except KeyError:
+                        expected = None
+                    if expected == loaded:
+                        await state.publish(
+                            "chunk",
+                            {
+                                "type": "skill_loaded",
+                                "name": loaded.name,
+                                "resource": loaded.resource,
+                                "step": _step,
+                                "call_id": call.id,
+                            },
+                        )
             await state.publish(
                 "chunk", {"type": "step_finish", "step": _step, "finish_reason": "tool-calls"}
             )

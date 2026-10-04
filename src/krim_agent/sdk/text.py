@@ -17,6 +17,7 @@ from krim_agent.protocol.models import StreamFrame, check_json
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
+from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadResult
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolResult
@@ -27,6 +28,7 @@ from .types import (
     GenerateResult,
     InteractionPart,
     SDKPart,
+    SkillLoadedPart,
     StepFinish,
     StepResult,
     StreamError,
@@ -82,6 +84,10 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "skill_loaded":
+        return SkillLoadedPart.model_validate(
+            {key: data.get(key) for key in ("name", "resource", "step", "call_id")}
+        )
     if kind == "tool_discovery":
         return ToolDiscoveryPart.model_validate(
             {key: data.get(key) for key in ("tools", "step", "call_id")}
@@ -300,6 +306,7 @@ class PythonAI:
         idempotency_key: str | None = None,
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
+        skill_names: list[str] | None = None,
     ) -> StreamTextResult:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
@@ -308,6 +315,7 @@ class PythonAI:
             idempotency_key=idempotency_key or str(uuid4()),
             parent_message_id=parent_message_id,
             mentions=mentions or [],
+            skill_names=skill_names or [],
         )
         topic = topic_id or (await self.runtime.repository.create_topic(prompt[:80])).id
         run = await self.runtime.start(topic, request)
@@ -321,6 +329,7 @@ class PythonAI:
         idempotency_key: str | None = None,
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
+        skill_names: list[str] | None = None,
     ) -> GenerateResult:
         stream = await self.stream_text(
             prompt,
@@ -328,8 +337,23 @@ class PythonAI:
             idempotency_key=idempotency_key,
             parent_message_id=parent_message_id,
             mentions=mentions,
+            skill_names=skill_names,
         )
         return await stream.collect()
+
+    async def skills(self, topic_id: str) -> SkillCatalogView:
+        return await self.runtime.repository.skill_catalog(topic_id)
+
+    async def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
+        return await self.runtime.repository.inject_skills(topic_id, request)
+
+    async def remove_skill(self, topic_id: str, name: str | None = None) -> SkillCatalogView:
+        return await self.runtime.repository.remove_skill(topic_id, name)
+
+    async def read_skill(
+        self, topic_id: str, name: str, resource: str | None = None
+    ) -> SkillReadResult:
+        return await self.runtime.repository.read_skill(topic_id, name, resource)
 
     async def compact(
         self, topic_id: str, request: ContextCompactRequest | None = None

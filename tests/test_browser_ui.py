@@ -31,9 +31,12 @@ async def test_static_browser_agent_app_assets_are_same_origin_and_safe(api):
     assert host.status_code == host_script.status_code == host_sdk.status_code == 200
     assert "iframe" in host.text and "HostClient" in host_sdk.text
     locale_script = await api.get("/ui/i18n.js")
+    skills_script = await api.get("/ui/skills-ui.js")
     assert locale_script.status_code == 200
+    assert skills_script.status_code == 200
     assert locale_script.headers["x-content-type-options"] == "nosniff"
     assert "textContent" in locale_script.text and "/v1/locales" in locale_script.text
+    assert "skill/inject" in skills_script.text and "textContent" in skills_script.text
 
 
 async def test_static_assets_are_public_but_business_api_still_requires_bearer_key(tmp_path):

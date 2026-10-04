@@ -21,6 +21,13 @@ from .protocol import InProcessBridge
 from .protocol.domain import ChatRequest, EditRequest, RegenerateRequest, TopicCreate
 from .protocol.models import StrictModel
 from .runtime import ChatRuntime
+from .skills import (
+    SkillBatch,
+    SkillInjectRequest,
+    SkillReadRequest,
+    SkillRemoveRequest,
+    SkillTopicRequest,
+)
 
 
 class SendRequest(ChatRequest):
@@ -176,6 +183,30 @@ class LocalApp:
             value = await runtime.repository.get_prompt_context(payload.topic_id)
             return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
+        async def list_skills(data: JsonValue) -> JsonValue:
+            payload = SkillTopicRequest.model_validate(data)
+            value = await runtime.repository.skill_catalog(payload.topic_id)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def inject_skills(data: JsonValue) -> JsonValue:
+            payload = SkillInjectRequest.model_validate(data)
+            value = await runtime.repository.inject_skills(
+                payload.topic_id, SkillBatch(skills=payload.skills)
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def remove_skill(data: JsonValue) -> JsonValue:
+            payload = SkillRemoveRequest.model_validate(data)
+            value = await runtime.repository.remove_skill(payload.topic_id, payload.name)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def read_skill(data: JsonValue) -> JsonValue:
+            payload = SkillReadRequest.model_validate(data)
+            value = await runtime.repository.read_skill(
+                payload.topic_id, payload.name, payload.resource
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
         async def add_mention(data: JsonValue) -> JsonValue:
             payload = MentionAddRequest.model_validate(data)
             value = await runtime.repository.add_mention(
@@ -215,6 +246,10 @@ class LocalApp:
             return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
         self._app.on("topic/create", create_topic)
+        self._app.on("skill/list", list_skills)
+        self._app.on("skill/inject", inject_skills)
+        self._app.on("skill/remove", remove_skill)
+        self._app.on("skill/read", read_skill)
         self._app.on("locale/change", locale_change)
         self._app.on("chat/send", send)
         self._app.on("chat/stop", stop)

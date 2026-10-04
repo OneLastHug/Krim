@@ -1,4 +1,4 @@
-"""最小宿主门面；不提供 iframe、Skills 或完整上游兼容声明。"""
+"""Python 宿主门面：进程内/同源 iframe、技能与上下文；不声明完整上游兼容。"""
 
 from .handle import AppHandle
 from .remote import RemoteHostHandle

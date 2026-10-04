@@ -15,6 +15,7 @@ from krim_agent.context_engine.engine import SummaryFn, summary_message
 from krim_agent.persistence import ContextSummaryRow, KrimRepository
 from krim_agent.prompt_context import PromptSnapshot
 from krim_agent.protocol.domain import MessageView, ServiceError
+from krim_agent.skills import materialize_skills
 
 logger = logging.getLogger(__name__)
 CompactTrigger = Literal["automatic", "manual"]
@@ -86,7 +87,9 @@ class PersistentContext:
         options: ContextOptions,
         trigger: CompactTrigger,
     ) -> tuple[ContextResult, ContextOptions]:
-        messages = [self._materialize_prompt_context(message) for message in messages]
+        messages = [
+            materialize_skills(self._materialize_prompt_context(message)) for message in messages
+        ]
         stored = await self.repository.match_context_summary(topic_id, messages)
         consumed = len(stored.source_message_ids) if stored else 0
         prior = (

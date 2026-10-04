@@ -20,6 +20,9 @@ from krim_agent.protocol.models import StrictModel
 from .output import OutputContract, OutputSchema, WireOutputSchema
 
 if TYPE_CHECKING:
+    from krim_agent.skills import SkillSnapshot
+
+if TYPE_CHECKING:
     from .registry import ToolRegistry
 
 Risk = Literal["read", "write"]
@@ -87,6 +90,7 @@ class ToolContext:
     # 来源由宿主/模型运行时设置，不能从工具参数伪造。
     origin: Literal["model", "host"] = "model"
     model_tools: Mapping[str, ToolDefinition] | None = None
+    skill_snapshot: SkillSnapshot | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -104,6 +108,7 @@ class ToolContext:
             execution_timeouts=self.execution_timeouts,
             origin=self.origin,
             model_tools=self.model_tools,
+            skill_snapshot=self.skill_snapshot,
             arguments=arguments,
         )
 

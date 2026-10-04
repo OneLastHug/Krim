@@ -47,6 +47,13 @@ class FakeProvider:
             if text.startswith("/question "):
                 yield ModelToolCall(name="question", arguments={"question": text[10:]})
                 return
+            if text.startswith("/skill "):
+                parts = text[7:].split(maxsplit=1)
+                yield ModelToolCall(
+                    name="read_skill",
+                    arguments={"name": parts[0], "resource": parts[1] if len(parts) > 1 else None},
+                )
+                return
             reply = "[fake] 收到：" + current.content.strip()
         reply = reply[:8192]
         for position in range(0, len(reply), 16):

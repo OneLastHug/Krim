@@ -20,6 +20,7 @@ import {
 } from "./api.js";
 import { HostEndpoint, type HostJson } from "./host.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
+import { SkillsUI } from "./skills-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 
 type State = {
@@ -59,6 +60,7 @@ const statuses: Record<string, string> = { created: "待执行", queued: "排队
 const idempotency = (): string => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
+const skillsUI = new SkillsUI(showNotice);
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";
@@ -71,6 +73,7 @@ function redrawLocale(): void {
   renderTopics(); renderBranchSelect(); renderMessages(); renderAgents();
   renderCompact(state.compactPreview); renderInteractions(); workflowView();
   promptContextUI.refreshLocale();
+  skillsUI.refreshLocale();
   $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
   $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
   $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -160,10 +163,12 @@ function setupHostBridge(): void {
   ]) {
     hostEndpoint.on(channel, (data) => promptContextUI.bridge(channel, data));
   }
+  for (const channel of ["skill/list", "skill/inject", "skill/remove", "skill/read"]) hostEndpoint.on(channel, (data) => skillsUI.bridge(channel, data));
   hostEndpoint.announceReady({ protocol_version: 2, channels: [
     "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
     "mention/get", "mention/add", "mention/remove", "mention/clear",
     "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
+    "skill/list", "skill/inject", "skill/remove", "skill/read",
   ] });
 }
 
@@ -175,6 +180,7 @@ function showNotice(message: string | (() => string) = "", error = false, local 
 function disableComposer(value: boolean): void {
   state.busy = value;
   promptContextUI.setBusy(value);
+  skillsUI.setBusy(value);
   ($("send") as HTMLButtonElement).disabled = value;
   text("prompt").disabled = value;
   ($("compact-preview") as HTMLButtonElement).disabled = value || !state.topicId;
@@ -409,6 +415,7 @@ async function loadTopic(topicId: string): Promise<void> {
   disableComposer(state.busy);
   await loadInteractions();
   await promptContextUI.selectTopic(topicId);
+  await skillsUI.selectTopic(topicId);
   if (state.topicId === topicId) await restoreLocale(tree.topic.locale);
 }
 async function loadTopics(): Promise<void> {
@@ -440,6 +447,7 @@ async function consume(runId: string, fromSeq = 0): Promise<void> {
       state.cursor = frame.seq + 1;
       if (frame.kind === "chunk" && frame.data?.type === "text_delta") { state.streamText += String(frame.data.text || ""); renderMessages(); }
       if (frame.kind === "chunk" && frame.data?.type === "context_compact") showNotice("上下文已压缩并继续生成");
+      if (frame.kind === "chunk" && frame.data?.type === "skill_loaded" && typeof frame.data.name === "string") skillsUI.loadedSkill(frame.data.name, typeof frame.data.resource === "string" ? frame.data.resource : null);
       if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
         const interaction = frame.data.interaction as InteractionView | undefined;
         if (interaction?.run_id) state.interactionRuns.add(interaction.run_id);
@@ -457,9 +465,10 @@ async function sendMessage(event: SubmitEvent): Promise<void> {
   disableComposer(true); showNotice("生成中……");
   try {
     const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
-    const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences };
+    const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames };
     const run = await requestJson<RunView>(path, { method: "POST", body: JSON.stringify(body) });
     state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
+    skillsUI.clearSelection();
     await loadTopic(run.topic_id); await consume(run.id);
   } catch (error) { showNotice(errorText(error), true); state.streaming = false; disableComposer(false); }
 }
