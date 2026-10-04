@@ -1,5 +1,6 @@
 import { consumeWorkflowEvents, consumeEvents, errorText, requestJson, setApiKey, } from "./api.js";
 import { HostEndpoint } from "./host.js";
+import { PromptContextUI } from "./prompt-context-ui.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
@@ -14,6 +15,7 @@ const labels = { user: "用户", assistant: "助手", tool: "工具", system: "�
 const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
 const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const hostEndpoint = new HostEndpoint();
+const promptContextUI = new PromptContextUI(showNotice);
 function hostObject(data) {
     if (typeof data === "object" && data !== null && !Array.isArray(data))
         return data;
@@ -66,7 +68,7 @@ function setupHostBridge() {
         const next = mode === "append" ? `${prompt.value}${value}` : value;
         if (next.length > 8192)
             throw new Error("Prompt 超过上限");
-        prompt.value = next;
+        promptContextUI.setText(next);
         prompt.focus();
         return { value: prompt.value, mode };
     });
@@ -77,7 +79,17 @@ function setupHostBridge() {
         showNotice(message);
         return { shown: true };
     });
-    hostEndpoint.announceReady({ protocol_version: 2, channels: ["host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme"] });
+    for (const channel of [
+        "mention/get", "mention/add", "mention/remove", "mention/clear",
+        "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
+    ]) {
+        hostEndpoint.on(channel, (data) => promptContextUI.bridge(channel, data));
+    }
+    hostEndpoint.announceReady({ protocol_version: 2, channels: [
+            "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
+            "mention/get", "mention/add", "mention/remove", "mention/clear",
+            "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
+        ] });
 }
 function showNotice(message = "", error = false) {
     const node = $("notice");
@@ -86,6 +98,7 @@ function showNotice(message = "", error = false) {
 }
 function disableComposer(value) {
     state.busy = value;
+    promptContextUI.setBusy(value);
     $("send").disabled = value;
     text("prompt").disabled = value;
     $("compact-preview").disabled = value || !state.topicId;
@@ -681,6 +694,7 @@ async function loadTopic(topicId) {
     }
     disableComposer(state.busy);
     await loadInteractions();
+    await promptContextUI.selectTopic(topicId);
 }
 async function loadTopics() {
     state.topics = (await requestJson("/v1/topics")).topics;
@@ -767,17 +781,17 @@ async function sendMessage(event) {
     event.preventDefault();
     if (!state.topicId || state.busy)
         return;
-    const prompt = text("prompt").value.trim();
-    if (!prompt)
+    const prompt = text("prompt").value;
+    if (!prompt.trim())
         return;
     disableComposer(true);
     showNotice("生成中……");
     try {
         const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
-        const body = state.editingMessageId ? { text: prompt, idempotency_key: idempotency() } : { text: prompt, idempotency_key: idempotency() };
+        const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences };
         const run = await requestJson(path, { method: "POST", body: JSON.stringify(body) });
         state.editingMessageId = null;
-        text("prompt").value = "";
+        promptContextUI.setText("", true);
         $("edit-cancel").hidden = true;
         $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行";
         await loadTopic(run.topic_id);
@@ -802,7 +816,7 @@ async function selectBranch(messageId) {
     }
 }
 function beginEdit(message) { if (state.busy)
-    return; state.editingMessageId = message.id; text("prompt").value = message.content; $("edit-cancel").hidden = false; $("composer-mode").textContent = "编辑后会创建新分支，原消息保留"; text("prompt").focus(); }
+    return; state.editingMessageId = message.id; promptContextUI.setText(message.content, true); $("edit-cancel").hidden = false; $("composer-mode").textContent = "编辑后会创建新分支，原消息保留"; text("prompt").focus(); }
 async function regenerateMessage(messageId) {
     if (!state.topicId || state.busy)
         return;
@@ -936,7 +950,7 @@ function setup() {
     $("run-resume").addEventListener("click", () => void resumeRun());
     $("agent-create").addEventListener("click", () => void createAgent());
     $("branch-select").addEventListener("change", (event) => void selectBranch(event.target.value));
-    $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; text("prompt").value = ""; $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; });
+    $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; });
     $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; });
     $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
     text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });

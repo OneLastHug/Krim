@@ -30,7 +30,8 @@ class FakeProvider:
         if results:
             reply = "[fake] 工具结果：" + results[-1].content
         else:
-            text = current.content.strip()
+            original = current.details.get("_prompt_context_raw_text", current.content)
+            text = (original if isinstance(original, str) else current.content).strip()
             number = r"(-?\d+(?:\.\d+)?)"
             match = re.fullmatch(rf"/add\s+{number}\s+{number}", text)
             if match is None:
@@ -46,7 +47,7 @@ class FakeProvider:
             if text.startswith("/question "):
                 yield ModelToolCall(name="question", arguments={"question": text[10:]})
                 return
-            reply = "[fake] 收到：" + text
+            reply = "[fake] 收到：" + current.content.strip()
         reply = reply[:8192]
         for position in range(0, len(reply), 16):
             await asyncio.sleep(self.delay)

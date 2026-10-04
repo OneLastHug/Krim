@@ -17,6 +17,16 @@ export interface MessageView {
   created_at: string;
   parent_id: string | null;
 }
+export interface MentionRef {
+  id: string;
+  kind: "text" | "file" | "resource";
+  label: string;
+  content: string;
+  metadata: Record<string, unknown>;
+}
+export interface MentionOccurrence { mention_id: string; start: number; end: number; }
+export interface ContextTag { name: string; content: string; metadata: Record<string, unknown>; }
+export interface PromptContext { mentions: MentionRef[]; context_tags: ContextTag[]; }
 export interface MessageTreeView {
   topic: TopicView;
   messages: MessageView[];

@@ -16,6 +16,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标、浏览器卡片与关闭回收；重启后句柄不恢复但持久 run 可查询，跨进程接管和目录持久化未完成。
 - 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认、Agent 目录执行和审批/问答卡片；完整 Workflow 产品、Host SDK/iframe、附件和剩余 M3 UI 未完成。
 - 已接通 [Python Host SDK 与同源 iframe 回程](docs/api/host-sdk.md)：RemoteHostHandle、当前进程 HostSessions、版本化 postMessage、父容器、状态/Prompt/theme/resize/notice/sidebar、真实回执与销毁；完整宿主信道、跨站身份、持久 session 和生产租约未完成。
+- 已接通 [Mentions 与 Context Tags](docs/api/prompt-context.md)：话题目录、Python ID、Unicode 引用位置、发送/编辑快照、模型/压缩预算及 client/SDK/Host/浏览器 chip；二进制附件、富文本、文件沙箱和完整 Locale 仍未完成。
 - 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
 - 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。真实 tokenizer、mid-stream、持久提案和完整确认 UI 未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。

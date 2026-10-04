@@ -18,6 +18,7 @@ from krim_agent.host import (
     HostUIState,
     HostWidthResult,
 )
+from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFrame
 
@@ -120,6 +121,43 @@ class RemoteHostHandle:
 
     async def notice(self, message: str) -> JsonValue:
         return await self._call("host/notice", {"message": message})
+
+    async def prompt_context(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(await self._call("mention/get", {"topic_id": topic_id}))
+
+    async def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
+        return MentionRef.model_validate(
+            await self._call(
+                "mention/add", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def remove_mention(self, topic_id: str, mention_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("mention/remove", {"topic_id": topic_id, "mention_id": mention_id})
+        )
+
+    async def clear_mentions(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("mention/clear", {"topic_id": topic_id})
+        )
+
+    async def add_context_tag(self, topic_id: str, request: ContextTagInput) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call(
+                "context/addTag", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def remove_context_tag(self, topic_id: str, name: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("context/removeTag", {"topic_id": topic_id, "name": name})
+        )
+
+    async def clear_context_tags(self, topic_id: str) -> PromptContext:
+        return PromptContext.model_validate(
+            await self._call("context/clearTags", {"topic_id": topic_id})
+        )
 
     def on(self, channel: str, handler: HostNotification) -> Callable[[], None]:
         if channel in self._handlers:

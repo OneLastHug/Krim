@@ -28,6 +28,7 @@ from krim_agent.context_engine import ContextCompactRequest, ContextCompactRespo
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
     BranchRequest,
     ChatRequest,
@@ -363,6 +364,32 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics")
     async def list_topics() -> TopicsResponse:
         return TopicsResponse(topics=await repository.list_topics())
+
+    @app.get("/v1/topics/{topic_id}/prompt-context")
+    async def prompt_context(topic_id: str) -> PromptContext:
+        return await repository.get_prompt_context(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/mentions", status_code=201)
+    async def add_mention(topic_id: str, payload: MentionInput) -> MentionRef:
+        return await repository.add_mention(topic_id, payload)
+
+    @app.delete("/v1/topics/{topic_id}/mentions/{mention_id}")
+    async def remove_mention(topic_id: str, mention_id: str) -> PromptContext:
+        return await repository.remove_mention(topic_id, mention_id)
+
+    @app.delete("/v1/topics/{topic_id}/mentions")
+    async def clear_mentions(topic_id: str) -> PromptContext:
+        return await repository.remove_mention(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/context-tags")
+    async def add_context_tag(topic_id: str, payload: ContextTagInput) -> PromptContext:
+        return await repository.add_context_tag(topic_id, payload)
+
+    @app.delete("/v1/topics/{topic_id}/context-tags")
+    async def remove_context_tag(
+        topic_id: str, name: str | None = Query(default=None, min_length=1, max_length=120)
+    ) -> PromptContext:
+        return await repository.remove_context_tag(topic_id, name)
 
     @app.get("/v1/topics/{topic_id}/messages")
     async def list_messages(topic_id: str) -> MessagesResponse:

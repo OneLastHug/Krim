@@ -13,7 +13,22 @@ from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFrame
 
 HOST_UI_CHANNELS = frozenset(
-    {"host/get-state", "host/resize", "host/prompt", "host/notice", "host/theme", "host/sidebar"}
+    {
+        "host/get-state",
+        "host/resize",
+        "host/prompt",
+        "host/notice",
+        "host/theme",
+        "host/sidebar",
+        "mention/get",
+        "mention/add",
+        "mention/remove",
+        "mention/clear",
+        "context/getTags",
+        "context/addTag",
+        "context/removeTag",
+        "context/clearTags",
+    }
 )
 
 

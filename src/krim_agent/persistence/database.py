@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -34,6 +34,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from krim_agent.interactions import InteractionKind, InteractionView
+from krim_agent.prompt_context import (
+    ContextTagInput,
+    MentionInput,
+    MentionOccurrence,
+    MentionRef,
+    MentionSnapshot,
+    PromptContext,
+    PromptSnapshot,
+)
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -65,6 +74,7 @@ class TopicRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     active_branches: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
+    prompt_context: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
 
 
 class RunRow(Base):
@@ -264,6 +274,101 @@ class KrimRepository:
             )
             return [TopicView.model_validate(row) for row in rows]
 
+    async def get_prompt_context(self, topic_id: str) -> PromptContext:
+        async with self.database.write_lock, self.database.sessions() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            return PromptContext.model_validate(topic.prompt_context)
+
+    async def add_mention(self, topic_id: str, request: MentionInput) -> MentionRef:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            context = PromptContext.model_validate(topic.prompt_context)
+            reference = MentionRef(id=str(uuid4()), **request.model_dump())
+            context.mentions.append(reference)
+            await self._save_prompt_context(topic, context)
+            return reference
+
+    async def remove_mention(self, topic_id: str, mention_id: str | None = None) -> PromptContext:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            context = PromptContext.model_validate(topic.prompt_context)
+            if mention_id is not None and not any(ref.id == mention_id for ref in context.mentions):
+                raise ServiceError("mention_not_found", "引用不在该话题中", 404)
+            context.mentions = (
+                [ref for ref in context.mentions if ref.id != mention_id] if mention_id else []
+            )
+            await self._save_prompt_context(topic, context)
+            return context
+
+    async def add_context_tag(self, topic_id: str, request: ContextTagInput) -> PromptContext:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            context = PromptContext.model_validate(topic.prompt_context)
+            context.context_tags = [tag for tag in context.context_tags if tag.name != request.name]
+            context.context_tags.append(request.model_copy(deep=True))
+            await self._save_prompt_context(topic, context)
+            return context
+
+    async def remove_context_tag(self, topic_id: str, name: str | None = None) -> PromptContext:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            context = PromptContext.model_validate(topic.prompt_context)
+            if name is not None and not any(tag.name == name for tag in context.context_tags):
+                raise ServiceError("context_tag_not_found", "背景标签不在该话题中", 404)
+            context.context_tags = (
+                [tag for tag in context.context_tags if tag.name != name] if name else []
+            )
+            await self._save_prompt_context(topic, context)
+            return context
+
+    @staticmethod
+    async def _save_prompt_context(topic: TopicRow, context: PromptContext) -> None:
+        try:
+            checked = PromptContext.model_validate(context.model_dump(mode="json"))
+        except ValueError as error:
+            raise ServiceError("prompt_context_limit", "引用/背景标签超出目录边界", 422) from error
+        topic.prompt_context = TypeAdapter(dict[str, JsonValue]).validate_python(
+            checked.model_dump(mode="json")
+        )
+        topic.updated_at = utc_now()
+
+    @staticmethod
+    def _prompt_snapshot(
+        topic: TopicRow, text: str, occurrences: list[MentionOccurrence]
+    ) -> PromptSnapshot:
+        context = PromptContext.model_validate(topic.prompt_context)
+        references = {ref.id: ref for ref in context.mentions}
+        snapshots: list[MentionSnapshot] = []
+        previous_end = 0
+        for occurrence in sorted(occurrences, key=lambda item: (item.start, item.end)):
+            reference = references.get(occurrence.mention_id)
+            if reference is None:
+                raise ServiceError("mention_not_found", "引用不在该话题中", 404)
+            if occurrence.start < previous_end or occurrence.end > len(text):
+                raise ServiceError("mention_position_invalid", "引用位置越界或重叠", 422)
+            if text[occurrence.start : occurrence.end] != "@" + reference.label:
+                raise ServiceError("mention_position_invalid", "引用位置不匹配正文标签", 422)
+            previous_end = occurrence.end
+            snapshots.append(
+                MentionSnapshot(
+                    **reference.model_dump(), start=occurrence.start, end=occurrence.end
+                )
+            )
+        try:
+            return PromptSnapshot(mentions=snapshots, context_tags=context.context_tags)
+        except ValueError as error:
+            raise ServiceError("prompt_context_limit", "发送引用/背景快照超过边界", 422) from error
+
     async def begin_run(
         self,
         topic_id: str,
@@ -290,6 +395,16 @@ class KrimRepository:
                 sort_keys=True,
             )
         )
+        occurrences = request.mentions if isinstance(request, (ChatRequest, EditRequest)) else []
+        if occurrences:
+            fingerprint = json.dumps(
+                {
+                    "base": fingerprint,
+                    "mentions": [item.model_dump(mode="json") for item in occurrences],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         async with self.database.write_lock, self.database.sessions.begin() as session:
             topic = await session.get(TopicRow, topic_id)
@@ -345,6 +460,14 @@ class KrimRepository:
             session.add(run)
             await session.flush()
             if action != "regenerate":
+                snapshot = self._prompt_snapshot(topic, text, occurrences)
+                input_details: dict[str, JsonValue] = (
+                    {"edited_from": source_message_id} if action == "edit" else {}
+                )
+                if snapshot.mentions or snapshot.context_tags:
+                    input_details["prompt_context"] = TypeAdapter(JsonValue).validate_python(
+                        snapshot.model_dump(mode="json")
+                    )
                 highest = max((message.sequence for message in messages), default=0)
                 session.add(
                     MessageRow(
@@ -354,7 +477,7 @@ class KrimRepository:
                         sequence=highest + 1,
                         role="user",
                         content=text,
-                        details={"edited_from": source_message_id} if action == "edit" else {},
+                        details=input_details,
                         parent_id=parent_id,
                     )
                 )

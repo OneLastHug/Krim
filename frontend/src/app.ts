@@ -18,6 +18,7 @@ import {
   setApiKey,
 } from "./api.js";
 import { HostEndpoint, type HostJson } from "./host.js";
+import { PromptContextUI } from "./prompt-context-ui.js";
 
 type State = {
   topics: TopicView[];
@@ -55,6 +56,7 @@ const labels: Record<string, string> = { user: "用户", assistant: "助手", to
 const statuses: Record<string, string> = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
 const idempotency = (): string => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const hostEndpoint = new HostEndpoint();
+const promptContextUI = new PromptContextUI(showNotice);
 
 function hostObject(data: HostJson): Record<string, HostJson> {
   if (typeof data === "object" && data !== null && !Array.isArray(data)) return data as Record<string, HostJson>;
@@ -102,7 +104,7 @@ function setupHostBridge(): void {
     const prompt = text("prompt");
     const next = mode === "append" ? `${prompt.value}${value}` : value;
     if (next.length > 8192) throw new Error("Prompt 超过上限");
-    prompt.value = next;
+    promptContextUI.setText(next);
     prompt.focus();
     return { value: prompt.value, mode };
   });
@@ -112,7 +114,17 @@ function setupHostBridge(): void {
     showNotice(message);
     return { shown: true };
   });
-  hostEndpoint.announceReady({ protocol_version: 2, channels: ["host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme"] });
+  for (const channel of [
+    "mention/get", "mention/add", "mention/remove", "mention/clear",
+    "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
+  ]) {
+    hostEndpoint.on(channel, (data) => promptContextUI.bridge(channel, data));
+  }
+  hostEndpoint.announceReady({ protocol_version: 2, channels: [
+    "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
+    "mention/get", "mention/add", "mention/remove", "mention/clear",
+    "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
+  ] });
 }
 
 function showNotice(message = "", error = false): void {
@@ -120,6 +132,7 @@ function showNotice(message = "", error = false): void {
 }
 function disableComposer(value: boolean): void {
   state.busy = value;
+  promptContextUI.setBusy(value);
   ($("send") as HTMLButtonElement).disabled = value;
   text("prompt").disabled = value;
   ($("compact-preview") as HTMLButtonElement).disabled = value || !state.topicId;
@@ -343,6 +356,7 @@ async function loadTopic(topicId: string): Promise<void> {
   }
   disableComposer(state.busy);
   await loadInteractions();
+  await promptContextUI.selectTopic(topicId);
 }
 async function loadTopics(): Promise<void> {
   state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; renderTopics();
@@ -386,13 +400,13 @@ async function consume(runId: string, fromSeq = 0): Promise<void> {
 }
 async function sendMessage(event: SubmitEvent): Promise<void> {
   event.preventDefault(); if (!state.topicId || state.busy) return;
-  const prompt = text("prompt").value.trim(); if (!prompt) return;
+  const prompt = text("prompt").value; if (!prompt.trim()) return;
   disableComposer(true); showNotice("生成中……");
   try {
     const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
-    const body = state.editingMessageId ? { text: prompt, idempotency_key: idempotency() } : { text: prompt, idempotency_key: idempotency() };
+    const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences };
     const run = await requestJson<RunView>(path, { method: "POST", body: JSON.stringify(body) });
-    state.editingMessageId = null; text("prompt").value = ""; $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行";
+    state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行";
     await loadTopic(run.topic_id); await consume(run.id);
   } catch (error) { showNotice(errorText(error), true); state.streaming = false; disableComposer(false); }
 }
@@ -400,7 +414,7 @@ async function selectBranch(messageId: string): Promise<void> {
   if (!state.topicId || !messageId) return;
   try { await requestJson(`/v1/topics/${encodeURIComponent(state.topicId)}/branch`, { method: "PUT", body: JSON.stringify({ message_id: messageId }) }); await loadTopic(state.topicId); showNotice("活动分支已切换"); } catch (error) { showNotice(errorText(error), true); }
 }
-function beginEdit(message: MessageView): void { if (state.busy) return; state.editingMessageId = message.id; text("prompt").value = message.content; $("edit-cancel").hidden = false; $("composer-mode").textContent = "编辑后会创建新分支，原消息保留"; text("prompt").focus(); }
+function beginEdit(message: MessageView): void { if (state.busy) return; state.editingMessageId = message.id; promptContextUI.setText(message.content, true); $("edit-cancel").hidden = false; $("composer-mode").textContent = "编辑后会创建新分支，原消息保留"; text("prompt").focus(); }
 async function regenerateMessage(messageId: string): Promise<void> {
   if (!state.topicId || state.busy) return;
   disableComposer(true);
@@ -453,7 +467,7 @@ async function refresh(): Promise<void> { if (state.topicId) await loadTopic(sta
 function setup(): void {
   $("new-topic").addEventListener("click", () => void createTopic()); $("refresh").addEventListener("click", () => void refresh()); $("composer").addEventListener("submit", (event) => void sendMessage(event as SubmitEvent));
   $("compact-preview").addEventListener("click", () => void compact(false)); $("compact-confirm").addEventListener("click", () => void compact(true)); $("run-stop").addEventListener("click", () => void stopRun()); $("run-resume").addEventListener("click", () => void resumeRun()); $("agent-create").addEventListener("click", () => void createAgent()); $("branch-select").addEventListener("change", (event) => void selectBranch((event.target as HTMLSelectElement).value));
-  $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; text("prompt").value = ""; $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; }); $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; }); $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
+  $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = "Enter 发送 · Shift+Enter 换行"; }); $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; }); $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
   text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });
   text("workflow-json").addEventListener("input", () => renderWorkflowGraph()); $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant")); $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output")); $("workflow-connect").addEventListener("click", () => connectWorkflowNodes()); $("workflow-run").addEventListener("click", () => void runWorkflow()); $("workflow-pause").addEventListener("click", () => void workflowControl("pause")); $("workflow-resume").addEventListener("click", () => void workflowControl("resume")); $("workflow-stop").addEventListener("click", () => void workflowControl("stop")); $("workflow-save-node").addEventListener("click", () => saveWorkflowNode()); $("workflow-delete-node").addEventListener("click", () => deleteWorkflowNode()); $("workflow-delete-edge").addEventListener("click", () => deleteWorkflowEdge()); $("workflow-rerun").addEventListener("click", () => void rerunWorkflow()); $("workflow-restore").addEventListener("click", () => void restoreWorkflow()); $("workflow-load-run").addEventListener("click", () => void loadWorkflowRun()); renderWorkflowGraph(); workflowView();
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
