@@ -208,7 +208,8 @@ async def test_human_wait_does_not_consume_short_tool_execution_deadline(reposit
         repository,
         WriterProvider(),
         writer_tools(effects),
-        Settings(interactive_tools=True, tool_timeout_seconds=0.1, run_timeout_seconds=5),
+        # 本测试只验证 100 ms 工具预算的暂停；总运行超时由下一项测试独立验证。
+        Settings(interactive_tools=True, tool_timeout_seconds=0.1, run_timeout_seconds=30),
     )
     try:
         run = await start(runtime)
@@ -216,7 +217,12 @@ async def test_human_wait_does_not_consume_short_tool_execution_deadline(reposit
         await asyncio.sleep(0.25)
         assert not effects and (await repository.get_run(run.id)).status == "running"
         await runtime.interactions.reply(run.id, request.id, InteractionReply(action="approve"))
-        assert (await wait(runtime, run)).status == "completed" and effects == ["original"]
+        result = await wait(runtime, run)
+        assert result.status == "completed" and effects == ["original"], (
+            result.error_code,
+            result.error,
+            effects,
+        )
     finally:
         await runtime.close()
 
