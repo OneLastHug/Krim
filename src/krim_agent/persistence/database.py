@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from krim_agent.interactions import InteractionKind, InteractionView
+from krim_agent.locale import LocaleView, resolve_locale
 from krim_agent.prompt_context import (
     ContextTagInput,
     MentionInput,
@@ -75,6 +76,7 @@ class TopicRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     active_branches: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
     prompt_context: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
+    locale: Mapped[str] = mapped_column(String(16), default="zh-CN")
 
 
 class RunRow(Base):
@@ -253,12 +255,23 @@ class KrimRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def create_topic(self, title: str) -> TopicView:
+    async def create_topic(self, title: str, locale: str = "zh-CN") -> TopicView:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            row = TopicRow(id=str(uuid4()), title=title)
+            resolved = resolve_locale(locale)
+            row = TopicRow(id=str(uuid4()), title=title, locale=resolved.effective)
             session.add(row)
             await session.flush()
             return TopicView.model_validate(row)
+
+    async def set_topic_locale(self, topic_id: str, requested: str) -> LocaleView:
+        resolved = resolve_locale(requested)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            topic.locale = resolved.effective
+            topic.updated_at = utc_now()
+            return resolved
 
     async def get_topic(self, topic_id: str) -> TopicView:
         async with self.database.write_lock, self.database.sessions() as session:

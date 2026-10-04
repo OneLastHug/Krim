@@ -147,6 +147,7 @@ if (frame.contentDocument?.readyState === "complete")
 element("host-connect").addEventListener("click", () => void connect());
 element("host-state").addEventListener("click", () => void call("host/get-state"));
 element("host-dark").addEventListener("click", () => void call("host/theme", { theme: "dark" }));
+element("host-locale-apply").addEventListener("click", () => void call("host/set-locale", { locale: element("host-locale").value }));
 element("host-resize").addEventListener("click", () => void call("host/resize", { width: 960 }));
 element("host-replace").addEventListener("click", () => void call("host/prompt", { value: input("host-prompt").value, mode: "replace" }));
 element("host-append").addEventListener("click", () => void call("host/prompt", { value: input("host-prompt").value, mode: "append" }));

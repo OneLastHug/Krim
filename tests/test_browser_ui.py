@@ -30,6 +30,10 @@ async def test_static_browser_agent_app_assets_are_same_origin_and_safe(api):
     host_sdk = await api.get("/ui/host.js")
     assert host.status_code == host_script.status_code == host_sdk.status_code == 200
     assert "iframe" in host.text and "HostClient" in host_sdk.text
+    locale_script = await api.get("/ui/i18n.js")
+    assert locale_script.status_code == 200
+    assert locale_script.headers["x-content-type-options"] == "nosniff"
+    assert "textContent" in locale_script.text and "/v1/locales" in locale_script.text
 
 
 async def test_static_assets_are_public_but_business_api_still_requires_bearer_key(tmp_path):
@@ -50,6 +54,8 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
     ):
         assert (await client.get("/ui/")).status_code == 200
         assert (await client.get("/v1/topics")).status_code == 401
+        assert (await client.get("/v1/locales")).status_code == 401
+        assert (await client.get("/ui/i18n.js")).status_code == 200
         authorized = await client.get(
             "/v1/agents/catalog", headers={"Authorization": "Bearer ui-key"}
         )

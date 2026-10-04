@@ -7,6 +7,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.interactions import InteractionReply, InteractionView
+from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol import ChannelResult, InProcessBridge, StreamFrame
 from krim_agent.protocol.bridge import Handler
@@ -42,8 +43,17 @@ class AppHandle:
             raise ServiceError("channel_error", result.error or "宿主调用失败")
         return result.data
 
-    async def create_topic(self, title: str = "新话题") -> TopicView:
-        return TopicView.model_validate(await self._call("topic/create", {"title": title}))
+    async def create_topic(self, title: str = "新话题", *, locale: str = "zh-CN") -> TopicView:
+        return TopicView.model_validate(
+            await self._call("topic/create", {"title": title, "locale": locale})
+        )
+
+    async def set_topic_locale(self, topic_id: str, locale: str) -> LocaleView:
+        value = await self._call(
+            "locale/change",
+            {"topic_id": topic_id, **LocaleChange(locale=locale).model_dump(mode="json")},
+        )
+        return LocaleView.model_validate(value)
 
     async def prompt_context(self, topic_id: str) -> PromptContext:
         return PromptContext.model_validate(await self._call("mention/get", {"topic_id": topic_id}))

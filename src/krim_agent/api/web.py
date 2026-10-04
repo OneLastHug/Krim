@@ -20,6 +20,7 @@ PUBLIC_UI_PATHS = frozenset(
         "/ui/host-shell.js",
         "/ui/prompt-context.js",
         "/ui/prompt-context-ui.js",
+        "/ui/i18n.js",
     }
 )
 _CSP = (
@@ -47,6 +48,7 @@ def mount_browser_ui(app: FastAPI) -> None:
         "host-shell.js": "text/javascript",
         "prompt-context.js": "text/javascript",
         "prompt-context-ui.js": "text/javascript",
+        "i18n.js": "text/javascript",
     }
 
     @app.get("/", include_in_schema=False)

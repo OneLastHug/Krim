@@ -7,6 +7,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 from .app_sdk import AppHandle
 from .context_engine import ContextCompactRequest
 from .interactions import InteractionReply
+from .locale import LocaleChange
 from .prompt_context import (
     ContextTagAddRequest,
     ContextTagInput,
@@ -51,6 +52,10 @@ class TopicRequest(StrictModel):
     topic_id: str
 
 
+class LocaleTopicRequest(LocaleChange):
+    topic_id: str
+
+
 class BranchSelection(TopicRequest):
     message_id: str
 
@@ -73,8 +78,13 @@ class LocalApp:
 
         async def create_topic(data: JsonValue) -> JsonValue:
             payload = TopicCreate.model_validate(data)
-            topic = await runtime.repository.create_topic(payload.title)
+            topic = await runtime.repository.create_topic(payload.title, payload.locale)
             return TypeAdapter(JsonValue).validate_json(topic.model_dump_json())
+
+        async def locale_change(data: JsonValue) -> JsonValue:
+            payload = LocaleTopicRequest.model_validate(data)
+            value = await runtime.repository.set_topic_locale(payload.topic_id, payload.locale)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
         async def send(data: JsonValue) -> JsonValue:
             payload = SendRequest.model_validate(data)
@@ -205,6 +215,7 @@ class LocalApp:
             return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
         self._app.on("topic/create", create_topic)
+        self._app.on("locale/change", locale_change)
         self._app.on("chat/send", send)
         self._app.on("chat/stop", stop)
         self._app.on("interaction/list", interactions)

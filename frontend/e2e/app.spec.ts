@@ -150,7 +150,7 @@ test("Workflow 图节点/边编辑、持久运行和重新读取", async ({ page
   await page.getByRole("button", { name: "保存节点" }).click();
   await expect(page.locator('[data-workflow-node="start"]')).toContainText("constant");
   await page.getByRole("button", { name: "运行 Workflow" }).click();
-  await expect(page.locator("#workflow-status")).toContainText("completed");
+  await expect(page.locator("#workflow-status")).toContainText("已完成");
   await expect(page.locator("#workflow-status")).toContainText("输出 3");
   await expect(page.locator("#workflow-events")).toContainText("node_end");
   const options = await page.locator("#workflow-run-list option").count();
@@ -184,11 +184,11 @@ test("Workflow 暂停、覆盖输入、继续与重跑", async ({ page, request 
   await page.locator("#workflow-input").fill("1");
   await page.locator("#workflow-pause-before").fill("finish");
   await page.getByRole("button", { name: "运行 Workflow" }).click();
-  await expect(page.locator("#workflow-status")).toContainText("paused");
+  await expect(page.locator("#workflow-status")).toContainText("已暂停");
   await page.locator("#workflow-override").fill("9");
   await page.locator("#workflow-has-override").check();
   await page.locator("#workflow-resume").click();
-  await expect(page.locator("#workflow-status")).toContainText("completed");
+  await expect(page.locator("#workflow-status")).toContainText("已完成");
   await expect(page.locator("#workflow-status")).toContainText("输出 9");
   const runId = await page.locator("#workflow-run-list").inputValue();
   const before = await (await request.get(`/v1/workflows/runs/${runId}`)).json();
@@ -196,7 +196,7 @@ test("Workflow 暂停、覆盖输入、继续与重跑", async ({ page, request 
   const rerunResponse = page.waitForResponse((response) => response.url().endsWith(`/v1/workflows/runs/${runId}/rerun`) && response.request().method() === "POST");
   await page.locator("#workflow-rerun").click();
   expect((await (await rerunResponse).json()).epoch).toBeGreaterThan(before.epoch);
-  await expect(page.locator("#workflow-status")).toContainText("completed");
+  await expect(page.locator("#workflow-status")).toContainText("已完成");
   const finished = await (await request.get(`/v1/workflows/runs/${runId}`)).json();
   expect(finished.status).toBe("completed");
   expect(finished.epoch).toBeGreaterThan(before.epoch);

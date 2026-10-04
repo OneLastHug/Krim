@@ -15,6 +15,7 @@ from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFr
 HOST_UI_CHANNELS = frozenset(
     {
         "host/get-state",
+        "host/set-locale",
         "host/resize",
         "host/prompt",
         "host/notice",
