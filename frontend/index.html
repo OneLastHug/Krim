@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Krim Agent</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div><p class="eyebrow">YOUR WORKSPACE</p><h1>Krim Agent</h1></div>
+      <div class="actions"><span id="model-label" class="muted"></span><span id="connection" class="badge" role="status">连接中</span><button id="key-toggle" class="secondary" type="button">访问密钥</button></div>
+    </header>
+    <form id="key-form" class="key-panel" hidden>
+      <label for="api-key">服务访问密钥</label>
+      <input id="api-key" type="password" autocomplete="off" placeholder="输入服务的 API Key" />
+      <button class="primary" type="submit">连接</button>
+      <span class="muted">密钥仅用于当前页面的同源请求。</span>
+    </form>
+    <main class="layout">
+      <aside class="sidebar" aria-label="话题和 Agent">
+        <section class="panel">
+          <div class="panel-heading"><h2>话题</h2><button id="new-topic" class="icon-button" type="button" title="新建话题" aria-label="新建话题">+</button></div>
+          <label class="sr-only" for="topic-title">新话题标题</label><input id="topic-title" class="compact-input" placeholder="新话题标题" maxlength="120" />
+          <div id="topics" class="stack"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><h2>Agent</h2><span id="agent-count" class="muted">0</span></div>
+          <label class="sr-only" for="agent-kind">Agent 目录</label><select id="agent-kind" class="compact-input"></select>
+          <label class="sr-only" for="agent-prompt">Agent 任务</label><textarea id="agent-prompt" rows="2" maxlength="8192" placeholder="交给 Agent 的任务"></textarea>
+          <button id="agent-create" class="secondary" type="button">创建 Agent</button>
+          <div id="agents" class="stack" aria-live="polite"></div>
+        </section>
+      </aside>
+      <section class="conversation" aria-label="对话">
+        <div class="conversation-heading">
+          <div><p class="eyebrow">CONVERSATION</p><h2 id="topic-heading">请选择话题</h2></div>
+          <div class="actions"><button id="refresh" class="secondary" type="button">刷新</button><button id="run-stop" class="secondary" type="button" disabled>停止</button><button id="run-resume" class="secondary" type="button" disabled>继续读取</button></div>
+        </div>
+        <div class="context-bar">
+          <label for="branch-select">消息分支</label><select id="branch-select"><option value="">当前活动分支</option></select>
+          <label for="compact-budget">保留预算</label><input id="compact-budget" type="number" value="20" min="2" max="10000" />
+          <button id="compact-preview" class="secondary" type="button" disabled>预览压缩</button>
+          <button id="compact-confirm" class="secondary" type="button" disabled>确认压缩</button>
+        </div>
+        <section id="compact-panel" class="compact-panel" hidden aria-label="上下文压缩预览"><h3 id="compact-title"></h3><p id="compact-sources" class="muted"></p><pre id="compact-summary"></pre></section>
+        <div id="messages" class="messages" aria-live="polite"><div class="empty">选择或新建一个话题，开始对话。</div></div>
+        <div id="notice" class="notice" role="status"></div>
+        <form id="composer" class="composer">
+          <label class="sr-only" for="prompt">发送消息</label><textarea id="prompt" rows="3" maxlength="8192" placeholder="输入消息，或试试 /add 2 3"></textarea>
+          <div class="composer-footer"><span id="composer-mode" class="muted">Enter 发送 · Shift+Enter 换行</span><div class="actions"><button id="edit-cancel" class="secondary" type="button" hidden>取消编辑</button><button id="send" class="primary" type="submit">发送</button></div></div>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/ui/app.js"></script>
+  </body>
+</html>
