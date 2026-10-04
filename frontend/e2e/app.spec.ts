@@ -1,4 +1,6 @@
 import { test as base, expect } from "@playwright/test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const test = base.extend({
   request: async ({ playwright, baseURL }, use) => {
@@ -304,4 +306,65 @@ test("Agent 卡片执行时使用同一审批与问答回程", async ({ page, re
   expect(history.map((item: { status: string }) => item.status)).toEqual(["approved", "answered"]);
   await card.getByRole("button", { name: "销毁" }).click();
   await expect(card).toHaveCount(0);
+});
+
+test("同源 iframe Host SDK 完成握手、Key、Prompt、状态、主题和宽度回程", async ({ page }) => {
+  await page.goto("/ui/host.html");
+  const frame = page.frameLocator("#agent-frame");
+  await page.locator("#host-key").fill("browser-test-key");
+  await page.getByRole("button", { name: "连接 iframe" }).click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(frame.locator("#connection")).toContainText("本地服务已连接");
+  await page.getByRole("button", { name: "读取状态" }).click();
+  await expect(page.locator("#host-output")).toContainText('"iframe": true');
+  await page.locator("#host-prompt").fill("由父窗口插入");
+  await page.getByRole("button", { name: "替换 Prompt" }).click();
+  await expect(frame.locator("#prompt")).toHaveValue("由父窗口插入");
+  await page.getByRole("button", { name: "深色主题" }).click();
+  await expect(frame.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByRole("button", { name: "调整宽度" }).click();
+  await expect(page.locator("#host-output")).toContainText('"width": 960');
+});
+
+test("Python Host SDK 经真实 HTTP/SSE 和 iframe 回执完成控制", async ({ page, baseURL }) => {
+  await page.goto("/ui/host.html");
+  await page.locator("#host-key").fill("browser-test-key");
+  await page.getByRole("button", { name: "连接 iframe" }).click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(page.locator("#host-session")).not.toBeEmpty();
+  const sessionId = await page.locator("#host-session").textContent();
+  const execute = promisify(execFile);
+  const result = await execute("../.venv/bin/python", ["../tests/fixtures/host_sdk_client.py", baseURL!, sessionId!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  expect(JSON.parse(result.stdout)).toEqual({ connected: true, width: 840, theme: "dark" });
+  const frame = page.frameLocator("#agent-frame");
+  await expect(frame.locator("#prompt")).toHaveValue("由 Python Host SDK 插入");
+  await expect(frame.locator("#notice")).toContainText("Python 回程完成");
+  await expect(page.locator("#host-panel")).toBeVisible();
+  await page.getByRole("button", { name: "销毁 iframe" }).click();
+  await expect(page.locator("#agent-frame")).toHaveCount(0);
+});
+
+test("iframe 来源/版本/大小校验拒绝伪造调用，隐藏后状态仍存活", async ({ page }) => {
+  await page.goto("/ui/host.html");
+  await page.locator("#host-key").fill("browser-test-key");
+  await page.getByRole("button", { name: "连接 iframe" }).click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  const frame = page.frameLocator("#agent-frame");
+  await page.locator("#host-prompt").fill("保留当前 Prompt");
+  await page.getByRole("button", { name: "替换 Prompt" }).click();
+  await expect(frame.locator("#prompt")).toHaveValue("保留当前 Prompt");
+  await frame.locator("#prompt").evaluate(() => {
+    window.postMessage({ protocol_version: 2, kind: "call", id: "spoof-source", channel: "host/prompt", data: { value: "伪造来源" } }, location.origin);
+  });
+  await page.evaluate(() => {
+    const target = (document.getElementById("agent-frame") as HTMLIFrameElement).contentWindow!;
+    target.postMessage({ protocol_version: 3, kind: "call", id: "spoof-version", channel: "host/prompt", data: { value: "版本错误" } }, location.origin);
+    target.postMessage({ protocol_version: 2, kind: "call", id: "spoof-size", channel: "host/prompt", data: { value: "x".repeat(65537) } }, location.origin);
+  });
+  await page.getByRole("button", { name: "隐藏侧栏" }).click();
+  await expect(page.locator("#host-panel")).toBeHidden();
+  await expect(page.locator("#agent-frame")).toHaveCount(1);
+  await page.getByRole("button", { name: "打开侧栏" }).click();
+  await expect(frame.locator("#prompt")).toHaveValue("保留当前 Prompt");
+  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });

@@ -17,6 +17,7 @@ import {
   requestJson,
   setApiKey,
 } from "./api.js";
+import { HostEndpoint, type HostJson } from "./host.js";
 
 type State = {
   topics: TopicView[];
@@ -53,6 +54,66 @@ const text = (id: string): HTMLInputElement | HTMLTextAreaElement => $(id) as HT
 const labels: Record<string, string> = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses: Record<string, string> = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁" };
 const idempotency = (): string => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+const hostEndpoint = new HostEndpoint();
+
+function hostObject(data: HostJson): Record<string, HostJson> {
+  if (typeof data === "object" && data !== null && !Array.isArray(data)) return data as Record<string, HostJson>;
+  return {};
+}
+
+function setupHostBridge(): void {
+  hostEndpoint.on("host/get-state", () => ({
+    connected: $("connection").classList.contains("ready"),
+    topic_id: state.topicId,
+    run_id: state.runId,
+    locale: document.documentElement.lang || "zh-CN",
+    iframe: window.parent !== window,
+  }));
+  hostEndpoint.on("host/set-key", async (data) => {
+    const key = hostObject(data).key;
+    if (typeof key !== "string" || key.length > 512) throw new Error("访问密钥无效");
+    setApiKey(key);
+    await boot();
+    return { connected: $("connection").classList.contains("ready") };
+  });
+  hostEndpoint.on("host/set-locale", (data) => {
+    const locale = hostObject(data).locale;
+    if (typeof locale !== "string" || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(locale)) throw new Error("locale 无效");
+    document.documentElement.lang = locale;
+    return { locale };
+  });
+  hostEndpoint.on("host/resize", (data) => {
+    const width = hostObject(data).width;
+    if (typeof width !== "number" || !Number.isFinite(width) || width < 320 || width > 1600) throw new Error("宽度必须在 320–1600 之间");
+    document.documentElement.style.setProperty("--host-width", `${Math.round(width)}px`);
+    return { width: Math.round(width) };
+  });
+  hostEndpoint.on("host/theme", (data) => {
+    const theme = hostObject(data).theme;
+    if (theme !== "light" && theme !== "dark" && theme !== "system") throw new Error("主题无效");
+    document.documentElement.dataset.theme = theme === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
+    return { theme };
+  });
+  hostEndpoint.on("host/prompt", (data) => {
+    const object = hostObject(data);
+    const value = object.value;
+    const mode = object.mode === "append" ? "append" : "replace";
+    if (typeof value !== "string" || value.length > 8192) throw new Error("Prompt 无效");
+    const prompt = text("prompt");
+    const next = mode === "append" ? `${prompt.value}${value}` : value;
+    if (next.length > 8192) throw new Error("Prompt 超过上限");
+    prompt.value = next;
+    prompt.focus();
+    return { value: prompt.value, mode };
+  });
+  hostEndpoint.on("host/notice", (data) => {
+    const message = hostObject(data).message;
+    if (typeof message !== "string" || message.length > 1024) throw new Error("通知无效");
+    showNotice(message);
+    return { shown: true };
+  });
+  hostEndpoint.announceReady({ protocol_version: 2, channels: ["host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme"] });
+}
 
 function showNotice(message = "", error = false): void {
   const node = $("notice"); node.textContent = message; node.className = error ? "notice error" : "notice";
@@ -68,6 +129,7 @@ function disableComposer(value: boolean): void {
   ($("run-stop") as HTMLButtonElement).disabled = !state.runId || !(state.streaming || state.disconnected);
   ($("run-resume") as HTMLButtonElement).disabled = !state.runId || state.streaming || !state.disconnected;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".topic-button, .message-controls button")) button.disabled = value;
+  hostEndpoint.notify("host/state", { connected: $("connection").classList.contains("ready"), topic_id: state.topicId, run_id: state.runId, iframe: window.parent !== window, locale: document.documentElement.lang || "zh-CN" });
 }
 function renderTopics(): void {
   const root = $("topics"); root.replaceChildren();
@@ -397,4 +459,6 @@ function setup(): void {
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
 }
 async function boot(): Promise<void> { try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); renderTopics(); renderAgents(); if (!state.topicId && state.topics[0]) await loadTopic(state.topics[0].id); $("connection").textContent = "本地服务已连接"; $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = "需要连接"; $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
-setup(); void boot();
+setupHostBridge();
+setup();
+void boot();
