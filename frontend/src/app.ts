@@ -119,6 +119,11 @@ function setupHostBridge(): void {
     locale: document.documentElement.lang || "zh-CN",
     iframe: window.parent !== window,
   }));
+  hostEndpoint.on("host/request", (data) => {
+    const request = hostObject(data);
+    if (typeof request.channel !== "string" || !["checkpoint/create", "checkpoint/rollback", "checkpoint/canRollback", "changeList/invoke", "host/callback"].includes(request.channel)) throw new Error("宿主回程信道无效");
+    return hostEndpoint.request(request.channel, request.data ?? null);
+  });
   hostEndpoint.on("host/set-key", async (data) => {
     const key = hostObject(data).key;
     if (typeof key !== "string" || key.length > 512) throw new Error("访问密钥无效");

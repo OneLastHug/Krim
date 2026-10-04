@@ -104,6 +104,17 @@ function bind(): void {
     if (!sessionId) { output(data); status("收到链接通知", true); return; }
     void requestJson(`/v1/host/sessions/${sessionId}/notify`, { method: "POST", body: JSON.stringify({ protocol_version: 2, kind: "notify", id: crypto.randomUUID(), channel: "link/navigate", data }) }).then(() => { output(data); status("收到链接通知", true); }).catch(() => status("链接通知被服务拒绝"));
   });
+  for (const channel of ["checkpoint/create", "checkpoint/rollback", "checkpoint/canRollback", "changeList/invoke", "host/callback"]) {
+    client.onCall(channel, async (data, requestId) => {
+      if (!sessionId) throw new Error("Python Host session 尚未建立");
+      const response = await requestJson<{ ok: boolean; data: HostJson; error: string | null }>(`/v1/host/sessions/${sessionId}/requests`, { method: "POST", body: JSON.stringify({ envelope: { protocol_version: 2, kind: "call", id: requestId, channel, data }, timeout_seconds: 10 }) });
+      if (!response.ok) throw new Error(response.error || "宿主执行失败");
+      return response.data;
+    });
+    client.onCancel(channel, (requestId) => {
+      if (sessionId) void requestJson(`/v1/host/sessions/${sessionId}/cancel/${encodeURIComponent(requestId)}`, { method: "POST" }).catch(() => undefined);
+    });
+  }
   void client.call("host/get-state").then(() => status("iframe 已就绪", true)).catch(() => status("等待 iframe 就绪"));
 }
 frame.addEventListener("load", bind);

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 from uuid import uuid4
 
 import httpx
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import (
@@ -27,6 +28,7 @@ from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StreamFr
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 
 HostNotification = Callable[[JsonValue], object | Awaitable[object]]
+HostRequest = Callable[[JsonValue], object | Awaitable[object]]
 LinkNotification = Callable[[LinkNavigate], object | Awaitable[object]]
 
 
@@ -50,6 +52,9 @@ class RemoteHostHandle:
         )
         self._closed = False
         self._handlers: dict[str, HostNotification] = {}
+        self._request_handlers: dict[str, HostRequest] = {}
+        self._request_tasks: dict[str, tuple[str, asyncio.Task[None]]] = {}
+        self._seen_requests: set[str] = set()
         self._seen_links: set[str] = set()
 
     async def __aenter__(self) -> RemoteHostHandle:
@@ -231,6 +236,68 @@ class RemoteHostHandle:
 
         return remove
 
+    def on_request(self, channel: str, handler: HostRequest) -> Callable[[], None]:
+        if channel in self._request_handlers:
+            raise ValueError("宿主请求 handler 已注册")
+        self._request_handlers[channel] = handler
+
+        def remove() -> None:
+            if self._request_handlers.get(channel) is handler:
+                self._request_handlers.pop(channel, None)
+
+        return remove
+
+    async def _serve_request(self, envelope: ProtocolEnvelope) -> None:
+        handler = self._request_handlers.get(envelope.channel)
+        if handler is None:
+            reply = ChannelResult(ok=False, error="未注册宿主请求 handler")
+        else:
+            try:
+                value = handler(envelope.data)
+                value = await value if inspect.isawaitable(value) else value
+                reply = ChannelResult(ok=True, data=TypeAdapter(JsonValue).validate_python(value))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                reply = ChannelResult(ok=False, error="宿主请求 handler 执行失败")
+        try:
+            envelope_reply = ProtocolEnvelope(
+                kind="reply",
+                id=envelope.id,
+                channel=envelope.channel,
+                data=reply.model_dump(mode="json"),
+            )
+        except ValueError:
+            envelope_reply = ProtocolEnvelope(
+                kind="reply",
+                id=envelope.id,
+                channel=envelope.channel,
+                data=ChannelResult(ok=False, error="宿主回执超过协议边界").model_dump(mode="json"),
+            )
+        response = await self._http.post(
+            self._path("/reply"),
+            params={"side": "host"},
+            json=envelope_reply.model_dump(mode="json"),
+        )
+        if response.status_code not in {409, 410}:
+            self._check(response)
+
+    def _dispatch_request(self, envelope: ProtocolEnvelope) -> None:
+        if envelope.id in self._seen_requests:
+            return
+        if len(self._seen_requests) >= 512 or len(self._request_tasks) >= 128:
+            raise ServiceError("host_request_limit", "宿主请求处理超过上限", 429)
+        self._seen_requests.add(envelope.id)
+        task = asyncio.create_task(self._serve_request(envelope))
+        self._request_tasks[envelope.id] = (envelope.channel, task)
+
+        def finished(value: asyncio.Task[None]) -> None:
+            self._request_tasks.pop(envelope.id, None)
+            if not value.cancelled():
+                value.exception()
+
+        task.add_done_callback(finished)
+
     def on_link(self, handler: LinkNotification) -> Callable[[], None]:
         async def consume(data: JsonValue) -> None:
             value = handler(LinkNavigate.model_validate(data))
@@ -258,8 +325,19 @@ class RemoteHostHandle:
                     raise ServiceError("host_stream_invalid", "宿主事件关联或游标无效")
                 cursor += 1
                 envelope = ProtocolEnvelope.model_validate(frame.data)
+                if envelope.kind == "call":
+                    self._dispatch_request(envelope)
+                    yield envelope
+                    continue
+                if envelope.kind == "cancel":
+                    active = self._request_tasks.get(envelope.id)
+                    if active is not None and active[0] == envelope.channel:
+                        active[1].cancel()
+                        await asyncio.gather(active[1], return_exceptions=True)
+                    yield envelope
+                    continue
                 if envelope.kind != "notify":
-                    raise ServiceError("host_stream_invalid", "宿主事件不是通知")
+                    raise ServiceError("host_stream_invalid", "宿主事件类型无效")
                 handler = self._handlers.get(envelope.channel)
                 if envelope.channel == "link/navigate":
                     if envelope.id in self._seen_links:
@@ -284,5 +362,12 @@ class RemoteHostHandle:
             return
         self._closed = True
         self._handlers.clear()
+        self._request_handlers.clear()
+        tasks = [task for _channel, task in self._request_tasks.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._request_tasks.clear()
+        self._seen_requests.clear()
         self._seen_links.clear()
         await self._http.aclose()

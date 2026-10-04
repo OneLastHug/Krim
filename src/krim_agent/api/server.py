@@ -241,8 +241,18 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         return await host_sessions.command(session_id, request)
 
     @app.post("/v1/host/sessions/{session_id}/reply")
-    async def host_reply(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
-        return await host_sessions.reply(session_id, envelope)
+    async def host_reply(
+        session_id: str, envelope: ProtocolEnvelope, side: HostSide = "app"
+    ) -> ChannelResult:
+        return await host_sessions.reply(session_id, envelope, side)
+
+    @app.post("/v1/host/sessions/{session_id}/requests")
+    async def app_host_request(session_id: str, command: HostCommand) -> ChannelResult:
+        return await host_sessions.request(session_id, command)
+
+    @app.post("/v1/host/sessions/{session_id}/cancel/{request_id}")
+    async def app_host_cancel(session_id: str, request_id: str) -> ChannelResult:
+        return await host_sessions.cancel(session_id, request_id)
 
     @app.post("/v1/host/sessions/{session_id}/notify")
     async def host_notify(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
