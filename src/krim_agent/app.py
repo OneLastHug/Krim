@@ -6,6 +6,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
 from .context_engine import ContextCompactRequest
+from .drag import DragDropRequest, DragEnterRequest, DragPreview, DragState
 from .interactions import InteractionReply
 from .link import LinkNavigate
 from .locale import LocaleChange
@@ -221,6 +222,30 @@ class LocalApp:
             value = await runtime.repository.remove_mention(payload.topic_id, payload.mention_id)
             return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
+        async def drag_enter(data: JsonValue) -> JsonValue:
+            payload = DragEnterRequest.model_validate(data)
+            await runtime.repository.get_topic(payload.topic_id)
+            value = DragState(
+                active=True,
+                preview=DragPreview.model_validate(payload.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def drag_leave(data: JsonValue) -> JsonValue:
+            payload = TopicRequest.model_validate(data)
+            await runtime.repository.get_topic(payload.topic_id)
+            return TypeAdapter(JsonValue).validate_python(
+                DragState(active=False).model_dump(mode="json")
+            )
+
+        async def drag_drop(data: JsonValue) -> JsonValue:
+            payload = DragDropRequest.model_validate(data)
+            value = await runtime.repository.add_mention(
+                payload.topic_id,
+                MentionInput.model_validate(payload.model_dump(exclude={"topic_id"})),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
         async def clear_mentions(data: JsonValue) -> JsonValue:
             value = await runtime.repository.remove_mention(
                 PromptContextRequest.model_validate(data).topic_id
@@ -265,6 +290,9 @@ class LocalApp:
         self._app.on_stream("chat/stream", events)
         self._app.on("mention/get", get_context)
         self._app.on("mention/add", add_mention)
+        self._app.on("drag/enter", drag_enter)
+        self._app.on("drag/leave", drag_leave)
+        self._app.on("drag/drop", drag_drop)
         self._app.on("mention/remove", remove_mention)
         self._app.on("mention/clear", clear_mentions)
         self._app.on("context/getTags", get_context)

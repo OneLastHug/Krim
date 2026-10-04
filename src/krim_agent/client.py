@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
+from .drag import DragPreview, DragState
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
 from .prompt_context import (
@@ -124,6 +125,25 @@ class KrimClient:
         )
         self._check(response)
         return SkillReadResult.model_validate_json(response.content)
+
+    def drag_enter(self, topic_id: str, preview: DragPreview) -> DragState:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/drag/enter", json=preview.model_dump(mode="json")
+        )
+        self._check(response)
+        return DragState.model_validate_json(response.content)
+
+    def drag_leave(self, topic_id: str) -> DragState:
+        response = self._http.post(f"/v1/topics/{topic_id}/drag/leave")
+        self._check(response)
+        return DragState.model_validate_json(response.content)
+
+    def drag_drop(self, topic_id: str, request: MentionInput) -> MentionRef:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/drag/drop", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return MentionRef.model_validate_json(response.content)
 
     def messages(self, topic_id: str) -> list[MessageView]:
         response = self._http.get(f"/v1/topics/{topic_id}/messages")

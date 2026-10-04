@@ -40,6 +40,13 @@ export class PromptContextUI {
     prompt.value = result.value; this.previous = result.value; this.selected = result.occurrences;
     prompt.focus(); prompt.setSelectionRange(result.cursor, result.cursor); this.render();
   }
+  async acceptDrop(topicId: string, reference: MentionRef): Promise<boolean> {
+    if (topicId !== this.topicId || this.busy) return false;
+    await this.load();
+    if (topicId !== this.topicId || this.busy) return false;
+    this.insert(reference);
+    return true;
+  }
   private async load(): Promise<void> {
     const id = this.topicId; if (!id) return;
     const value = await requestJson<PromptContext>(`/v1/topics/${encodeURIComponent(id)}/prompt-context`);

@@ -3,6 +3,7 @@ import { HostEndpoint } from "./host.js";
 import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
+import { DragDropUI } from "./drag-drop.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
@@ -20,6 +21,7 @@ const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random(
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
+const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 let localeChangeQueue = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice = "";
@@ -37,6 +39,7 @@ function redrawLocale() {
     workflowView();
     promptContextUI.refreshLocale();
     skillsUI.refreshLocale();
+    dragDropUI.refreshLocale();
     $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
     $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
     $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -145,11 +148,14 @@ function setupHostBridge() {
     }
     for (const channel of ["skill/list", "skill/inject", "skill/remove", "skill/read"])
         hostEndpoint.on(channel, (data) => skillsUI.bridge(channel, data));
+    for (const channel of ["drag/enter", "drag/leave", "drag/drop"])
+        hostEndpoint.on(channel, (data) => dragDropUI.bridge(channel, data));
     hostEndpoint.announceReady({ protocol_version: 2, channels: [
             "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
             "mention/get", "mention/add", "mention/remove", "mention/clear",
             "context/getTags", "context/addTag", "context/removeTag", "context/clearTags",
             "skill/list", "skill/inject", "skill/remove", "skill/read",
+            "drag/enter", "drag/leave", "drag/drop",
         ] });
 }
 function showNotice(message = "", error = false, local = true) {
@@ -165,6 +171,7 @@ function disableComposer(value) {
     state.busy = value;
     promptContextUI.setBusy(value);
     skillsUI.setBusy(value);
+    dragDropUI.setBusy(value);
     $("send").disabled = value;
     text("prompt").disabled = value;
     $("compact-preview").disabled = value || !state.topicId;
@@ -756,6 +763,7 @@ async function loadTopic(topicId) {
         renderInteractions();
     }
     state.topicId = topicId;
+    dragDropUI.selectTopic(topicId);
     const topic = state.topics.find((item) => item.id === topicId);
     $("topic-heading").textContent = topic?.title || t("话题");
     const [messages, tree] = await Promise.all([
