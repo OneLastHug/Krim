@@ -132,18 +132,31 @@ class ToolRegistry:
     ) -> Result:
         parent = context or ToolContext(self, timeout=self.default_timeout)
         try:
-            definition = self.get(name)
-        except ToolError:
+            if parent.depth == 0 and parent.model_tools is not None:
+                candidate = parent.model_tools.get(name)
+                if candidate is None:
+                    self.get(name)
+                    raise ToolError("tool_not_loaded", "工具未在当前模型步骤加载")
+                if candidate.name != name:
+                    raise ToolError("tool_binding_changed", "工具名称与当前模型步骤绑定不一致")
+                if name in self._definitions and candidate is not self._definitions[name]:
+                    raise ToolError("tool_binding_changed", "工具定义与当前模型步骤绑定不一致")
+                if name not in self._definitions and name != "tool_search":
+                    self.get(name)
+                definition = candidate
+            else:
+                definition = self.get(name)
+        except ToolError as error:
             self._observe(
                 ToolAudit(
                     call_id=parent.call_id,
                     run_id=parent.run_id,
                     name=name,
-                    risk="write",
+                    risk=self._definitions[name].risk if name in self._definitions else "write",
                     decision="deny",
                     depth=parent.depth + 1,
                     ok=False,
-                    code="tool_not_found",
+                    code=error.code,
                 )
             )
             raise

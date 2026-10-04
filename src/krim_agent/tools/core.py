@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, get_type_hints
@@ -86,6 +86,7 @@ class ToolContext:
     execution_timeouts: tuple[ToolExecutionBudget, ...] = ()
     # 来源由宿主/模型运行时设置，不能从工具参数伪造。
     origin: Literal["model", "host"] = "model"
+    model_tools: Mapping[str, ToolDefinition] | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -102,6 +103,7 @@ class ToolContext:
             interaction_publisher=self.interaction_publisher,
             execution_timeouts=self.execution_timeouts,
             origin=self.origin,
+            model_tools=self.model_tools,
             arguments=arguments,
         )
 
@@ -133,6 +135,8 @@ class ToolDefinition:
     pre_execute: PreHook | None = None
     post_execute: PostHook | None = None
     output_schema: OutputSchema | None = None
+    should_defer: bool = False
+    always_load: bool = False
     _output_contract: OutputContract | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -142,6 +146,8 @@ class ToolDefinition:
             raise ValueError("工具名称必须是小写字母开头的 snake_case，最多 64 字符")
         if self.risk not in {"read", "write"}:
             raise ValueError("不支持的风险等级")
+        if type(self.should_defer) is not bool or type(self.always_load) is not bool:
+            raise ValueError("工具加载配置必须为布尔值")
         Draft202012Validator.check_schema(self.parameters.model_json_schema())
         if self.output_schema is not None:
             object.__setattr__(self, "_output_contract", OutputContract(self.output_schema))
@@ -160,6 +166,8 @@ class ToolDefinition:
             risk=self.risk,
             input_schema=self.parameters.model_json_schema(),
             output_schema=self._output_contract.schema() if self._output_contract else None,
+            should_defer=self.should_defer,
+            always_load=self.always_load,
         )
 
 
@@ -169,6 +177,8 @@ class ToolBase(ABC):
     parameters: type[BaseModel]
     risk: Risk = "write"
     output_schema: OutputSchema | None = None
+    should_defer: bool = False
+    always_load: bool = False
 
     @abstractmethod
     async def execute(self, arguments: BaseModel, context: ToolContext) -> Any:
@@ -182,6 +192,8 @@ class ToolBase(ABC):
             self.execute,
             self.risk,
             output_schema=self.output_schema,
+            should_defer=self.should_defer,
+            always_load=self.always_load,
         )
 
 
@@ -191,6 +203,8 @@ def tool(
     description: str = "",
     risk: Risk = "write",
     output_schema: OutputSchema | None = None,
+    should_defer: bool = False,
+    always_load: bool = False,
 ) -> Callable[[Callable[..., Awaitable[Any]]], ToolDefinition]:
     def decorate(function: Callable[..., Awaitable[Any]]) -> ToolDefinition:
         if not inspect.iscoroutinefunction(function):
@@ -233,6 +247,8 @@ def tool(
             executor,
             risk,
             output_schema=output_schema,
+            should_defer=should_defer,
+            always_load=always_load,
         )
 
     return decorate
@@ -249,6 +265,8 @@ class ToolInfo(StrictModel):
     risk: Risk
     input_schema: dict[str, JsonValue]
     output_schema: WireOutputSchema | None = None
+    should_defer: bool = False
+    always_load: bool = False
 
 
 class ToolResult(StrictModel):

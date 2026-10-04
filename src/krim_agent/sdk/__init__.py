@@ -14,12 +14,14 @@ from .types import (
     StreamStart,
     TextDelta,
     ToolCallPart,
+    ToolDiscoveryPart,
     ToolResultPart,
 )
 
 __all__ = [
     "ContextCompactPart",
     "InteractionPart",
+    "ToolDiscoveryPart",
     "FinishReason",
     "GenerateResult",
     "PythonAI",

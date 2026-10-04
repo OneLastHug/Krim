@@ -43,6 +43,7 @@ from krim_agent.tools.core import (
     ToolDefinition,
     ToolExecutionBudget,
 )
+from krim_agent.tools.discovery import ToolDiscovery
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class RunState:
     seen_calls: set[str] = field(default_factory=set)
     publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     step: int = 0
+    discovery: ToolDiscovery | None = None
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -298,6 +300,12 @@ class ChatRuntime:
                     state.condition.notify_all()
 
     async def _loop(self, state: RunState) -> None:
+        try:
+            state.discovery = ToolDiscovery(self.tools.definitions)
+        except ValueError as error:
+            raise ServiceError(
+                "tool_catalog_conflict", "工具目录与按需搜索名称冲突", 409
+            ) from error
         for _step in range(self.settings.max_steps):
             state.step = _step
             history = await self.repository.list_messages(state.run.topic_id)
@@ -343,7 +351,9 @@ class ChatRuntime:
                     },
                 )
             calls: list[ModelToolCall] = []
-            provider_stream = self.provider.stream(messages, self.tools.definitions)
+            assert state.discovery is not None
+            tool_step = state.discovery.prepare()
+            provider_stream = self.provider.stream(messages, list(tool_step.definitions.values()))
             try:
                 async for delta in provider_stream:
                     if isinstance(delta, ModelText):
@@ -410,6 +420,7 @@ class ChatRuntime:
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,
                         execution_timeouts=self.execution_timeouts,
+                        model_tools=tool_step.bindings(),
                     ),
                 )
                 await self.repository.add_message(
@@ -419,6 +430,7 @@ class ChatRuntime:
                     {"call_id": call.id, "name": call.name, **result.model_dump(mode="json")},
                 )
                 state.pending_calls.remove(call)
+                added = state.discovery.consume(tool_step, call.id, call.name, result)
                 await state.publish(
                     "chunk",
                     {
@@ -428,6 +440,16 @@ class ChatRuntime:
                         **result.model_dump(mode="json"),
                     },
                 )
+                if added:
+                    await state.publish(
+                        "chunk",
+                        {
+                            "type": "tool_discovery",
+                            "tools": list(added),
+                            "step": _step,
+                            "call_id": call.id,
+                        },
+                    )
             await state.publish(
                 "chunk", {"type": "step_finish", "step": _step, "finish_reason": "tool-calls"}
             )

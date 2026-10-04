@@ -33,6 +33,7 @@ from .types import (
     StreamStart,
     TextDelta,
     ToolCallPart,
+    ToolDiscoveryPart,
     ToolResultPart,
 )
 
@@ -80,6 +81,10 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "tool_discovery":
+        return ToolDiscoveryPart.model_validate(
+            {key: data.get(key) for key in ("tools", "step", "call_id")}
+        )
     if kind == "interaction_request":
         return InteractionPart.model_validate({"interaction": data.get("interaction")})
     if kind == "text_delta":

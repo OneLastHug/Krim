@@ -101,6 +101,8 @@ class MCPBridge:
                     TypeAdapter(dict[str, JsonValue]).validate_python(remote.outputSchema)
                     if remote.outputSchema is not None
                     else None,
+                    remote.name in config.deferred_tools,
+                    remote.name in config.always_load_tools,
                 )
                 prepared.append(
                     (
@@ -156,6 +158,8 @@ class MCPBridge:
         readonly: bool,
         schema: dict[str, JsonValue],
         output_schema: dict[str, JsonValue] | None = None,
+        should_defer: bool = False,
+        always_load: bool = False,
     ) -> ToolDefinition:
         parameters = arguments_model(f"MCP_{local}_Input", schema)
 
@@ -178,6 +182,8 @@ class MCPBridge:
             execute,
             "read" if readonly else "write",
             output_schema=output_schema,
+            should_defer=should_defer,
+            always_load=always_load,
         )
 
     def statuses(self) -> list[MCPServerStatus]:
