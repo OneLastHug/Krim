@@ -1,5 +1,6 @@
 """M1 SQLite 持久化边界。"""
 
+from .change_lists import ChangeListRepository
 from .database import (
     ContextSummaryRow,
     Database,
@@ -19,6 +20,7 @@ __all__ = [
     "WorkflowRequestRow",
     "ContextSummaryRow",
     "InteractionRow",
+    "ChangeListRepository",
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
 ]

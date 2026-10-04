@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,9 +21,22 @@ from krim_agent.application.agents import (
     AgentSpawnRequest,
     AgentView,
 )
+from krim_agent.application.change_lists import ChangeListService
 from krim_agent.application.host import HostSessions
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
+from krim_agent.change_list import (
+    ChangeClick,
+    ChangeExecution,
+    ChangeInvoke,
+    ChangeInvokeRequest,
+    ChangeItemClick,
+    ChangeListView,
+    ChangeOperation,
+    ChangeReceipt,
+    ChangeRevision,
+    ChangeSync,
+)
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
 from krim_agent.drag import DragPreview, DragState
@@ -31,6 +45,7 @@ from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.persistence.change_lists import ChangeListRepository
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -122,15 +137,19 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     )
     agent_service = AgentService(service, config)
     host_sessions = HostSessions()
+    change_repository = ChangeListRepository(database)
+    change_service = ChangeListService(change_repository)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             await database.initialize()
+            await change_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
             yield
         finally:
+            await change_service.close()
             await host_sessions.shutdown()
             try:
                 await workflow_service.close()
@@ -164,6 +183,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.workflow = workflow_service
     app.state.agents = agent_service
     app.state.host_sessions = host_sessions
+    app.state.change_lists = change_service
     mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
@@ -248,6 +268,24 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @app.post("/v1/host/sessions/{session_id}/requests")
     async def app_host_request(session_id: str, command: HostCommand) -> ChannelResult:
+        if command.envelope.channel == "changeList/invoke":
+            if command.envelope.kind != "call":
+                raise ServiceError("host_channel_invalid", "变更操作必须是 call", 422)
+            try:
+                request = ChangeInvokeRequest.model_validate(command.envelope.data)
+            except ValueError:
+                raise ServiceError(
+                    "change_input_invalid", "变更操作必须绑定话题、revision 和幂等键", 422
+                ) from None
+            payload = ChangeInvoke.model_validate(
+                {
+                    **request.model_dump(exclude={"topic_id"}),
+                    "host_session_id": session_id,
+                    "timeout_seconds": min(command.timeout_seconds, request.timeout_seconds),
+                }
+            )
+            operation = await invoke_change(request.topic_id, payload)
+            return ChannelResult(ok=True, data=operation.model_dump(mode="json"))
         return await host_sessions.request(session_id, command)
 
     @app.post("/v1/host/sessions/{session_id}/cancel/{request_id}")
@@ -256,6 +294,16 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @app.post("/v1/host/sessions/{session_id}/notify")
     async def host_notify(session_id: str, envelope: ProtocolEnvelope) -> ChannelResult:
+        if envelope.channel == "changeList/item/click":
+            try:
+                click = ChangeItemClick.model_validate(envelope.data)
+            except ValueError:
+                raise ServiceError(
+                    "host_notification_invalid", "变更点击通知结构无效", 422
+                ) from None
+            current = await change_repository.get(click.topic_id)
+            if current.revision != click.revision or click.item not in current.items:
+                raise ServiceError("change_revision_conflict", "变更点击快照已失效", 409)
         await host_sessions.notify(session_id, envelope)
         return ChannelResult(ok=True, data=None)
 
@@ -408,6 +456,86 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics/{topic_id}/prompt-context")
     async def prompt_context(topic_id: str) -> PromptContext:
         return await repository.get_prompt_context(topic_id)
+
+    @app.get("/v1/topics/{topic_id}/change-list")
+    async def change_list(topic_id: str) -> ChangeListView:
+        return await change_repository.get(topic_id)
+
+    @app.put("/v1/topics/{topic_id}/change-list")
+    async def sync_change_list(topic_id: str, payload: ChangeSync) -> ChangeListView:
+        return await change_repository.sync(topic_id, payload)
+
+    @app.post("/v1/topics/{topic_id}/change-list/clear")
+    async def clear_change_list(topic_id: str, payload: ChangeRevision) -> ChangeListView:
+        return await change_repository.sync(topic_id, ChangeSync(revision=payload.revision))
+
+    @app.post("/v1/topics/{topic_id}/change-list/invoke")
+    async def invoke_change(topic_id: str, payload: ChangeInvoke) -> ChangeOperation:
+        async def execute(execution: ChangeExecution) -> ChangeReceipt:
+            if payload.host_session_id is None:
+                raise ServiceError("host_not_ready", "变更执行需要可信 Python Host session", 409)
+            result = await host_sessions.request(
+                payload.host_session_id,
+                HostCommand(
+                    envelope=ProtocolEnvelope(
+                        kind="call",
+                        id=execution.operation_id,
+                        channel="changeList/invoke",
+                        data=execution.model_dump(mode="json"),
+                    ),
+                    timeout_seconds=payload.timeout_seconds,
+                ),
+            )
+            if not result.ok:
+                raise ServiceError("executor_failed", "宿主执行未返回有效业务回执", 502)
+            return ChangeReceipt.model_validate(result.data)
+
+        return await change_service.invoke(topic_id, payload, execute)
+
+    @app.get("/v1/topics/{topic_id}/change-list/operations")
+    async def change_operations(topic_id: str) -> list[ChangeOperation]:
+        return await change_repository.operations(topic_id)
+
+    @app.get("/v1/topics/{topic_id}/change-list/operations/{operation_id}")
+    async def change_operation(topic_id: str, operation_id: str) -> ChangeOperation:
+        return await change_repository.operation(topic_id, operation_id)
+
+    @app.get("/v1/topics/{topic_id}/change-list/operations/{operation_id}/history")
+    async def change_history(topic_id: str, operation_id: str) -> list[ChangeReceipt]:
+        return await change_repository.history(topic_id, operation_id)
+
+    @app.post("/v1/topics/{topic_id}/change-list/operations/{operation_id}/cancel")
+    async def cancel_change(topic_id: str, operation_id: str) -> ChangeOperation:
+        return await change_service.cancel(topic_id, operation_id)
+
+    @app.post("/v1/topics/{topic_id}/change-list/operations/{operation_id}/resolve")
+    async def resolve_change(
+        topic_id: str, operation_id: str, payload: ChangeReceipt
+    ) -> ChangeOperation:
+        if payload.operation_id != operation_id or payload.topic_id != topic_id:
+            raise ServiceError("change_receipt_mismatch", "核实回执与路由不匹配", 409)
+        return await change_repository.settle(payload, resolve=True)
+
+    @app.post("/v1/topics/{topic_id}/change-list/click")
+    async def click_change(topic_id: str, payload: ChangeClick) -> ChangeItemClick:
+        current = await change_repository.get(topic_id)
+        if current.revision != payload.revision:
+            raise ServiceError("change_revision_conflict", "变更清单已更新，请重新读取", 409)
+        item = next((item for item in current.items if item.id == payload.item_id), None)
+        if item is None:
+            raise ServiceError("change_item_not_found", "变更条目不在该话题中", 404)
+        click = ChangeItemClick(topic_id=topic_id, revision=current.revision, item=item)
+        if payload.host_session_id is not None:
+            await host_sessions.notify(
+                payload.host_session_id,
+                ProtocolEnvelope(
+                    kind="notify",
+                    id=str(uuid4()),
+                    channel="changeList/item/click",
+                    data=click.model_dump(mode="json"),
+                ),
+            )
+        return click
 
     @app.get("/v1/topics/{topic_id}/skills")
     async def skills(topic_id: str) -> SkillCatalogView:

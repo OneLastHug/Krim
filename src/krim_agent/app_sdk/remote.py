@@ -11,6 +11,16 @@ from uuid import uuid4
 import httpx
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.change_list import (
+    ChangeClick,
+    ChangeExecution,
+    ChangeInvoke,
+    ChangeItemClick,
+    ChangeListView,
+    ChangeOperation,
+    ChangeReceipt,
+    ChangeSync,
+)
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import (
     HostCommand,
@@ -115,6 +125,84 @@ class RemoteHostHandle:
 
     async def state(self) -> HostUIState:
         return HostUIState.model_validate(await self._call("host/get-state"))
+
+    async def change_list(self, topic_id: str) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call("changeList/get", {"topic_id": topic_id})
+        )
+
+    async def sync_changes(self, topic_id: str, request: ChangeSync) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call(
+                "changeList/sync", {"topic_id": topic_id, **request.model_dump(mode="json")}
+            )
+        )
+
+    async def clear_changes(self, topic_id: str, revision: int) -> ChangeListView:
+        return ChangeListView.model_validate(
+            await self._call("changeList/clear", {"topic_id": topic_id, "revision": revision})
+        )
+
+    async def invoke_change(self, topic_id: str, request: ChangeInvoke) -> ChangeOperation:
+        payload = ChangeInvoke.model_validate(
+            {**request.model_dump(mode="json"), "host_session_id": self.session_id}
+        )
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/change-list/invoke",
+            json=payload.model_dump(mode="json"),
+            timeout=payload.timeout_seconds + 2,
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    async def change_operation(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        response = await self._http.get(
+            f"/v1/topics/{topic_id}/change-list/operations/{operation_id}"
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    async def resolve_change(self, receipt: ChangeReceipt) -> ChangeOperation:
+        response = await self._http.post(
+            f"/v1/topics/{receipt.topic_id}/change-list/operations/{receipt.operation_id}/resolve",
+            json=receipt.model_dump(mode="json"),
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    async def cancel_change(self, topic_id: str, operation_id: str) -> ChangeOperation:
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/change-list/operations/{operation_id}/cancel"
+        )
+        self._check(response)
+        return ChangeOperation.model_validate_json(response.content)
+
+    async def click_change(self, topic_id: str, revision: int, item_id: str) -> ChangeItemClick:
+        payload = ChangeClick(revision=revision, item_id=item_id, host_session_id=self.session_id)
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/change-list/click", json=payload.model_dump(mode="json")
+        )
+        self._check(response)
+        return ChangeItemClick.model_validate_json(response.content)
+
+    def on_change_invoke(
+        self, handler: Callable[[ChangeExecution], Awaitable[ChangeReceipt]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            receipt = await handler(ChangeExecution.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(receipt.model_dump(mode="json"))
+
+        return self.on_request("changeList/invoke", consume)
+
+    def on_change_click(
+        self, handler: Callable[[ChangeItemClick], object | Awaitable[object]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> None:
+            value = handler(ChangeItemClick.model_validate(data))
+            if inspect.isawaitable(value):
+                await value
+
+        return self.on("changeList/item/click", consume)
 
     async def set_theme(self, theme: Literal["light", "dark", "system"]) -> HostThemeResult:
         return HostThemeResult.model_validate(await self._call("host/theme", {"theme": theme}))
@@ -339,7 +427,7 @@ class RemoteHostHandle:
                 if envelope.kind != "notify":
                     raise ServiceError("host_stream_invalid", "宿主事件类型无效")
                 handler = self._handlers.get(envelope.channel)
-                if envelope.channel == "link/navigate":
+                if envelope.channel in {"link/navigate", "changeList/item/click"}:
                     if envelope.id in self._seen_links:
                         handler = None
                     else:

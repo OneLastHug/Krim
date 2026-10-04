@@ -17,7 +17,7 @@ async def main() -> None:
             resource["value"] = "before"
             return {"status": "done", "value": resource["value"], "metadata": data["metadata"]}
 
-        host.on_request("changeList/invoke", apply)
+        host.on_request("host/callback", apply)
 
         async def listen():
             async for _event in host.events():
@@ -28,7 +28,7 @@ async def main() -> None:
             value = await host.emit(
                 "host/request",
                 {
-                    "channel": "changeList/invoke",
+                    "channel": "host/callback",
                     "data": {"action": "undo", "metadata": {"source": "test"}},
                 },
             )

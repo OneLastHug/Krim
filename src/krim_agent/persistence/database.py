@@ -222,6 +222,30 @@ class WorkflowRequestRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class ChangeListRow(Base):
+    __tablename__ = "change_lists"
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    items: Mapped[list[JsonValue]] = mapped_column(JSON, default=list)
+    active_operation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class ChangeOperationRow(Base):
+    __tablename__ = "change_operations"
+    __table_args__ = (UniqueConstraint("topic_id", "idempotency_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    execution: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16))
+    receipt: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    receipt_history: Mapped[list[JsonValue]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
