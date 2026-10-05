@@ -9,6 +9,7 @@ from pydantic import Field, JsonValue, model_validator
 from krim_agent.budgets import BudgetRequestView
 from krim_agent.context_engine import ContextProposalNotice
 from krim_agent.interactions import InteractionView
+from krim_agent.observability import TraceContext
 from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelToolCall
@@ -22,6 +23,7 @@ class StreamStart(StrictModel):
     type: Literal["start"] = "start"
     provider: str
     context_config: dict[str, JsonValue] | None = None
+    trace_context: TraceContext | None = None
 
 
 class TextDelta(StrictModel):

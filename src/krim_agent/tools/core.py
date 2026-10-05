@@ -15,6 +15,7 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, JsonValue, create_model
 
+from krim_agent.observability import OwnerKind, Tracer
 from krim_agent.protocol.models import StrictModel
 
 from .output import OutputContract, OutputSchema, WireOutputSchema
@@ -93,6 +94,9 @@ class ToolContext:
     skill_snapshot: SkillSnapshot | None = None
     context_config: dict[str, JsonValue] | None = None
     budget_account_ids: tuple[str, ...] = ()
+    tracer: Tracer | None = None
+    trace_owner_kind: OwnerKind | None = None
+    trace_owner_id: str | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -113,6 +117,9 @@ class ToolContext:
             skill_snapshot=self.skill_snapshot,
             context_config=self.context_config,
             budget_account_ids=self.budget_account_ids,
+            tracer=self.tracer,
+            trace_owner_kind=self.trace_owner_kind,
+            trace_owner_id=self.trace_owner_id,
             arguments=arguments,
         )
 

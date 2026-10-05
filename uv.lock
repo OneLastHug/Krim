@@ -488,6 +488,11 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+observability = [
+    { name = "opentelemetry-api" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
@@ -507,12 +512,14 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "langcodes", specifier = ">=3.5,<4" },
     { name = "mcp", specifier = ">=1.20,<2" },
+    { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = "==1.45.0" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "referencing", specifier = ">=0.37,<0.38" },
     { name = "sqlalchemy", specifier = ">=2.0,<2.1" },
     { name = "tiktoken", specifier = ">=0.13,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
+provides-extras = ["observability"]
 
 [package.metadata.requires-dev]
 dev = [

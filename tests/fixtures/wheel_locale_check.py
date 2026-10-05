@@ -86,7 +86,7 @@ async def main() -> None:
                 async with database.engine.connect() as connection:
                     assert (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
-                    ).scalar() == "0018_context_proposals"
+                    ).scalar() == "0019_trace_spans"
             await database.close()
             reopened = Database(url)
             try:
@@ -100,7 +100,7 @@ async def main() -> None:
                     {
                         "import": "site-packages",
                         "langcodes": "3.5.1",
-                        "head": "0018_context_proposals",
+                        "head": "0019_trace_spans",
                         "locale": "en-US",
                         "resources": len(TRANSLATIONS),
                         "assets": assets,

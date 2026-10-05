@@ -424,9 +424,21 @@ async def test_outer_tool_timeout_cleans_child_without_returning_completed(repos
     catalog = catalog_entry(manager, provider=child)
     registry = ToolRegistry()
     catalog.install_tools(registry)
-    result = await registry.invoke(
-        "agent_calculator", {"prompt": "等待"}, ToolContext(registry, timeout=0.5)
+    deadlines = []
+
+    async def capture(definition, context):
+        if definition.name == "agent_calculator":
+            deadlines.append(context.execution_timeouts[-1].deadline)
+
+    registry.add_global_pre(capture)
+    # 本测试验证“运行中”的工具 timeout 清理，先等待真实 Provider 已进入。
+    # 启动时取消由其它用例验证；不让 SQLite 调度耗时替代该测试的目标边界。
+    task = asyncio.create_task(
+        registry.invoke("agent_calculator", {"prompt": "等待"}, ToolContext(registry, timeout=5))
     )
+    await asyncio.wait_for(child.entered.wait(), 5)
+    deadlines[0].reschedule(asyncio.get_running_loop().time() + 0.05)
+    result = await asyncio.wait_for(task, 5)
     assert result.is_error and result.code == "timeout"
     assert child.entered.is_set() and child.closed.is_set() and not manager._handles
     async with repository.database.sessions() as session:

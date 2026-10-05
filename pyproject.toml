@@ -27,6 +27,9 @@ dependencies = [
 [project.scripts]
 krim = "krim_agent.cli:main"
 
+[project.optional-dependencies]
+observability = ["opentelemetry-api==1.45.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=8,<10",

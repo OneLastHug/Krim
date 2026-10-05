@@ -399,6 +399,15 @@ class UsageBudgetBindingRow(Base):
     account_ids: Mapped[list[JsonValue]] = mapped_column(JSON)
 
 
+class TraceSpanRow(Base):
+    __tablename__ = "trace_spans"
+    span_id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    owner_kind: Mapped[str] = mapped_column(String(16))
+    owner_ref: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
