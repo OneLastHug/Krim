@@ -303,6 +303,24 @@ class AttachmentRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AgentHandleRow(Base):
+    __tablename__ = "agent_handles"
+    agent_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    persistent: Mapped[bool] = mapped_column(Boolean)
+    turn: Mapped[int] = mapped_column(Integer, default=0)
+    current_run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    definition_hash: Mapped[str] = mapped_column(String(64))
+    parent_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    parent_tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
