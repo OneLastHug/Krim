@@ -88,6 +88,7 @@ from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, Skil
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolInfo
 from krim_agent.ui_locale import LocaleResources, locale_resources
+from krim_agent.usage import RunUsageView
 from krim_agent.workflow import (
     WorkflowError,
     WorkflowGraph,
@@ -433,6 +434,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         return StreamingResponse(
             stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
         )
+
+    @app.get("/v1/runs/{run_id}/usage")
+    async def run_usage(run_id: str) -> RunUsageView:
+        return await repository.usage_view(run_id)
 
     @app.get("/v1/runs/{run_id}/interactions")
     async def run_interactions(run_id: str, pending_only: bool = False) -> list[InteractionView]:

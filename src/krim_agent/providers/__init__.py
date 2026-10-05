@@ -3,13 +3,14 @@
 from .factory import create_provider
 from .fake import FakeProvider
 from .openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider, ProviderError
-from .types import ModelProvider, ModelText, ModelToolCall
+from .types import ModelProvider, ModelText, ModelToolCall, ModelUsage
 
 __all__ = [
     "FakeProvider",
     "ModelProvider",
     "ModelText",
     "ModelToolCall",
+    "ModelUsage",
     "OpenAICompatibleConfig",
     "OpenAICompatibleProvider",
     "ProviderError",

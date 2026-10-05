@@ -17,6 +17,7 @@ class Settings(BaseModel):
     provider_api_key: SecretStr = SecretStr("")
     provider_timeout_seconds: float = Field(default=60, gt=0, le=600)
     provider_max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+    provider_include_usage: bool = False
     max_steps: int = Field(default=8, ge=1, le=32)
     tool_timeout_seconds: float = Field(default=10, gt=0, le=120)
     interactive_tools: bool = False

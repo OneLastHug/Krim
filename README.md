@@ -10,7 +10,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
 - M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
 - M2 已接通 [持久审批与用户问答](docs/api/user-interactions.md)：SQLite 0009 保存单次 tool call/参数请求，HTTP、Python client、CLI、AppHandle、SDK 和浏览器可批准、拒绝或提交真实答案；子 Agent 权限交集、停止/超时/重启取消和旧事件不重放已验证，完整权限作用域、租户和多 worker 仍未完成。
-- 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
+- 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取、Provider usage 部件/聚合和显式取消；缺失 usage 保持未知。
 - 已接通 [Python Tool SDK](docs/sdk/python-tools.md)：函数/类/Pydantic/JSON output_schema、最终消费/失败审计、MCP 输出声明、should_defer/always_load 和每次 Run 隔离的按需发现；raw call_tool 保留原始值，Schema 从搜索成功后的下一模型步骤暴露，不扩大权限。
 - 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；默认 persistent 句柄已由 0016 验证跨两个 Python 进程恢复，动态模型/目录持久化和累计成本预算未完成。
 - 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、execute/resume/stop/destroy、SSE 游标、基础浏览器卡片与关闭回收；persistent:true 在可信定义一致时恢复同一句柄并创建新的 Run，普通句柄仍属于当前进程，生产多 worker/目录动态更新未完成。
@@ -20,7 +20,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
 - 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通，证据见 [Tokenizer 报告](docs/testing/reports/2026-10-05-tokenizer-budgets.md)；mid-stream、持久提案、真实 usage/成本和完整确认 UI 未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
-- 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
+- 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流、可选 usage 持久投影与错误持久化已验证，真实商业供应商矩阵/账单尚未验证。
 - 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新及显式 MCP HTTP Auth 已验证，浏览器/跨进程授权状态未完成。
 - 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册、PKCE exchange 与显式 401 Auth；本机 TCP 已验证，浏览器回调仍未完成。
 - 已实现显式 MCP Streamable HTTP OAuth Auth：401 触发受控 PKCE 回调、持久令牌复用和一次请求重放；真实本机 MCP tools/list/call 已验证，宿主仍需提供回调，不自动打开浏览器。

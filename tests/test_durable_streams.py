@@ -128,7 +128,11 @@ async def test_cancel_during_committed_frame_waits_and_keeps_next_sequence(repos
 
     async def blocked_writer(frame):
         stored = await original_writer(frame)
-        if frame.kind == "chunk":
+        if (
+            frame.kind == "chunk"
+            and isinstance(frame.data, dict)
+            and frame.data.get("type") == "text_delta"
+        ):
             entered.set()
             await release.wait()
         return stored
@@ -153,7 +157,17 @@ async def test_cancel_during_committed_frame_waits_and_keeps_next_sequence(repos
         release.set()
         assert (await stopping).status == "aborted"
         replay = await frames(runtime, run.id)
-        assert [item.seq for item in replay] == [0, 1, 2]
+        assert [item.seq for item in replay] == list(range(len(replay)))
+        assert (
+            len(
+                [
+                    item
+                    for item in replay
+                    if isinstance(item.data, dict) and item.data.get("type") == "text_delta"
+                ]
+            )
+            == 1
+        )
         assert replay[-1].data["status"] == "aborted"
         assert (await repository.list_events(run.id)) == replay
         assert (await repository.list_messages(topic.id))[-1].content == "持久部分"
@@ -214,7 +228,13 @@ async def test_readonly_live_subscription_uses_durable_updates_and_heartbeats(re
         await asyncio.wait_for(entered.wait(), 3)
         state = await reader.stream_state(run.id, 0)
         subscription = reader.subscribe(state, heartbeat=0.02)
-        seen = [await anext(subscription), await anext(subscription)]
+        seen = []
+        while (
+            not seen
+            or not isinstance(seen[-1].data, dict)
+            or seen[-1].data.get("type") != "text_delta"
+        ):
+            seen.append(await anext(subscription))
         assert seen[-1].data["text"] == "FIRST"
         assert await asyncio.wait_for(anext(subscription), 2) is None
         release.set()
@@ -363,7 +383,12 @@ async def test_failed_event_write_is_not_sent_or_reported_as_completed(repositor
 
     async def fail_once(frame):
         nonlocal failed
-        if frame.kind == "chunk" and not failed:
+        if (
+            frame.kind == "chunk"
+            and isinstance(frame.data, dict)
+            and frame.data.get("type") == "text_delta"
+            and not failed
+        ):
             failed = True
             raise OSError("模拟事件存储写入失败")
         return await original_writer(frame)
@@ -374,7 +399,11 @@ async def test_failed_event_write_is_not_sent_or_reported_as_completed(repositor
         topic = await repository.create_topic("写入失败")
         run = await runtime.start(topic.id, ChatRequest(text="unsent", idempotency_key="one"))
         observed = await frames(runtime, run.id)
-        assert [frame.kind for frame in observed] == ["start", "end"]
+        assert observed[0].kind == "start" and observed[-1].kind == "end"
+        assert not any(
+            isinstance(frame.data, dict) and frame.data.get("type") == "text_delta"
+            for frame in observed
+        )
         assert observed[-1].data["status"] == "failed"
         assert (await repository.get_run(run.id)).status == "failed"
         assert await repository.list_events(run.id) == observed

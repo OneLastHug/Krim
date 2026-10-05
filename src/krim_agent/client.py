@@ -56,6 +56,7 @@ from .protocol.domain import (
 )
 from .protocol.models import StreamFrame
 from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
+from .usage import RunUsageView
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
 
@@ -460,6 +461,11 @@ class KrimClient:
                 if summary.terminal and from_seq == summary.last_seq + 1:
                     return
             raise ClientError("Agent SSE 未收到终止帧")
+
+    def usage(self, run_id: str) -> RunUsageView:
+        response = self._http.get(f"/v1/runs/{run_id}/usage")
+        self._check(response)
+        return RunUsageView.model_validate_json(response.content)
 
     def compact(
         self,

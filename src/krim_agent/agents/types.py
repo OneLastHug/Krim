@@ -14,6 +14,7 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.core import Policy
+from krim_agent.usage import UsageTotals
 
 AgentStatus = Literal[
     "queued", "running", "completed", "failed", "aborted", "interrupted", "destroyed"
@@ -35,6 +36,8 @@ class ExecResult(StrictModel):
     code: str | None = None
     parent_tool_call_id: str | None = None
     turn: int = Field(ge=0)
+    token_usage: UsageTotals | None = None
+    usage_complete: bool = False
 
 
 @dataclass(frozen=True)

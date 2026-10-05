@@ -108,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("run", "run（运行）：查看运行状态"),
         ("stop", "stop（停止）：取消并等待持久化"),
         ("resume", "resume（续传）：从持久事件序号继续输出"),
+        ("usage", "usage（用量）：读取每步供应商报告和完整覆盖状态"),
         ("tree", "tree（树）：查看全部消息节点与活动路径"),
         ("branch", "branch（分支）：切换活动消息分支"),
         ("edit", "edit（编辑）：创建用户消息的新分支并重新回答"),
@@ -129,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
                 child.add_argument("text")
             if command != "branch":
                 child.add_argument("--idempotency-key", help="重试时复用的幂等键")
-        elif command in {"run", "stop", "resume"}:
+        elif command in {"run", "stop", "resume", "usage"}:
             child.add_argument("run_id")
             if command == "resume":
                 child.add_argument("--from-seq", type=int, default=0, help="起始事件序号")
@@ -348,6 +349,8 @@ def main() -> None:
                     client.stop(args.run_id) if args.command == "stop" else client.run(args.run_id)
                 )
                 print(run.model_dump_json(indent=2))
+            elif args.command == "usage":
+                print(client.usage(args.run_id).model_dump_json(indent=2))
             elif args.command == "resume":
                 if args.from_seq < 0:
                     parser.error("from-seq 必须是非负整数")

@@ -9,6 +9,7 @@ from pydantic import Field, JsonValue
 from krim_agent.protocol.domain import MessageView
 from krim_agent.protocol.models import StrictModel
 from krim_agent.tools.core import ToolDefinition
+from krim_agent.usage import TokenUsage
 
 
 class ModelText(StrictModel):
@@ -23,9 +24,15 @@ class ModelToolCall(StrictModel):
     arguments: dict[str, JsonValue]
 
 
+class ModelUsage(StrictModel):
+    kind: Literal["usage"] = "usage"
+    usage: TokenUsage
+    final: bool = True
+
+
 class ModelProvider(Protocol):
     name: str
 
     def stream(
         self, messages: Sequence[MessageView], tools: Sequence[ToolDefinition]
-    ) -> AsyncIterator[ModelText | ModelToolCall]: ...
+    ) -> AsyncIterator[ModelText | ModelToolCall | ModelUsage]: ...

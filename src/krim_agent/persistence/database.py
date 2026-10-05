@@ -73,6 +73,7 @@ from krim_agent.skills import (
     SkillSnapshot,
 )
 from krim_agent.tools.core import ToolAudit
+from krim_agent.usage import RunUsageView, usage_from_events
 
 from .migration import upgrade_database
 from .tree import ROOT, MessageTree
@@ -1197,6 +1198,9 @@ class KrimRepository:
                 )
                 for row in rows
             ]
+
+    async def usage_view(self, run_id: str) -> RunUsageView:
+        return usage_from_events(run_id, await self.list_events(run_id))
 
     async def event_summary(self, run_id: str) -> StreamEventView:
         events = await self.list_events(run_id)
