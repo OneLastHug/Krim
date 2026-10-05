@@ -32,7 +32,7 @@ from .checkpoint import (
     CheckpointRollback,
     CheckpointRollbackRequest,
 )
-from .context_engine import ContextCompactRequest
+from .context_engine import ContextCompactRequest, ContextProposalDecision
 from .drag import DragDropRequest, DragEnterRequest, DragPreview, DragState
 from .interactions import InteractionReply
 from .link import LinkNavigate
@@ -89,6 +89,19 @@ class StreamRequest(RunRequest):
 
 class TopicRequest(StrictModel):
     topic_id: str
+
+
+class ProposalListRequest(TopicRequest):
+    pending_only: bool = False
+
+
+class ProposalRequest(TopicRequest):
+    proposal_id: str
+
+
+class ProposalDecisionRequest(ContextProposalDecision):
+    topic_id: str
+    proposal_id: str
 
 
 class LocaleTopicRequest(LocaleChange):
@@ -283,6 +296,29 @@ class LocalApp:
             )
             return TypeAdapter(JsonValue).validate_json(value.model_dump_json())
 
+        async def list_proposals(data: JsonValue) -> JsonValue:
+            request = ProposalListRequest.model_validate(data)
+            values = await runtime.context_proposals(
+                request.topic_id, pending_only=request.pending_only
+            )
+            return TypeAdapter(JsonValue).validate_python(
+                [value.model_dump(mode="json") for value in values]
+            )
+
+        async def get_proposal(data: JsonValue) -> JsonValue:
+            request = ProposalRequest.model_validate(data)
+            value = await runtime.context_proposal(request.topic_id, request.proposal_id)
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
+        async def decide_proposal(data: JsonValue) -> JsonValue:
+            request = ProposalDecisionRequest.model_validate(data)
+            value = await runtime.decide_context_proposal(
+                request.topic_id,
+                request.proposal_id,
+                ContextProposalDecision(action=request.action, revision=request.revision),
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
+
         async def messages(data: JsonValue) -> JsonValue:
             history = await runtime.repository.list_messages(
                 TopicRequest.model_validate(data).topic_id
@@ -461,6 +497,9 @@ class LocalApp:
         self._app.on("interaction/respond", respond)
         self._app.on("chat/tree", tree)
         self._app.on("chat/compact", compact)
+        self._app.on("context/proposals", list_proposals)
+        self._app.on("context/proposal", get_proposal)
+        self._app.on("context/decision", decide_proposal)
         self._app.on("chat/messages", messages)
         self._app.on("chat/branch", branch)
         self._app.on("chat/edit", edit)

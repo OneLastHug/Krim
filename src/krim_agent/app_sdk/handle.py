@@ -32,7 +32,12 @@ from krim_agent.checkpoint import (
     CheckpointReceipt,
     CheckpointRollback,
 )
-from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
+from krim_agent.context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextProposalDecision,
+    ContextProposalView,
+)
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkNavigate
@@ -382,6 +387,31 @@ class AppHandle:
         return TypeAdapter(list[MessageView]).validate_python(
             await self._call("chat/messages", {"topic_id": topic_id})
         )
+
+    async def context_proposals(
+        self, topic_id: str, *, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        value = await self._call(
+            "context/proposals", {"topic_id": topic_id, "pending_only": pending_only}
+        )
+        return TypeAdapter(list[ContextProposalView]).validate_json(
+            json.dumps(value, ensure_ascii=False)
+        )
+
+    async def context_proposal(self, topic_id: str, proposal_id: str) -> ContextProposalView:
+        value = await self._call(
+            "context/proposal", {"topic_id": topic_id, "proposal_id": proposal_id}
+        )
+        return ContextProposalView.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def decide_context_proposal(
+        self, topic_id: str, proposal_id: str, request: ContextProposalDecision
+    ) -> ContextProposalView:
+        value = await self._call(
+            "context/decision",
+            {"topic_id": topic_id, "proposal_id": proposal_id, **request.model_dump(mode="json")},
+        )
+        return ContextProposalView.model_validate_json(json.dumps(value, ensure_ascii=False))
 
     async def select_branch(self, topic_id: str, message_id: str) -> TopicView:
         return TopicView.model_validate(

@@ -9,7 +9,12 @@ from uuid import uuid4
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.config import Settings
-from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
+from krim_agent.context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextProposalDecision,
+    ContextProposalView,
+)
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.prompt_context import MentionOccurrence
 from krim_agent.prompt_nodes import PromptNode
@@ -26,6 +31,8 @@ from krim_agent.tools.core import ToolResult
 from .types import (
     ContextBudgetPart,
     ContextCompactPart,
+    ContextNoticePart,
+    ContextProposalPart,
     FinishReason,
     GenerateResult,
     InteractionPart,
@@ -94,6 +101,14 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "context_compact_proposal":
+        return ContextProposalPart.model_validate(
+            {"phase": data.get("phase"), "proposal": data.get("proposal")}
+        )
+    if kind == "context_notice":
+        return ContextNoticePart.model_validate(
+            {key: data.get(key) for key in ("step", "message_count", "threshold")}
+        )
     if kind == "usage_budget":
         return UsageBudgetPart.model_validate({"request": data.get("request")})
     if kind == "context_budget":
@@ -415,6 +430,25 @@ class PythonAI:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
         return await self.runtime.compact(topic_id, request or ContextCompactRequest())
+
+    async def context_proposals(
+        self, topic_id: str, *, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return await self.runtime.context_proposals(topic_id, pending_only=pending_only)
+
+    async def context_proposal(self, topic_id: str, proposal_id: str) -> ContextProposalView:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return await self.runtime.context_proposal(topic_id, proposal_id)
+
+    async def decide_context_proposal(
+        self, topic_id: str, proposal_id: str, request: ContextProposalDecision
+    ) -> ContextProposalView:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return await self.runtime.decide_context_proposal(topic_id, proposal_id, request)
 
     async def close(self) -> None:
         if self._closed:

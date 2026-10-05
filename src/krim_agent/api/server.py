@@ -56,7 +56,13 @@ from krim_agent.checkpoint import (
     CheckpointRollbackRequest,
 )
 from krim_agent.config import Settings
-from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
+from krim_agent.context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextError,
+    ContextProposalDecision,
+    ContextProposalView,
+)
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
@@ -869,6 +875,22 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         topic_id: str, payload: ContextCompactRequest
     ) -> ContextCompactResponse:
         return await service.compact(topic_id, payload)
+
+    @app.get("/v1/topics/{topic_id}/compact-proposals")
+    async def context_proposals(
+        topic_id: str, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        return await service.context_proposals(topic_id, pending_only=pending_only)
+
+    @app.get("/v1/topics/{topic_id}/compact-proposals/{proposal_id}")
+    async def context_proposal(topic_id: str, proposal_id: str) -> ContextProposalView:
+        return await service.context_proposal(topic_id, proposal_id)
+
+    @app.post("/v1/topics/{topic_id}/compact-proposals/{proposal_id}/decision")
+    async def decide_context_proposal(
+        topic_id: str, proposal_id: str, payload: ContextProposalDecision
+    ) -> ContextProposalView:
+        return await service.decide_context_proposal(topic_id, proposal_id, payload)
 
     @app.put("/v1/topics/{topic_id}/branch")
     async def select_branch(topic_id: str, payload: BranchRequest) -> TopicView:

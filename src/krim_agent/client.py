@@ -32,7 +32,13 @@ from .checkpoint import (
     CheckpointReceipt,
     CheckpointRollback,
 )
-from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
+from .context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextOptions,
+    ContextProposalDecision,
+    ContextProposalView,
+)
 from .drag import DragPreview, DragState
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
@@ -502,16 +508,46 @@ class KrimClient:
         *,
         confirm: bool = False,
         expected_branch_key: str | None = None,
+        proposal_id: str | None = None,
+        proposal_revision: int | None = None,
     ) -> ContextCompactResponse:
         values = options.model_dump() if options is not None else {}
         request = ContextCompactRequest(
-            **values, confirm=confirm, expected_branch_key=expected_branch_key
+            **values,
+            confirm=confirm,
+            expected_branch_key=expected_branch_key,
+            proposal_id=proposal_id,
+            proposal_revision=proposal_revision,
         )
         response = self._http.post(
             f"/v1/topics/{topic_id}/compact", json=request.model_dump(mode="json")
         )
         self._check(response)
         return ContextCompactResponse.model_validate_json(response.content)
+
+    def context_proposals(
+        self, topic_id: str, *, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        response = self._http.get(
+            f"/v1/topics/{topic_id}/compact-proposals", params={"pending_only": pending_only}
+        )
+        self._check(response)
+        return TypeAdapter(list[ContextProposalView]).validate_json(response.content)
+
+    def context_proposal(self, topic_id: str, proposal_id: str) -> ContextProposalView:
+        response = self._http.get(f"/v1/topics/{topic_id}/compact-proposals/{proposal_id}")
+        self._check(response)
+        return ContextProposalView.model_validate_json(response.content)
+
+    def decide_context_proposal(
+        self, topic_id: str, proposal_id: str, request: ContextProposalDecision
+    ) -> ContextProposalView:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/compact-proposals/{proposal_id}/decision",
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return ContextProposalView.model_validate_json(response.content)
 
     def select_branch(self, topic_id: str, message_id: str) -> TopicView:
         response = self._http.put(f"/v1/topics/{topic_id}/branch", json={"message_id": message_id})

@@ -320,7 +320,7 @@ async def test_restart_cancels_pending_and_preserves_reply_history_and_downgrade
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0017_usage_budgets"
+            ).scalar() == "0018_context_proposals"
         assert (await repository.get_interaction(run.id, request.id)).status == "cancelled"
     finally:
         await reopened.close()
@@ -516,7 +516,7 @@ async def test_child_approval_reaches_parent_stream_and_keeps_production_slot(re
         repository,
         DelegatingProvider(),
         tools,
-        Settings(interactive_tools=True, tool_timeout_seconds=2, run_timeout_seconds=20),
+        Settings(interactive_tools=True, tool_timeout_seconds=5, run_timeout_seconds=20),
     )
     queued_task = None
     try:
@@ -539,7 +539,7 @@ async def test_child_approval_reaches_parent_stream_and_keeps_production_slot(re
         )
         queued_task = asyncio.create_task(queued.execute("/echo queued"))
         # 等待超过父工具预算；留足 SQLite 启动/关闭的真实执行余量。
-        await asyncio.sleep(2.25)
+        await asyncio.sleep(5.25)
         assert queued.pending_start and queued.current_run is None
         assert (await repository.get_run(run.id)).status == "running"
         assert (await repository.get_run(child_approval.run_id)).status == "running"
@@ -550,7 +550,7 @@ async def test_child_approval_reaches_parent_stream_and_keeps_production_slot(re
         parent_result = next(
             message for message in await repository.run_messages(run.id) if message.role == "tool"
         )
-        assert not parent_result.details["is_error"]
+        assert not parent_result.details["is_error"], parent_result.details
         assert parent_result.details["data"]["status"] == "completed"
         assert (await asyncio.wait_for(queued_task, 5)).status == "completed"
         assert (

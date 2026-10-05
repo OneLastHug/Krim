@@ -45,9 +45,20 @@ class Settings(BaseModel):
     context_reserved_output_tokens: int = Field(default=0, ge=0, le=1_000_000)
     model_context_window_tokens: int | None = Field(default=None, ge=32, le=2_500_000)
     model_framing_reserve_tokens: int = Field(default=64, ge=0, le=100_000)
+    context_compact_mode: Literal["automatic", "confirmation"] = "automatic"
+    context_proposal_ttl_seconds: float = Field(default=300, ge=1, le=3600)
+    context_notice_messages: int | None = Field(default=None, ge=2, le=10000)
+    context_trigger_ratio: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_provider(self) -> Settings:
+        if self.context_compact_mode == "confirmation" and self.context_strategy not in {
+            "summarize_then_truncate",
+            "annotated_compact",
+        }:
+            raise ValueError("压缩确认模式需要摘要策略")
+        if self.context_trigger_ratio is not None and self.model_context_window_tokens is None:
+            raise ValueError("容量比例触发需要显式模型窗口")
         if any(
             value is not None
             for value in (self.usage_budget, self.agent_usage_budget, self.workflow_usage_budget)
