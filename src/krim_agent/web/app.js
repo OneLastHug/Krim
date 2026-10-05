@@ -24,10 +24,10 @@ const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random(
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
+const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice, (topicId, file) => attachmentsUI.uploadFile(file, topicId));
 const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000));
 const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
-const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 let localeChangeQueue = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice = "";
@@ -35,6 +35,24 @@ let lastNoticeError = false;
 let lastNoticeLocal = true;
 let workflowRuns = [];
 const localStatus = (status) => t(statuses[status] || status);
+function promptNodes(prompt) {
+    const points = Array.from(prompt);
+    const occurrences = [...promptContextUI.occurrences].sort((left, right) => left.start - right.start);
+    const nodes = [];
+    let cursor = 0;
+    for (const occurrence of occurrences) {
+        if (occurrence.start > cursor)
+            nodes.push({ type: "text", text: points.slice(cursor, occurrence.start).join("") });
+        const token = points.slice(occurrence.start, occurrence.end).join("");
+        nodes.push({ type: "mention", mention_id: occurrence.mention_id, label: token.startsWith("@") ? token.slice(1) : token });
+        cursor = occurrence.end;
+    }
+    if (cursor < points.length)
+        nodes.push({ type: "text", text: points.slice(cursor).join("") });
+    for (const name of skillsUI.selectedNames)
+        nodes.push({ type: "skill", name });
+    return nodes;
+}
 function redrawLocale() {
     renderTopics();
     renderBranchSelect();
@@ -924,7 +942,7 @@ async function sendMessage(event) {
     showNotice("生成中……");
     try {
         const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
-        const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames };
+        const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames, nodes: promptNodes(prompt) };
         const run = await requestJson(path, { method: "POST", body: JSON.stringify(body) });
         state.editingMessageId = null;
         promptContextUI.setText("", true);

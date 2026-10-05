@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from krim_agent.locale import LocaleChange, LocaleTag
 from krim_agent.prompt_context import MentionOccurrence
+from krim_agent.prompt_nodes import PromptNode
 from krim_agent.skills import SkillName
 
 from .models import StrictModel
@@ -45,11 +46,13 @@ class ChatRequest(TextRequest):
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     mentions: list[MentionOccurrence] = Field(default_factory=list, max_length=32)
     skill_names: list[SkillName] = Field(default_factory=list, max_length=8)
+    nodes: list[PromptNode] = Field(default_factory=list, max_length=128)
 
 
 class EditRequest(TextRequest):
     mentions: list[MentionOccurrence] = Field(default_factory=list, max_length=32)
     skill_names: list[SkillName] = Field(default_factory=list, max_length=8)
+    nodes: list[PromptNode] = Field(default_factory=list, max_length=128)
 
 
 class RegenerateRequest(StrictModel):

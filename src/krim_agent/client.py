@@ -42,6 +42,7 @@ from .prompt_context import (
     MentionRef,
     PromptContext,
 )
+from .prompt_nodes import PromptNode
 from .protocol.domain import (
     ChatRequest,
     EditRequest,
@@ -492,12 +493,14 @@ class KrimClient:
         *,
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
+        nodes: list[PromptNode] | None = None,
     ) -> RunView:
         request = EditRequest(
             text=text,
             idempotency_key=idempotency_key or str(uuid4()),
             mentions=mentions or [],
             skill_names=skill_names or [],
+            nodes=nodes or [],
         )
         response = self._http.post(
             f"/v1/topics/{topic_id}/messages/{message_id}/edit", json=request.model_dump()
@@ -524,6 +527,7 @@ class KrimClient:
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
+        nodes: list[PromptNode] | None = None,
     ) -> RunView:
         request = ChatRequest(
             text=text,
@@ -531,6 +535,7 @@ class KrimClient:
             parent_message_id=parent_message_id,
             mentions=mentions or [],
             skill_names=skill_names or [],
+            nodes=nodes or [],
         )
         response = self._http.post(f"/v1/topics/{topic_id}/messages", json=request.model_dump())
         self._check(response)

@@ -61,6 +61,7 @@ test("选择发送技能与中英文文案切换保持用户正文和技能快�
   await expect(page.locator("#send")).toBeEnabled();
   const history = (await (await request.get(`/v1/runs/${run.id}/messages`)).json()).messages;
   expect(history[0].content).toBe("用户原始问题"); expect(history[0].details.skills_snapshot.selected_names).toEqual(["review"]);
+  expect(history[0].details.prompt_nodes).toEqual([{ type: "text", text: "用户原始问题" }, { type: "skill", name: "review" }]);
   await expect(page.locator(".message.assistant").last()).toContainText("当前发送明确选择的技能正文");
   await page.locator("#locale-select").selectOption("zh-CN"); await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
 });

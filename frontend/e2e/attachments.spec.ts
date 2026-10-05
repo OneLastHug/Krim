@@ -36,5 +36,6 @@ test("原生 PNG drop 预览不写入，drop 后存储字节并绑定发送快�
   const attachment = (await (await request.get(`/v1/topics/${topic.id}/attachments`)).json())[0]; expect(attachment.byte_size).toBe(12);
   const accepted = page.waitForResponse((response) => response.url().endsWith("/messages") && response.request().method() === "POST"); await page.locator("#send").click(); const run = await (await accepted).json(); await expect(page.locator("#send")).toBeEnabled();
   const history = (await (await request.get(`/v1/runs/${run.id}/messages`)).json()).messages; expect(history[0].details.prompt_context.mentions[0].metadata).toMatchObject({ attachment_id: attachment.id, sha256: attachment.sha256, size: 12 });
+  expect(history[0].details.prompt_nodes).toEqual([{ type: "mention", mention_id: history[0].details.prompt_context.mentions[0].id, label: "drop.png" }]);
   expect(JSON.stringify(history[0].details)).not.toContain("content_base64"); await transfer.dispose();
 });
