@@ -45,6 +45,12 @@ from krim_agent.prompt_context import (
     PromptContext,
     PromptSnapshot,
 )
+from krim_agent.prompt_nodes import (
+    PromptMentionNode,
+    PromptSkillNode,
+    prompt_node_mentions,
+    validate_prompt_nodes,
+)
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -597,6 +603,21 @@ class KrimRepository:
         )
         occurrences = request.mentions if isinstance(request, (ChatRequest, EditRequest)) else []
         skill_names = request.skill_names if isinstance(request, (ChatRequest, EditRequest)) else []
+        nodes = request.nodes if isinstance(request, (ChatRequest, EditRequest)) else []
+        if nodes:
+            try:
+                validate_prompt_nodes(text, nodes)
+            except ValueError as error:
+                raise ServiceError("prompt_nodes_invalid", str(error), 422) from error
+            if [item.model_dump(mode="json") for item in prompt_node_mentions(nodes)] != [
+                item.model_dump(mode="json") for item in occurrences
+            ]:
+                raise ServiceError(
+                    "prompt_nodes_invalid", "节点 Mention 与 occurrences 不一致", 422
+                )
+            node_skills = sorted(node.name for node in nodes if isinstance(node, PromptSkillNode))
+            if node_skills != sorted(skill_names):
+                raise ServiceError("prompt_nodes_invalid", "节点 Skill 与显式技能选择不一致", 422)
         if occurrences:
             fingerprint = json.dumps(
                 {
@@ -609,6 +630,12 @@ class KrimRepository:
         if skill_names:
             fingerprint = json.dumps(
                 {"base": fingerprint, "skill_names": skill_names},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        if nodes:
+            fingerprint = json.dumps(
+                {"base": fingerprint, "nodes": [item.model_dump(mode="json") for item in nodes]},
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -626,6 +653,16 @@ class KrimRepository:
                 if existing.input_hash != digest:
                     raise ServiceError("idempotency_conflict", "同一幂等键不能用于不同输入", 409)
                 return RunView.model_validate(existing), False
+            if nodes:
+                context = PromptContext.model_validate(topic.prompt_context)
+                references = {item.id: item for item in context.mentions}
+                for node in nodes:
+                    if isinstance(node, PromptMentionNode):
+                        reference = references.get(node.mention_id)
+                        if reference is None or reference.label != node.label:
+                            raise ServiceError(
+                                "prompt_nodes_invalid", "节点 Mention 不属于当前话题目录", 422
+                            )
             if not allow_new:
                 raise ServiceError("run_limit", "同时运行数量超过限制", 429)
             await self._require_idle(session, topic_id)
@@ -686,6 +723,10 @@ class KrimRepository:
                 if skill_snapshot.skills:
                     input_details["skills_snapshot"] = TypeAdapter(JsonValue).validate_python(
                         skill_snapshot.model_dump(mode="json")
+                    )
+                if nodes:
+                    input_details["prompt_nodes"] = TypeAdapter(JsonValue).validate_python(
+                        [item.model_dump(mode="json") for item in nodes]
                     )
                 highest = max((message.sequence for message in messages), default=0)
                 session.add(

@@ -12,6 +12,7 @@ from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.prompt_context import MentionOccurrence
+from krim_agent.prompt_nodes import PromptNode
 from krim_agent.protocol.domain import ChatRequest, MessageView, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame, check_json
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
@@ -307,6 +308,7 @@ class PythonAI:
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
+        nodes: list[PromptNode] | None = None,
     ) -> StreamTextResult:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
@@ -316,6 +318,7 @@ class PythonAI:
             parent_message_id=parent_message_id,
             mentions=mentions or [],
             skill_names=skill_names or [],
+            nodes=nodes or [],
         )
         topic = topic_id or (await self.runtime.repository.create_topic(prompt[:80])).id
         run = await self.runtime.start(topic, request)
@@ -330,6 +333,7 @@ class PythonAI:
         parent_message_id: str | None = None,
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
+        nodes: list[PromptNode] | None = None,
     ) -> GenerateResult:
         stream = await self.stream_text(
             prompt,
@@ -338,6 +342,7 @@ class PythonAI:
             parent_message_id=parent_message_id,
             mentions=mentions,
             skill_names=skill_names,
+            nodes=nodes,
         )
         return await stream.collect()
 

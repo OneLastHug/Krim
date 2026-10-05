@@ -77,6 +77,21 @@ let lastNoticeError = false;
 let lastNoticeLocal = true;
 let workflowRuns: WorkflowRunView[] = [];
 const localStatus = (status: string): string => t(statuses[status] || status);
+function promptNodes(prompt: string): Array<Record<string, unknown>> {
+  const points = Array.from(prompt);
+  const occurrences = [...promptContextUI.occurrences].sort((left, right) => left.start - right.start);
+  const nodes: Array<Record<string, unknown>> = [];
+  let cursor = 0;
+  for (const occurrence of occurrences) {
+    if (occurrence.start > cursor) nodes.push({ type: "text", text: points.slice(cursor, occurrence.start).join("") });
+    const token = points.slice(occurrence.start, occurrence.end).join("");
+    nodes.push({ type: "mention", mention_id: occurrence.mention_id, label: token.startsWith("@") ? token.slice(1) : token });
+    cursor = occurrence.end;
+  }
+  if (cursor < points.length) nodes.push({ type: "text", text: points.slice(cursor).join("") });
+  for (const name of skillsUI.selectedNames) nodes.push({ type: "skill", name });
+  return nodes;
+}
 
 function redrawLocale(): void {
   renderTopics(); renderBranchSelect(); renderMessages(); renderAgents();
@@ -499,7 +514,7 @@ async function sendMessage(event: SubmitEvent): Promise<void> {
   disableComposer(true); showNotice("生成中……");
   try {
     const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
-    const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames };
+    const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames, nodes: promptNodes(prompt) };
     const run = await requestJson<RunView>(path, { method: "POST", body: JSON.stringify(body) });
     state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
     skillsUI.clearSelection();
