@@ -64,6 +64,17 @@ export interface CompactResponse {
   tokenizer: "approx-v1" | "cl100k_base" | "o200k_base" | "custom";
   estimated_tokens: number;
   reserved_output_tokens: number;
+  proposal_id: string | null;
+  proposal_revision: number | null;
+  proposal_expires_at: number | null;
+}
+export interface ContextProposal {
+  id: string; topic_id: string; run_id: string | null; step: number | null;
+  branch_key: string; source_branch_key: string;
+  status: "proposed" | "completed" | "rejected" | "expired" | "stale" | "cancelled";
+  revision: number; expires_at: number; created_at: string;
+  options: { max_messages: number | null };
+  result: Omit<CompactResponse, "topic_id" | "status" | "persisted" | "branch_key" | "proposal_id" | "proposal_revision" | "proposal_expires_at">;
 }
 export interface InteractionView {
   id: string;

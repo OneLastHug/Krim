@@ -4,6 +4,14 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "拒绝压缩": "Reject compaction",
+    "压缩已拒绝": "Compaction rejected",
+    "压缩提案已过期": "Compaction proposal expired",
+    "压缩来源已变化": "Compaction sources changed",
+    "压缩提案已取消": "Compaction proposal cancelled",
+    "等待确认压缩后继续生成": "Waiting for compaction confirmation to continue",
+    "有效期至 {time}": "Valid until {time}",
+    "历史较长，可以预览压缩": "Long history; compaction preview is available",
     "变更清单": "Change list",
     "刷新变更": "Refresh changes",
     "全部撤销": "Undo all",

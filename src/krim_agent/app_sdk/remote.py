@@ -33,6 +33,12 @@ from krim_agent.checkpoint import (
     CheckpointReceipt,
     CheckpointRollback,
 )
+from krim_agent.context_engine import (
+    ContextCompactRequest,
+    ContextCompactResponse,
+    ContextProposalDecision,
+    ContextProposalView,
+)
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import (
     HostCommand,
@@ -137,6 +143,41 @@ class RemoteHostHandle:
 
     async def state(self) -> HostUIState:
         return HostUIState.model_validate(await self._call("host/get-state"))
+
+    async def compact(
+        self, topic_id: str, request: ContextCompactRequest | None = None
+    ) -> ContextCompactResponse:
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/compact",
+            json=(request or ContextCompactRequest()).model_dump(mode="json"),
+            timeout=302,
+        )
+        self._check(response)
+        return ContextCompactResponse.model_validate_json(response.content)
+
+    async def context_proposals(
+        self, topic_id: str, *, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        response = await self._http.get(
+            f"/v1/topics/{topic_id}/compact-proposals", params={"pending_only": pending_only}
+        )
+        self._check(response)
+        return TypeAdapter(list[ContextProposalView]).validate_json(response.content)
+
+    async def context_proposal(self, topic_id: str, proposal_id: str) -> ContextProposalView:
+        response = await self._http.get(f"/v1/topics/{topic_id}/compact-proposals/{proposal_id}")
+        self._check(response)
+        return ContextProposalView.model_validate_json(response.content)
+
+    async def decide_context_proposal(
+        self, topic_id: str, proposal_id: str, request: ContextProposalDecision
+    ) -> ContextProposalView:
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/compact-proposals/{proposal_id}/decision",
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return ContextProposalView.model_validate_json(response.content)
 
     async def attachments(self, topic_id: str) -> list[AttachmentView]:
         response = await self._http.get(f"/v1/topics/{topic_id}/attachments")

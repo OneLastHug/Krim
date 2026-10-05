@@ -18,7 +18,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已接通 [Python Host SDK 与同源 iframe 回程](docs/api/host-sdk.md)：RemoteHostHandle、当前进程 HostSessions、版本化 postMessage、父容器、状态/Prompt/theme/resize/notice/sidebar、真实回执与销毁；完整宿主信道、跨站身份、持久 session 和生产租约未完成。
 - 已接通 [Mentions 与 Context Tags](docs/api/prompt-context.md)：话题目录、Python ID、Unicode 引用位置、发送/编辑快照、模型/压缩预算及 client/SDK/Host/浏览器 chip；受限二进制附件已由 [Attachments](docs/api/attachments.md) 接通，富文本和文件沙箱仍未完成。
 - 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
-- 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通，证据见 [Tokenizer 报告](docs/testing/reports/2026-10-05-tokenizer-budgets.md)；mid-stream、持久提案、真实 usage/成本和完整确认 UI 未完成。
+- 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通。持久提案与运行中确认另见 [提案合约](docs/api/context-proposals.md)：0018、原摘要确认、TTL/revision、运行等待、SDK/HTTP/client/CLI/Host 和浏览器刷新已验证；真实 usage/成本、多模态容量和生产租户仍未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流、可选 usage 持久投影与错误持久化已验证，真实商业供应商矩阵/账单尚未验证。
 - 已接通 [持久累计预算](docs/api/usage-budgets.md)：0017、Runtime/Agent/Workflow 父子额度、调用前预留、Provider 报告结算、未知结果保留与可信回执核实；token 和显式整数费率费用可限制后续派发，跨进程/幂等/并发已有本机证据。真实商业费率/账单与生产租户仍未验证。

@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field, JsonValue, model_validator
 
 from krim_agent.budgets import BudgetRequestView
+from krim_agent.context_engine import ContextProposalNotice
 from krim_agent.interactions import InteractionView
 from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
@@ -87,6 +88,19 @@ class ContextCompactPart(StrictModel):
     reserved_output_tokens: int = Field(default=0, ge=0)
 
 
+class ContextProposalPart(StrictModel):
+    type: Literal["context-proposal"] = "context-proposal"
+    phase: Literal["pending", "resolved"]
+    proposal: ContextProposalNotice
+
+
+class ContextNoticePart(StrictModel):
+    type: Literal["context-notice"] = "context-notice"
+    step: int = Field(ge=0)
+    message_count: int = Field(ge=0)
+    threshold: int = Field(ge=2)
+
+
 class ContextBudgetPart(StrictModel):
     type: Literal["context-budget"] = "context-budget"
     step: int = Field(ge=0)
@@ -161,6 +175,8 @@ SDKPart = (
     | UsageBudgetPart
     | ModelStepPart
     | ContextCompactPart
+    | ContextProposalPart
+    | ContextNoticePart
     | ContextBudgetPart
     | InteractionPart
     | ToolDiscoveryPart

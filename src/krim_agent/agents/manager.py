@@ -374,7 +374,19 @@ class AgentManager:
             definition.context_config is not None
             and definition.context_config != ContextRunConfig()
         ):
-            payload["context_config"] = definition.context_config.model_dump(mode="json")
+            context = definition.context_config.model_dump(mode="json")
+            defaults = ContextRunConfig()
+            # 新确认字段的缺省值保持旧语义，不能使 0017 已保存的同一定义失效。
+            # 显式启用/调整后仍进入指纹，禁止持久句柄静默扩大或切换配置。
+            for field in (
+                "compact_mode",
+                "proposal_ttl_seconds",
+                "notice_messages",
+                "trigger_ratio",
+            ):
+                if context[field] == getattr(defaults, field):
+                    del context[field]
+            payload["context_config"] = context
         if definition.usage_budget is not None:
             payload["usage_budget"] = definition.usage_budget.model_dump(mode="json")
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()

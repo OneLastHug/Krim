@@ -11,12 +11,13 @@ import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js"
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
-    compactPreview: null, agents: [], handles: [],
+    compactPreview: null, compactProposal: null, agents: [], handles: [],
     workflowGraph: { nodes: [], edges: [], output_node: null }, workflowRun: null, workflowSelected: [],
     interactions: [], interactionRuns: new Set(),
 };
 const $ = (id) => document.getElementById(id);
 let interactionLoadVersion = 0;
+let proposalLoadVersion = 0;
 const text = (id) => $(id);
 const labels = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁", paused: "已暂停" };
@@ -193,6 +194,23 @@ function setupHostBridge() {
         hostEndpoint.on(channel, (data) => dragDropUI.bridge(channel, data));
     for (const channel of ["changeList/get", "changeList/sync", "changeList/clear"])
         hostEndpoint.on(channel, (data) => changeListUI.bridge(channel, data));
+    for (const channel of ["context/proposals", "context/proposal", "context/decision"])
+        hostEndpoint.on(channel, async (data) => {
+            const payload = hostObject(data);
+            const topic = payload.topic_id;
+            if (typeof topic !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(topic))
+                throw new Error("话题标识无效");
+            const base = `/v1/topics/${encodeURIComponent(topic)}/compact-proposals`;
+            if (channel === "context/proposals")
+                return await requestJson(`${base}?pending_only=${payload.pending_only === true}`);
+            if (typeof payload.proposal_id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(payload.proposal_id))
+                throw new Error("提案标识无效");
+            const path = `${base}/${encodeURIComponent(payload.proposal_id)}`;
+            const value = await requestJson(channel === "context/decision" ? `${path}/decision` : path, channel === "context/decision" ? { method: "POST", body: JSON.stringify({ action: payload.action, revision: payload.revision }) } : undefined);
+            if (topic === state.topicId)
+                await loadProposals();
+            return value;
+        });
     hostEndpoint.announceReady({ protocol_version: 2, channels: [
             "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
             "mention/get", "mention/add", "mention/remove", "mention/clear",
@@ -200,6 +218,7 @@ function setupHostBridge() {
             "skill/list", "skill/inject", "skill/remove", "skill/read",
             "drag/enter", "drag/leave", "drag/drop",
             "host/set-session", "changeList/get", "changeList/sync", "changeList/clear",
+            "context/proposals", "context/proposal", "context/decision",
         ] });
 }
 function showNotice(message = "", error = false, local = true) {
@@ -220,7 +239,7 @@ function disableComposer(value) {
     $("send").disabled = value;
     text("prompt").disabled = value;
     $("compact-preview").disabled = value || !state.topicId;
-    $("compact-confirm").disabled = value || state.compactPreview?.status !== "proposed";
+    renderCompact(state.compactPreview);
     $("new-topic").disabled = value;
     $("branch-select").disabled = value;
     $("run-stop").disabled = !state.runId || !(state.streaming || state.disconnected);
@@ -336,16 +355,52 @@ function renderMessages() {
 }
 function renderCompact(result) {
     const panel = $("compact-panel");
+    const proposal = state.compactProposal;
+    const pending = proposal?.status === "proposed" && (!state.busy || proposal.run_id !== null);
+    $("compact-confirm").disabled = !pending;
+    $("compact-reject").disabled = !pending;
     if (!result) {
         panel.hidden = true;
-        $("compact-confirm").disabled = true;
         return;
     }
+    const status = proposal?.status || result.status;
+    const titles = { proposed: "压缩预览", completed: "摘要已保存", rejected: "压缩已拒绝", expired: "压缩提案已过期", stale: "压缩来源已变化", cancelled: "压缩提案已取消", unchanged: "暂无需压缩的历史" };
     panel.hidden = false;
-    $("compact-title").textContent = t("{status} · 覆盖 {count} 条", { status: t(result.status === "proposed" ? "压缩预览" : result.status === "completed" ? "摘要已保存" : "暂无需压缩的历史"), count: result.omitted_count });
+    $("compact-title").textContent = t("{status} · 覆盖 {count} 条", { status: t(titles[status] || "暂无需压缩的历史"), count: result.omitted_count });
     $("compact-sources").textContent = t("来源 {count} 条历史消息；{saved}", { count: result.source_message_ids.length, saved: t(result.persisted ? "已保存" : "尚未保存") });
     $("compact-summary").textContent = result.summary || result.reason || t("没有需要压缩的历史");
-    $("compact-confirm").disabled = state.busy || result.status !== "proposed";
+    $("compact-expiry").textContent = status === "proposed" && result.proposal_expires_at ? t("有效期至 {time}", { time: localDate(new Date(result.proposal_expires_at * 1000).toISOString()) }) : "";
+}
+async function loadProposals() {
+    const topic = state.topicId;
+    const version = ++proposalLoadVersion;
+    if (!topic)
+        return;
+    const proposals = await requestJson(`/v1/topics/${encodeURIComponent(topic)}/compact-proposals`);
+    if (state.topicId !== topic || version !== proposalLoadVersion)
+        return;
+    const proposal = proposals.find((item) => item.status === "proposed") || proposals[0] || null;
+    state.compactProposal = proposal;
+    if (proposal) {
+        state.compactPreview = { ...proposal.result, topic_id: proposal.topic_id, branch_key: proposal.branch_key, status: proposal.status === "completed" ? "completed" : "proposed", persisted: proposal.status === "completed", proposal_id: proposal.id, proposal_revision: proposal.revision, proposal_expires_at: proposal.expires_at };
+        if (proposal.status === "proposed" && proposal.options.max_messages !== null)
+            text("compact-budget").value = String(proposal.options.max_messages);
+    }
+    renderCompact(state.compactPreview);
+}
+async function decideProposal(action) {
+    const proposal = state.compactProposal;
+    if (!proposal || proposal.status !== "proposed")
+        return;
+    try {
+        await requestJson(`/v1/topics/${encodeURIComponent(proposal.topic_id)}/compact-proposals/${encodeURIComponent(proposal.id)}/decision`, { method: "POST", body: JSON.stringify({ action, revision: proposal.revision }) });
+        await loadProposals();
+        showNotice(action === "confirm" ? "历史摘要已保存，原始消息仍然保留" : "压缩已拒绝");
+    }
+    catch (error) {
+        showNotice(errorText(error), true);
+        await loadProposals().catch(() => undefined);
+    }
 }
 function renderInteractions() {
     const root = $("interactions");
@@ -823,6 +878,7 @@ async function loadTopic(topicId) {
     state.messages = messages.messages;
     state.tree = tree;
     state.compactPreview = null;
+    state.compactProposal = null;
     renderTopics();
     renderBranchSelect();
     renderMessages();
@@ -839,6 +895,7 @@ async function loadTopic(topicId) {
         }
     }
     disableComposer(state.busy);
+    await loadProposals();
     await loadInteractions();
     await promptContextUI.selectTopic(topicId);
     await skillsUI.selectTopic(topicId);
@@ -890,7 +947,7 @@ async function consume(runId, fromSeq = 0) {
     renderMessages();
     const controller = new AbortController();
     state.streamAbort = controller;
-    const interactionTimer = setInterval(() => void loadInteractions().catch(() => undefined), 500);
+    const interactionTimer = setInterval(() => { void loadInteractions().catch(() => undefined); void loadProposals().catch(() => undefined); }, 500);
     try {
         state.cursor = await consumeEvents(runId, fromSeq, (frame) => {
             state.cursor = frame.seq + 1;
@@ -900,6 +957,13 @@ async function consume(runId, fromSeq = 0) {
             }
             if (frame.kind === "chunk" && frame.data?.type === "context_compact")
                 showNotice("上下文已压缩并继续生成");
+            if (frame.kind === "chunk" && frame.data?.type === "context_compact_proposal") {
+                void loadProposals().catch(() => undefined);
+                if (frame.data.phase === "pending")
+                    showNotice("等待确认压缩后继续生成");
+            }
+            if (frame.kind === "chunk" && frame.data?.type === "context_notice")
+                showNotice("历史较长，可以预览压缩");
             if (frame.kind === "chunk" && frame.data?.type === "skill_loaded" && typeof frame.data.name === "string")
                 skillsUI.loadedSkill(frame.data.name, typeof frame.data.resource === "string" ? frame.data.resource : null);
             if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
@@ -1015,15 +1079,20 @@ catch (error) {
     showNotice(errorText(error), true);
 } }
 async function compact(confirm) {
-    if (!state.topicId || state.busy || (confirm && state.compactPreview?.status !== "proposed"))
+    if (confirm) {
+        await decideProposal("confirm");
+        return;
+    }
+    if (!state.topicId || state.busy)
         return;
     try {
         const body = { max_messages: Number(text("compact-budget").value) || 20, confirm };
-        if (confirm && state.compactPreview)
-            body.expected_branch_key = state.compactPreview.branch_key;
         const result = await requestJson(`/v1/topics/${encodeURIComponent(state.topicId)}/compact`, { method: "POST", body: JSON.stringify(body) });
         state.compactPreview = result;
-        renderCompact(result);
+        state.compactProposal = null;
+        if (result.proposal_id)
+            await loadProposals();
+        renderCompact(state.compactPreview);
         showNotice(result.status === "completed" ? "历史摘要已保存，原始消息仍然保留" : result.status === "proposed" ? "请检查摘要内容，再确认保存" : "没有需要压缩的历史");
     }
     catch (error) {
@@ -1109,7 +1178,8 @@ function setup() {
     $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); });
     $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; });
     $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
-    text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });
+    $("compact-reject").addEventListener("click", () => void decideProposal("reject"));
+    text("compact-budget").addEventListener("input", () => { state.compactPreview = null; state.compactProposal = null; renderCompact(null); });
     text("workflow-json").addEventListener("input", () => renderWorkflowGraph());
     $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant"));
     $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output"));

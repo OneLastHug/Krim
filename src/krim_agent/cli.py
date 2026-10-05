@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from . import __version__
 from .budgets import BudgetResolveRequest
 from .client import ClientError, KrimClient
-from .context_engine import ContextOptions
+from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
 from .protocol.domain import TERMINAL_STATUSES
 from .workflow import WorkflowGraph
@@ -88,11 +88,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="reserved output tokens（预留输出词元）：不能低于宿主预留",
     )
     compact.add_argument("--expected-branch-key", help="确认时匹配预览中的活动路径标识")
+    compact.add_argument("--proposal-id", help="proposal ID（提案标识）：确认已保存的原摘要")
+    compact.add_argument(
+        "--proposal-revision", type=int, help="proposal revision（提案修订号）：匹配预览"
+    )
     compact_mode = compact.add_mutually_exclusive_group()
     compact_mode.add_argument(
-        "--preview", action="store_true", help="preview（预览）：只读提案，默认行为"
+        "--preview", action="store_true", help="preview（预览）：保存待确认提案，不改写摘要"
     )
     compact_mode.add_argument("--confirm", action="store_true", help="confirm（确认）：保存摘要")
+    proposal = subparsers.add_parser(
+        "proposal", help="proposal（提案）：读取或确认/拒绝持久压缩提案"
+    )
+    proposal.add_argument("action", choices=["list", "get", "confirm", "reject"])
+    proposal.add_argument("topic_id")
+    proposal.add_argument("proposal_id", nargs="?")
+    proposal.add_argument("--revision", type=int, help="revision（修订号）：确认/拒绝的预期版本")
+    proposal.add_argument(
+        "--pending", action="store_true", help="pending（待确认）：只读取有效待办"
+    )
+    proposal.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     workflow = subparsers.add_parser("workflow", help="workflow（工作流）：运行与控制持久图")
     workflow.add_argument(
         "action",
@@ -317,8 +332,43 @@ def main() -> None:
                         ),
                         confirm=args.confirm,
                         expected_branch_key=args.expected_branch_key,
+                        proposal_id=args.proposal_id,
+                        proposal_revision=args.proposal_revision,
                     ).model_dump_json(indent=2)
                 )
+                return
+            if args.command == "proposal":
+                if args.action == "list":
+                    print(
+                        json.dumps(
+                            [
+                                item.model_dump(mode="json")
+                                for item in client.context_proposals(
+                                    args.topic_id, pending_only=args.pending
+                                )
+                            ],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                elif not args.proposal_id:
+                    parser.error("proposal get/confirm/reject 需要 proposal_id")
+                elif args.action == "get":
+                    print(
+                        client.context_proposal(args.topic_id, args.proposal_id).model_dump_json(
+                            indent=2
+                        )
+                    )
+                else:
+                    if args.revision is None:
+                        parser.error("proposal confirm/reject 需要 --revision")
+                    print(
+                        client.decide_context_proposal(
+                            args.topic_id,
+                            args.proposal_id,
+                            ContextProposalDecision(action=args.action, revision=args.revision),
+                        ).model_dump_json(indent=2)
+                    )
                 return
             if args.command == "workflow":
                 if args.action == "list":

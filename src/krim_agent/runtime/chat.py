@@ -21,11 +21,16 @@ from krim_agent.context_engine import (
     ContextEngine,
     ContextError,
     ContextOptions,
+    ContextProposalDecision,
+    ContextProposalNotice,
+    ContextProposalView,
+    ContextResult,
     ContextRunConfig,
 )
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.budgets import UsageBudgetStore
 from krim_agent.persistence.budgets import digest as budget_digest
+from krim_agent.persistence.context_proposals import fingerprint
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -85,6 +90,7 @@ class RunState:
     context_config: ContextRunConfig | None = None
     context_engine: ContextEngine | None = None
     budget_account_ids: tuple[str, ...] = ()
+    context_noticed: bool = False
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -244,6 +250,10 @@ class ChatRuntime:
             expected_branch_key=request.expected_branch_key,
             timeout_seconds=self.settings.run_timeout_seconds,
             engine=self._engine_for_context(config),
+            proposal_id=request.proposal_id,
+            proposal_revision=request.proposal_revision,
+            config_hash=fingerprint(config.model_dump(mode="json")),
+            ttl_seconds=config.proposal_ttl_seconds,
         )
         sources = outcome.result.source_message_ids
         return ContextCompactResponse(
@@ -255,8 +265,119 @@ class ChatRuntime:
             reason=outcome.reason,
             persisted=outcome.persisted,
             options=outcome.options,
+            proposal_id=outcome.proposal_id,
+            proposal_revision=outcome.proposal_revision,
+            proposal_expires_at=outcome.proposal_expires_at,
             **outcome.result.model_dump(),
         )
+
+    async def context_proposals(
+        self, topic_id: str, *, pending_only: bool = False
+    ) -> list[ContextProposalView]:
+        return await self.persistent_context.proposals.list(
+            topic_id,
+            pending_only=pending_only,
+            manual_config_hash=fingerprint(
+                ContextRunConfig.from_settings(self.settings).model_dump(mode="json")
+            ),
+        )
+
+    async def context_proposal(self, topic_id: str, proposal_id: str) -> ContextProposalView:
+        return await self.persistent_context.proposals.get(
+            topic_id,
+            proposal_id,
+            manual_config_hash=fingerprint(
+                ContextRunConfig.from_settings(self.settings).model_dump(mode="json")
+            ),
+        )
+
+    async def decide_context_proposal(
+        self, topic_id: str, proposal_id: str, request: ContextProposalDecision
+    ) -> ContextProposalView:
+        if self._closed:
+            raise ServiceError("runtime_closed", "运行时已经关闭", 503)
+        proposal = await self.context_proposal(topic_id, proposal_id)
+        config = ContextRunConfig.from_settings(self.settings)
+        if proposal.run_id is not None:
+            frames = await self.repository.list_events(proposal.run_id)
+            if not frames or frames[0].kind != "start" or not isinstance(frames[0].data, dict):
+                raise ServiceError("proposal_config_missing", "提案运行缺少公开配置快照", 409)
+            config = ContextRunConfig.model_validate(frames[0].data.get("context_config"))
+        return await self.persistent_context.decide(
+            topic_id,
+            proposal_id,
+            request,
+            config_hash=fingerprint(config.model_dump(mode="json")),
+            engine=self._engine_for_context(config),
+        )
+
+    async def _wait_context_proposal(
+        self, state: RunState, proposal: ContextProposalView
+    ) -> ContextResult:
+        # 子 Agent 可能借用父工具的执行 deadline；人工压缩确认与审批一样暂停它，
+        # 当前 Run/Agent 的总预算仍由外层 timeout 管理，不释放生产名额。
+        context = ToolContext(self.tools, execution_timeouts=self.execution_timeouts)
+        async with context.human_wait():
+            current = await self._await_context_proposal(state, proposal)
+        assert state.context_engine is not None
+        if not state.context_engine._fits(current.result.messages, current.options):
+            raise ContextError("确认摘要不满足本次模型输入预算", code="model_input_budget")
+        return await self.persistent_context._observe(
+            state.run.topic_id,
+            "automatic",
+            current.result.model_copy(deep=True),
+            True,
+        )
+
+    async def _await_context_proposal(
+        self, state: RunState, proposal: ContextProposalView
+    ) -> ContextProposalView:
+        def notice(current: ContextProposalView) -> dict[str, JsonValue]:
+            value = ContextProposalNotice(
+                id=current.id,
+                topic_id=current.topic_id,
+                run_id=current.run_id,
+                step=current.step,
+                status=current.status,
+                revision=current.revision,
+                expires_at=current.expires_at,
+                branch_key=current.branch_key,
+                source_branch_key=current.source_branch_key,
+                source_count=len(current.result.source_message_ids),
+                summary_hash=fingerprint(current.result.summary),
+                estimated_tokens=current.result.estimated_tokens,
+                reserved_output_tokens=current.result.reserved_output_tokens,
+                tokenizer=current.result.tokenizer,
+            )
+            return value.model_dump(mode="json")
+
+        await state.publish(
+            "chunk",
+            {
+                "type": "context_compact_proposal",
+                "phase": "pending",
+                "proposal": notice(proposal),
+            },
+        )
+        while True:
+            current = await self.context_proposal(state.run.topic_id, proposal.id)
+            if current.status != "proposed":
+                await state.publish(
+                    "chunk",
+                    {
+                        "type": "context_compact_proposal",
+                        "phase": "resolved",
+                        "proposal": notice(current),
+                    },
+                )
+                if current.status != "completed":
+                    if (await self.repository.get_run(state.run.id)).stop_requested:
+                        raise asyncio.CancelledError
+                    raise ServiceError(
+                        "proposal_" + current.status, "压缩提案未获确认，模型派发已停止", 409
+                    )
+                return current
+            await asyncio.sleep(0.05)
 
     async def _start(
         self,
@@ -451,20 +572,60 @@ class ChatRuntime:
                 if token_limit is None or hard_limit < token_limit:
                     token_limit = hard_limit
                     hard_limit_applied = True
-            try:
-                context = await self.persistent_context.prepare(
-                    state.run.topic_id,
-                    history,
-                    ContextOptions(
-                        strategy=config.strategy,
-                        policy=config.policy,
-                        max_messages=config.max_messages,
-                        max_chars=config.max_chars,
-                        max_tokens=token_limit,
-                        reserved_output_tokens=config.reserved_output_tokens,
-                    ),
-                    engine=state.context_engine,
+                if config.trigger_ratio is not None:
+                    soft_limit = config.reserved_output_tokens + int(
+                        (hard_limit - config.reserved_output_tokens) * config.trigger_ratio
+                    )
+                    if soft_limit < token_limit:
+                        token_limit = soft_limit
+                        hard_limit_applied = False
+            if (
+                config.notice_messages is not None
+                and len(history) >= config.notice_messages
+                and not state.context_noticed
+            ):
+                state.context_noticed = True
+                await state.publish(
+                    "chunk",
+                    {
+                        "type": "context_notice",
+                        "step": _step,
+                        "message_count": len(history),
+                        "threshold": config.notice_messages,
+                    },
                 )
+            try:
+                options = ContextOptions(
+                    strategy=config.strategy,
+                    policy=config.policy,
+                    max_messages=config.max_messages,
+                    max_chars=config.max_chars,
+                    max_tokens=token_limit,
+                    reserved_output_tokens=config.reserved_output_tokens,
+                )
+                if config.compact_mode == "confirmation":
+                    prepared = await self.persistent_context.prepare_confirmation(
+                        state.run.topic_id,
+                        history,
+                        options,
+                        engine=state.context_engine,
+                        run_id=state.run.id,
+                        step=_step,
+                        config_hash=fingerprint(config.model_dump(mode="json")),
+                        ttl_seconds=config.proposal_ttl_seconds,
+                    )
+                    context = (
+                        await self._wait_context_proposal(state, prepared)
+                        if isinstance(prepared, ContextProposalView)
+                        else prepared
+                    )
+                else:
+                    context = await self.persistent_context.prepare(
+                        state.run.topic_id,
+                        history,
+                        options,
+                        engine=state.context_engine,
+                    )
             except ContextError as error:
                 if hard_limit_applied and error.code == "context_budget":
                     raise ContextError(

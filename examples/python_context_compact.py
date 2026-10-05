@@ -39,11 +39,14 @@ async def main() -> None:
                         "max_messages": 3,
                         "confirm": True,
                         "expected_branch_key": preview["branch_key"],
+                        "proposal_id": preview["proposal_id"],
+                        "proposal_revision": preview["proposal_revision"],
                     },
                 )
                 assert response.status_code == 200, response.text
                 completed = response.json()
                 assert completed["status"] == "completed" and completed["persisted"]
+                assert completed["summary"] == preview["summary"]
         reopened = Database(database_url)
         await reopened.initialize()
         try:

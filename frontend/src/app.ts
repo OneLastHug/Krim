@@ -3,6 +3,7 @@ import {
   AgentView,
   InteractionView,
   CompactResponse,
+  ContextProposal,
   MessageTreeView,
   MessageView,
   LocaleView,
@@ -42,6 +43,7 @@ type State = {
   streamAbort: AbortController | null;
   editingMessageId: string | null;
   compactPreview: CompactResponse | null;
+  compactProposal: ContextProposal | null;
   workflowGraph: WorkflowGraph;
   workflowRun: WorkflowRunView | null;
   workflowSelected: string[];
@@ -53,12 +55,13 @@ type State = {
 const state: State = {
   topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
   streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
-  compactPreview: null, agents: [], handles: [],
+  compactPreview: null, compactProposal: null, agents: [], handles: [],
   workflowGraph: { nodes: [], edges: [], output_node: null }, workflowRun: null, workflowSelected: [],
   interactions: [], interactionRuns: new Set(),
 };
 const $ = (id: string): HTMLElement => document.getElementById(id)!;
 let interactionLoadVersion = 0;
+let proposalLoadVersion = 0;
 const text = (id: string): HTMLInputElement | HTMLTextAreaElement => $(id) as HTMLInputElement;
 const labels: Record<string, string> = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses: Record<string, string> = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁", paused: "已暂停" };
@@ -205,6 +208,17 @@ function setupHostBridge(): void {
   for (const channel of ["skill/list", "skill/inject", "skill/remove", "skill/read"]) hostEndpoint.on(channel, (data) => skillsUI.bridge(channel, data));
   for (const channel of ["drag/enter", "drag/leave", "drag/drop"]) hostEndpoint.on(channel, (data) => dragDropUI.bridge(channel, data));
   for (const channel of ["changeList/get", "changeList/sync", "changeList/clear"]) hostEndpoint.on(channel, (data) => changeListUI.bridge(channel, data));
+  for (const channel of ["context/proposals", "context/proposal", "context/decision"]) hostEndpoint.on(channel, async (data) => {
+    const payload = hostObject(data); const topic = payload.topic_id;
+    if (typeof topic !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(topic)) throw new Error("话题标识无效");
+    const base = `/v1/topics/${encodeURIComponent(topic)}/compact-proposals`;
+    if (channel === "context/proposals") return await requestJson(`${base}?pending_only=${payload.pending_only === true}`) as HostJson;
+    if (typeof payload.proposal_id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(payload.proposal_id)) throw new Error("提案标识无效");
+    const path = `${base}/${encodeURIComponent(payload.proposal_id)}`;
+    const value = await requestJson<ContextProposal>(channel === "context/decision" ? `${path}/decision` : path, channel === "context/decision" ? { method: "POST", body: JSON.stringify({ action: payload.action, revision: payload.revision }) } : undefined);
+    if (topic === state.topicId) await loadProposals();
+    return value as unknown as HostJson;
+  });
   hostEndpoint.announceReady({ protocol_version: 2, channels: [
     "host/get-state", "host/set-key", "host/set-locale", "host/resize", "host/prompt", "host/notice", "host/theme",
     "mention/get", "mention/add", "mention/remove", "mention/clear",
@@ -212,6 +226,7 @@ function setupHostBridge(): void {
     "skill/list", "skill/inject", "skill/remove", "skill/read",
     "drag/enter", "drag/leave", "drag/drop",
     "host/set-session", "changeList/get", "changeList/sync", "changeList/clear",
+    "context/proposals", "context/proposal", "context/decision",
   ] });
 }
 
@@ -229,7 +244,7 @@ function disableComposer(value: boolean): void {
   ($("send") as HTMLButtonElement).disabled = value;
   text("prompt").disabled = value;
   ($("compact-preview") as HTMLButtonElement).disabled = value || !state.topicId;
-  ($("compact-confirm") as HTMLButtonElement).disabled = value || state.compactPreview?.status !== "proposed";
+  renderCompact(state.compactPreview);
   ($("new-topic") as HTMLButtonElement).disabled = value;
   ($("branch-select") as HTMLSelectElement).disabled = value;
   ($("run-stop") as HTMLButtonElement).disabled = !state.runId || !(state.streaming || state.disconnected);
@@ -296,11 +311,39 @@ function renderMessages(): void {
 }
 function renderCompact(result: CompactResponse | null): void {
   const panel = $("compact-panel");
-  if (!result) { panel.hidden = true; ($("compact-confirm") as HTMLButtonElement).disabled = true; return; }
-  panel.hidden = false; $("compact-title").textContent = t("{status} · 覆盖 {count} 条", { status: t(result.status === "proposed" ? "压缩预览" : result.status === "completed" ? "摘要已保存" : "暂无需压缩的历史"), count: result.omitted_count });
+  const proposal = state.compactProposal;
+  const pending = proposal?.status === "proposed" && (!state.busy || proposal.run_id !== null);
+  ($("compact-confirm") as HTMLButtonElement).disabled = !pending;
+  ($("compact-reject") as HTMLButtonElement).disabled = !pending;
+  if (!result) { panel.hidden = true; return; }
+  const status = proposal?.status || result.status;
+  const titles: Record<string, string> = { proposed: "压缩预览", completed: "摘要已保存", rejected: "压缩已拒绝", expired: "压缩提案已过期", stale: "压缩来源已变化", cancelled: "压缩提案已取消", unchanged: "暂无需压缩的历史" };
+  panel.hidden = false; $("compact-title").textContent = t("{status} · 覆盖 {count} 条", { status: t(titles[status] || "暂无需压缩的历史"), count: result.omitted_count });
   $("compact-sources").textContent = t("来源 {count} 条历史消息；{saved}", { count: result.source_message_ids.length, saved: t(result.persisted ? "已保存" : "尚未保存") });
   $("compact-summary").textContent = result.summary || result.reason || t("没有需要压缩的历史");
-  ($("compact-confirm") as HTMLButtonElement).disabled = state.busy || result.status !== "proposed";
+  $("compact-expiry").textContent = status === "proposed" && result.proposal_expires_at ? t("有效期至 {time}", { time: localDate(new Date(result.proposal_expires_at * 1000).toISOString()) }) : "";
+}
+async function loadProposals(): Promise<void> {
+  const topic = state.topicId; const version = ++proposalLoadVersion;
+  if (!topic) return;
+  const proposals = await requestJson<ContextProposal[]>(`/v1/topics/${encodeURIComponent(topic)}/compact-proposals`);
+  if (state.topicId !== topic || version !== proposalLoadVersion) return;
+  const proposal = proposals.find((item) => item.status === "proposed") || proposals[0] || null;
+  state.compactProposal = proposal;
+  if (proposal) {
+    state.compactPreview = { ...proposal.result, topic_id: proposal.topic_id, branch_key: proposal.branch_key, status: proposal.status === "completed" ? "completed" : "proposed", persisted: proposal.status === "completed", proposal_id: proposal.id, proposal_revision: proposal.revision, proposal_expires_at: proposal.expires_at };
+    if (proposal.status === "proposed" && proposal.options.max_messages !== null) text("compact-budget").value = String(proposal.options.max_messages);
+  }
+  renderCompact(state.compactPreview);
+}
+async function decideProposal(action: "confirm" | "reject"): Promise<void> {
+  const proposal = state.compactProposal;
+  if (!proposal || proposal.status !== "proposed") return;
+  try {
+    await requestJson<ContextProposal>(`/v1/topics/${encodeURIComponent(proposal.topic_id)}/compact-proposals/${encodeURIComponent(proposal.id)}/decision`, { method: "POST", body: JSON.stringify({ action, revision: proposal.revision }) });
+    await loadProposals();
+    showNotice(action === "confirm" ? "历史摘要已保存，原始消息仍然保留" : "压缩已拒绝");
+  } catch (error) { showNotice(errorText(error), true); await loadProposals().catch(() => undefined); }
 }
 function renderInteractions(): void {
   const root = $("interactions");
@@ -448,7 +491,7 @@ async function loadTopic(topicId: string): Promise<void> {
   ]);
   if (state.topicId !== topicId) return;
   const url = new URL(location.href); url.searchParams.set("topic", topicId); history.replaceState(null, "", url);
-  state.messages = messages.messages; state.tree = tree; state.compactPreview = null; renderTopics(); renderBranchSelect(); renderMessages(); renderCompact(null);
+  state.messages = messages.messages; state.tree = tree; state.compactPreview = null; state.compactProposal = null; renderTopics(); renderBranchSelect(); renderMessages(); renderCompact(null);
   state.topics = state.topics.map((item) => item.id === topicId ? tree.topic : item);
   if (switched && state.messages.at(-1)) {
     const latest = state.messages.at(-1)!;
@@ -459,6 +502,7 @@ async function loadTopic(topicId: string): Promise<void> {
     }
   }
   disableComposer(state.busy);
+  await loadProposals();
   await loadInteractions();
   await promptContextUI.selectTopic(topicId);
   await skillsUI.selectTopic(topicId);
@@ -490,12 +534,14 @@ async function consume(runId: string, fromSeq = 0): Promise<void> {
   if (fromSeq === 0) state.streamText = "";
   disableComposer(true); renderTopics(); renderMessages();
   const controller = new AbortController(); state.streamAbort = controller;
-  const interactionTimer = setInterval(() => void loadInteractions().catch(() => undefined), 500);
+  const interactionTimer = setInterval(() => { void loadInteractions().catch(() => undefined); void loadProposals().catch(() => undefined); }, 500);
   try {
     state.cursor = await consumeEvents(runId, fromSeq, (frame: StreamFrame) => {
       state.cursor = frame.seq + 1;
       if (frame.kind === "chunk" && frame.data?.type === "text_delta") { state.streamText += String(frame.data.text || ""); renderMessages(); }
       if (frame.kind === "chunk" && frame.data?.type === "context_compact") showNotice("上下文已压缩并继续生成");
+      if (frame.kind === "chunk" && frame.data?.type === "context_compact_proposal") { void loadProposals().catch(() => undefined); if (frame.data.phase === "pending") showNotice("等待确认压缩后继续生成"); }
+      if (frame.kind === "chunk" && frame.data?.type === "context_notice") showNotice("历史较长，可以预览压缩");
       if (frame.kind === "chunk" && frame.data?.type === "skill_loaded" && typeof frame.data.name === "string") skillsUI.loadedSkill(frame.data.name, typeof frame.data.resource === "string" ? frame.data.resource : null);
       if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
         const interaction = frame.data.interaction as InteractionView | undefined;
@@ -550,12 +596,14 @@ async function stopRun(): Promise<void> {
 }
 async function resumeRun(): Promise<void> { if (!state.runId) return; try { await consume(state.runId, state.cursor); } catch (error) { showNotice(errorText(error), true); } }
 async function compact(confirm: boolean): Promise<void> {
-  if (!state.topicId || state.busy || (confirm && state.compactPreview?.status !== "proposed")) return;
+  if (confirm) { await decideProposal("confirm"); return; }
+  if (!state.topicId || state.busy) return;
   try {
     const body: Record<string, unknown> = { max_messages: Number(text("compact-budget").value) || 20, confirm };
-    if (confirm && state.compactPreview) body.expected_branch_key = state.compactPreview.branch_key;
     const result = await requestJson<CompactResponse>(`/v1/topics/${encodeURIComponent(state.topicId)}/compact`, { method: "POST", body: JSON.stringify(body) });
-    state.compactPreview = result; renderCompact(result); showNotice(result.status === "completed" ? "历史摘要已保存，原始消息仍然保留" : result.status === "proposed" ? "请检查摘要内容，再确认保存" : "没有需要压缩的历史");
+    state.compactPreview = result; state.compactProposal = null;
+    if (result.proposal_id) await loadProposals();
+    renderCompact(state.compactPreview); showNotice(result.status === "completed" ? "历史摘要已保存，原始消息仍然保留" : result.status === "proposed" ? "请检查摘要内容，再确认保存" : "没有需要压缩的历史");
   } catch (error) { showNotice(errorText(error), true); }
 }
 async function createAgent(): Promise<void> {
@@ -580,7 +628,8 @@ function setup(): void {
   $("new-topic").addEventListener("click", () => void createTopic()); $("refresh").addEventListener("click", () => void refresh()); $("composer").addEventListener("submit", (event) => void sendMessage(event as SubmitEvent));
   $("compact-preview").addEventListener("click", () => void compact(false)); $("compact-confirm").addEventListener("click", () => void compact(true)); $("run-stop").addEventListener("click", () => void stopRun()); $("run-resume").addEventListener("click", () => void resumeRun()); $("agent-create").addEventListener("click", () => void createAgent()); $("branch-select").addEventListener("change", (event) => void selectBranch((event.target as HTMLSelectElement).value));
   $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); }); $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; }); $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
-  text("compact-budget").addEventListener("input", () => { state.compactPreview = null; renderCompact(null); });
+  $("compact-reject").addEventListener("click", () => void decideProposal("reject"));
+  text("compact-budget").addEventListener("input", () => { state.compactPreview = null; state.compactProposal = null; renderCompact(null); });
   text("workflow-json").addEventListener("input", () => renderWorkflowGraph()); $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant")); $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output")); $("workflow-connect").addEventListener("click", () => connectWorkflowNodes()); $("workflow-run").addEventListener("click", () => void runWorkflow()); $("workflow-pause").addEventListener("click", () => void workflowControl("pause")); $("workflow-resume").addEventListener("click", () => void workflowControl("resume")); $("workflow-stop").addEventListener("click", () => void workflowControl("stop")); $("workflow-save-node").addEventListener("click", () => saveWorkflowNode()); $("workflow-delete-node").addEventListener("click", () => deleteWorkflowNode()); $("workflow-delete-edge").addEventListener("click", () => deleteWorkflowEdge()); $("workflow-rerun").addEventListener("click", () => void rerunWorkflow()); $("workflow-restore").addEventListener("click", () => void restoreWorkflow()); $("workflow-load-run").addEventListener("click", () => void loadWorkflowRun()); renderWorkflowGraph(); workflowView();
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
 }

@@ -51,7 +51,7 @@ async def main() -> None:
                 head = (
                     await connection.execute(text("SELECT version_num FROM alembic_version"))
                 ).scalar()
-            assert head == "0017_usage_budgets"
+            assert head == "0018_context_proposals"
             assert (await api.delete(f"/v1/agents/{agent['agent_id']}")).status_code == 200
             print(
                 json.dumps(

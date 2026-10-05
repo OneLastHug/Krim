@@ -418,15 +418,15 @@ async def test_cancelled_summary_does_not_save_and_releases_topic(repository):
 async def test_cancellation_after_save_starts_waits_for_transaction(repository, monkeypatch):
     topic, _ = await seed(repository)
     entered, release = asyncio.Event(), asyncio.Event()
-    original_save = repository.save_context_summary
+    service = PersistentContext(repository, ContextEngine())
+    original_save = service.proposals.decide
 
     async def blocked_save(*args, **kwargs):
         entered.set()
         await release.wait()
         return await original_save(*args, **kwargs)
 
-    monkeypatch.setattr(repository, "save_context_summary", blocked_save)
-    service = PersistentContext(repository, ContextEngine())
+    monkeypatch.setattr(service.proposals, "decide", blocked_save)
     task = asyncio.create_task(service.compact(topic.id, options(), confirm=True))
     await asyncio.wait_for(entered.wait(), 5)
     task.cancel()
@@ -451,7 +451,7 @@ async def test_summary_migration_downgrade_preserves_existing_data(repository):
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0017_usage_budgets"
+        ).scalar() == "0018_context_proposals"
     assert (await summaries(repository))[0].summary == before
 
 

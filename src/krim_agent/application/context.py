@@ -10,9 +10,21 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from krim_agent.context_engine import ContextEngine, ContextError, ContextOptions, ContextResult
+from krim_agent.context_engine import (
+    ContextEngine,
+    ContextError,
+    ContextOptions,
+    ContextProposalDecision,
+    ContextProposalView,
+    ContextResult,
+)
 from krim_agent.context_engine.engine import SummaryFn, summary_message
 from krim_agent.persistence import ContextSummaryRow, KrimRepository
+from krim_agent.persistence.context_proposals import (
+    ContextProposalStore,
+    fingerprint,
+    message_snapshot,
+)
 from krim_agent.prompt_context import PromptSnapshot
 from krim_agent.protocol.domain import MessageView, ServiceError
 from krim_agent.skills import materialize_skills
@@ -57,6 +69,9 @@ class PersistentCompactResult:
     status: CompactStatus
     reason: str | None = None
     persisted: bool = False
+    proposal_id: str | None = None
+    proposal_revision: int | None = None
+    proposal_expires_at: float | None = None
 
 
 class PersistentContext:
@@ -76,6 +91,7 @@ class PersistentContext:
         self.pre_compact, self.post_compact = pre_compact, post_compact
         self.observer_timeout_seconds = observer_timeout_seconds
         self._compacting: set[str] = set()
+        self.proposals = ContextProposalStore(repository)
 
     def is_busy(self, topic_id: str) -> bool:
         return topic_id in self._compacting
@@ -237,6 +253,93 @@ class PersistentContext:
             await self._save(topic_id, original, result, used, manual=False)
         return await self._observe(topic_id, "automatic", result, persisted)
 
+    @staticmethod
+    async def _commit[Result](operation: Awaitable[Result]) -> Result:
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def decide(
+        self,
+        topic_id: str,
+        proposal_id: str,
+        request: ContextProposalDecision,
+        *,
+        config_hash: str,
+        engine: ContextEngine | None = None,
+    ) -> ContextProposalView:
+        proposal = await self.proposals.get(topic_id, proposal_id)
+        if proposal.status == "proposed" and request.action == "confirm":
+            if proposal.run_id is None:
+                fits = (engine or self.engine)._fits(proposal.result.messages, proposal.options)
+            else:
+                # 根 API 可能回应子 Agent 的提案。使用计算时冻结的实际投影计数，
+                # 所属生产任务仍用自己的编码器/Provider 投影复核后才能派发。
+                saved, limits = proposal.result, proposal.options
+                fits = (
+                    (limits.max_messages is None or len(saved.messages) <= limits.max_messages)
+                    and (limits.max_chars is None or saved.estimated_chars <= limits.max_chars)
+                    and (
+                        limits.max_tokens is None
+                        or saved.estimated_tokens + limits.reserved_output_tokens
+                        <= limits.max_tokens
+                    )
+                )
+            if not fits:
+                raise ServiceError("proposal_budget_changed", "保存的提案不满足当前编码预算", 409)
+        decided, changed = await self._commit(
+            self.proposals.decide(
+                topic_id,
+                proposal_id,
+                request.revision,
+                confirm=request.action == "confirm",
+                config_hash=config_hash,
+            )
+        )
+        expected = "completed" if request.action == "confirm" else "rejected"
+        if decided.status != expected:
+            raise ServiceError("proposal_" + decided.status, "提案已过期/变化或不能确认", 409)
+        # Run 的 PostCompact 由所属生产任务执行，避免根 API 使用错误的子 Agent Hook。
+        if changed and decided.status == "completed" and decided.run_id is None:
+            result = await self._observe(
+                topic_id, "manual", decided.result.model_copy(deep=True), True
+            )
+            decided = decided.model_copy(update={"result": result})
+        return decided
+
+    async def prepare_confirmation(
+        self,
+        topic_id: str,
+        messages: list[MessageView],
+        options: ContextOptions,
+        *,
+        engine: ContextEngine,
+        run_id: str,
+        step: int,
+        config_hash: str,
+        ttl_seconds: float,
+    ) -> ContextResult | ContextProposalView:
+        prior_hash = await self.proposals.prior(topic_id, messages)
+        result, used = await self._compute(topic_id, messages, options, "automatic", engine)
+        if not result.compacted or result.summary is None or used.policy == "never":
+            return result
+        return await self._commit(
+            self.proposals.create(
+                topic_id,
+                messages,
+                used,
+                result,
+                prior_hash=prior_hash,
+                config_hash=config_hash,
+                run_id=run_id,
+                step=step,
+                ttl_seconds=ttl_seconds,
+            )
+        )
+
     async def compact(
         self,
         topic_id: str,
@@ -246,16 +349,38 @@ class PersistentContext:
         expected_branch_key: str | None = None,
         timeout_seconds: float = 60,
         engine: ContextEngine | None = None,
+        proposal_id: str | None = None,
+        proposal_revision: int | None = None,
+        config_hash: str = "",
+        ttl_seconds: float = 300,
     ) -> PersistentCompactResult:
         if self.is_busy(topic_id):
             raise ServiceError("context_busy", "话题正在生成手动压缩结果", 409)
         self._compacting.add(topic_id)
+        engine = engine or self.engine
+        guard = config_hash or fingerprint(
+            {"tokenizer": engine.tokenizer.name if engine.tokenizer else "custom"}
+        )
         try:
+            if proposal_id is not None:
+                if not confirm or proposal_revision is None:
+                    raise ServiceError(
+                        "proposal_request_invalid", "提案确认需要 confirm/revision", 422
+                    )
+                decided = await self.decide(
+                    topic_id,
+                    proposal_id,
+                    ContextProposalDecision(action="confirm", revision=proposal_revision),
+                    config_hash=guard,
+                    engine=engine,
+                )
+                return self._proposal_result(decided, decided.result, persisted=True)
             await self.repository.assert_topic_idle(topic_id)
             messages = await self.repository.list_messages(topic_id)
             branch_key = self.repository.context_branch_key(messages)
             if expected_branch_key is not None and expected_branch_key != branch_key:
                 raise ServiceError("summary_branch_changed", "确认时活动分支已经变化", 409)
+            prior_hash = await self.proposals.prior(topic_id, messages)
             try:
                 async with asyncio.timeout(timeout_seconds):
                     result, used = await self._compute(
@@ -263,42 +388,63 @@ class PersistentContext:
                     )
             except TimeoutError as exc:
                 raise ServiceError("context_timeout", "手动摘要生成超过时间预算", 504) from exc
-            sources = list(result.source_message_ids)
-            prefix = messages[: len(sources)]
-            if sources and [message.id for message in prefix] != sources:
-                raise ContextError(
-                    "Context 摘要来源不是完整活动前缀", code="context_source_invalid"
-                )
-            source_key = self.repository.context_branch_key(prefix) if sources else None
-            status: CompactStatus = "unchanged"
-            persisted = False
-            reason: str | None = (
-                "policy_never" if used.policy == "never" else "no_compaction_needed"
-            )
             if result.compacted and result.summary is not None and used.policy != "never":
-                if used.strategy not in {"summarize_then_truncate", "annotated_compact"}:
-                    raise ContextError("手动压缩需要摘要策略", code="context_strategy_invalid")
-                status, reason = "proposed", None
-                if confirm:
-                    await self._save(topic_id, messages, result, used, manual=True)
-                    status, persisted = "completed", True
-                    result = await self._observe(topic_id, "manual", result, True)
-            # 预览/无变化也复核状态，不能对已经变化的会话返回有效提案。
-            if not persisted:
-                await self.repository.assert_topic_idle(topic_id)
-                current = await self.repository.list_messages(topic_id)
-                if self.repository.context_branch_key(current) != branch_key:
-                    raise ServiceError(
-                        "summary_branch_changed", "摘要计算期间活动路径已经变化", 409
+                pending = asyncio.create_task(
+                    self.proposals.create(
+                        topic_id,
+                        messages,
+                        used,
+                        result,
+                        prior_hash=prior_hash,
+                        config_hash=guard,
+                        ttl_seconds=ttl_seconds,
                     )
+                )
+                try:
+                    proposal = await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    await pending
+                    raise
+                if confirm:
+                    decided = await self.decide(
+                        topic_id,
+                        proposal.id,
+                        ContextProposalDecision(action="confirm", revision=proposal.revision),
+                        config_hash=guard,
+                        engine=engine,
+                    )
+                    return self._proposal_result(decided, decided.result, persisted=True)
+                return self._proposal_result(proposal, result, persisted=False)
+            await self.repository.assert_topic_idle(topic_id)
+            current = await self.repository.list_messages(topic_id)
+            if message_snapshot(current) != message_snapshot(messages):
+                raise ServiceError("summary_branch_changed", "摘要计算期间活动路径发生变化", 409)
+            sources = result.source_message_ids
             return PersistentCompactResult(
                 result=result,
                 options=used,
                 branch_key=branch_key,
-                source_branch_key=source_key,
-                status=status,
-                reason=reason,
-                persisted=persisted,
+                source_branch_key=self.repository.context_branch_key(messages[: len(sources)])
+                if sources
+                else None,
+                status="unchanged",
+                reason="policy_never" if used.policy == "never" else "no_compaction_needed",
             )
         finally:
             self._compacting.discard(topic_id)
+
+    def _proposal_result(
+        self, proposal: ContextProposalView, result: ContextResult, *, persisted: bool
+    ) -> PersistentCompactResult:
+        sources = result.source_message_ids
+        return PersistentCompactResult(
+            result=result,
+            options=proposal.options,
+            branch_key=proposal.branch_key,
+            source_branch_key=proposal.source_branch_key if sources else None,
+            status="completed" if persisted else "proposed",
+            persisted=persisted,
+            proposal_id=proposal.id,
+            proposal_revision=proposal.revision,
+            proposal_expires_at=proposal.expires_at,
+        )

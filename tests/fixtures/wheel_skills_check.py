@@ -89,12 +89,12 @@ async def main() -> None:
                 async with database.engine.connect() as connection:
                     assert (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
-                    ).scalar() == "0017_usage_budgets"
+                    ).scalar() == "0018_context_proposals"
                 print(
                     json.dumps(
                         {
                             "import": "site-packages",
-                            "head": "0017_usage_budgets",
+                            "head": "0018_context_proposals",
                             "skill": "wheel-review",
                             "loaded": 1,
                             "snapshot": "retained",

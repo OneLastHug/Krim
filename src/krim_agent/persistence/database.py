@@ -203,6 +203,24 @@ class ContextSummaryRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class ContextProposalRow(Base):
+    __tablename__ = "context_compact_proposals"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True, index=True)
+    step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    branch_key: Mapped[str] = mapped_column(String(64))
+    snapshot_hash: Mapped[str] = mapped_column(String(64))
+    prior_summary_hash: Mapped[str] = mapped_column(String(64))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="proposed")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class InteractionRow(Base):
     __tablename__ = "interaction_requests"
     __table_args__ = (UniqueConstraint("run_id", "call_id", "kind", "arguments_hash"),)
@@ -1336,6 +1354,15 @@ class KrimRepository:
                 .where(RunRow.id == run_id, RunRow.status.not_in(TERMINAL_STATUSES))
                 .values(stop_requested=True, updated_at=utc_now())
             )
+            await session.execute(
+                update(ContextProposalRow)
+                .where(ContextProposalRow.run_id == run_id, ContextProposalRow.status == "proposed")
+                .values(
+                    status="cancelled",
+                    revision=ContextProposalRow.revision + 1,
+                    updated_at=utc_now(),
+                )
+            )
 
     async def finish(
         self,
@@ -1351,6 +1378,15 @@ class KrimRepository:
                 update(InteractionRow)
                 .where(InteractionRow.run_id == run_id, InteractionRow.status == "pending")
                 .values(status="cancelled", updated_at=utc_now())
+            )
+            await session.execute(
+                update(ContextProposalRow)
+                .where(ContextProposalRow.run_id == run_id, ContextProposalRow.status == "proposed")
+                .values(
+                    status="cancelled",
+                    revision=ContextProposalRow.revision + 1,
+                    updated_at=utc_now(),
+                )
             )
             for audit in audits:
                 session.add(
@@ -1384,6 +1420,17 @@ class KrimRepository:
                 )
             )
             for row in rows:
+                await session.execute(
+                    update(ContextProposalRow)
+                    .where(
+                        ContextProposalRow.run_id == row.id, ContextProposalRow.status == "proposed"
+                    )
+                    .values(
+                        status="cancelled",
+                        revision=ContextProposalRow.revision + 1,
+                        updated_at=utc_now(),
+                    )
+                )
                 await session.execute(
                     update(InteractionRow)
                     .where(InteractionRow.run_id == row.id, InteractionRow.status == "pending")
