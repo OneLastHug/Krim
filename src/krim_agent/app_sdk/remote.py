@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.attachment import AttachmentContent, AttachmentUpload, AttachmentView
 from krim_agent.change_list import (
     ChangeClick,
     ChangeExecution,
@@ -136,6 +137,29 @@ class RemoteHostHandle:
 
     async def state(self) -> HostUIState:
         return HostUIState.model_validate(await self._call("host/get-state"))
+
+    async def attachments(self, topic_id: str) -> list[AttachmentView]:
+        response = await self._http.get(f"/v1/topics/{topic_id}/attachments")
+        self._check(response)
+        return TypeAdapter(list[AttachmentView]).validate_json(response.content)
+
+    async def upload_attachment(self, topic_id: str, request: AttachmentUpload) -> AttachmentView:
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/attachments", json=request.model_dump(mode="json"), timeout=20
+        )
+        self._check(response)
+        return AttachmentView.model_validate_json(response.content)
+
+    async def attachment_content(self, topic_id: str, attachment_id: str) -> AttachmentContent:
+        response = await self._http.get(
+            f"/v1/topics/{topic_id}/attachments/{attachment_id}/content"
+        )
+        self._check(response)
+        return AttachmentContent.model_validate_json(response.content)
+
+    async def delete_attachment(self, topic_id: str, attachment_id: str) -> None:
+        response = await self._http.delete(f"/v1/topics/{topic_id}/attachments/{attachment_id}")
+        self._check(response)
 
     async def checkpoints(self, topic_id: str) -> CheckpointCatalog:
         response = await self._http.get(f"/v1/topics/{topic_id}/checkpoints")

@@ -37,6 +37,7 @@ from .drag import DragDropRequest, DragEnterRequest, DragPreview, DragState
 from .interactions import InteractionReply
 from .link import LinkNavigate
 from .locale import LocaleChange
+from .persistence.attachments import AttachmentRepository
 from .persistence.change_lists import ChangeListRepository
 from .persistence.checkpoints import CheckpointRepository
 from .prompt_context import (
@@ -111,7 +112,8 @@ class RegenerateMessageRequest(RegenerateRequest):
 class LocalApp:
     def __init__(self, runtime: ChatRuntime) -> None:
         host, self._app = InProcessBridge.pair()
-        self.handle = AppHandle(host)
+        self.attachment_repository = AttachmentRepository(runtime.repository.database)
+        self.handle = AppHandle(host, attachments=self.attachment_repository)
         self.runtime = runtime
         self.change_repository = ChangeListRepository(runtime.repository.database)
         self.changes = ChangeListService(self.change_repository)

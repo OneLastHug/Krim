@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
@@ -26,6 +27,7 @@ from krim_agent.application.checkpoints import CheckpointService
 from krim_agent.application.host import HostSessions
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
+from krim_agent.attachment import AttachmentContent, AttachmentUpload, AttachmentView
 from krim_agent.change_list import (
     ChangeClick,
     ChangeExecution,
@@ -60,6 +62,7 @@ from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.persistence.attachments import AttachmentRepository
 from krim_agent.persistence.change_lists import ChangeListRepository
 from krim_agent.persistence.checkpoints import CheckpointRepository
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
@@ -157,6 +160,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     change_service = ChangeListService(change_repository)
     checkpoint_repository = CheckpointRepository(database)
     checkpoint_service = CheckpointService(checkpoint_repository)
+    attachment_repository = AttachmentRepository(database)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -205,6 +209,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.host_sessions = host_sessions
     app.state.change_lists = change_service
     app.state.checkpoints = checkpoint_service
+    app.state.attachments = attachment_repository
     mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
@@ -537,6 +542,45 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics/{topic_id}/prompt-context")
     async def prompt_context(topic_id: str) -> PromptContext:
         return await repository.get_prompt_context(topic_id)
+
+    @app.get("/v1/topics/{topic_id}/attachments")
+    async def list_attachments(topic_id: str) -> list[AttachmentView]:
+        return await attachment_repository.list(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/attachments", status_code=201)
+    async def upload_attachment(topic_id: str, payload: AttachmentUpload) -> AttachmentView:
+        return await attachment_repository.upload(topic_id, payload)
+
+    @app.get("/v1/topics/{topic_id}/attachments/{attachment_id}")
+    async def attachment(topic_id: str, attachment_id: str) -> AttachmentView:
+        return await attachment_repository.get(topic_id, attachment_id)
+
+    @app.get("/v1/topics/{topic_id}/attachments/{attachment_id}/content")
+    async def attachment_content(topic_id: str, attachment_id: str) -> AttachmentContent:
+        return await attachment_repository.content(topic_id, attachment_id)
+
+    @app.get("/v1/topics/{topic_id}/attachments/{attachment_id}/download")
+    async def download_attachment(topic_id: str, attachment_id: str) -> Response:
+        import base64
+
+        content = await attachment_repository.content(topic_id, attachment_id)
+        filename = quote(content.attachment.filename, safe="")
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+            "Cache-Control": "no-store",
+        }
+        return Response(
+            base64.b64decode(content.content_base64),
+            media_type=content.attachment.media_type,
+            headers=headers,
+        )
+
+    @app.delete("/v1/topics/{topic_id}/attachments/{attachment_id}")
+    async def delete_attachment(topic_id: str, attachment_id: str) -> dict[str, bool]:
+        await attachment_repository.delete(topic_id, attachment_id)
+        return {"deleted": True}
 
     @app.get("/v1/topics/{topic_id}/change-list")
     async def change_list(topic_id: str) -> ChangeListView:

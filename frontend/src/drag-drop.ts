@@ -12,7 +12,7 @@ export class DragDropUI {
   private dropping = false;
   private preview: Preview | null = null;
   private generation = 0;
-  constructor(private readonly accept: (topicId: string, ref: MentionRef) => Promise<boolean>, private readonly notice: (message: string, error?: boolean) => void) {
+  constructor(private readonly accept: (topicId: string, ref: MentionRef) => Promise<boolean>, private readonly notice: (message: string, error?: boolean) => void, private readonly upload?: (topicId: string, file: File) => Promise<MentionRef | null>) {
     const area = node("composer");
     area.addEventListener("dragenter", (event) => {
       const drag = event as DragEvent;
@@ -52,7 +52,10 @@ export class DragDropUI {
       if (data.files.length !== 1) throw new Error(t("一次只能拖入一个文本文件"));
       const file = data.files[0]!;
       const textType = file.type.startsWith("text/") || ["application/json", "application/xml"].includes(file.type) || (!file.type && /\.(?:txt|md|json|csv|py|ts|js|yaml|yml|toml|xml|log|rst)$/i.test(file.name));
-      if (!textType || file.size > MAX_FILE_BYTES) throw new Error(t("只接受有限 UTF-8 文本文件"));
+      if (!textType || file.size > MAX_FILE_BYTES) {
+        if (!this.upload) throw new Error(t("只接受有限 UTF-8 文本文件"));
+        await this.upload(id, file); return;
+      }
       let content: string;
       try { content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer()); } catch { throw new Error(t("文件不是有效 UTF-8 文本")); }
       if (content.includes("\0") || !content.trim() || Array.from(content).length > 8192) throw new Error(t("文件内容为空或超过文本边界"));

@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
+from .attachment import AttachmentContent, AttachmentUpload, AttachmentView
 from .change_list import (
     ChangeClick,
     ChangeInvoke,
@@ -122,6 +123,27 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/skills")
         self._check(response)
         return SkillCatalogView.model_validate_json(response.content)
+
+    def attachments(self, topic_id: str) -> list[AttachmentView]:
+        response = self._http.get(f"/v1/topics/{topic_id}/attachments")
+        self._check(response)
+        return TypeAdapter(list[AttachmentView]).validate_json(response.content)
+
+    def upload_attachment(self, topic_id: str, request: AttachmentUpload) -> AttachmentView:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/attachments", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return AttachmentView.model_validate_json(response.content)
+
+    def attachment_content(self, topic_id: str, attachment_id: str) -> AttachmentContent:
+        response = self._http.get(f"/v1/topics/{topic_id}/attachments/{attachment_id}/content")
+        self._check(response)
+        return AttachmentContent.model_validate_json(response.content)
+
+    def delete_attachment(self, topic_id: str, attachment_id: str) -> None:
+        response = self._http.delete(f"/v1/topics/{topic_id}/attachments/{attachment_id}")
+        self._check(response)
 
     def change_list(self, topic_id: str) -> ChangeListView:
         response = self._http.get(f"/v1/topics/{topic_id}/change-list")
