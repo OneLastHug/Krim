@@ -17,6 +17,7 @@ class ExecutionContext:
     attempt: int
     path: str = ""
     epoch: int = 0
+    root_run_id: str | None = None
 
     @property
     def execution_id(self) -> str:

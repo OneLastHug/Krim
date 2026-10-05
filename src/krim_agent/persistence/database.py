@@ -322,6 +322,65 @@ class AgentHandleRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class UsageBudgetAccountRow(Base):
+    __tablename__ = "usage_budget_accounts"
+    __table_args__ = (UniqueConstraint("owner_kind", "owner_id"),)
+    account_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    owner_kind: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str] = mapped_column(String(128))
+    config: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    spent_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    spent_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class UsageBudgetRequestRow(Base):
+    __tablename__ = "usage_budget_requests"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step"),
+        CheckConstraint("step >= 0 AND step <= 31", name="ck_usage_budget_request_step"),
+    )
+    request_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    step: Mapped[int] = mapped_column(Integer)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16))
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_reserve: Mapped[int] = mapped_column(Integer)
+    reported_usage: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    receipt: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    overdrawn: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class UsageBudgetAllocationRow(Base):
+    __tablename__ = "usage_budget_allocations"
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_budget_requests.request_id"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_budget_accounts.account_id"), primary_key=True
+    )
+    reserved_tokens: Mapped[int] = mapped_column(Integer)
+    reserved_cost_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    charged_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    charged_cost_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+
+
+class UsageBudgetBindingRow(Base):
+    __tablename__ = "usage_budget_bindings"
+    owner_kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    config_hash: Mapped[str] = mapped_column(String(64))
+    parents: Mapped[list[JsonValue]] = mapped_column(JSON)
+    account_ids: Mapped[list[JsonValue]] = mapped_column(JSON)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)

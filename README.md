@@ -21,6 +21,7 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通，证据见 [Tokenizer 报告](docs/testing/reports/2026-10-05-tokenizer-budgets.md)；mid-stream、持久提案、真实 usage/成本和完整确认 UI 未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流、可选 usage 持久投影与错误持久化已验证，真实商业供应商矩阵/账单尚未验证。
+- 已接通 [持久累计预算](docs/api/usage-budgets.md)：0017、Runtime/Agent/Workflow 父子额度、调用前预留、Provider 报告结算、未知结果保留与可信回执核实；token 和显式整数费率费用可限制后续派发，跨进程/幂等/并发已有本机证据。真实商业费率/账单与生产租户仍未验证。
 - 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新及显式 MCP HTTP Auth 已验证，浏览器/跨进程授权状态未完成。
 - 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册、PKCE exchange 与显式 401 Auth；本机 TCP 已验证，浏览器回调仍未完成。
 - 已实现显式 MCP Streamable HTTP OAuth Auth：401 触发受控 PKCE 回调、持久令牌复用和一次请求重放；真实本机 MCP tools/list/call 已验证，宿主仍需提供回调，不自动打开浏览器。

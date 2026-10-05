@@ -28,6 +28,7 @@ from krim_agent.application.host import HostSessions
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.attachment import AttachmentContent, AttachmentUpload, AttachmentView
+from krim_agent.budgets import BudgetAccountView, BudgetRequestView, BudgetResolveRequest
 from krim_agent.change_list import (
     ChangeClick,
     ChangeExecution,
@@ -151,7 +152,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         database,
         scope="api",
         services=WorkflowServices(
-            tools=service.tools.fork(), models={"default": PythonAI(service)}
+            tools=service.tools.fork(),
+            models={"default": PythonAI(service)},
+            usage_budget=config.workflow_usage_budget,
+            budget_store=service.budget_store,
         ),
         max_active_runs=config.max_active_runs,
     )
@@ -172,6 +176,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             await checkpoint_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
+            await service.budget_store.recover()
             await agent_service.restore_persistent()
             yield
         finally:
@@ -438,6 +443,29 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/runs/{run_id}/usage")
     async def run_usage(run_id: str) -> RunUsageView:
         return await repository.usage_view(run_id)
+
+    @app.get("/v1/budgets/accounts")
+    async def budget_accounts() -> list[BudgetAccountView]:
+        return await service.budget_store.accounts()
+
+    @app.get("/v1/budgets/accounts/{account_id}")
+    async def budget_account(account_id: str) -> BudgetAccountView:
+        return await service.budget_store.account(account_id)
+
+    @app.get("/v1/runs/{run_id}/budget")
+    async def run_budget(run_id: str) -> list[BudgetRequestView]:
+        await repository.get_run(run_id)
+        return await service.budget_store.requests(run_id)
+
+    @app.get("/v1/budgets/requests/{request_id}")
+    async def budget_request(request_id: str) -> BudgetRequestView:
+        return await service.budget_store.request(request_id)
+
+    @app.post("/v1/budgets/requests/{request_id}/resolve")
+    async def budget_resolve(request_id: str, payload: BudgetResolveRequest) -> BudgetRequestView:
+        return await service.budget_store.settle(
+            request_id, payload.usage, receipt=payload.receipt, revision=payload.revision
+        )
 
     @app.get("/v1/runs/{run_id}/interactions")
     async def run_interactions(run_id: str, pending_only: bool = False) -> list[InteractionView]:

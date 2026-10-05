@@ -9,6 +9,9 @@ from collections.abc import Awaitable, Callable, Mapping
 
 from pydantic import JsonValue
 
+from krim_agent.budgets import UsageBudgetConfig
+from krim_agent.context_engine import ContextRunConfig
+from krim_agent.persistence.budgets import UsageBudgetStore
 from krim_agent.sdk import PythonAI
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import Policy, ToolError
@@ -27,11 +30,29 @@ class WorkflowServices:
         models: Mapping[str, PythonAI] | None = None,
         trusted_code: Mapping[str, TrustedCode] | None = None,
         policy: Policy | None = None,
+        usage_budget: UsageBudgetConfig | None = None,
+        budget_store: UsageBudgetStore | None = None,
+        context_config: ContextRunConfig | None = None,
     ) -> None:
         self.tools = tools
         self.models = dict(models or {})
         self.trusted_code = dict(trusted_code or {})
         self.policy = policy
+        self.usage_budget = usage_budget
+        self.budget_store = budget_store
+        self.context_config = context_config
+
+    async def _budget_scope(self, context: ExecutionContext) -> tuple[str, ...]:
+        first = next(iter(self.models.values()), None)
+        store = self.budget_store or (first.runtime.budget_store if first else None)
+        if store is None:
+            if self.usage_budget is not None:
+                raise WorkflowError("budget_store_required", "Workflow 预算需要可信账本")
+            return ()
+        parents = await first.runtime.ensure_usage_budget_binding() if first else ()
+        return await store.bind(
+            "workflow", context.root_run_id or context.run_id, self.usage_budget, parents
+        )
 
     def bindings(self, graph: WorkflowGraph) -> dict[str, RunnerBinding]:
         bindings: dict[str, RunnerBinding] = {
@@ -83,6 +104,15 @@ class WorkflowServices:
                 call_id=context.execution_id,
                 timeout=node.timeout_seconds,
                 policy=self.policy,
+                budget_account_ids=await self._budget_scope(context),
+                context_config=(
+                    self.context_config
+                    or ContextRunConfig.from_settings(
+                        next(iter(self.models.values())).runtime.settings
+                    )
+                ).model_dump(mode="json")
+                if self.context_config is not None or self.models
+                else None,
             ),
         )
         if result.is_error:
@@ -106,7 +136,9 @@ class WorkflowServices:
         prompt = prefix + (
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         )
-        stream = await self.models[model_name].stream_text(prompt)
+        ai = self.models[model_name]
+        accounts = await self._budget_scope(context)
+        stream = await ai.stream_text(prompt, budget_account_ids=accounts)
         try:
             result = await stream.collect()
         except asyncio.CancelledError:

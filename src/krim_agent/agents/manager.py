@@ -375,6 +375,8 @@ class AgentManager:
             and definition.context_config != ContextRunConfig()
         ):
             payload["context_config"] = definition.context_config.model_dump(mode="json")
+        if definition.usage_budget is not None:
+            payload["usage_budget"] = definition.usage_budget.model_dump(mode="json")
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     async def persist(self, handle: AgentHandle, status: str, *, release: bool = False) -> None:
@@ -434,7 +436,11 @@ class AgentManager:
             )
 
     async def spawn(
-        self, definition: AgentDefinition, *, parent_context: ToolContext | None = None
+        self,
+        definition: AgentDefinition,
+        *,
+        parent_context: ToolContext | None = None,
+        budget_account_ids: tuple[str, ...] = (),
     ) -> AgentHandle:
         async with self._spawn_lock:
             if parent_context is not None:
@@ -466,7 +472,9 @@ class AgentManager:
                         parent_context.timeout,
                     ),
                 )
-            return await self._spawn(definition, parent_context)
+            return await self._spawn(
+                definition, parent_context, budget_account_ids=budget_account_ids
+            )
 
     async def _spawn(
         self,
@@ -474,6 +482,7 @@ class AgentManager:
         parent_context: ToolContext | None = None,
         *,
         stored: StoredAgentHandle | None = None,
+        budget_account_ids: tuple[str, ...] = (),
     ) -> AgentHandle:
         if self._closed:
             raise AgentError("manager_closed", "AgentManager 已关闭")
@@ -499,6 +508,9 @@ class AgentManager:
                 "max_steps": definition.max_steps,
                 "run_timeout_seconds": definition.timeout_seconds,
                 "tool_timeout_seconds": definition.tool_timeout_seconds,
+                "usage_budget": definition.usage_budget.model_dump(mode="json")
+                if definition.usage_budget
+                else None,
                 **(
                     definition.context_config.settings_values() if definition.context_config else {}
                 ),
@@ -519,6 +531,16 @@ class AgentManager:
             execution_timeouts=parent_context.execution_timeouts
             if parent_context and not definition.persistent
             else (),
+            budget_account_ids=tuple(
+                dict.fromkeys(
+                    (
+                        *budget_account_ids,
+                        *(parent_context.budget_account_ids if parent_context else ()),
+                    )
+                )
+            ),
+            budget_owner_kind="agent",
+            budget_owner_id=definition.agent_id,
         )
         topic = (
             await self.repository.get_topic(stored.topic_id)
@@ -529,6 +551,7 @@ class AgentManager:
             for batch in parent_context.skill_snapshot.batches():
                 await self.repository.inject_skills(topic.id, batch)
         handle = AgentHandle(self, definition, runtime, topic.id)
+        await runtime.ensure_usage_budget_binding()
         if definition.persistent:
             try:
                 saved = (

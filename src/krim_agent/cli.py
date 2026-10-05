@@ -11,6 +11,7 @@ import httpx
 from pydantic import ValidationError
 
 from . import __version__
+from .budgets import BudgetResolveRequest
 from .client import ClientError, KrimClient
 from .context_engine import ContextOptions
 from .interactions import InteractionReply
@@ -25,6 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    budget = subparsers.add_parser("budget", help="budget（预算）：读取累计账本和核实未知请求")
+    budget.add_argument("action", choices=["accounts", "account", "run", "request", "resolve"])
+    budget.add_argument("value", nargs="?", help="account/run/request 标识")
+    budget.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    budget.add_argument("--revision", type=int, help="revision（修订号）：匹配当前未知请求")
+    budget.add_argument("--receipt", help="receipt（回执）：可信宿主核实依据")
+    budget.add_argument("--usage", help="usage（用量）：输入/输出/总量的 JSON 报告")
     interaction = subparsers.add_parser(
         "interaction", help="interaction（用户交互）：读取审批/问题和提交回应"
     )
@@ -181,6 +189,45 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "budget":
+                if args.action == "accounts":
+                    print(
+                        json.dumps(
+                            [value.model_dump(mode="json") for value in client.budget_accounts()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    if not args.value:
+                        parser.error("budget 动作需要标识")
+                    if args.action == "account":
+                        print(client.budget_account(args.value).model_dump_json(indent=2))
+                    elif args.action == "run":
+                        print(
+                            json.dumps(
+                                [
+                                    value.model_dump(mode="json")
+                                    for value in client.run_budget(args.value)
+                                ],
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                        )
+                    elif args.action == "request":
+                        print(client.budget_request(args.value).model_dump_json(indent=2))
+                    elif args.action == "resolve":
+                        if args.revision is None or not args.receipt or not args.usage:
+                            parser.error("budget resolve 需要 revision/receipt/usage")
+                        request = BudgetResolveRequest.model_validate(
+                            {
+                                "revision": args.revision,
+                                "receipt": args.receipt,
+                                "usage": json.loads(args.usage),
+                            }
+                        )
+                        print(client.budget_resolve(args.value, request).model_dump_json(indent=2))
+                return
             if args.command == "interaction":
                 if args.action == "list":
                     print(

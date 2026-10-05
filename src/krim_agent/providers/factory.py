@@ -27,6 +27,9 @@ def create_provider(settings: Settings) -> OwnedProvider:
             or (
                 settings.context_reserved_output_tokens
                 if settings.model_context_window_tokens is not None
+                or settings.usage_budget is not None
+                or settings.agent_usage_budget is not None
+                or settings.workflow_usage_budget is not None
                 else None
             ),
         )

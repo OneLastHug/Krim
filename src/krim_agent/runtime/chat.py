@@ -13,6 +13,7 @@ from pydantic import JsonValue, ValidationError
 
 from krim_agent.application.context import PersistentContext
 from krim_agent.application.interactions import InteractionService
+from krim_agent.budgets import BudgetOwner, BudgetRequestView
 from krim_agent.config import Settings
 from krim_agent.context_engine import (
     ContextCompactRequest,
@@ -23,6 +24,8 @@ from krim_agent.context_engine import (
     ContextRunConfig,
 )
 from krim_agent.persistence import KrimRepository
+from krim_agent.persistence.budgets import UsageBudgetStore
+from krim_agent.persistence.budgets import digest as budget_digest
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -81,6 +84,7 @@ class RunState:
     skill_snapshot: SkillSnapshot | None = None
     context_config: ContextRunConfig | None = None
     context_engine: ContextEngine | None = None
+    budget_account_ids: tuple[str, ...] = ()
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -116,6 +120,9 @@ class ChatRuntime:
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
         execution_timeouts: tuple[ToolExecutionBudget, ...] = (),
+        budget_account_ids: tuple[str, ...] = (),
+        budget_owner_kind: BudgetOwner = "runtime",
+        budget_owner_id: str | None = None,
     ) -> None:
         self.repository = repository
         self.provider = provider
@@ -132,6 +139,11 @@ class ChatRuntime:
         self.question_handler = question_handler or self.interactions.question
         self.interaction_publisher = interaction_publisher
         self.execution_timeouts = execution_timeouts
+        self.budget_store = UsageBudgetStore(repository.database)
+        self._parent_budget_accounts = budget_account_ids
+        self._budget_owner_kind = budget_owner_kind
+        self._budget_owner_id = budget_owner_id or settings.usage_budget_scope
+        self._own_budget_accounts: tuple[str, ...] | None = None
         self._lock = asyncio.Lock()
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
@@ -163,8 +175,29 @@ class ChatRuntime:
         except TokenizerError as error:
             raise ServiceError(error.code, "本地词元编码器不可用", 503) from error
 
-    async def start(self, topic_id: str, request: ChatRequest) -> RunView:
-        return await self._start(topic_id, request)
+    @staticmethod
+    async def _budget_commit[Result](operation: Awaitable[Result]) -> Result:
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def ensure_usage_budget_binding(self) -> tuple[str, ...]:
+        if self._own_budget_accounts is None:
+            self._own_budget_accounts = await self.budget_store.bind(
+                self._budget_owner_kind,
+                self._budget_owner_id,
+                self.settings.usage_budget,
+                self._parent_budget_accounts,
+            )
+        return self._own_budget_accounts
+
+    async def start(
+        self, topic_id: str, request: ChatRequest, *, budget_account_ids: tuple[str, ...] = ()
+    ) -> RunView:
+        return await self._start(topic_id, request, budget_account_ids=budget_account_ids)
 
     @staticmethod
     async def _confirm_writes(definition: ToolDefinition, _context: ToolContext) -> Decision:
@@ -232,6 +265,7 @@ class ChatRuntime:
         *,
         action: Literal["send", "edit", "regenerate"] = "send",
         source_message_id: str | None = None,
+        budget_account_ids: tuple[str, ...] = (),
     ) -> RunView:
         async with self._lock:
             if self._closed:
@@ -240,6 +274,16 @@ class ChatRuntime:
                 raise ServiceError("context_busy", "话题正在生成手动压缩结果", 409)
             context_config = ContextRunConfig.from_settings(self.settings)
             context_engine = self._engine_for_context(context_config)
+            await self.ensure_usage_budget_binding()
+            assert self._own_budget_accounts is not None
+            accounts = tuple(dict.fromkeys((*self._own_budget_accounts, *budget_account_ids)))
+            if accounts and (
+                context_config.tokenizer == "approx-v1"
+                or context_config.reserved_output_tokens <= 0
+            ):
+                raise ServiceError(
+                    "budget_configuration_invalid", "累计预算需要 BPE 与正数输出预留", 422
+                )
             active = sum(
                 state.task is not None and not state.terminal for state in self._runs.values()
             )
@@ -257,6 +301,7 @@ class ChatRuntime:
                 event_writer=self.repository.append_event,
                 context_config=context_config,
                 context_engine=context_engine,
+                budget_account_ids=accounts,
             )
             self._runs[run.id] = state
             state.task = asyncio.create_task(self._drive(state), name=f"krim-run-{run.id}")
@@ -283,6 +328,7 @@ class ChatRuntime:
                 "provider": self.provider.name,
                 "model_usage_trace": 1,
                 "context_config": state.context_config.model_dump(mode="json"),
+                "budget_account_ids": list(state.budget_account_ids),
             }
             await state.publish("start", start_data)
             snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
@@ -387,7 +433,7 @@ class ChatRuntime:
             tool_step = state.discovery.prepare()
             tool_tokens = (
                 tokenizer.tool_tokens(list(tool_step.definitions.values()))
-                if config.model_context_window_tokens is not None
+                if config.model_context_window_tokens is not None or state.budget_account_ids
                 else 0
             )
             token_limit = config.max_tokens
@@ -498,16 +544,83 @@ class ChatRuntime:
             provider_usage: TokenUsage | None = None
             usage_final = False
             provider_completed = False
-            await state.publish(
-                "chunk",
-                {
-                    "type": "model_step",
-                    "step": _step,
-                    "phase": "start",
-                    "provider": self.provider.name,
-                },
-            )
+            reservation: BudgetRequestView | None = None
+            invoked = False
+            if state.budget_account_ids:
+                if isinstance(self.provider, OpenAICompatibleProvider) and (
+                    self.provider.config.max_output_tokens is None
+                    or self.provider.config.max_output_tokens > config.reserved_output_tokens
+                ):
+                    raise ServiceError(
+                        "budget_output_cap_invalid", "Provider 输出 cap 未受预留约束", 409
+                    )
+                pending_reservation = asyncio.create_task(
+                    self.budget_store.reserve(
+                        state.run.id,
+                        _step,
+                        state.budget_account_ids,
+                        tokenizer.count(messages)
+                        + tool_tokens
+                        + config.model_framing_reserve_tokens,
+                        config.reserved_output_tokens,
+                        budget_digest(
+                            [
+                                [
+                                    {
+                                        "role": message.role,
+                                        "content": message.content,
+                                        "details": message.details,
+                                    }
+                                    for message in messages
+                                ],
+                                [
+                                    definition.schema().model_dump(mode="json")
+                                    for definition in tool_step.definitions.values()
+                                ],
+                            ]
+                        ),
+                    )
+                )
+                try:
+                    reservation = await asyncio.shield(pending_reservation)
+                except asyncio.CancelledError:
+                    reservation = await pending_reservation
+                    if reservation.state == "reserved":
+                        await self._budget_commit(
+                            self.budget_store.transition(reservation.request_id, "released")
+                        )
+                    raise
+                if reservation.state != "reserved":
+                    raise ServiceError(
+                        "budget_request_replay_denied", "已派发预算 request 禁止再次执行模型", 409
+                    )
             try:
+                if reservation is not None:
+                    await state.publish(
+                        "chunk",
+                        {"type": "usage_budget", "request": reservation.model_dump(mode="json")},
+                    )
+                await state.publish(
+                    "chunk",
+                    {
+                        "type": "model_step",
+                        "step": _step,
+                        "phase": "start",
+                        "provider": self.provider.name,
+                    },
+                )
+                if reservation is not None:
+                    reservation = await self._budget_commit(
+                        self.budget_store.transition(reservation.request_id, "dispatched")
+                    )
+            except BaseException:
+                if reservation is not None:
+                    await self._budget_commit(
+                        self.budget_store.transition(reservation.request_id, "released")
+                    )
+                raise
+            try:
+                invoked = True
                 provider_stream = self.provider.stream(
                     messages, list(tool_step.definitions.values())
                 )
@@ -563,6 +676,35 @@ class ChatRuntime:
                     if close_stream is not None:
                         await close_stream()
                 finally:
+                    if reservation is not None:
+                        if not invoked:
+                            reservation = await self._budget_commit(
+                                self.budget_store.transition(reservation.request_id, "released")
+                            )
+                        elif (
+                            provider_completed
+                            and usage_final
+                            and provider_usage is not None
+                            and all(
+                                getattr(provider_usage, key) is not None
+                                for key in ("input_tokens", "output_tokens", "total_tokens")
+                            )
+                        ):
+                            try:
+                                reservation = await self._budget_commit(
+                                    self.budget_store.settle(reservation.request_id, provider_usage)
+                                )
+                            except Exception:
+                                await self._budget_commit(
+                                    self.budget_store.transition(
+                                        reservation.request_id, "uncertain"
+                                    )
+                                )
+                                raise
+                        else:
+                            reservation = await self._budget_commit(
+                                self.budget_store.transition(reservation.request_id, "uncertain")
+                            )
                     await state.publish(
                         "chunk",
                         {
@@ -572,6 +714,23 @@ class ChatRuntime:
                             "provider": self.provider.name,
                             "completed": provider_completed,
                         },
+                    )
+                    if reservation is not None:
+                        await state.publish(
+                            "chunk",
+                            {
+                                "type": "usage_budget",
+                                "request": reservation.model_dump(mode="json"),
+                            },
+                        )
+            if reservation is not None:
+                if reservation.state == "uncertain":
+                    raise ServiceError(
+                        "budget_usage_unknown", "模型用量未获完整确认，预算保留待核实", 409
+                    )
+                if reservation.overdrawn:
+                    raise ServiceError(
+                        "budget_report_overrun", "已报告用量超过预留/累计预算，已照实记录", 409
                     )
             if not calls:
                 if not state.draft:
@@ -620,6 +779,7 @@ class ChatRuntime:
                         if state.skill_snapshot
                         else None,
                         context_config=config.model_dump(mode="json"),
+                        budget_account_ids=state.budget_account_ids,
                     ),
                 )
                 await self.repository.add_message(

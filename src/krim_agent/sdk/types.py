@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, model_validator
 
+from krim_agent.budgets import BudgetRequestView
 from krim_agent.interactions import InteractionView
 from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
@@ -46,6 +47,11 @@ class UsagePart(StrictModel):
     step: int = Field(ge=0)
     usage: TokenUsage
     final: bool = True
+
+
+class UsageBudgetPart(StrictModel):
+    type: Literal["usage-budget"] = "usage-budget"
+    request: BudgetRequestView
 
 
 class ModelStepPart(StrictModel):
@@ -152,6 +158,7 @@ SDKPart = (
     | ToolCallPart
     | ToolResultPart
     | UsagePart
+    | UsageBudgetPart
     | ModelStepPart
     | ContextCompactPart
     | ContextBudgetPart

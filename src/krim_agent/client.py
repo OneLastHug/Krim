@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .attachment import AttachmentContent, AttachmentUpload, AttachmentView
+from .budgets import BudgetAccountView, BudgetRequestView, BudgetResolveRequest
 from .change_list import (
     ChangeClick,
     ChangeInvoke,
@@ -466,6 +467,33 @@ class KrimClient:
         response = self._http.get(f"/v1/runs/{run_id}/usage")
         self._check(response)
         return RunUsageView.model_validate_json(response.content)
+
+    def budget_accounts(self) -> list[BudgetAccountView]:
+        response = self._http.get("/v1/budgets/accounts")
+        self._check(response)
+        return TypeAdapter(list[BudgetAccountView]).validate_json(response.content)
+
+    def budget_account(self, account_id: str) -> BudgetAccountView:
+        response = self._http.get(f"/v1/budgets/accounts/{account_id}")
+        self._check(response)
+        return BudgetAccountView.model_validate_json(response.content)
+
+    def run_budget(self, run_id: str) -> list[BudgetRequestView]:
+        response = self._http.get(f"/v1/runs/{run_id}/budget")
+        self._check(response)
+        return TypeAdapter(list[BudgetRequestView]).validate_json(response.content)
+
+    def budget_request(self, request_id: str) -> BudgetRequestView:
+        response = self._http.get(f"/v1/budgets/requests/{request_id}")
+        self._check(response)
+        return BudgetRequestView.model_validate_json(response.content)
+
+    def budget_resolve(self, request_id: str, payload: BudgetResolveRequest) -> BudgetRequestView:
+        response = self._http.post(
+            f"/v1/budgets/requests/{request_id}/resolve", json=payload.model_dump(mode="json")
+        )
+        self._check(response)
+        return BudgetRequestView.model_validate_json(response.content)
 
     def compact(
         self,

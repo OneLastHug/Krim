@@ -19,6 +19,7 @@ from .types import (
     ToolCallPart,
     ToolDiscoveryPart,
     ToolResultPart,
+    UsageBudgetPart,
     UsagePart,
 )
 
@@ -44,4 +45,5 @@ __all__ = [
     "ToolCallPart",
     "ToolResultPart",
     "UsagePart",
+    "UsageBudgetPart",
 ]
