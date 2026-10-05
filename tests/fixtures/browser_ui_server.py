@@ -19,6 +19,10 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         api_key=SecretStr("browser-test-key"),
         interactive_tools=True,
         run_timeout_seconds=120,
+        context_tokenizer="cl100k_base",
+        context_reserved_output_tokens=128,
+        model_context_window_tokens=32768,
+        model_framing_reserve_tokens=64,
     )
     runtime = ChatRuntime(
         KrimRepository(Database(settings.database_url)),

@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import JsonValue
 
 from krim_agent.protocol.domain import MessageView
+from krim_agent.tokenizer import TokenizerSpec
 
 from .types import ContextOptions, ContextResult
 
@@ -112,11 +113,20 @@ def _source_ids(messages: Sequence[MessageView]) -> list[str]:
 
 
 class ContextEngine:
-    def __init__(self, token_counter: TokenCounter | None = None) -> None:
+    def __init__(
+        self, token_counter: TokenCounter | None = None, *, tokenizer: TokenizerSpec | None = None
+    ) -> None:
         self.token_counter = token_counter
+        self.tokenizer = tokenizer
 
     def _tokens(self, messages: Sequence[MessageView]) -> int:
-        value = self.token_counter(messages) if self.token_counter else (_chars(messages) + 3) // 4
+        value = (
+            self.token_counter(messages)
+            if self.token_counter
+            else self.tokenizer.count(messages)
+            if self.tokenizer
+            else (_chars(messages) + 3) // 4
+        )
         if type(value) is not int or value < 0:
             raise ContextError("token 计数器必须返回非负整数", code="context_token_counter_invalid")
         return value
@@ -125,7 +135,10 @@ class ContextEngine:
         return (
             (options.max_messages is None or len(messages) <= options.max_messages)
             and (options.max_chars is None or _chars(messages) <= options.max_chars)
-            and (options.max_tokens is None or self._tokens(messages) <= options.max_tokens)
+            and (
+                options.max_tokens is None
+                or self._tokens(messages) + options.reserved_output_tokens <= options.max_tokens
+            )
         )
 
     def needs_compaction(self, messages: Sequence[MessageView], options: ContextOptions) -> bool:
@@ -244,6 +257,12 @@ class ContextEngine:
                 omitted_count=0,
                 estimated_chars=_chars(original),
                 estimated_tokens=self._tokens(original),
+                tokenizer=self.tokenizer.name
+                if self.tokenizer and self.token_counter is None
+                else "custom"
+                if self.token_counter
+                else "approx-v1",
+                reserved_output_tokens=options.reserved_output_tokens,
                 strategy=options.strategy,
                 policy=options.policy,
                 processor_trace=["message_cleanup"],
@@ -278,6 +297,12 @@ class ContextEngine:
             compacted=len(retained) < len(original),
             estimated_chars=_chars(retained),
             estimated_tokens=self._tokens(retained),
+            tokenizer=self.tokenizer.name
+            if self.tokenizer and self.token_counter is None
+            else "custom"
+            if self.token_counter
+            else "approx-v1",
+            reserved_output_tokens=options.reserved_output_tokens,
             strategy=options.strategy,
             policy=options.policy,
             processor_trace=trace,

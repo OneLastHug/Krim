@@ -22,6 +22,11 @@ def create_provider(settings: Settings) -> OwnedProvider:
             model=settings.provider_model or "",
             api_key=settings.provider_api_key,
             timeout_seconds=settings.provider_timeout_seconds,
-            max_output_tokens=settings.provider_max_output_tokens,
+            max_output_tokens=settings.provider_max_output_tokens
+            or (
+                settings.context_reserved_output_tokens
+                if settings.model_context_window_tokens is not None
+                else None
+            ),
         )
     )

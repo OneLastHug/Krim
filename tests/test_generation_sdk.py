@@ -180,11 +180,17 @@ async def test_no_output_is_error_and_timeout_keeps_stable_reason():
         assert not result.steps and not result.text
     async with await PythonAI.create(
         provider=PausedProvider(),
-        settings=Settings(database_url="sqlite+aiosqlite:///:memory:", run_timeout_seconds=0.01),
+        settings=Settings(database_url="sqlite+aiosqlite:///:memory:", run_timeout_seconds=1),
     ) as ai:
-        result = await ai.generate_text("timeout")
+        stream = await ai.stream_text("timeout")
+        # 先证明模型已经给出部分输出，再验证实际总超时保留该输出。
+        # 10 ms 可能在上下文准备阶段耗尽，不能据此要求存在模型步骤。
+        subscription = stream.text_stream()
+        assert await anext(subscription) == "部分 SDK 输出"
+        await subscription.aclose()
+        result = await stream.collect()
         assert result.finish_reason == "error" and result.code == "run_timeout"
-        assert result.steps[-1].partial
+        assert result.steps[-1].partial and result.text == "部分 SDK 输出"
 
 
 async def test_sdk_finish_reason_and_step_metadata_survive_database_reopen(tmp_path):

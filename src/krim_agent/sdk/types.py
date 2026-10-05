@@ -1,8 +1,10 @@
 """Python SDK 部件与逐步结果；语义参考 Vercel AI SDK（SRC-OSS-016）。"""
 
+from __future__ import annotations
+
 from typing import Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from krim_agent.interactions import InteractionView
 from krim_agent.protocol.domain import MessageView, RunView
@@ -16,6 +18,7 @@ FinishReason = Literal["stop", "tool-calls", "length", "abort", "error", "interr
 class StreamStart(StrictModel):
     type: Literal["start"] = "start"
     provider: str
+    context_config: dict[str, JsonValue] | None = None
 
 
 class TextDelta(StrictModel):
@@ -49,6 +52,34 @@ class ContextCompactPart(StrictModel):
     source_count: int = Field(default=0, ge=0)
     source_until_message_id: str | None = None
     source_branch_key: str | None = None
+    tokenizer: Literal["approx-v1", "cl100k_base", "o200k_base", "custom"] = "approx-v1"
+    estimated_tokens: int | None = Field(default=None, ge=0)
+    reserved_output_tokens: int = Field(default=0, ge=0)
+
+
+class ContextBudgetPart(StrictModel):
+    type: Literal["context-budget"] = "context-budget"
+    step: int = Field(ge=0)
+    encoding: Literal["cl100k_base", "o200k_base"]
+    input_tokens: int = Field(ge=0)
+    tool_tokens: int = Field(ge=0)
+    reserved_output_tokens: int = Field(gt=0)
+    framing_reserve_tokens: int = Field(ge=0)
+    window_tokens: int = Field(gt=0)
+    required_tokens: int = Field(ge=0)
+    within_limit: bool
+
+    @model_validator(mode="after")
+    def validate_total(self) -> ContextBudgetPart:
+        total = (
+            self.input_tokens
+            + self.tool_tokens
+            + self.reserved_output_tokens
+            + self.framing_reserve_tokens
+        )
+        if self.required_tokens != total or self.within_limit != (total <= self.window_tokens):
+            raise ValueError("上下文预算事件的总量/窗口状态不一致")
+        return self
 
 
 class StepFinish(StrictModel):
@@ -97,6 +128,7 @@ SDKPart = (
     | ToolCallPart
     | ToolResultPart
     | ContextCompactPart
+    | ContextBudgetPart
     | InteractionPart
     | ToolDiscoveryPart
     | SkillLoadedPart

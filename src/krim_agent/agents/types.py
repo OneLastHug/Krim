@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from krim_agent.context_engine.types import ContextRunConfig
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
@@ -50,6 +51,7 @@ class AgentDefinition:
     agent_id: str = ""
     policy: Policy | None = None
     tool_timeout_seconds: float = 10
+    context_config: ContextRunConfig | None = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
@@ -62,6 +64,14 @@ class AgentDefinition:
             raise ValueError("max_steps 必须在 1–32 之间")
         if not 0 < self.tool_timeout_seconds <= 120:
             raise ValueError("tool_timeout_seconds 必须在 0–120 秒之间")
+        if self.context_config is not None:
+            if not isinstance(self.context_config, ContextRunConfig):
+                raise ValueError("context_config 必须是可信 ContextRunConfig")
+            object.__setattr__(
+                self,
+                "context_config",
+                ContextRunConfig.model_validate(self.context_config.model_dump()),
+            )
 
     def with_id(self) -> AgentDefinition:
         return replace(self, agent_id=self.agent_id or str(uuid4()))

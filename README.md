@@ -12,13 +12,13 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 - M2 已接通 [持久审批与用户问答](docs/api/user-interactions.md)：SQLite 0009 保存单次 tool call/参数请求，HTTP、Python client、CLI、AppHandle、SDK 和浏览器可批准、拒绝或提交真实答案；子 Agent 权限交集、停止/超时/重启取消和旧事件不重放已验证，完整权限作用域、租户和多 worker 仍未完成。
 - 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取和显式取消。
 - 已接通 [Python Tool SDK](docs/sdk/python-tools.md)：函数/类/Pydantic/JSON output_schema、最终消费/失败审计、MCP 输出声明、should_defer/always_load 和每次 Run 隔离的按需发现；raw call_tool 保留原始值，Schema 从搜索成功后的下一模型步骤暴露，不扩大权限。
-- 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；跨进程句柄、动态模型/目录持久化和成本预算未完成。
-- 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、当前进程句柄、execute/resume/stop/destroy、SSE 游标、浏览器卡片与关闭回收；重启后句柄不恢复但持久 run 可查询，跨进程接管和目录持久化未完成。
+- 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；默认 persistent 句柄已由 0016 验证跨两个 Python 进程恢复，动态模型/目录持久化和累计成本预算未完成。
+- 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、execute/resume/stop/destroy、SSE 游标、基础浏览器卡片与关闭回收；persistent:true 在可信定义一致时恢复同一句柄并创建新的 Run，普通句柄仍属于当前进程，生产多 worker/目录动态更新未完成。
 - 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认、Agent 目录执行和审批/问答卡片；完整 Workflow 产品、Host SDK/iframe、附件和剩余 M3 UI 未完成。
 - 已接通 [Python Host SDK 与同源 iframe 回程](docs/api/host-sdk.md)：RemoteHostHandle、当前进程 HostSessions、版本化 postMessage、父容器、状态/Prompt/theme/resize/notice/sidebar、真实回执与销毁；完整宿主信道、跨站身份、持久 session 和生产租约未完成。
 - 已接通 [Mentions 与 Context Tags](docs/api/prompt-context.md)：话题目录、Python ID、Unicode 引用位置、发送/编辑快照、模型/压缩预算及 client/SDK/Host/浏览器 chip；受限二进制附件已由 [Attachments](docs/api/attachments.md) 接通，富文本和文件沙箱仍未完成。
 - 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
-- 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。真实 tokenizer、mid-stream、持久提案和完整确认 UI 未完成。
+- 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通，证据见 [Tokenizer 报告](docs/testing/reports/2026-10-05-tokenizer-budgets.md)；mid-stream、持久提案、真实 usage/成本和完整确认 UI 未完成。
 - 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
 - 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流与错误持久化已验证，真实商业供应商矩阵尚未验证。
 - 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新及显式 MCP HTTP Auth 已验证，浏览器/跨进程授权状态未完成。

@@ -11,6 +11,7 @@ from typing import cast
 from uuid import uuid4
 
 from krim_agent.config import Settings
+from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView
@@ -366,6 +367,11 @@ class AgentManager:
             "timeout_seconds": definition.timeout_seconds,
             "tool_timeout_seconds": definition.tool_timeout_seconds,
         }
+        if (
+            definition.context_config is not None
+            and definition.context_config != ContextRunConfig()
+        ):
+            payload["context_config"] = definition.context_config.model_dump(mode="json")
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     async def persist(self, handle: AgentHandle, status: str, *, release: bool = False) -> None:
@@ -429,12 +435,24 @@ class AgentManager:
     ) -> AgentHandle:
         async with self._spawn_lock:
             if parent_context is not None:
+                context_config = definition.context_config
+                if parent_context.context_config is not None:
+                    try:
+                        parent_config = ContextRunConfig.model_validate(
+                            parent_context.context_config
+                        )
+                        context_config = (context_config or parent_config).restricted_by(
+                            parent_config
+                        )
+                    except ValueError as error:
+                        raise AgentError("agent_context_budget", "父子上下文预算不兼容") from error
                 definition = replace(
                     definition,
                     parent_agent_id=parent_context.agent_id,
                     parent_tool_call_id=parent_context.call_id,
                     policy=inherited_policy(definition.policy, parent_context.policy),
                     tools=definition.tools.fork(controls=parent_context.registry),
+                    context_config=context_config,
                     timeout_seconds=definition.timeout_seconds
                     if parent_context.approval_handler is not None
                     and any(budget.active for budget in parent_context.execution_timeouts)
@@ -472,11 +490,16 @@ class AgentManager:
         if depth > self.max_recursion_depth:
             raise AgentError("recursion_limit", "Agent 递归深度超过限制")
         database = self.repository.database
-        settings = Settings(
-            database_url=str(database.engine.url),
-            max_steps=definition.max_steps,
-            run_timeout_seconds=definition.timeout_seconds,
-            tool_timeout_seconds=definition.tool_timeout_seconds,
+        settings = Settings.model_validate(
+            {
+                "database_url": str(database.engine.url),
+                "max_steps": definition.max_steps,
+                "run_timeout_seconds": definition.timeout_seconds,
+                "tool_timeout_seconds": definition.tool_timeout_seconds,
+                **(
+                    definition.context_config.settings_values() if definition.context_config else {}
+                ),
+            }
         )
         runtime = ChatRuntime(
             self.repository,

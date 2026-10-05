@@ -16,7 +16,8 @@ from krim_agent.api import create_app
 from krim_agent.config import Settings
 from krim_agent.persistence import Database
 from krim_agent.providers import OpenAICompatibleConfig, OpenAICompatibleProvider
-from krim_agent.sdk import PythonAI
+from krim_agent.sdk import ContextBudgetPart, PythonAI
+from krim_agent.tokenizer import TokenizerSpec
 
 
 def event(delta, reason=None):
@@ -148,6 +149,55 @@ async def test_real_tcp_sdk_factory_and_two_step_tool_loop(provider_server):
     finally:
         await ai.close()
     assert provider._http.is_closed
+
+
+async def test_real_tcp_model_budget_matches_sent_tool_arguments_and_output_cap(provider_server):
+    ai = await PythonAI.create(
+        settings=settings(
+            provider_server,
+            context_tokenizer="cl100k_base",
+            model_context_window_tokens=4096,
+            context_reserved_output_tokens=64,
+            model_framing_reserve_tokens=32,
+        )
+    )
+    try:
+        stream = await ai.stream_text("计算 2 + 3", idempotency_key="budget-tcp")
+        result = await stream.collect()
+        parts = [part async for part in stream.full_stream()]
+        budgets = [part for part in parts if isinstance(part, ContextBudgetPart)]
+        assert result.text == "5" and result.token_usage is None
+        assert len(budgets) == len(provider_server.records) == 2
+        counter = TokenizerSpec("cl100k_base")
+        for record, budget in zip(provider_server.records, budgets, strict=True):
+            assert record["max_tokens"] == 64
+            assert budget.input_tokens == sum(
+                counter.text_tokens(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    )
+                )
+                for item in record["messages"]
+            )
+            assert budget.tool_tokens == counter.text_tokens(
+                json.dumps(
+                    record["tools"],
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            )
+            assert budget.required_tokens == budget.input_tokens + budget.tool_tokens + 96
+            assert budget.within_limit and budget.window_tokens == 4096
+        arguments = provider_server.records[1]["messages"][-2]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        assert isinstance(arguments, str) and json.loads(arguments) == {"left": 2, "right": 3}
+    finally:
+        await ai.close()
 
 
 async def test_real_tcp_first_text_arrives_before_provider_finishes(provider_server):

@@ -61,6 +61,9 @@ export interface CompactResponse {
   reason: string | null;
   omitted_count: number;
   messages: MessageView[];
+  tokenizer: "approx-v1" | "cl100k_base" | "o200k_base" | "custom";
+  estimated_tokens: number;
+  reserved_output_tokens: number;
 }
 export interface InteractionView {
   id: string;

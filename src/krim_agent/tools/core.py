@@ -91,6 +91,7 @@ class ToolContext:
     origin: Literal["model", "host"] = "model"
     model_tools: Mapping[str, ToolDefinition] | None = None
     skill_snapshot: SkillSnapshot | None = None
+    context_config: dict[str, JsonValue] | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -109,6 +110,7 @@ class ToolContext:
             origin=self.origin,
             model_tools=self.model_tools,
             skill_snapshot=self.skill_snapshot,
+            context_config=self.context_config,
             arguments=arguments,
         )
 

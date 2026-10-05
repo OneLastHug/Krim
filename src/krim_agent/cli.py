@@ -70,7 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
     compact.add_argument("--policy", choices=["never", "always", "auto"], default="auto")
     compact.add_argument("--max-messages", type=int, help="模型输入消息数量预算，包含摘要")
     compact.add_argument("--max-chars", type=int, help="JSON 请求文本字符预算")
-    compact.add_argument("--max-tokens", type=int, help="近似 token（词元）预算")
+    compact.add_argument(
+        "--max-tokens", type=int, help="按服务端 tokenizer（词元编码器）计算的预算"
+    )
+    compact.add_argument(
+        "--reserved-output-tokens",
+        type=int,
+        default=0,
+        help="reserved output tokens（预留输出词元）：不能低于宿主预留",
+    )
     compact.add_argument("--expected-branch-key", help="确认时匹配预览中的活动路径标识")
     compact_mode = compact.add_mutually_exclusive_group()
     compact_mode.add_argument(
@@ -257,6 +265,7 @@ def main() -> None:
                             max_messages=args.max_messages,
                             max_chars=args.max_chars,
                             max_tokens=args.max_tokens,
+                            reserved_output_tokens=args.reserved_output_tokens,
                         ),
                         confirm=args.confirm,
                         expected_branch_key=args.expected_branch_key,
