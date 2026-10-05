@@ -6,6 +6,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 
 from .app_sdk import AppHandle
 from .application.change_lists import ChangeListService
+from .application.checkpoints import CheckpointService
 from .change_list import (
     ChangeClearRequest,
     ChangeClickRequest,
@@ -19,12 +20,25 @@ from .change_list import (
     ChangeSyncRequest,
     ChangeTopic,
 )
+from .checkpoint import (
+    CheckpointCanRollback,
+    CheckpointCanRollbackRequest,
+    CheckpointCheck,
+    CheckpointCheckResult,
+    CheckpointCreate,
+    CheckpointCreateRequest,
+    CheckpointExecution,
+    CheckpointReceipt,
+    CheckpointRollback,
+    CheckpointRollbackRequest,
+)
 from .context_engine import ContextCompactRequest
 from .drag import DragDropRequest, DragEnterRequest, DragPreview, DragState
 from .interactions import InteractionReply
 from .link import LinkNavigate
 from .locale import LocaleChange
 from .persistence.change_lists import ChangeListRepository
+from .persistence.checkpoints import CheckpointRepository
 from .prompt_context import (
     ContextTagAddRequest,
     ContextTagInput,
@@ -101,6 +115,8 @@ class LocalApp:
         self.runtime = runtime
         self.change_repository = ChangeListRepository(runtime.repository.database)
         self.changes = ChangeListService(self.change_repository)
+        self.checkpoint_repository = CheckpointRepository(runtime.repository.database)
+        self.checkpoints = CheckpointService(self.checkpoint_repository)
 
         async def get_changes(data: JsonValue) -> JsonValue:
             value = await self.change_repository.get(ChangeTopic.model_validate(data).topic_id)
@@ -172,6 +188,71 @@ class LocalApp:
             receipt = ChangeReceipt.model_validate(data)
             operation = await self.change_repository.settle(receipt, resolve=True)
             return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
+
+        async def create_checkpoint(data: JsonValue) -> JsonValue:
+            request = CheckpointCreateRequest.model_validate(data)
+
+            async def execute(execution: CheckpointExecution) -> CheckpointReceipt:
+                result = await self._app.emit(
+                    "checkpoint/create",
+                    TypeAdapter(JsonValue).validate_python(execution.model_dump(mode="json")),
+                    timeout=request.timeout_seconds,
+                )
+                if not result.ok:
+                    raise ServiceError("executor_failed", "宿主未返回 Checkpoint 创建回执", 502)
+                return CheckpointReceipt.model_validate(result.data)
+
+            operation = await self.checkpoints.create(
+                request.topic_id,
+                CheckpointCreate.model_validate(request.model_dump(exclude={"topic_id"})),
+                execute,
+            )
+            return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
+
+        async def list_checkpoints(data: JsonValue) -> JsonValue:
+            request = TopicRequest.model_validate(data)
+            catalog = await self.checkpoint_repository.catalog(request.topic_id)
+            return TypeAdapter(JsonValue).validate_python(catalog.model_dump(mode="json"))
+
+        async def rollback_checkpoint(data: JsonValue) -> JsonValue:
+            request = CheckpointRollbackRequest.model_validate(data)
+
+            async def execute(execution: CheckpointExecution) -> CheckpointReceipt:
+                result = await self._app.emit(
+                    "checkpoint/rollback",
+                    TypeAdapter(JsonValue).validate_python(execution.model_dump(mode="json")),
+                    timeout=request.timeout_seconds,
+                )
+                if not result.ok:
+                    raise ServiceError("executor_failed", "宿主未返回 Checkpoint 回滚回执", 502)
+                return CheckpointReceipt.model_validate(result.data)
+
+            operation = await self.checkpoints.rollback(
+                request.topic_id,
+                CheckpointRollback.model_validate(request.model_dump(exclude={"topic_id"})),
+                execute,
+            )
+            return TypeAdapter(JsonValue).validate_python(operation.model_dump(mode="json"))
+
+        async def can_rollback_checkpoint(data: JsonValue) -> JsonValue:
+            request = CheckpointCanRollbackRequest.model_validate(data)
+
+            async def execute(check: CheckpointCheck) -> CheckpointCheckResult:
+                result = await self._app.emit(
+                    "checkpoint/canRollback",
+                    TypeAdapter(JsonValue).validate_python(check.model_dump(mode="json")),
+                    timeout=request.timeout_seconds,
+                )
+                if not result.ok:
+                    raise ServiceError("executor_failed", "宿主未返回 Checkpoint 校验回执", 502)
+                return CheckpointCheckResult.model_validate(result.data)
+
+            value = await self.checkpoints.can_rollback(
+                request.topic_id,
+                CheckpointCanRollback.model_validate(request.model_dump(exclude={"topic_id"})),
+                execute,
+            )
+            return TypeAdapter(JsonValue).validate_python(value.model_dump(mode="json"))
 
         async def locale_change(data: JsonValue) -> JsonValue:
             payload = LocaleTopicRequest.model_validate(data)
@@ -363,6 +444,10 @@ class LocalApp:
         self._app.on("changeList/operation", get_change_operation)
         self._app.on("changeList/cancel", cancel_change)
         self._app.on("changeList/resolve", resolve_change)
+        self._app.on("checkpoint/create", create_checkpoint)
+        self._app.on("checkpoint/list", list_checkpoints)
+        self._app.on("checkpoint/rollback", rollback_checkpoint)
+        self._app.on("checkpoint/canRollback", can_rollback_checkpoint)
         self._app.on("skill/list", list_skills)
         self._app.on("skill/inject", inject_skills)
         self._app.on("skill/remove", remove_skill)
@@ -399,5 +484,6 @@ class LocalApp:
 
     async def close(self) -> None:
         await self.changes.close()
+        await self.checkpoints.close()
         await self.handle.destroy()
         await self._app.close()
