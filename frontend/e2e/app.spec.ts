@@ -28,6 +28,38 @@ test("创建话题并完成真实工具 SSE 对话", async ({ page }) => {
   await expect(page.locator("#notice")).toContainText("已完成");
 });
 
+test("BPE 预算事件与公开快照不影响工具回复和刷新", async ({ page, request }) => {
+  const title = `预算测试-${Date.now()}`;
+  await page.getByPlaceholder("新话题标题").fill(title);
+  const topicResponse = page.waitForResponse((response) => response.url().endsWith("/v1/topics") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "新建话题" }).click();
+  const topic = await (await topicResponse).json();
+  const runResponse = page.waitForResponse((response) => response.url().endsWith(`/v1/topics/${topic.id}/messages`) && response.request().method() === "POST");
+  await page.locator("#prompt").fill("/add 2 3");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const run = await (await runResponse).json();
+  await expect(page.locator("#notice")).toContainText("已完成");
+  await expect(page.locator(".message.tool").last()).toContainText('"sum": 5.0');
+  const replay = await request.get(`/v1/runs/${run.id}/events`);
+  const frames = (await replay.text()).split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
+  expect(frames[0].data.context_config).toMatchObject({ tokenizer: "cl100k_base", model_context_window_tokens: 32768, reserved_output_tokens: 128 });
+  const budgets = frames.filter((frame) => frame.kind === "chunk" && frame.data?.type === "context_budget");
+  expect(budgets).toHaveLength(2);
+  for (const frame of budgets) {
+    const data = frame.data;
+    expect(data.encoding).toBe("cl100k_base");
+    expect(data.required_tokens).toBe(data.input_tokens + data.tool_tokens + 192);
+    expect(data.tool_tokens).toBeGreaterThan(0);
+    expect(data.within_limit).toBe(true);
+  }
+  await page.reload();
+  await page.getByLabel("服务访问密钥").fill("browser-test-key");
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+  await expect(page.locator(".message.tool")).toHaveCount(1);
+  await expect(page.locator(".message.tool").last()).toContainText('"sum": 5.0');
+});
+
 test("通过 Agent 目录创建并执行默认 Agent", async ({ page }) => {
   await expect(page.getByRole("status").filter({ hasText: "本地服务已连接" })).toBeVisible();
   await page.getByLabel("Agent 任务").fill("/echo 浏览器 Agent");

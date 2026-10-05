@@ -20,6 +20,7 @@ from krim_agent.context_engine import (
     ContextEngine,
     ContextError,
     ContextOptions,
+    ContextRunConfig,
 )
 from krim_agent.persistence import KrimRepository
 from krim_agent.protocol.domain import (
@@ -32,9 +33,16 @@ from krim_agent.protocol.domain import (
     ServiceError,
 )
 from krim_agent.protocol.models import StreamFrame
-from krim_agent.providers import ModelProvider, ModelText, ModelToolCall, ProviderError
+from krim_agent.providers import (
+    ModelProvider,
+    ModelText,
+    ModelToolCall,
+    OpenAICompatibleProvider,
+    ProviderError,
+)
 from krim_agent.runtime.skills import definition as skill_tool_definition
 from krim_agent.skills import SkillReadResult, SkillSnapshot
+from krim_agent.tokenizer import TokenizerError, TokenizerSpec
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import (
     ApprovalHandler,
@@ -69,6 +77,8 @@ class RunState:
     step: int = 0
     discovery: ToolDiscovery | None = None
     skill_snapshot: SkillSnapshot | None = None
+    context_config: ContextRunConfig | None = None
+    context_engine: ContextEngine | None = None
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -123,7 +133,7 @@ class ChatRuntime:
         self._lock = asyncio.Lock()
         self._runs: OrderedDict[str, RunState] = OrderedDict()
         self._closed = False
-        self.context_engine = ContextEngine()
+        self.context_engine = self._engine_for_context(ContextRunConfig.from_settings(settings))
         self.persistent_context = PersistentContext(repository, self.context_engine)
         existing_skill_tool = next(
             (
@@ -137,6 +147,19 @@ class ChatRuntime:
             raise ValueError("read_skill 是运行时保留工具名称")
         if existing_skill_tool is None:
             self.tools.register(skill_tool_definition())
+
+    def _engine_for_context(self, config: ContextRunConfig) -> ContextEngine:
+        try:
+            return ContextEngine(
+                tokenizer=TokenizerSpec(
+                    config.tokenizer,
+                    message_projector=self.provider.project_messages
+                    if isinstance(self.provider, OpenAICompatibleProvider)
+                    else None,
+                )
+            )
+        except TokenizerError as error:
+            raise ServiceError(error.code, "本地词元编码器不可用", 503) from error
 
     async def start(self, topic_id: str, request: ChatRequest) -> RunView:
         return await self._start(topic_id, request)
@@ -160,6 +183,7 @@ class ChatRuntime:
     ) -> ContextCompactResponse:
         if self._closed:
             raise ServiceError("runtime_closed", "运行时已经关闭", 503)
+        config = ContextRunConfig.from_settings(self.settings)
         budgets = (request.max_messages, request.max_chars, request.max_tokens)
         if all(value is None for value in budgets):
             budgets = (
@@ -177,10 +201,14 @@ class ChatRuntime:
                 max_messages=budgets[0],
                 max_chars=budgets[1],
                 max_tokens=budgets[2],
+                reserved_output_tokens=max(
+                    request.reserved_output_tokens, config.reserved_output_tokens
+                ),
             ),
             confirm=request.confirm,
             expected_branch_key=request.expected_branch_key,
             timeout_seconds=self.settings.run_timeout_seconds,
+            engine=self._engine_for_context(config),
         )
         sources = outcome.result.source_message_ids
         return ContextCompactResponse(
@@ -208,6 +236,8 @@ class ChatRuntime:
                 raise ServiceError("runtime_closed", "运行时已经关闭", 503)
             if self.persistent_context.is_busy(topic_id):
                 raise ServiceError("context_busy", "话题正在生成手动压缩结果", 409)
+            context_config = ContextRunConfig.from_settings(self.settings)
+            context_engine = self._engine_for_context(context_config)
             active = sum(
                 state.task is not None and not state.terminal for state in self._runs.values()
             )
@@ -220,7 +250,12 @@ class ChatRuntime:
             )
             if not created:
                 return run
-            state = RunState(run, event_writer=self.repository.append_event)
+            state = RunState(
+                run,
+                event_writer=self.repository.append_event,
+                context_config=context_config,
+                context_engine=context_engine,
+            )
             self._runs[run.id] = state
             state.task = asyncio.create_task(self._drive(state), name=f"krim-run-{run.id}")
             await state.started.wait()
@@ -241,7 +276,14 @@ class ChatRuntime:
         state.started.set()
         try:
             await self.repository.set_running(state.run.id)
-            await state.publish("start", {"provider": self.provider.name})
+            assert state.context_config is not None
+            await state.publish(
+                "start",
+                {
+                    "provider": self.provider.name,
+                    "context_config": state.context_config.model_dump(mode="json"),
+                },
+            )
             snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
             try:
                 state.skill_snapshot = await asyncio.shield(snapshot)
@@ -322,6 +364,10 @@ class ChatRuntime:
 
     async def _loop(self, state: RunState) -> None:
         assert state.skill_snapshot is not None
+        assert state.context_config is not None and state.context_engine is not None
+        config = state.context_config
+        tokenizer = state.context_engine.tokenizer
+        assert tokenizer is not None
         try:
             definitions = [
                 definition
@@ -336,17 +382,48 @@ class ChatRuntime:
         for _step in range(self.settings.max_steps):
             state.step = _step
             history = await self.repository.list_messages(state.run.topic_id)
-            context = await self.persistent_context.prepare(
-                state.run.topic_id,
-                history,
-                ContextOptions(
-                    strategy=self.settings.context_strategy,
-                    policy=self.settings.context_policy,
-                    max_messages=self.settings.context_max_messages,
-                    max_chars=self.settings.context_max_chars,
-                    max_tokens=self.settings.context_max_tokens,
-                ),
+            assert state.discovery is not None
+            tool_step = state.discovery.prepare()
+            tool_tokens = (
+                tokenizer.tool_tokens(list(tool_step.definitions.values()))
+                if config.model_context_window_tokens is not None
+                else 0
             )
+            token_limit = config.max_tokens
+            hard_limit_applied = False
+            if config.model_context_window_tokens is not None:
+                hard_limit = (
+                    config.model_context_window_tokens
+                    - tool_tokens
+                    - config.model_framing_reserve_tokens
+                )
+                if hard_limit <= config.reserved_output_tokens:
+                    raise ContextError(
+                        "工具 Schema/输出/封装预留超过模型窗口", code="model_input_budget"
+                    )
+                if token_limit is None or hard_limit < token_limit:
+                    token_limit = hard_limit
+                    hard_limit_applied = True
+            try:
+                context = await self.persistent_context.prepare(
+                    state.run.topic_id,
+                    history,
+                    ContextOptions(
+                        strategy=config.strategy,
+                        policy=config.policy,
+                        max_messages=config.max_messages,
+                        max_chars=config.max_chars,
+                        max_tokens=token_limit,
+                        reserved_output_tokens=config.reserved_output_tokens,
+                    ),
+                    engine=state.context_engine,
+                )
+            except ContextError as error:
+                if hard_limit_applied and error.code == "context_budget":
+                    raise ContextError(
+                        "最新完整上下文与输出预留超过模型窗口", code="model_input_budget"
+                    ) from error
+                raise
             messages = context.messages
             if context.compacted:
                 await state.publish(
@@ -358,6 +435,9 @@ class ChatRuntime:
                         "omitted_count": context.omitted_count,
                         "strategy": context.strategy,
                         "summary": context.summary,
+                        "tokenizer": context.tokenizer,
+                        "estimated_tokens": context.estimated_tokens,
+                        "reserved_output_tokens": context.reserved_output_tokens,
                         "status": "completed",
                         "persisted": (
                             context.summary is not None
@@ -378,8 +458,41 @@ class ChatRuntime:
                     },
                 )
             calls: list[ModelToolCall] = []
-            assert state.discovery is not None
-            tool_step = state.discovery.prepare()
+            if config.model_context_window_tokens is not None:
+                assert tokenizer is not None
+                input_tokens = tokenizer.count(messages)
+                required = (
+                    input_tokens
+                    + tool_tokens
+                    + config.reserved_output_tokens
+                    + config.model_framing_reserve_tokens
+                )
+                await state.publish(
+                    "chunk",
+                    {
+                        "type": "context_budget",
+                        "step": _step,
+                        "encoding": config.tokenizer,
+                        "input_tokens": input_tokens,
+                        "tool_tokens": tool_tokens,
+                        "reserved_output_tokens": config.reserved_output_tokens,
+                        "framing_reserve_tokens": config.model_framing_reserve_tokens,
+                        "window_tokens": config.model_context_window_tokens,
+                        "required_tokens": required,
+                        "within_limit": required <= config.model_context_window_tokens,
+                    },
+                )
+                if required > config.model_context_window_tokens:
+                    raise ContextError(
+                        "完整消息/工具 Schema/输出预留超过模型窗口", code="model_input_budget"
+                    )
+                if isinstance(self.provider, OpenAICompatibleProvider) and (
+                    self.provider.config.max_output_tokens is None
+                    or self.provider.config.max_output_tokens > config.reserved_output_tokens
+                ):
+                    raise ContextError(
+                        "Provider 输出上限未受当前预留约束", code="model_output_budget"
+                    )
             provider_stream = self.provider.stream(messages, list(tool_step.definitions.values()))
             try:
                 async for delta in provider_stream:
@@ -451,6 +564,7 @@ class ChatRuntime:
                         skill_snapshot=state.skill_snapshot.model_copy(deep=True)
                         if state.skill_snapshot
                         else None,
+                        context_config=config.model_dump(mode="json"),
                     ),
                 )
                 await self.repository.add_message(

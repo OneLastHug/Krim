@@ -2,6 +2,7 @@
 
 from .text import PythonAI, SDKOutputError, StreamTextResult
 from .types import (
+    ContextBudgetPart,
     ContextCompactPart,
     FinishReason,
     GenerateResult,
@@ -20,6 +21,7 @@ from .types import (
 )
 
 __all__ = [
+    "ContextBudgetPart",
     "ContextCompactPart",
     "InteractionPart",
     "ToolDiscoveryPart",

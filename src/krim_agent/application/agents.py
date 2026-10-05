@@ -19,6 +19,7 @@ from krim_agent.agents import (
     ExecResult,
 )
 from krim_agent.config import Settings
+from krim_agent.context_engine import ContextRunConfig
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.runtime import ChatRuntime
@@ -84,6 +85,7 @@ class AgentService:
                 timeout_seconds=settings.run_timeout_seconds,
                 tool_timeout_seconds=settings.tool_timeout_seconds,
                 policy=runtime.tool_policy,
+                context_config=ContextRunConfig.from_settings(settings),
             ),
             description="复用当前本地 Runtime provider 和工具权限的 Agent",
             expose_as_tool=False,

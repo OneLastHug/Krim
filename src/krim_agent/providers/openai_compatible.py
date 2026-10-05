@@ -222,6 +222,11 @@ class _ToolBuffer:
 class OpenAICompatibleProvider:
     name = "openai-compatible"
 
+    @staticmethod
+    def project_messages(messages: Sequence[MessageView]) -> list[dict[str, Any]]:
+        """与实际请求复用同一消息投影，供本地 BPE 预算计数。"""
+        return _messages(messages)
+
     def __init__(
         self, config: OpenAICompatibleConfig, *, transport: httpx.AsyncBaseTransport | None = None
     ) -> None:
@@ -246,7 +251,7 @@ class OpenAICompatibleProvider:
             raise ProviderError("provider_closed", "provider 已经关闭")
         body: dict[str, Any] = {
             "model": self.config.model,
-            "messages": _messages(messages),
+            "messages": self.project_messages(messages),
             "stream": True,
             "n": 1,
         }

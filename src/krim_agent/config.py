@@ -34,6 +34,10 @@ class Settings(BaseModel):
     context_max_messages: int | None = Field(default=None, ge=2, le=10000)
     context_max_chars: int | None = Field(default=None, ge=128, le=10_000_000)
     context_max_tokens: int | None = Field(default=None, ge=32, le=2_500_000)
+    context_tokenizer: Literal["approx-v1", "cl100k_base", "o200k_base"] = "approx-v1"
+    context_reserved_output_tokens: int = Field(default=0, ge=0, le=1_000_000)
+    model_context_window_tokens: int | None = Field(default=None, ge=32, le=2_500_000)
+    model_framing_reserve_tokens: int = Field(default=64, ge=0, le=100_000)
 
     @model_validator(mode="after")
     def validate_provider(self) -> Settings:
@@ -41,6 +45,21 @@ class Settings(BaseModel):
             not self.provider_base_url or not self.provider_model
         ):
             raise ValueError("openai-compatible 需要 provider_base_url 和 provider_model")
+        if self.model_context_window_tokens is not None:
+            if self.context_tokenizer == "approx-v1":
+                raise ValueError("硬模型窗口需要显式 BPE tokenizer，不能按字符近似")
+            if self.context_reserved_output_tokens <= 0:
+                raise ValueError("硬模型窗口必须显式预留输出 token")
+            if (
+                self.context_reserved_output_tokens + self.model_framing_reserve_tokens
+                >= self.model_context_window_tokens
+            ):
+                raise ValueError("输出/封装预留必须小于模型窗口")
+            if (
+                self.provider_max_output_tokens is not None
+                and self.provider_max_output_tokens > self.context_reserved_output_tokens
+            ):
+                raise ValueError("provider 输出上限不能大于上下文输出预留")
         return self
 
     @classmethod

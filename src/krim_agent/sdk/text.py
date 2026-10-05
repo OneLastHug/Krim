@@ -24,6 +24,7 @@ from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolResult
 
 from .types import (
+    ContextBudgetPart,
     ContextCompactPart,
     FinishReason,
     GenerateResult,
@@ -77,7 +78,12 @@ def _finish(frame: StreamFrame) -> StreamFinish:
 def _part(frame: StreamFrame) -> SDKPart:
     data = frame.data if isinstance(frame.data, dict) else {}
     if frame.kind == "start":
-        return StreamStart(provider=str(data.get("provider", "unknown")))
+        return StreamStart.model_validate(
+            {
+                "provider": str(data.get("provider", "unknown")),
+                "context_config": data.get("context_config"),
+            }
+        )
     if frame.kind == "end":
         return _finish(frame)
     if frame.kind == "error":
@@ -85,6 +91,10 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "context_budget":
+        return ContextBudgetPart.model_validate(
+            {key: value for key, value in data.items() if key != "type"}
+        )
     if kind == "skill_loaded":
         return SkillLoadedPart.model_validate(
             {key: data.get(key) for key in ("name", "resource", "step", "call_id")}
@@ -129,6 +139,9 @@ def _part(frame: StreamFrame) -> SDKPart:
                 "source_count": data.get("source_count", 0),
                 "source_until_message_id": data.get("source_until_message_id"),
                 "source_branch_key": data.get("source_branch_key"),
+                "tokenizer": data.get("tokenizer", "approx-v1"),
+                "estimated_tokens": data.get("estimated_tokens"),
+                "reserved_output_tokens": data.get("reserved_output_tokens", 0),
             }
         )
     if kind == "step_finish":

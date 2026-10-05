@@ -86,7 +86,9 @@ class PersistentContext:
         messages: list[MessageView],
         options: ContextOptions,
         trigger: CompactTrigger,
+        engine: ContextEngine | None = None,
     ) -> tuple[ContextResult, ContextOptions]:
+        engine = engine or self.engine
         messages = [
             materialize_skills(self._materialize_prompt_context(message)) for message in messages
         ]
@@ -100,7 +102,7 @@ class PersistentContext:
         prepared = messages[consumed:]
         combined = [summary_message(prior[0], prior[1]), *prepared] if prior else prepared
         used = options.model_copy(deep=True)
-        hooked = self.pre_compact is not None and self.engine.needs_compaction(combined, used)
+        hooked = self.pre_compact is not None and engine.needs_compaction(combined, used)
         if hooked and self.pre_compact is not None:
             try:
                 decision = self.pre_compact(
@@ -125,14 +127,19 @@ class PersistentContext:
                     used = ContextOptions.model_validate(decision.options.model_dump())
                 except Exception as exc:
                     raise ContextError("PreCompact 预算无效", code="context_hook_invalid") from exc
+        used = used.model_copy(
+            update={
+                "reserved_output_tokens": max(
+                    used.reserved_output_tokens, options.reserved_output_tokens
+                )
+            }
+        )
         if trigger == "manual" and used.strategy not in {
             "summarize_then_truncate",
             "annotated_compact",
         }:
             raise ContextError("手动压缩需要摘要策略", code="context_strategy_invalid")
-        result = await self.engine.prepare_async(
-            prepared, used, self.summarizer, existing_summary=prior
-        )
+        result = await engine.prepare_async(prepared, used, self.summarizer, existing_summary=prior)
         if hooked:
             result.processor_trace.insert(0, "pre_compact")
         return result, used
@@ -211,10 +218,15 @@ class PersistentContext:
         return result
 
     async def prepare(
-        self, topic_id: str, messages: Sequence[MessageView], options: ContextOptions
+        self,
+        topic_id: str,
+        messages: Sequence[MessageView],
+        options: ContextOptions,
+        *,
+        engine: ContextEngine | None = None,
     ) -> ContextResult:
         original = list(messages)
-        result, used = await self._compute(topic_id, original, options, "automatic")
+        result, used = await self._compute(topic_id, original, options, "automatic", engine)
         persisted = (
             result.compacted
             and result.summary is not None
@@ -233,6 +245,7 @@ class PersistentContext:
         confirm: bool = False,
         expected_branch_key: str | None = None,
         timeout_seconds: float = 60,
+        engine: ContextEngine | None = None,
     ) -> PersistentCompactResult:
         if self.is_busy(topic_id):
             raise ServiceError("context_busy", "话题正在生成手动压缩结果", 409)
@@ -245,7 +258,9 @@ class PersistentContext:
                 raise ServiceError("summary_branch_changed", "确认时活动分支已经变化", 409)
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    result, used = await self._compute(topic_id, messages, options, "manual")
+                    result, used = await self._compute(
+                        topic_id, messages, options, "manual", engine
+                    )
             except TimeoutError as exc:
                 raise ServiceError("context_timeout", "手动摘要生成超过时间预算", 504) from exc
             sources = list(result.source_message_ids)

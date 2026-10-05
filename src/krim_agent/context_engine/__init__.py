@@ -8,6 +8,7 @@ from .types import (
     ContextOptions,
     ContextPolicy,
     ContextResult,
+    ContextRunConfig,
     ContextStrategy,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "ContextOptions",
     "ContextPolicy",
     "ContextResult",
+    "ContextRunConfig",
     "ContextStrategy",
 ]
