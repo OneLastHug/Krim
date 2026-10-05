@@ -25,8 +25,11 @@ def event(delta, reason=None):
     return f"data: {json.dumps(value, ensure_ascii=False)}\n\n"
 
 
-def end(reason):
-    return event({}, reason) + "data: [DONE]\n\n"
+def end(reason, usage=None):
+    tail = (
+        "data: " + json.dumps({"choices": [], "usage": usage}) + "\n\n" if usage is not None else ""
+    )
+    return event({}, reason) + tail + "data: [DONE]\n\n"
 
 
 @asynccontextmanager
@@ -67,6 +70,14 @@ async def provider_server():
         assert request.headers["Authorization"] == "Bearer test-key"
         assert payload["model"] == "local-model" and payload["stream"] is True
         messages = payload["messages"]
+        reported = None
+        if payload.get("stream_options", {}).get("include_usage"):
+            first = messages[-1]["role"] != "tool"
+            reported = {
+                "prompt_tokens": 100 if first else 200,
+                "completion_tokens": 10 if first else 20,
+                "total_tokens": 110 if first else 220,
+            }
         prompt = next(item["content"] for item in reversed(messages) if item["role"] == "user")
 
         async def stream():
@@ -75,7 +86,7 @@ async def provider_server():
                     yield event({"content": "FIRST"})
                     await release.wait()
                     yield event({"content": "SECOND"})
-                    yield end("stop")
+                    yield end("stop", reported)
                 finally:
                     closed.set()
                 return
@@ -83,7 +94,7 @@ async def provider_server():
                 assert messages[-1]["tool_call_id"] == messages[-2]["tool_calls"][0]["id"]
                 assert json.loads(messages[-1]["content"])["sum"] == 5
                 yield event({"content": "5"})
-                yield end("stop")
+                yield end("stop", reported)
                 return
             assert payload["tools"][0]["function"]["name"] == "add"
             yield event({"content": "计算中"})
@@ -108,7 +119,7 @@ async def provider_server():
                     ]
                 }
             )
-            yield end("tool_calls")
+            yield end("tool_calls", reported)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -302,3 +313,29 @@ async def test_owned_provider_is_closed_on_sdk_and_api_initialization_failure(mo
         async with app.router.lifespan_context(app):
             pass
     assert providers[-1]._http.is_closed
+
+
+async def test_real_tcp_usage_headers_multiple_steps_and_durable_sdk_replay(provider_server):
+    from krim_agent.sdk import UsagePart
+
+    async with await PythonAI.create(
+        settings=settings(provider_server, provider_include_usage=True)
+    ) as ai:
+        stream = await ai.stream_text("计算 2 + 3", idempotency_key="usage-tcp")
+        result = await stream.collect()
+        parts = [part async for part in stream.full_stream()]
+        reports = [part for part in parts if isinstance(part, UsagePart)]
+        assert result.text == "5" and result.usage_complete
+        assert result.token_usage.input_tokens == 300
+        assert result.token_usage.output_tokens == 30 and result.token_usage.total_tokens == 330
+        assert [step.token_usage.total_tokens for step in result.steps] == [110, 220]
+        assert all(step.usage_complete for step in result.steps)
+        assert len(reports) == 4 and len([part for part in reports if part.final]) == 2
+        assert all(
+            item["stream_options"] == {"include_usage": True} for item in provider_server.records
+        )
+        repeated = await ai.stream_text(
+            "计算 2 + 3", topic_id=result.run.topic_id, idempotency_key="usage-tcp"
+        )
+        assert [part async for part in repeated.full_stream()] == parts
+        assert len(provider_server.records) == 2

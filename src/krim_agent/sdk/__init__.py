@@ -7,6 +7,7 @@ from .types import (
     FinishReason,
     GenerateResult,
     InteractionPart,
+    ModelStepPart,
     SDKPart,
     SkillLoadedPart,
     StepFinish,
@@ -18,10 +19,12 @@ from .types import (
     ToolCallPart,
     ToolDiscoveryPart,
     ToolResultPart,
+    UsagePart,
 )
 
 __all__ = [
     "ContextBudgetPart",
+    "ModelStepPart",
     "ContextCompactPart",
     "InteractionPart",
     "ToolDiscoveryPart",
@@ -40,4 +43,5 @@ __all__ = [
     "TextDelta",
     "ToolCallPart",
     "ToolResultPart",
+    "UsagePart",
 ]

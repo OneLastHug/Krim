@@ -114,6 +114,7 @@ class AgentService:
                 status = run.status
             if run.status in {"completed", "failed", "aborted", "interrupted"}:
                 messages = await self.runtime.repository.run_messages(run.id)
+                usage = await self.runtime.repository.usage_view(run.id)
                 text = next(
                     (
                         message.content
@@ -131,6 +132,8 @@ class AgentService:
                     code=run.error_code,
                     parent_tool_call_id=handle.parent_tool_call_id,
                     turn=turn,
+                    token_usage=usage.token_usage,
+                    usage_complete=usage.usage_complete,
                 )
         recent = self._results.get(handle.agent_id)
         if (

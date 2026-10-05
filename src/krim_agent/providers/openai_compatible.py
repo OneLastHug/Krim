@@ -15,8 +15,9 @@ from pydantic import ConfigDict, Field, SecretStr, ValidationError, field_valida
 from krim_agent.protocol.domain import MessageView
 from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.tools.core import ToolDefinition
+from krim_agent.usage import TokenUsage
 
-from .types import ModelText, ModelToolCall
+from .types import ModelText, ModelToolCall, ModelUsage
 
 
 class ProviderError(RuntimeError):
@@ -36,6 +37,7 @@ class OpenAICompatibleConfig(StrictModel):
     api_key: SecretStr = SecretStr("")
     timeout_seconds: float = Field(default=60, gt=0, le=600)
     max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+    include_usage: bool = False
     max_request_bytes: int = Field(default=4_194_304, ge=1024, le=67_108_864)
     max_response_bytes: int = Field(default=4_194_304, ge=1024, le=67_108_864)
     max_event_bytes: int = Field(default=1_048_576, ge=256, le=16_777_216)
@@ -128,6 +130,37 @@ def _messages(messages: Sequence[MessageView]) -> list[dict[str, Any]]:
             item["tool_call_id"] = call_id
         result.append(item)
     return result
+
+
+def _usage_report(value: object) -> TokenUsage | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ProviderError("provider_usage", "Provider 用量必须是对象")
+    projected = {
+        target: value.get(source)
+        for source, target in (
+            ("prompt_tokens", "input_tokens"),
+            ("completion_tokens", "output_tokens"),
+            ("total_tokens", "total_tokens"),
+        )
+        if value.get(source) is not None
+    }
+    for source, detail, target in (
+        ("prompt_tokens_details", "cached_tokens", "cached_input_tokens"),
+        ("completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens"),
+    ):
+        details = value.get(source)
+        if details is not None and not isinstance(details, dict):
+            raise ProviderError("provider_usage", "Provider 用量细分必须是对象")
+        if isinstance(details, dict) and details.get(detail) is not None:
+            projected[target] = details[detail]
+    if not projected:
+        return None
+    try:
+        return TokenUsage.model_validate(projected)
+    except ValidationError as error:
+        raise ProviderError("provider_usage", "Provider 用量计数无效") from error
 
 
 async def _sse_data(
@@ -246,7 +279,7 @@ class OpenAICompatibleProvider:
 
     async def stream(
         self, messages: Sequence[MessageView], tools: Sequence[ToolDefinition]
-    ) -> AsyncIterator[ModelText | ModelToolCall]:
+    ) -> AsyncIterator[ModelText | ModelToolCall | ModelUsage]:
         if self._http.is_closed:
             raise ProviderError("provider_closed", "provider 已经关闭")
         body: dict[str, Any] = {
@@ -269,12 +302,15 @@ class OpenAICompatibleProvider:
             ]
         if self.config.max_output_tokens is not None:
             body["max_tokens"] = self.config.max_output_tokens
+        if self.config.include_usage:
+            body["stream_options"] = {"include_usage": True}
         try:
             check_json(body, max_bytes=self.config.max_request_bytes)
         except ValueError as error:
             raise ProviderError("provider_request_limit", "provider 请求超出 JSON 限制") from error
         calls: dict[int, _ToolBuffer] = {}
         finish_reason: str | None = None
+        reported_usage: TokenUsage | None = None
         try:
             async with self._http.stream("POST", "chat/completions", json=body) as response:
                 if 300 <= response.status_code < 400:
@@ -315,6 +351,15 @@ class OpenAICompatibleProvider:
                         raise ProviderError("provider_response", "provider SSE 数据不是对象")
                     if "error" in event:
                         raise ProviderError("provider_error", "provider 返回错误")
+                    reported = _usage_report(event.get("usage"))
+                    if reported is not None:
+                        if reported_usage is not None and not reported.follows(reported_usage):
+                            raise ProviderError(
+                                "provider_usage_conflict", "Provider 用量发生回退或丢失"
+                            )
+                        if reported != reported_usage:
+                            reported_usage = reported
+                            yield ModelUsage(usage=reported, final=False)
                     choices = event.get("choices")
                     if not isinstance(choices, list):
                         raise ProviderError("provider_response", "provider choices 不是列表")
@@ -382,6 +427,8 @@ class OpenAICompatibleProvider:
                 complete_calls = [calls[index].collect() for index in sorted(calls)]
                 for call in complete_calls:
                     yield call
+                if reported_usage is not None:
+                    yield ModelUsage(usage=reported_usage, final=True)
         except httpx.TimeoutException as error:
             raise ProviderError("provider_timeout", "provider 请求超时") from error
         except httpx.HTTPError as error:

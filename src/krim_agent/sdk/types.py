@@ -11,6 +11,7 @@ from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelToolCall
 from krim_agent.tools.core import ToolAudit, ToolResult
+from krim_agent.usage import TokenUsage, UsageTotals
 
 FinishReason = Literal["stop", "tool-calls", "length", "abort", "error", "interrupted"]
 
@@ -38,6 +39,29 @@ class ToolResultPart(StrictModel):
     tool_call_id: str
     tool_name: str
     result: ToolResult
+
+
+class UsagePart(StrictModel):
+    type: Literal["usage"] = "usage"
+    step: int = Field(ge=0)
+    usage: TokenUsage
+    final: bool = True
+
+
+class ModelStepPart(StrictModel):
+    type: Literal["model-step"] = "model-step"
+    step: int = Field(ge=0, le=31)
+    phase: Literal["start", "end"]
+    provider: str | None = None
+    completed: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_phase(self) -> ModelStepPart:
+        if self.phase == "start" and (not self.provider or self.completed is not None):
+            raise ValueError("模型开始事件需要 provider 且不能已完成")
+        if self.phase == "end" and self.completed is None:
+            raise ValueError("模型结束事件需要 completed")
+        return self
 
 
 class ContextCompactPart(StrictModel):
@@ -127,6 +151,8 @@ SDKPart = (
     | TextDelta
     | ToolCallPart
     | ToolResultPart
+    | UsagePart
+    | ModelStepPart
     | ContextCompactPart
     | ContextBudgetPart
     | InteractionPart
@@ -145,6 +171,8 @@ class StepResult(StrictModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     finish_reason: Literal["stop", "tool-calls", "error"]
     partial: bool = False
+    token_usage: TokenUsage | None = None
+    usage_complete: bool = False
 
 
 class GenerateResult(StrictModel):
@@ -156,7 +184,8 @@ class GenerateResult(StrictModel):
     audits: list[ToolAudit]
     error: str | None = None
     code: str | None = None
-    token_usage: None = None
+    token_usage: UsageTotals | None = None
+    usage_complete: bool = False
 
     @property
     def all_text(self) -> str:

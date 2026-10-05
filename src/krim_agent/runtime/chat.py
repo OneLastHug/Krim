@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from krim_agent.application.context import PersistentContext
 from krim_agent.application.interactions import InteractionService
@@ -37,6 +37,7 @@ from krim_agent.providers import (
     ModelProvider,
     ModelText,
     ModelToolCall,
+    ModelUsage,
     OpenAICompatibleProvider,
     ProviderError,
 )
@@ -54,6 +55,7 @@ from krim_agent.tools.core import (
     ToolExecutionBudget,
 )
 from krim_agent.tools.discovery import ToolDiscovery
+from krim_agent.usage import TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -277,13 +279,12 @@ class ChatRuntime:
         try:
             await self.repository.set_running(state.run.id)
             assert state.context_config is not None
-            await state.publish(
-                "start",
-                {
-                    "provider": self.provider.name,
-                    "context_config": state.context_config.model_dump(mode="json"),
-                },
-            )
+            start_data: dict[str, JsonValue] = {
+                "provider": self.provider.name,
+                "model_usage_trace": 1,
+                "context_config": state.context_config.model_dump(mode="json"),
+            }
+            await state.publish("start", start_data)
             snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
             try:
                 state.skill_snapshot = await asyncio.shield(snapshot)
@@ -493,15 +494,54 @@ class ChatRuntime:
                     raise ContextError(
                         "Provider 输出上限未受当前预留约束", code="model_output_budget"
                     )
-            provider_stream = self.provider.stream(messages, list(tool_step.definitions.values()))
+            provider_stream: AsyncIterator[ModelText | ModelToolCall | ModelUsage] | None = None
+            provider_usage: TokenUsage | None = None
+            usage_final = False
+            provider_completed = False
+            await state.publish(
+                "chunk",
+                {
+                    "type": "model_step",
+                    "step": _step,
+                    "phase": "start",
+                    "provider": self.provider.name,
+                },
+            )
             try:
+                provider_stream = self.provider.stream(
+                    messages, list(tool_step.definitions.values())
+                )
                 async for delta in provider_stream:
+                    if usage_final and not isinstance(delta, ModelUsage):
+                        raise ProviderError("provider_usage_conflict", "最终用量后仍有模型输出")
                     if isinstance(delta, ModelText):
                         if len(state.draft) + len(delta.text) > 8192:
                             raise ServiceError("output_limit", "单轮输出超过限制")
                         state.draft += delta.text
                         await state.publish("chunk", {"type": "text_delta", "text": delta.text})
-                    else:
+                    elif isinstance(delta, ModelUsage):
+                        try:
+                            delta = ModelUsage.model_validate(delta.model_dump(mode="json"))
+                        except ValidationError as error:
+                            raise ProviderError(
+                                "provider_usage", "Provider 用量计数无效"
+                            ) from error
+                        if provider_usage is not None and not delta.usage.follows(provider_usage):
+                            raise ProviderError("provider_usage_conflict", "Provider 用量发生回退")
+                        if usage_final and (delta.usage != provider_usage or not delta.final):
+                            raise ProviderError("provider_usage_conflict", "最终用量不能被改写")
+                        if delta.usage != provider_usage or delta.final != usage_final:
+                            await state.publish(
+                                "chunk",
+                                {
+                                    "type": "token_usage",
+                                    "step": _step,
+                                    "usage": delta.usage.model_dump(mode="json"),
+                                    "final": delta.final,
+                                },
+                            )
+                        provider_usage, usage_final = delta.usage, delta.final
+                    elif isinstance(delta, ModelToolCall):
                         if delta.id in state.seen_calls:
                             raise ServiceError("duplicate_tool_call", "工具调用 ID 重复")
                         state.seen_calls.add(delta.id)
@@ -512,12 +552,27 @@ class ChatRuntime:
                         await state.publish(
                             "chunk", {"type": "tool_call", **delta.model_dump(mode="json")}
                         )
+                    else:
+                        raise ProviderError("provider_response", "Provider 返回未知模型事件")
                     if len(state.frames) >= 2048:
                         raise ServiceError("stream_limit", "流事件超过限制")
+                provider_completed = True
             finally:
-                close_stream = getattr(provider_stream, "aclose", None)
-                if close_stream is not None:
-                    await close_stream()
+                try:
+                    close_stream = getattr(provider_stream, "aclose", None)
+                    if close_stream is not None:
+                        await close_stream()
+                finally:
+                    await state.publish(
+                        "chunk",
+                        {
+                            "type": "model_step",
+                            "step": _step,
+                            "phase": "end",
+                            "provider": self.provider.name,
+                            "completed": provider_completed,
+                        },
+                    )
             if not calls:
                 if not state.draft:
                     raise ServiceError("no_output", "模型没有输出文本或工具请求")

@@ -29,6 +29,7 @@ from .types import (
     FinishReason,
     GenerateResult,
     InteractionPart,
+    ModelStepPart,
     SDKPart,
     SkillLoadedPart,
     StepFinish,
@@ -40,6 +41,7 @@ from .types import (
     ToolCallPart,
     ToolDiscoveryPart,
     ToolResultPart,
+    UsagePart,
 )
 
 
@@ -94,6 +96,18 @@ def _part(frame: StreamFrame) -> SDKPart:
     if kind == "context_budget":
         return ContextBudgetPart.model_validate(
             {key: value for key, value in data.items() if key != "type"}
+        )
+    if kind == "model_step":
+        return ModelStepPart.model_validate(
+            {key: data.get(key) for key in ("step", "phase", "provider", "completed")}
+        )
+    if kind == "token_usage":
+        return UsagePart.model_validate(
+            {
+                "step": data.get("step"),
+                "usage": data.get("usage"),
+                "final": data.get("final", False),
+            }
         )
     if kind == "skill_loaded":
         return SkillLoadedPart.model_validate(
@@ -227,6 +241,20 @@ class StreamTextResult:
         messages = await repository.run_messages(self.run.id)
         steps = _steps(messages)
         response_messages = [message for message in messages if message.role != "user"]
+        run_usage = await repository.usage_view(self.run.id)
+        for step in steps:
+            observed = next((item for item in run_usage.steps if item.step == step.step), None)
+            if observed is not None:
+                step.token_usage = observed.usage
+                step.usage_complete = bool(
+                    observed.completed
+                    and observed.final
+                    and observed.usage is not None
+                    and all(
+                        getattr(observed.usage, name) is not None
+                        for name in ("input_tokens", "output_tokens", "total_tokens")
+                    )
+                )
         return GenerateResult(
             text=steps[-1].text if steps else "",
             run=await repository.get_run(self.run.id),
@@ -236,6 +264,8 @@ class StreamTextResult:
             audits=await repository.audits(self.run.id),
             error=finish.error,
             code=finish.code,
+            token_usage=run_usage.token_usage,
+            usage_complete=run_usage.usage_complete,
         )
 
     async def output[Output: BaseModel](self, schema: type[Output]) -> Output:

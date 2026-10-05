@@ -303,6 +303,7 @@ class AgentHandle:
             "",
         )
         status: AgentStatus = forced_status or cast(AgentStatus, run.status)
+        usage = await self.runtime.repository.usage_view(run.id)
         result = ExecResult(
             agent_id=self.agent_id,
             run_id=run.id,
@@ -312,6 +313,8 @@ class AgentHandle:
             code=forced_code or run.error_code,
             parent_tool_call_id=self.parent_tool_call_id,
             turn=self.turn,
+            token_usage=usage.token_usage,
+            usage_complete=usage.usage_complete,
         )
         await self.manager.persist(self, run.status)
         return result
