@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from krim_agent.budgets import UsageBudgetConfig
 from krim_agent.context_engine.types import ContextRunConfig
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
@@ -55,6 +56,7 @@ class AgentDefinition:
     policy: Policy | None = None
     tool_timeout_seconds: float = 10
     context_config: ContextRunConfig | None = None
+    usage_budget: UsageBudgetConfig | None = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
@@ -75,6 +77,18 @@ class AgentDefinition:
                 "context_config",
                 ContextRunConfig.model_validate(self.context_config.model_dump()),
             )
+        if self.usage_budget is not None:
+            object.__setattr__(
+                self,
+                "usage_budget",
+                UsageBudgetConfig.model_validate(self.usage_budget.model_dump(mode="json")),
+            )
+            if (
+                self.context_config is None
+                or self.context_config.tokenizer == "approx-v1"
+                or self.context_config.reserved_output_tokens <= 0
+            ):
+                raise ValueError("Agent 累计预算需要 BPE 上下文与正数输出预留")
 
     def with_id(self) -> AgentDefinition:
         return replace(self, agent_id=self.agent_id or str(uuid4()))

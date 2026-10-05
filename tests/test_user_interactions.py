@@ -320,7 +320,7 @@ async def test_restart_cancels_pending_and_preserves_reply_history_and_downgrade
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0016_agent_handles"
+            ).scalar() == "0017_usage_budgets"
         assert (await repository.get_interaction(run.id, request.id)).status == "cancelled"
     finally:
         await reopened.close()
@@ -619,10 +619,16 @@ async def test_persistent_agent_does_not_publish_to_completed_parent_or_reuse_de
     effects = []
     manager = AgentManager(repository)
     handles = []
+    parent_deadlines = []
     tools = ToolRegistry()
 
     @tool(name="make_agent", risk="read")
     async def make_agent(context: ToolContext):
+        parent_deadlines.extend(
+            budget.deadline.when()
+            for budget in context.execution_timeouts
+            if budget.deadline.when() is not None
+        )
         handle = await manager.spawn(
             AgentDefinition(
                 name="persistent",
@@ -647,12 +653,13 @@ async def test_persistent_agent_does_not_publish_to_completed_parent_or_reuse_de
 
     tools.register(make_agent)
     runtime = ChatRuntime(
-        repository, FactoryProvider(), tools, Settings(tool_timeout_seconds=0.2), tool_policy=policy
+        repository, FactoryProvider(), tools, Settings(tool_timeout_seconds=1), tool_policy=policy
     )
     operation = None
     try:
         parent = await start(runtime)
         assert (await wait(runtime, parent)).status == "completed"
+        assert handles and parent_deadlines
         frames = await repository.list_events(parent.id)
         handle = handles[0]
         ready = asyncio.Event()
@@ -667,7 +674,9 @@ async def test_persistent_agent_does_not_publish_to_completed_parent_or_reuse_de
         operation = asyncio.create_task(handle.execute("write"))
         await asyncio.wait_for(ready.wait(), 5)
         approval, _ = await request_part(handle.runtime, handle.current_run)
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(
+            max(0, max(parent_deadlines) - asyncio.get_running_loop().time()) + 0.05
+        )
         assert not effects
         await runtime.interactions.reply(
             approval.run_id, approval.id, InteractionReply(action="approve")

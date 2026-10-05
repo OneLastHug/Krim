@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
+from krim_agent.budgets import UsageBudgetConfig
+
 
 class Settings(BaseModel):
     database_url: str = "sqlite+aiosqlite:///./.data/krim-agent.db"
@@ -28,6 +30,10 @@ class Settings(BaseModel):
     agent_max_concurrent: int = Field(default=8, ge=1, le=64)
     agent_max_recursion_depth: int = Field(default=4, ge=1, le=16)
     agent_max_turns: int = Field(default=8, ge=1, le=128)
+    usage_budget: UsageBudgetConfig | None = None
+    agent_usage_budget: UsageBudgetConfig | None = None
+    workflow_usage_budget: UsageBudgetConfig | None = None
+    usage_budget_scope: str = Field(default="default", min_length=1, max_length=128)
     context_strategy: Literal[
         "truncate", "sliding_window", "summarize_then_truncate", "annotated_compact"
     ] = "sliding_window"
@@ -42,6 +48,12 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def validate_provider(self) -> Settings:
+        if any(
+            value is not None
+            for value in (self.usage_budget, self.agent_usage_budget, self.workflow_usage_budget)
+        ):
+            if self.context_tokenizer == "approx-v1" or self.context_reserved_output_tokens <= 0:
+                raise ValueError("累计预算需要显式 BPE tokenizer 与正数输出预留")
         if self.provider == "openai-compatible" and (
             not self.provider_base_url or not self.provider_model
         ):
@@ -65,9 +77,12 @@ class Settings(BaseModel):
 
     @classmethod
     def from_env(cls) -> Settings:
-        values = {
+        values: dict[str, object] = {
             name: os.environ[f"KRIM_AGENT_{name.upper()}"]
             for name in cls.model_fields
             if f"KRIM_AGENT_{name.upper()}" in os.environ
         }
+        for name in ("usage_budget", "agent_usage_budget", "workflow_usage_budget"):
+            if name in values:
+                values[name] = UsageBudgetConfig.model_validate_json(str(values[name]))
         return cls.model_validate(values)

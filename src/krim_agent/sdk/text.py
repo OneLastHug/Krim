@@ -41,6 +41,7 @@ from .types import (
     ToolCallPart,
     ToolDiscoveryPart,
     ToolResultPart,
+    UsageBudgetPart,
     UsagePart,
 )
 
@@ -93,6 +94,8 @@ def _part(frame: StreamFrame) -> SDKPart:
             code=str(data.get("code", "stream_error")), message=str(data.get("error", "流失败"))
         )
     kind = data.get("type")
+    if kind == "usage_budget":
+        return UsageBudgetPart.model_validate({"request": data.get("request")})
     if kind == "context_budget":
         return ContextBudgetPart.model_validate(
             {key: value for key, value in data.items() if key != "type"}
@@ -352,6 +355,7 @@ class PythonAI:
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
         nodes: list[PromptNode] | None = None,
+        budget_account_ids: tuple[str, ...] = (),
     ) -> StreamTextResult:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
@@ -364,7 +368,7 @@ class PythonAI:
             nodes=nodes or [],
         )
         topic = topic_id or (await self.runtime.repository.create_topic(prompt[:80])).id
-        run = await self.runtime.start(topic, request)
+        run = await self.runtime.start(topic, request, budget_account_ids=budget_account_ids)
         return StreamTextResult(self.runtime, run)
 
     async def generate_text(
@@ -377,6 +381,7 @@ class PythonAI:
         mentions: list[MentionOccurrence] | None = None,
         skill_names: list[str] | None = None,
         nodes: list[PromptNode] | None = None,
+        budget_account_ids: tuple[str, ...] = (),
     ) -> GenerateResult:
         stream = await self.stream_text(
             prompt,
@@ -386,6 +391,7 @@ class PythonAI:
             mentions=mentions,
             skill_names=skill_names,
             nodes=nodes,
+            budget_account_ids=budget_account_ids,
         )
         return await stream.collect()
 

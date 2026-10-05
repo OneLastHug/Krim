@@ -41,6 +41,7 @@ _UNSET = object()
 @dataclass
 class _Budget:
     count: int = 0
+    root_run_id: str | None = None
 
 
 class WorkflowHandle:
@@ -66,6 +67,8 @@ class WorkflowHandle:
         self.production, self.depth = production, depth
         self.budget = budget or _Budget()
         self.run_id = restored.run_id if restored else (run_id or str(uuid4()))
+        if self.budget.root_run_id is None:
+            self.budget.root_run_id = self.run_id
         self.path = restored.path if restored else path
         self.epoch: int = (
             restored.epoch if restored else (journal.root.epoch if journal and journal.root else 0)
@@ -835,7 +838,12 @@ class WorkflowEngine:
                 if handle._journal is not None:
                     await handle._journal.persist(handle)
                 context = ExecutionContext(
-                    handle.run_id, node.id, attempt, handle.path, handle.epoch
+                    handle.run_id,
+                    node.id,
+                    attempt,
+                    handle.path,
+                    handle.epoch,
+                    handle.budget.root_run_id,
                 )
                 value = binding.execute(node, inputs, context)
                 resolved = await value if inspect.isawaitable(value) else value

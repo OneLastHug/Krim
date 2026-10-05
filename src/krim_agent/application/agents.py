@@ -86,6 +86,7 @@ class AgentService:
                 tool_timeout_seconds=settings.tool_timeout_seconds,
                 policy=runtime.tool_policy,
                 context_config=ContextRunConfig.from_settings(settings),
+                usage_budget=settings.agent_usage_budget,
             ),
             description="复用当前本地 Runtime provider 和工具权限的 Agent",
             expose_as_tool=False,
@@ -163,8 +164,14 @@ class AgentService:
     async def spawn(self, name: str, *, persistent: bool = False) -> AgentView:
         try:
             entry = self.catalog.get(name)
+            parent_accounts = await self.runtime.budget_store.bind(
+                "runtime",
+                self.runtime.settings.usage_budget_scope,
+                self.runtime.settings.usage_budget,
+            )
             handle = await self.manager.spawn(
-                replace(entry.definition, agent_id="", persistent=persistent)
+                replace(entry.definition, agent_id="", persistent=persistent),
+                budget_account_ids=parent_accounts,
             )
         except ToolError as exc:
             raise ServiceError(exc.code, str(exc), 404) from exc
