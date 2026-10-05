@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import cast
+from uuid import uuid4
 
 from krim_agent.config import Settings
 from krim_agent.persistence import KrimRepository
+from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.runtime import ChatRuntime
@@ -65,6 +69,11 @@ class AgentHandle:
         self._destroy_task: asyncio.Task[ExecResult] | None = None
         self._production: asyncio.Task[None] | None = None
         self.pending_start = False
+        self._durable_revision: int | None = None
+        self._durable_lock = asyncio.Lock()
+        self._heartbeat: asyncio.Task[None] | None = None
+        self._lease_lost = False
+        self._closing = False
 
     @property
     def parent_tool_call_id(self) -> str | None:
@@ -90,7 +99,9 @@ class AgentHandle:
             raise
 
     async def _execute(self, prompt: str, idempotency_key: str | None) -> ExecResult:
-        if self.destroyed:
+        if self._lease_lost:
+            raise AgentError("agent_lease_lost", "Agent 持久句柄租约已丢失")
+        if self.destroyed or self._closing:
             raise AgentError("agent_destroyed", "Agent 已销毁")
         if self.current_run is not None:
             self.current_run = await self.runtime.repository.get_run(self.current_run.id)
@@ -124,6 +135,11 @@ class AgentHandle:
         try:
             if self.destroyed:
                 raise AgentError("agent_destroyed", "Agent 已销毁")
+            if self._durable_revision is not None:
+                async with self._durable_lock:
+                    await self.manager.store.renew(
+                        self.agent_id, self.manager.owner_id, self._durable_revision
+                    )
             request = ChatRequest(
                 text=prompt,
                 idempotency_key=requested_key,
@@ -138,8 +154,13 @@ class AgentHandle:
                 cancelled = True
             if self.current_run.id != previous_id:
                 self.turn += 1
-            self.pending_start = False
             self._production = self.runtime.production_task(self.current_run.id)
+            try:
+                await self.manager.persist(self, "running")
+            except BaseException:
+                await self.runtime.stop(self.current_run.id)
+                raise
+            self.pending_start = False
             state = await self.runtime.stream_state(self.current_run.id, 0)
             self._production = state.task
             if cancelled:
@@ -239,8 +260,31 @@ class AgentHandle:
         if self.current_run is not None and self.current_run.status not in TERMINAL_STATUSES:
             self.current_run = await self.runtime.stop(self.current_run.id)
         await self.runtime.close()
+        await self._close_heartbeat()
+        if self._durable_revision is not None and not self._lease_lost:
+            async with self._durable_lock:
+                await self.manager.store.delete(
+                    self.agent_id, self.manager.owner_id, self._durable_revision
+                )
         self.manager._handles.pop(self.agent_id, None)
         return self._result(self.current_run, "destroyed", "Agent 已销毁", "destroyed")
+
+    async def _close_heartbeat(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.cancel()
+            await asyncio.gather(self._heartbeat, return_exceptions=True)
+            self._heartbeat = None
+
+    async def detach(self) -> None:
+        """正常进程关闭：收束当前生产，但保留 persistent 的稳定句柄身份。"""
+        self._closing = True
+        await self.stop()
+        await self.runtime.close()
+        await self._close_heartbeat()
+        if not self._lease_lost:
+            await self.manager.persist(self, "detached", release=True)
+        self.destroyed = True
+        self.manager._handles.pop(self.agent_id, None)
 
     async def _completed_result(
         self,
@@ -258,7 +302,7 @@ class AgentHandle:
             "",
         )
         status: AgentStatus = forced_status or cast(AgentStatus, run.status)
-        return ExecResult(
+        result = ExecResult(
             agent_id=self.agent_id,
             run_id=run.id,
             status=status,
@@ -268,6 +312,8 @@ class AgentHandle:
             parent_tool_call_id=self.parent_tool_call_id,
             turn=self.turn,
         )
+        await self.manager.persist(self, run.status)
+        return result
 
     def _result(
         self, run: RunView | None, status: AgentStatus, error: str, code: str
@@ -303,6 +349,80 @@ class AgentManager:
         self._handles: dict[str, AgentHandle] = {}
         self._spawn_lock = asyncio.Lock()
         self._closed = False
+        self.owner_id = str(uuid4())
+        self.store = AgentHandleStore(repository.database)
+
+    @staticmethod
+    def definition_hash(definition: AgentDefinition) -> str:
+        """只冻结公开定义；恢复仍要求宿主重供可信 provider/tools/policy。"""
+        provider_class = type(definition.provider)
+        payload = {
+            "name": definition.name,
+            "provider": definition.provider.name,
+            "provider_class": f"{provider_class.__module__}.{provider_class.__qualname__}",
+            "tools": [item.model_dump(mode="json") for item in definition.tools.list_tools()],
+            "max_turns": definition.max_turns,
+            "max_steps": definition.max_steps,
+            "timeout_seconds": definition.timeout_seconds,
+            "tool_timeout_seconds": definition.tool_timeout_seconds,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    async def persist(self, handle: AgentHandle, status: str, *, release: bool = False) -> None:
+        if handle._durable_revision is None:
+            return
+        async with handle._durable_lock:
+            try:
+                stored = await self.store.save(
+                    handle.agent_id,
+                    self.owner_id,
+                    handle._durable_revision,
+                    turn=handle.turn,
+                    current_run_id=handle.current_run.id if handle.current_run else None,
+                    status=status,
+                    release=release,
+                )
+            except Exception:
+                handle._lease_lost = True
+                raise
+            handle._durable_revision = stored.revision
+
+    async def _renew(self, handle: AgentHandle) -> None:
+        try:
+            while not handle.destroyed:
+                await asyncio.sleep(self.store.lease_seconds / 3)
+                async with handle._durable_lock:
+                    if handle._durable_revision is not None:
+                        await self.store.renew(
+                            handle.agent_id, self.owner_id, handle._durable_revision
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            handle._lease_lost = True
+            if handle._consumer is not None:
+                handle._consumer.cancel()
+            if handle.current_run is not None:
+                await handle.runtime.stop(handle.current_run.id)
+
+    async def restore(self, definition: AgentDefinition, stored: StoredAgentHandle) -> AgentHandle:
+        async with self._spawn_lock:
+            if (
+                stored.name != definition.name
+                or not stored.persistent
+                or stored.definition_hash != self.definition_hash(definition)
+            ):
+                raise AgentError("agent_definition_changed", "持久 Agent 的可信定义不匹配")
+            return await self._spawn(
+                replace(
+                    definition,
+                    agent_id=stored.agent_id,
+                    persistent=True,
+                    parent_agent_id=stored.parent_agent_id,
+                    parent_tool_call_id=stored.parent_tool_call_id,
+                ),
+                stored=stored,
+            )
 
     async def spawn(
         self, definition: AgentDefinition, *, parent_context: ToolContext | None = None
@@ -328,7 +448,11 @@ class AgentManager:
             return await self._spawn(definition, parent_context)
 
     async def _spawn(
-        self, definition: AgentDefinition, parent_context: ToolContext | None = None
+        self,
+        definition: AgentDefinition,
+        parent_context: ToolContext | None = None,
+        *,
+        stored: StoredAgentHandle | None = None,
     ) -> AgentHandle:
         if self._closed:
             raise AgentError("manager_closed", "AgentManager 已关闭")
@@ -370,11 +494,49 @@ class AgentManager:
             if parent_context and not definition.persistent
             else (),
         )
-        topic = await self.repository.create_topic(f"Agent: {definition.name}")
+        topic = (
+            await self.repository.get_topic(stored.topic_id)
+            if stored
+            else await self.repository.create_topic(f"Agent: {definition.name}")
+        )
         if parent_context is not None and parent_context.skill_snapshot is not None:
             for batch in parent_context.skill_snapshot.batches():
                 await self.repository.inject_skills(topic.id, batch)
         handle = AgentHandle(self, definition, runtime, topic.id)
+        if definition.persistent:
+            try:
+                saved = (
+                    await self.store.claim(stored.agent_id, self.owner_id, stored.revision)
+                    if stored
+                    else await self.store.create(
+                        StoredAgentHandle(
+                            agent_id=handle.agent_id,
+                            name=definition.name,
+                            topic_id=topic.id,
+                            persistent=True,
+                            turn=0,
+                            current_run_id=None,
+                            status="created",
+                            definition_hash=self.definition_hash(definition),
+                            revision=0,
+                            owner_id=None,
+                            lease_expires_at=None,
+                            parent_agent_id=definition.parent_agent_id,
+                            parent_tool_call_id=definition.parent_tool_call_id,
+                        ),
+                        self.owner_id,
+                    )
+                )
+                handle._durable_revision = saved.revision
+                handle.turn = saved.turn
+                if saved.current_run_id is not None:
+                    handle.current_run = await self.repository.get_run(saved.current_run_id)
+                    if handle.current_run.topic_id != topic.id:
+                        raise AgentError("agent_run_mismatch", "持久 Agent 的运行话题不匹配")
+                handle._heartbeat = asyncio.create_task(self._renew(handle))
+            except BaseException:
+                await runtime.close()
+                raise
         self._handles[handle.agent_id] = handle
         return handle
 
@@ -393,4 +555,8 @@ class AgentManager:
     async def close(self) -> None:
         async with self._spawn_lock:
             self._closed = True
-        await self.destroy_all()
+        for handle in list(self._handles.values()):
+            if handle.definition.persistent:
+                await handle.detach()
+            else:
+                await handle.destroy()

@@ -368,8 +368,8 @@ class KrimClient:
         self._check(response)
         return TypeAdapter(list[AgentView]).validate_json(response.content)
 
-    def agent_spawn(self, name: str) -> AgentView:
-        response = self._http.post("/v1/agents", json={"name": name})
+    def agent_spawn(self, name: str, *, persistent: bool = False) -> AgentView:
+        response = self._http.post("/v1/agents", json={"name": name, "persistent": persistent})
         self._check(response)
         return AgentView.model_validate_json(response.content)
 

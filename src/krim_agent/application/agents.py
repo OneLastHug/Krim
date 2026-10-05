@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from typing import Literal
 
@@ -31,6 +32,7 @@ AgentViewStatus = Literal[
 
 class AgentSpawnRequest(StrictModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+    persistent: bool = False
 
 
 class AgentPromptRequest(StrictModel):
@@ -153,10 +155,12 @@ class AgentService:
             result=result,
         )
 
-    async def spawn(self, name: str) -> AgentView:
+    async def spawn(self, name: str, *, persistent: bool = False) -> AgentView:
         try:
             entry = self.catalog.get(name)
-            handle = await self.manager.spawn(replace(entry.definition, agent_id=""))
+            handle = await self.manager.spawn(
+                replace(entry.definition, agent_id="", persistent=persistent)
+            )
         except ToolError as exc:
             raise ServiceError(exc.code, str(exc), 404) from exc
         except AgentError as exc:
@@ -164,6 +168,41 @@ class AgentService:
                 exc.code, str(exc), 429 if exc.code == "agent_limit" else 409
             ) from exc
         return await self.view(handle)
+
+    async def restore_persistent(self) -> int:
+        restored = 0
+        stored = await self.manager.store.list()
+        for item in stored:
+            if not item.persistent:
+                continue
+            try:
+                entry = self.catalog.get(item.name)
+                handle = await self.manager.restore(entry.definition, item)
+                if handle.current_run is not None and handle.current_run.status in {
+                    "queued",
+                    "running",
+                }:
+                    handle.current_run = await self.runtime.repository.get_run(
+                        handle.current_run.id
+                    )
+                restored += 1
+            except (AgentError, ServiceError, ToolError):
+                continue
+        return restored
+
+    async def assert_inventory_available(self) -> None:
+        """启动恢复前先拒绝有效的其它 owner，不能中断仍在生产的进程。"""
+        now = time.time()
+        for item in await self.manager.store.list():
+            if (
+                item.owner_id is not None
+                and item.owner_id != self.manager.owner_id
+                and item.lease_expires_at is not None
+                and item.lease_expires_at > now
+            ):
+                raise ServiceError(
+                    "agent_inventory_busy", "持久 Agent 仍由另一进程拥有，禁止启动恢复", 409
+                )
 
     def catalog_views(self) -> list[AgentDescriptor]:
         return self.catalog.descriptors()
