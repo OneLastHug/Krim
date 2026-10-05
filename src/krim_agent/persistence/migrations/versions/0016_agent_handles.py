@@ -28,6 +28,11 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.CheckConstraint("turn >= 0", name="ck_agent_turn"),
         sa.CheckConstraint("revision >= 0", name="ck_agent_handle_revision"),
+        sa.CheckConstraint(
+            "(owner_id IS NULL AND lease_expires_at IS NULL) OR "
+            "(owner_id IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_agent_handle_lease",
+        ),
     )
     op.create_index("ix_agent_handles_topic_id", "agent_handles", ["topic_id"])
 

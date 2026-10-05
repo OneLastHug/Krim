@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import delete, exists, or_, select, update
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
@@ -60,6 +60,23 @@ class AgentHandleStore:
             rows = await session.scalars(select(AgentHandleRow).order_by(AgentHandleRow.agent_id))
             return [self._stored(row) for row in rows]
 
+    async def renew(self, agent_id: str, owner_id: str, revision: int) -> None:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            now = time.time()
+            identifier = await session.scalar(
+                update(AgentHandleRow)
+                .where(
+                    AgentHandleRow.agent_id == agent_id,
+                    AgentHandleRow.owner_id == owner_id,
+                    AgentHandleRow.revision == revision,
+                    AgentHandleRow.lease_expires_at > now,
+                )
+                .values(lease_expires_at=now + self.lease_seconds, updated_at=utc_now())
+                .returning(AgentHandleRow.agent_id)
+            )
+            if identifier is None:
+                raise ServiceError("agent_lease_lost", "Agent 所有权、版本或租约已变化", 409)
+
     async def create(self, value: StoredAgentHandle, owner_id: str) -> StoredAgentHandle:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             if await session.get(TopicRow, value.topic_id) is None:
@@ -94,22 +111,28 @@ class AgentHandleStore:
         self, agent_id: str, owner_id: str, expected_revision: int
     ) -> StoredAgentHandle:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            row = await session.get(AgentHandleRow, agent_id)
-            if row is None:
-                raise ServiceError("agent_not_found", "持久 Agent 句柄不存在", 404)
             now = time.time()
-            if row.revision != expected_revision or (
-                row.owner_id is not None
-                and row.owner_id != owner_id
-                and row.lease_expires_at is not None
-                and row.lease_expires_at > now
-            ):
+            row = await session.scalar(
+                update(AgentHandleRow)
+                .where(
+                    AgentHandleRow.agent_id == agent_id,
+                    AgentHandleRow.revision == expected_revision,
+                    or_(
+                        AgentHandleRow.owner_id.is_(None),
+                        AgentHandleRow.owner_id == owner_id,
+                        AgentHandleRow.lease_expires_at <= now,
+                    ),
+                )
+                .values(
+                    owner_id=owner_id,
+                    lease_expires_at=now + self.lease_seconds,
+                    revision=AgentHandleRow.revision + 1,
+                    updated_at=utc_now(),
+                )
+                .returning(AgentHandleRow)
+            )
+            if row is None:
                 raise ServiceError("agent_busy", "Agent 已由另一进程接管或版本变化", 409)
-            row.owner_id = owner_id
-            row.lease_expires_at = now + self.lease_seconds
-            row.revision += 1
-            row.updated_at = utc_now()
-            await session.flush()
             return self._stored(row)
 
     async def save(
@@ -124,30 +147,50 @@ class AgentHandleStore:
         release: bool = False,
     ) -> StoredAgentHandle:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            row = await session.get(AgentHandleRow, agent_id)
-            if row is None:
-                raise ServiceError("agent_not_found", "持久 Agent 句柄不存在", 404)
-            if row.owner_id != owner_id or row.revision != revision:
-                raise ServiceError("agent_lease_lost", "Agent 所有权已变化", 409)
+            now = time.time()
+            statement = update(AgentHandleRow).where(
+                AgentHandleRow.agent_id == agent_id,
+                AgentHandleRow.owner_id == owner_id,
+                AgentHandleRow.revision == revision,
+                AgentHandleRow.lease_expires_at > now,
+                AgentHandleRow.turn <= turn,
+            )
             if current_run_id is not None:
-                run = await session.get(RunRow, current_run_id)
-                if run is None or run.topic_id != row.topic_id:
-                    raise ServiceError("agent_run_mismatch", "Agent run 不属于当前 topic", 409)
-            row.turn = turn
-            row.current_run_id = current_run_id
-            row.status = status
-            row.revision += 1
-            row.updated_at = utc_now()
-            row.owner_id = None if release else owner_id
-            row.lease_expires_at = None if release else time.time() + self.lease_seconds
-            await session.flush()
+                statement = statement.where(
+                    exists(
+                        select(RunRow.id).where(
+                            RunRow.id == current_run_id, RunRow.topic_id == AgentHandleRow.topic_id
+                        )
+                    )
+                )
+            row = await session.scalar(
+                statement.values(
+                    turn=turn,
+                    current_run_id=current_run_id,
+                    status=status,
+                    revision=AgentHandleRow.revision + 1,
+                    updated_at=utc_now(),
+                    owner_id=None if release else owner_id,
+                    lease_expires_at=None if release else now + self.lease_seconds,
+                ).returning(AgentHandleRow)
+            )
+            if row is None:
+                raise ServiceError(
+                    "agent_lease_lost", "Agent 所有权、版本、租约或运行归属已变化", 409
+                )
             return self._stored(row)
 
     async def delete(self, agent_id: str, owner_id: str, revision: int) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            row = await session.get(AgentHandleRow, agent_id)
-            if row is None:
-                return
-            if row.owner_id != owner_id or row.revision != revision:
-                raise ServiceError("agent_lease_lost", "Agent 所有权已变化", 409)
-            await session.delete(row)
+            identifier = await session.scalar(
+                delete(AgentHandleRow)
+                .where(
+                    AgentHandleRow.agent_id == agent_id,
+                    AgentHandleRow.owner_id == owner_id,
+                    AgentHandleRow.revision == revision,
+                    AgentHandleRow.lease_expires_at > time.time(),
+                )
+                .returning(AgentHandleRow.agent_id)
+            )
+            if identifier is None:
+                raise ServiceError("agent_lease_lost", "Agent 所有权、版本或租约已变化", 409)

@@ -56,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     agent.add_argument("--idempotency-key", help="重试去重键")
     agent.add_argument("--from-seq", type=int, default=0, help="events 起始序号")
+    agent.add_argument(
+        "--persistent", action="store_true", help="persistent（持久）：spawn 句柄可由后续进程恢复"
+    )
     compact = subparsers.add_parser("compact", help="compact（压缩）：预览或确认持久历史摘要")
     compact.add_argument("topic_id")
     compact.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
@@ -220,7 +223,11 @@ def main() -> None:
                     if not args.value:
                         parser.error("agent 操作需要 Agent ID 或目录名称")
                     if args.action == "spawn":
-                        print(client.agent_spawn(args.value).model_dump_json(indent=2))
+                        print(
+                            client.agent_spawn(
+                                args.value, persistent=args.persistent
+                            ).model_dump_json(indent=2)
+                        )
                     elif args.action == "get":
                         print(client.agent(args.value).model_dump_json(indent=2))
                     elif args.action in {"execute", "resume"}:

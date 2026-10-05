@@ -3,6 +3,7 @@ import json
 import sys
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from krim_agent.agents import AgentDefinition
@@ -314,6 +315,68 @@ async def test_http_close_and_reopen_drop_handles_but_preserve_runs(tmp_path):
         assert (await api.get(f"/v1/runs/{run_id}")).json()["status"] == "completed"
         assert "persisted" in (await api.get(f"/v1/runs/{run_id}/messages")).text
         assert '"status":"completed"' in (await api.get(f"/v1/runs/{run_id}/events")).text
+
+
+async def test_http_persistent_agent_handle_reopens_and_resumes_from_durable_inventory(tmp_path):
+    config = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'persistent-agent.sqlite'}")
+    app = create_app(config)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as api,
+    ):
+        created = await api.post("/v1/agents", json={"name": "default", "persistent": True})
+        assert created.status_code == 201
+        agent = created.json()
+        result = (
+            await api.post(
+                f"/v1/agents/{agent['agent_id']}/execute", json={"prompt": "/echo persisted"}
+            )
+        ).json()
+        assert result["persistent"] is True and result["status"] == "completed"
+        agent_id = agent["agent_id"]
+    reopened = create_app(config)
+    async with (
+        reopened.router.lifespan_context(reopened),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=reopened), base_url="http://127.0.0.1"
+        ) as api,
+    ):
+        restored = await api.get(f"/v1/agents/{agent_id}")
+        assert restored.status_code == 200 and restored.json()["agent_id"] == agent_id
+        resumed = await api.post(f"/v1/agents/{agent_id}/resume", json={"prompt": "/echo resumed"})
+        assert resumed.status_code == 200 and resumed.json()["status"] == "completed"
+        destroyed = await api.delete(f"/v1/agents/{agent_id}")
+        assert destroyed.status_code == 200
+    final = create_app(config)
+    async with (
+        final.router.lifespan_context(final),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=final), base_url="http://127.0.0.1"
+        ) as api,
+    ):
+        assert (await api.get(f"/v1/agents/{agent_id}")).status_code == 404
+
+
+async def test_second_application_cannot_restore_or_interrupt_live_persistent_owner(tmp_path):
+    from krim_agent.protocol.domain import ServiceError
+
+    config = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'owners.sqlite'}")
+    first = create_app(config)
+    async with (
+        first.router.lifespan_context(first),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=first), base_url="http://127.0.0.1"
+        ) as api,
+    ):
+        agent = (await api.post("/v1/agents", json={"name": "default", "persistent": True})).json()
+        second = create_app(config)
+        with pytest.raises(ServiceError) as busy:
+            async with second.router.lifespan_context(second):
+                pass
+        assert busy.value.code == "agent_inventory_busy"
+        assert (await api.get(f"/v1/agents/{agent['agent_id']}")).status_code == 200
 
 
 async def test_http_agent_errors_limits_and_authentication(repository):

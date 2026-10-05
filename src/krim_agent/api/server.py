@@ -166,10 +166,12 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             await database.initialize()
+            await agent_service.assert_inventory_available()
             await change_repository.recover_interrupted()
             await checkpoint_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
+            await agent_service.restore_persistent()
             yield
         finally:
             await change_service.close()
@@ -452,7 +454,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     @app.post("/v1/agents", status_code=201)
     async def spawn_agent(payload: AgentSpawnRequest) -> AgentView:
-        return await agent_service.spawn(payload.name)
+        return await agent_service.spawn(payload.name, persistent=payload.persistent)
 
     @app.get("/v1/agents")
     async def list_agents() -> list[AgentView]:
