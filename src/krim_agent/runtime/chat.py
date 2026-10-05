@@ -27,10 +27,13 @@ from krim_agent.context_engine import (
     ContextResult,
     ContextRunConfig,
 )
+from krim_agent.observability import JsonlSink, SpanSink, TraceContext, Tracer
+from krim_agent.otel import OtlpJsonSink
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.budgets import UsageBudgetStore
 from krim_agent.persistence.budgets import digest as budget_digest
 from krim_agent.persistence.context_proposals import fingerprint
+from krim_agent.persistence.traces import TraceStore
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -91,6 +94,7 @@ class RunState:
     context_engine: ContextEngine | None = None
     budget_account_ids: tuple[str, ...] = ()
     context_noticed: bool = False
+    trace_context: TraceContext | None = None
 
     async def publish(
         self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
@@ -129,11 +133,27 @@ class ChatRuntime:
         budget_account_ids: tuple[str, ...] = (),
         budget_owner_kind: BudgetOwner = "runtime",
         budget_owner_id: str | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         self.repository = repository
         self.provider = provider
         self.tools = tools
         self.settings = settings
+        sink: SpanSink | None = None
+        if tracer is None and settings.observability_enabled:
+            if settings.observability_jsonl_path:
+                sink = JsonlSink(settings.observability_jsonl_path)
+            elif settings.observability_otlp_endpoint:
+                sink = OtlpJsonSink(settings.observability_otlp_endpoint)
+        self.tracer = tracer or Tracer(
+            TraceStore(repository.database),
+            enabled=settings.observability_enabled,
+            sample_rate=settings.observability_sample_rate,
+            queue_size=settings.observability_queue_size,
+            timeout_seconds=settings.observability_timeout_seconds,
+            sink=sink,
+        )
+        self._owns_tracer = tracer is None
         self.tool_policy = tool_policy
         if self.tool_policy is None and settings.interactive_tools:
             self.tool_policy = self._confirm_writes
@@ -438,6 +458,20 @@ class ChatRuntime:
                 del self._runs[run_id]
 
     async def _drive(self, state: RunState) -> None:
+        with self.tracer.scope("run", "run", state.run.id) as span:
+            state.trace_context = span.context if span.context and span.context.sampled else None
+            await self._drive_observed(state)
+            if state.frames and isinstance(state.frames[-1].data, dict):
+                status = state.frames[-1].data.get("status")
+                span.status = (
+                    "ok"
+                    if status == "completed"
+                    else "cancelled"
+                    if status == "aborted"
+                    else "error"
+                )
+
+    async def _drive_observed(self, state: RunState) -> None:
         status: RunStatus = "completed"
         error: str | None = None
         error_code: str | None = None
@@ -451,6 +485,8 @@ class ChatRuntime:
                 "context_config": state.context_config.model_dump(mode="json"),
                 "budget_account_ids": list(state.budget_account_ids),
             }
+            if state.trace_context is not None:
+                start_data["trace_context"] = state.trace_context.model_dump(mode="json")
             await state.publish("start", start_data)
             snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
             try:
@@ -476,7 +512,7 @@ class ChatRuntime:
             status, error = "failed", str(exc)
             error_code = exc.code
         except Exception:
-            logger.exception("运行失败: %s", state.run.id)
+            logger.error("运行失败；异常正文和堆栈不进入日志: %s", state.run.id)
             status, error = "failed", "模型或运行时执行失败"
             error_code = "execution_error"
         finally:
@@ -780,110 +816,119 @@ class ChatRuntime:
                         self.budget_store.transition(reservation.request_id, "released")
                     )
                 raise
-            try:
-                invoked = True
-                provider_stream = self.provider.stream(
-                    messages, list(tool_step.definitions.values())
-                )
-                async for delta in provider_stream:
-                    if usage_final and not isinstance(delta, ModelUsage):
-                        raise ProviderError("provider_usage_conflict", "最终用量后仍有模型输出")
-                    if isinstance(delta, ModelText):
-                        if len(state.draft) + len(delta.text) > 8192:
-                            raise ServiceError("output_limit", "单轮输出超过限制")
-                        state.draft += delta.text
-                        await state.publish("chunk", {"type": "text_delta", "text": delta.text})
-                    elif isinstance(delta, ModelUsage):
-                        try:
-                            delta = ModelUsage.model_validate(delta.model_dump(mode="json"))
-                        except ValidationError as error:
-                            raise ProviderError(
-                                "provider_usage", "Provider 用量计数无效"
-                            ) from error
-                        if provider_usage is not None and not delta.usage.follows(provider_usage):
-                            raise ProviderError("provider_usage_conflict", "Provider 用量发生回退")
-                        if usage_final and (delta.usage != provider_usage or not delta.final):
-                            raise ProviderError("provider_usage_conflict", "最终用量不能被改写")
-                        if delta.usage != provider_usage or delta.final != usage_final:
-                            await state.publish(
-                                "chunk",
-                                {
-                                    "type": "token_usage",
-                                    "step": _step,
-                                    "usage": delta.usage.model_dump(mode="json"),
-                                    "final": delta.final,
-                                },
-                            )
-                        provider_usage, usage_final = delta.usage, delta.final
-                    elif isinstance(delta, ModelToolCall):
-                        if delta.id in state.seen_calls:
-                            raise ServiceError("duplicate_tool_call", "工具调用 ID 重复")
-                        state.seen_calls.add(delta.id)
-                        if len(calls) >= 8:
-                            raise ServiceError("tool_limit", "单轮工具调用超过限制")
-                        calls.append(delta)
-                        state.draft_calls.append(delta)
-                        await state.publish(
-                            "chunk", {"type": "tool_call", **delta.model_dump(mode="json")}
-                        )
-                    else:
-                        raise ProviderError("provider_response", "Provider 返回未知模型事件")
-                    if len(state.frames) >= 2048:
-                        raise ServiceError("stream_limit", "流事件超过限制")
-                provider_completed = True
-            finally:
+            with self.tracer.scope("model", "run", state.run.id, {"step": _step}):
                 try:
-                    close_stream = getattr(provider_stream, "aclose", None)
-                    if close_stream is not None:
-                        await close_stream()
-                finally:
-                    if reservation is not None:
-                        if not invoked:
-                            reservation = await self._budget_commit(
-                                self.budget_store.transition(reservation.request_id, "released")
-                            )
-                        elif (
-                            provider_completed
-                            and usage_final
-                            and provider_usage is not None
-                            and all(
-                                getattr(provider_usage, key) is not None
-                                for key in ("input_tokens", "output_tokens", "total_tokens")
-                            )
-                        ):
+                    invoked = True
+                    provider_stream = self.provider.stream(
+                        messages, list(tool_step.definitions.values())
+                    )
+                    async for delta in provider_stream:
+                        if usage_final and not isinstance(delta, ModelUsage):
+                            raise ProviderError("provider_usage_conflict", "最终用量后仍有模型输出")
+                        if isinstance(delta, ModelText):
+                            if len(state.draft) + len(delta.text) > 8192:
+                                raise ServiceError("output_limit", "单轮输出超过限制")
+                            state.draft += delta.text
+                            await state.publish("chunk", {"type": "text_delta", "text": delta.text})
+                        elif isinstance(delta, ModelUsage):
                             try:
-                                reservation = await self._budget_commit(
-                                    self.budget_store.settle(reservation.request_id, provider_usage)
+                                delta = ModelUsage.model_validate(delta.model_dump(mode="json"))
+                            except ValidationError as error:
+                                raise ProviderError(
+                                    "provider_usage", "Provider 用量计数无效"
+                                ) from error
+                            if provider_usage is not None and not delta.usage.follows(
+                                provider_usage
+                            ):
+                                raise ProviderError(
+                                    "provider_usage_conflict", "Provider 用量发生回退"
                                 )
-                            except Exception:
-                                await self._budget_commit(
+                            if usage_final and (delta.usage != provider_usage or not delta.final):
+                                raise ProviderError("provider_usage_conflict", "最终用量不能被改写")
+                            if delta.usage != provider_usage or delta.final != usage_final:
+                                await state.publish(
+                                    "chunk",
+                                    {
+                                        "type": "token_usage",
+                                        "step": _step,
+                                        "usage": delta.usage.model_dump(mode="json"),
+                                        "final": delta.final,
+                                    },
+                                )
+                            provider_usage, usage_final = delta.usage, delta.final
+                        elif isinstance(delta, ModelToolCall):
+                            if delta.id in state.seen_calls:
+                                raise ServiceError("duplicate_tool_call", "工具调用 ID 重复")
+                            state.seen_calls.add(delta.id)
+                            if len(calls) >= 8:
+                                raise ServiceError("tool_limit", "单轮工具调用超过限制")
+                            calls.append(delta)
+                            state.draft_calls.append(delta)
+                            await state.publish(
+                                "chunk", {"type": "tool_call", **delta.model_dump(mode="json")}
+                            )
+                        else:
+                            raise ProviderError("provider_response", "Provider 返回未知模型事件")
+                        if len(state.frames) >= 2048:
+                            raise ServiceError("stream_limit", "流事件超过限制")
+                    provider_completed = True
+                finally:
+                    try:
+                        close_stream = getattr(provider_stream, "aclose", None)
+                        if close_stream is not None:
+                            await close_stream()
+                    finally:
+                        if reservation is not None:
+                            if not invoked:
+                                reservation = await self._budget_commit(
+                                    self.budget_store.transition(reservation.request_id, "released")
+                                )
+                            elif (
+                                provider_completed
+                                and usage_final
+                                and provider_usage is not None
+                                and all(
+                                    getattr(provider_usage, key) is not None
+                                    for key in ("input_tokens", "output_tokens", "total_tokens")
+                                )
+                            ):
+                                try:
+                                    reservation = await self._budget_commit(
+                                        self.budget_store.settle(
+                                            reservation.request_id, provider_usage
+                                        )
+                                    )
+                                except Exception:
+                                    await self._budget_commit(
+                                        self.budget_store.transition(
+                                            reservation.request_id, "uncertain"
+                                        )
+                                    )
+                                    raise
+                            else:
+                                reservation = await self._budget_commit(
                                     self.budget_store.transition(
                                         reservation.request_id, "uncertain"
                                     )
                                 )
-                                raise
-                        else:
-                            reservation = await self._budget_commit(
-                                self.budget_store.transition(reservation.request_id, "uncertain")
-                            )
-                    await state.publish(
-                        "chunk",
-                        {
-                            "type": "model_step",
-                            "step": _step,
-                            "phase": "end",
-                            "provider": self.provider.name,
-                            "completed": provider_completed,
-                        },
-                    )
-                    if reservation is not None:
                         await state.publish(
                             "chunk",
                             {
-                                "type": "usage_budget",
-                                "request": reservation.model_dump(mode="json"),
+                                "type": "model_step",
+                                "step": _step,
+                                "phase": "end",
+                                "provider": self.provider.name,
+                                "completed": provider_completed,
                             },
                         )
+                        if reservation is not None:
+                            await state.publish(
+                                "chunk",
+                                {
+                                    "type": "usage_budget",
+                                    "request": reservation.model_dump(mode="json"),
+                                },
+                            )
             if reservation is not None:
                 if reservation.state == "uncertain":
                     raise ServiceError(
@@ -941,6 +986,7 @@ class ChatRuntime:
                         else None,
                         context_config=config.model_dump(mode="json"),
                         budget_account_ids=state.budget_account_ids,
+                        tracer=self.tracer,
                     ),
                 )
                 await self.repository.add_message(
@@ -1081,3 +1127,5 @@ class ChatRuntime:
             if state.task is not None and not state.terminal:
                 await self.stop(state.run.id)
         await self.tools.close()
+        if self._owns_tracer:
+            await self.tracer.close()

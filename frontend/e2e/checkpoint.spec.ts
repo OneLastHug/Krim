@@ -9,6 +9,7 @@ const test = base.extend({
   },
 });
 function pythonHost(baseURL: string, sessionId: string, topicId: string, mode = "success") {
+  if (!sessionId) throw new Error("Checkpoint Host 需要已就绪的控制会话");
   const process = spawn("../.venv/bin/python", ["../tests/fixtures/browser_checkpoint_host.py", baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
   let output = "", errors = "";
   process.stdout.on("data", (data) => { output += data.toString(); }); process.stderr.on("data", (data) => { errors += data.toString(); });
@@ -23,6 +24,7 @@ function pythonHost(baseURL: string, sessionId: string, topicId: string, mode = 
 test("iframe 创建宿主快照，修改真实文件后检查可回滚并恢复原值", async ({ page, request, baseURL }) => {
   const topic = await (await request.post("/v1/topics", { data: { title: `Checkpoint-${Date.now()}` } })).json();
   await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click(); await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(page.locator("#host-session")).not.toBeEmpty();
   const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click();
   const sid = await page.locator("#host-session").textContent(); const host = pythonHost(baseURL!, sid!, topic.id);
   try {
@@ -41,6 +43,8 @@ test("iframe 创建宿主快照，修改真实文件后检查可回滚并恢复�
 test("宿主拒绝 canRollback 时不执行回滚，文件仍保持修改值", async ({ page, request, baseURL }) => {
   const topic = await (await request.post("/v1/topics", { data: { title: `Checkpoint-deny-${Date.now()}` } })).json();
   await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(page.locator("#host-session")).not.toBeEmpty();
   const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click(); const sid = await page.locator("#host-session").textContent(); const host = pythonHost(baseURL!, sid!, topic.id, "deny");
   try {
     const ready = await host.ready; await frame.getByText("资源快照", { exact: true }).click(); await frame.locator("#checkpoint-create").click(); await expect(frame.locator('[data-checkpoint-status="available"]')).toHaveCount(1); await writeFile(`${ready.directory}/resource.txt`, "新值");
@@ -51,7 +55,10 @@ test("宿主拒绝 canRollback 时不执行回滚，文件仍保持修改值", a
 
 test("回滚写入资源后 callback 抛错会保留 uncertain，刷新不自动重放", async ({ page, request, baseURL }) => {
   const topic = await (await request.post("/v1/topics", { data: { title: `Checkpoint-uncertain-${Date.now()}` } })).json();
-  await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click(); const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click(); const sid = await page.locator("#host-session").textContent(); const host = pythonHost(baseURL!, sid!, topic.id, "rollback-error");
+  await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(page.locator("#host-session")).not.toBeEmpty();
+  const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click(); const sid = await page.locator("#host-session").textContent(); const host = pythonHost(baseURL!, sid!, topic.id, "rollback-error");
   try {
     const ready = await host.ready; await frame.getByText("资源快照", { exact: true }).click(); await frame.locator("#checkpoint-create").click(); await expect(frame.locator('[data-checkpoint-status="available"]')).toHaveCount(1); await writeFile(`${ready.directory}/resource.txt`, "新值"); await frame.locator(".checkpoint-card").getByRole("button", { name: "回滚到此快照", exact: true }).click();
     await expect(frame.locator('[data-checkpoint-status="uncertain"]')).toHaveCount(1); expect(await readFile(`${ready.directory}/resource.txt`, "utf8")).toBe("原值"); await frame.locator("#checkpoint-refresh").click(); await expect(frame.locator('[data-checkpoint-status="uncertain"]')).toHaveCount(1);

@@ -66,16 +66,18 @@ async def test_topic_busy_stop_and_partial_persistence(repository):
     runtime = ChatRuntime(repository, provider, ToolRegistry(), Settings())
     topic = await repository.create_topic("取消")
     run = await runtime.start(topic.id, ChatRequest(text="hello", idempotency_key="1"))
-    await asyncio.wait_for(provider.entered.wait(), 1)
-    with pytest.raises(ServiceError) as error:
-        await runtime.start(topic.id, ChatRequest(text="second", idempotency_key="2"))
-    assert error.value.code == "topic_busy"
-    results = await asyncio.gather(runtime.stop(run.id), runtime.stop(run.id))
-    assert all(result.status == "aborted" and result.stop_requested for result in results)
-    history = await repository.list_messages(topic.id)
-    assert history[-1].content == "部分输出" and history[-1].details["partial"]
-    assert (await finish(runtime, run))[-1].data["status"] == "aborted"
-    await runtime.close()
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 5)
+        with pytest.raises(ServiceError) as error:
+            await runtime.start(topic.id, ChatRequest(text="second", idempotency_key="2"))
+        assert error.value.code == "topic_busy"
+        results = await asyncio.gather(runtime.stop(run.id), runtime.stop(run.id))
+        assert all(result.status == "aborted" and result.stop_requested for result in results)
+        history = await repository.list_messages(topic.id)
+        assert history[-1].content == "部分输出" and history[-1].details["partial"]
+        assert (await finish(runtime, run))[-1].data["status"] == "aborted"
+    finally:
+        await runtime.close()
 
 
 async def test_disconnect_does_not_cancel_producer_and_replay(repository):

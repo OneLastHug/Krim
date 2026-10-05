@@ -11,6 +11,7 @@ from pydantic import JsonValue
 
 from krim_agent.budgets import UsageBudgetConfig
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.observability import Tracer
 from krim_agent.persistence.budgets import UsageBudgetStore
 from krim_agent.sdk import PythonAI
 from krim_agent.tools import ToolContext, ToolRegistry
@@ -33,6 +34,7 @@ class WorkflowServices:
         usage_budget: UsageBudgetConfig | None = None,
         budget_store: UsageBudgetStore | None = None,
         context_config: ContextRunConfig | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         self.tools = tools
         self.models = dict(models or {})
@@ -41,6 +43,7 @@ class WorkflowServices:
         self.usage_budget = usage_budget
         self.budget_store = budget_store
         self.context_config = context_config
+        self.tracer = tracer or next((ai.runtime.tracer for ai in self.models.values()), None)
 
     async def _budget_scope(self, context: ExecutionContext) -> tuple[str, ...]:
         first = next(iter(self.models.values()), None)
@@ -104,6 +107,9 @@ class WorkflowServices:
                 call_id=context.execution_id,
                 timeout=node.timeout_seconds,
                 policy=self.policy,
+                tracer=self.tracer,
+                trace_owner_kind="workflow",
+                trace_owner_id=context.root_run_id or context.run_id,
                 budget_account_ids=await self._budget_scope(context),
                 context_config=(
                     self.context_config

@@ -26,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    trace = subparsers.add_parser("trace", help="trace（追踪）：读取脱敏 span 与观测状态")
+    trace.add_argument("action", choices=["run", "workflow", "get", "status"])
+    trace.add_argument("value", nargs="?")
+    trace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     budget = subparsers.add_parser("budget", help="budget（预算）：读取累计账本和核实未知请求")
     budget.add_argument("action", choices=["accounts", "account", "run", "request", "resolve"])
     budget.add_argument("value", nargs="?", help="account/run/request 标识")
@@ -317,6 +321,27 @@ def main() -> None:
                         print(client.agent_stop(args.value).model_dump_json(indent=2))
                     elif args.action == "destroy":
                         print(client.agent_destroy(args.value).model_dump_json(indent=2))
+                return
+            if args.command == "trace":
+                if args.action == "status":
+                    print(client.observability_status().model_dump_json(indent=2))
+                elif not args.value:
+                    parser.error("trace run/workflow/get 需要标识")
+                elif args.action == "get":
+                    print(client.trace(args.value).model_dump_json(indent=2))
+                else:
+                    records = (
+                        client.run_trace(args.value)
+                        if args.action == "run"
+                        else client.workflow_trace(args.value)
+                    )
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in records],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
                 return
             if args.command == "compact":
                 print(

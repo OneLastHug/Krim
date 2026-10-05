@@ -92,6 +92,7 @@ def _part(frame: StreamFrame) -> SDKPart:
             {
                 "provider": str(data.get("provider", "unknown")),
                 "context_config": data.get("context_config"),
+                "trace_context": data.get("trace_context"),
             }
         )
     if frame.kind == "end":

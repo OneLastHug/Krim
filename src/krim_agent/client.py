@@ -42,6 +42,7 @@ from .context_engine import (
 from .drag import DragPreview, DragState
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
+from .observability import ObservationStatus, SpanRecord, TraceView
 from .prompt_context import (
     ContextTagInput,
     MentionInput,
@@ -473,6 +474,26 @@ class KrimClient:
         response = self._http.get(f"/v1/runs/{run_id}/usage")
         self._check(response)
         return RunUsageView.model_validate_json(response.content)
+
+    def run_trace(self, run_id: str) -> list[SpanRecord]:
+        response = self._http.get(f"/v1/runs/{run_id}/trace")
+        self._check(response)
+        return TypeAdapter(list[SpanRecord]).validate_json(response.content)
+
+    def workflow_trace(self, run_id: str) -> list[SpanRecord]:
+        response = self._http.get(f"/v1/workflows/runs/{run_id}/trace")
+        self._check(response)
+        return TypeAdapter(list[SpanRecord]).validate_json(response.content)
+
+    def trace(self, trace_id: str) -> TraceView:
+        response = self._http.get(f"/v1/traces/{trace_id}")
+        self._check(response)
+        return TraceView.model_validate_json(response.content)
+
+    def observability_status(self) -> ObservationStatus:
+        response = self._http.get("/v1/observability/status")
+        self._check(response)
+        return ObservationStatus.model_validate_json(response.content)
 
     def budget_accounts(self) -> list[BudgetAccountView]:
         response = self._http.get("/v1/budgets/accounts")

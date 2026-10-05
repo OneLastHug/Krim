@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
+from krim_agent.observability import scope
 from krim_agent.protocol.models import check_json
 
 from .core import (
@@ -131,6 +132,22 @@ class ToolRegistry:
         consume: Callable[[ToolDefinition, Any], Result],
     ) -> Result:
         parent = context or ToolContext(self, timeout=self.default_timeout)
+        with scope(
+            "tool",
+            parent.trace_owner_kind or ("run" if parent.run_id != "local" else "host"),
+            parent.trace_owner_id or parent.run_id,
+            {"depth": parent.depth + 1},
+            tracer=parent.tracer,
+        ):
+            return await self._execute_observed(name, arguments, parent, consume)
+
+    async def _execute_observed[Result](
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        parent: ToolContext,
+        consume: Callable[[ToolDefinition, Any], Result],
+    ) -> Result:
         try:
             if parent.depth == 0 and parent.model_tools is not None:
                 candidate = parent.model_tools.get(name)

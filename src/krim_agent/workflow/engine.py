@@ -14,6 +14,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import JsonValue
 
+from krim_agent.observability import Tracer, scope
+
 from .builtins import NESTED_KINDS, PURE_KINDS, condition, input_value, run_builtin
 from .checkpoints import WorkflowCheckpointBackend
 from .durable import WorkflowJournal
@@ -325,6 +327,7 @@ class WorkflowEngine:
         max_depth: int = 8,
         max_iterations: int = 100,
         timeout_seconds: float = 300,
+        tracer: Tracer | None = None,
     ) -> None:
         if (
             not 1 <= max_nodes <= 10000
@@ -343,6 +346,7 @@ class WorkflowEngine:
             max_retries,
             max_concurrency,
         )
+        self.tracer = tracer
         self.max_depth, self.max_iterations, self.timeout_seconds = (
             max_depth,
             max_iterations,
@@ -618,6 +622,35 @@ class WorkflowEngine:
         return values
 
     async def _drive(self, handle: WorkflowHandle) -> WorkflowResult:
+        # 冷读取终态检查点没有新执行，不生成新的观测事实。
+        if handle._restored is not None and handle._restored.status in {
+            "completed",
+            "failed",
+            "aborted",
+        }:
+            return await self._drive_observed(handle)
+        with scope(
+            "workflow",
+            "workflow",
+            handle.budget.root_run_id or handle.run_id,
+            {
+                "depth": handle.depth,
+                "epoch": handle.epoch,
+                "recovered": handle._restored is not None,
+            },
+            tracer=self.tracer,
+        ) as span:
+            result = await self._drive_observed(handle)
+            span.status = (
+                "ok"
+                if result.status == "completed"
+                else "cancelled"
+                if result.status == "aborted"
+                else "error"
+            )
+            return result
+
+    async def _drive_observed(self, handle: WorkflowHandle) -> WorkflowResult:
         if handle._restored is not None and handle._restored.status in {
             "completed",
             "failed",
@@ -815,6 +848,18 @@ class WorkflowEngine:
         return {node.id: self.output_value(handle.node_outputs[node.id]) for node in sinks}
 
     async def _run_node(
+        self, handle: WorkflowHandle, node: WorkflowNode, inputs: dict[str, JsonValue]
+    ) -> NodeOutput:
+        with scope(
+            "node",
+            "workflow",
+            handle.budget.root_run_id or handle.run_id,
+            {"epoch": handle.epoch},
+            tracer=self.tracer,
+        ):
+            return await self._run_node_observed(handle, node, inputs)
+
+    async def _run_node_observed(
         self, handle: WorkflowHandle, node: WorkflowNode, inputs: dict[str, JsonValue]
     ) -> NodeOutput:
         if node.kind in PURE_KINDS:

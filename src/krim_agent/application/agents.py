@@ -71,6 +71,7 @@ class AgentService:
             max_agents=settings.agent_max_agents,
             max_concurrent=settings.agent_max_concurrent,
             max_recursion_depth=settings.agent_max_recursion_depth,
+            tracer=runtime.tracer,
         )
         self.catalog = AgentCatalog(self.manager)
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}

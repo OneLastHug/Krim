@@ -41,8 +41,8 @@ class WorkflowRuntime:
     ) -> None:
         self.database = database
         self.store = WorkflowCheckpointStore(database, scope=scope)
-        self.engine = WorkflowEngine()
         self.services = services or WorkflowServices()
+        self.engine = WorkflowEngine(tracer=self.services.tracer)
         self.max_active_runs = max_active_runs
         self._handles: dict[str, WorkflowHandle] = {}
         self._lock = asyncio.Lock()

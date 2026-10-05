@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.observability import Tracer
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView
@@ -341,12 +342,14 @@ class AgentManager:
         max_agents: int = 32,
         max_concurrent: int = 8,
         max_recursion_depth: int = 4,
+        tracer: Tracer | None = None,
     ) -> None:
         if not 1 <= max_agents <= 1024 or not 1 <= max_concurrent <= 64:
             raise ValueError("Agent 数量和并发必须为有效正数")
         if not 1 <= max_recursion_depth <= 16:
             raise ValueError("Agent 递归上限必须在 1–16 之间")
         self.repository = repository
+        self.tracer = tracer
         self.max_agents = max_agents
         self.max_recursion_depth = max_recursion_depth
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -553,6 +556,9 @@ class AgentManager:
             ),
             budget_owner_kind="agent",
             budget_owner_id=definition.agent_id,
+            tracer=parent_context.tracer
+            if parent_context and parent_context.tracer
+            else self.tracer,
         )
         topic = (
             await self.repository.get_topic(stored.topic_id)

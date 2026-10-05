@@ -49,9 +49,17 @@ class Settings(BaseModel):
     context_proposal_ttl_seconds: float = Field(default=300, ge=1, le=3600)
     context_notice_messages: int | None = Field(default=None, ge=2, le=10000)
     context_trigger_ratio: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    observability_enabled: bool = False
+    observability_sample_rate: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+    observability_queue_size: int = Field(default=512, ge=1, le=4096)
+    observability_timeout_seconds: float = Field(default=0.25, gt=0, le=10)
+    observability_jsonl_path: str | None = Field(default=None, max_length=512)
+    observability_otlp_endpoint: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
     def validate_provider(self) -> Settings:
+        if self.observability_jsonl_path and self.observability_otlp_endpoint:
+            raise ValueError("观测导出器只能选 JSONL 或 OTLP；也可由可信 Python 宿主注入")
         if self.context_compact_mode == "confirmation" and self.context_strategy not in {
             "summarize_then_truncate",
             "annotated_compact",

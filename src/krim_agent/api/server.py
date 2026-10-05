@@ -68,6 +68,7 @@ from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
+from krim_agent.observability import ObservationStatus, SpanRecord, TraceView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.attachments import AttachmentRepository
 from krim_agent.persistence.change_lists import ChangeListRepository
@@ -162,6 +163,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             models={"default": PythonAI(service)},
             usage_budget=config.workflow_usage_budget,
             budget_store=service.budget_store,
+            tracer=service.tracer,
         ),
         max_active_runs=config.max_active_runs,
     )
@@ -182,6 +184,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             await checkpoint_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
+                await service.tracer.store.recover()
             await service.budget_store.recover()
             await agent_service.restore_persistent()
             yield
@@ -917,6 +920,27 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/runs/{run_id}/audits")
     async def get_audits(run_id: str) -> list[ToolAudit]:
         return await repository.audits(run_id)
+
+    @app.get("/v1/observability/status")
+    async def observation_status() -> ObservationStatus:
+        return service.tracer.status()
+
+    @app.get("/v1/runs/{run_id}/trace")
+    async def run_trace(run_id: str) -> list[SpanRecord]:
+        await repository.get_run(run_id)
+        await service.tracer.flush(0.5)
+        return await service.tracer.store.spans("run", run_id)
+
+    @app.get("/v1/traces/{trace_id}")
+    async def trace_view(trace_id: str) -> TraceView:
+        await service.tracer.flush(0.5)
+        return await service.tracer.store.trace(trace_id)
+
+    @app.get("/v1/workflows/runs/{run_id}/trace")
+    async def workflow_trace(run_id: str) -> list[SpanRecord]:
+        await workflow_service.get(run_id)
+        await service.tracer.flush(0.5)
+        return await service.tracer.store.spans("workflow", run_id)
 
     @app.get("/v1/runs/{run_id}/events/summary")
     async def event_summary(run_id: str) -> StreamEventView:

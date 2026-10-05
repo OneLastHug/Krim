@@ -12,6 +12,7 @@ from .database import (
     WorkflowCheckpointRow,
     WorkflowRequestRow,
 )
+from .traces import TraceStore
 from .workflow import WorkflowCheckpointError, WorkflowCheckpointStore
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "AttachmentRepository",
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
+    "TraceStore",
 ]
