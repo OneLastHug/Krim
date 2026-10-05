@@ -6,6 +6,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 from pydantic import JsonValue, TypeAdapter
 
+from krim_agent.attachment import (
+    AttachmentAccess,
+    AttachmentContent,
+    AttachmentUpload,
+    AttachmentView,
+)
 from krim_agent.change_list import (
     ChangeExecution,
     ChangeInvoke,
@@ -48,8 +54,28 @@ from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, Skil
 
 
 class AppHandle:
-    def __init__(self, bridge: InProcessBridge) -> None:
+    def __init__(
+        self, bridge: InProcessBridge, *, attachments: AttachmentAccess | None = None
+    ) -> None:
         self._bridge = bridge
+        self._attachments = attachments
+
+    def _attachment_access(self) -> AttachmentAccess:
+        if not self.ready or self._attachments is None:
+            raise ServiceError("attachment_unavailable", "宿主没有就绪的附件数据访问", 409)
+        return self._attachments
+
+    async def attachments(self, topic_id: str) -> list[AttachmentView]:
+        return await self._attachment_access().list(topic_id)
+
+    async def upload_attachment(self, topic_id: str, request: AttachmentUpload) -> AttachmentView:
+        return await self._attachment_access().upload(topic_id, request)
+
+    async def attachment_content(self, topic_id: str, attachment_id: str) -> AttachmentContent:
+        return await self._attachment_access().content(topic_id, attachment_id)
+
+    async def delete_attachment(self, topic_id: str, attachment_id: str) -> None:
+        await self._attachment_access().delete(topic_id, attachment_id)
 
     @property
     def ready(self) -> bool:

@@ -33,6 +33,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from krim_agent.attachment import validate_attachment_metadata
 from krim_agent.interactions import InteractionKind, InteractionView
 from krim_agent.locale import LocaleView, resolve_locale
 from krim_agent.prompt_context import (
@@ -281,6 +282,21 @@ class HostCheckpointOperationRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AttachmentRow(Base):
+    __tablename__ = "attachments"
+    __table_args__ = (UniqueConstraint("topic_id", "idempotency_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(120))
+    media_type: Mapped[str] = mapped_column(String(120))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
@@ -432,6 +448,37 @@ class KrimRepository:
             topic = await session.get(TopicRow, topic_id)
             if topic is None:
                 raise ServiceError("topic_not_found", "话题不存在", 404)
+            try:
+                attachment_identifier = validate_attachment_metadata(request.metadata)
+            except ValueError as error:
+                raise ServiceError("attachment_reference_invalid", str(error), 422) from error
+            if attachment_identifier is not None:
+                attachment = await session.get(AttachmentRow, attachment_identifier)
+                if attachment is None or attachment.topic_id != topic_id:
+                    raise ServiceError("attachment_not_found", "附件不在该话题中", 404)
+                if request.kind != "file" or request.label != attachment.filename:
+                    raise ServiceError(
+                        "attachment_reference_invalid",
+                        "附件引用必须绑定原始文件名和 file 类型",
+                        422,
+                    )
+                expected_metadata = {
+                    "attachment_id": attachment.id,
+                    "filename": attachment.filename,
+                    "media_type": attachment.media_type,
+                    "size": attachment.byte_size,
+                    "sha256": attachment.sha256,
+                }
+                if any(
+                    key in request.metadata and request.metadata[key] != value
+                    for key, value in expected_metadata.items()
+                ):
+                    raise ServiceError(
+                        "attachment_reference_invalid", "附件引用元数据与实际资源不匹配", 422
+                    )
+                request = request.model_copy(
+                    update={"metadata": {**request.metadata, **expected_metadata}}
+                )
             context = PromptContext.model_validate(topic.prompt_context)
             reference = MentionRef(id=str(uuid4()), **request.model_dump())
             context.mentions.append(reference)
@@ -489,8 +536,8 @@ class KrimRepository:
         topic.updated_at = utc_now()
 
     @staticmethod
-    def _prompt_snapshot(
-        topic: TopicRow, text: str, occurrences: list[MentionOccurrence]
+    async def _prompt_snapshot(
+        topic: TopicRow, text: str, occurrences: list[MentionOccurrence], session: AsyncSession
     ) -> PromptSnapshot:
         context = PromptContext.model_validate(topic.prompt_context)
         references = {ref.id: ref for ref in context.mentions}
@@ -500,6 +547,13 @@ class KrimRepository:
             reference = references.get(occurrence.mention_id)
             if reference is None:
                 raise ServiceError("mention_not_found", "引用不在该话题中", 404)
+            identifier = validate_attachment_metadata(reference.metadata)
+            if identifier is not None:
+                attachment = await session.get(AttachmentRow, identifier)
+                if attachment is None or attachment.topic_id != topic.id:
+                    raise ServiceError(
+                        "attachment_not_found", "发送引用的附件已经删除或不属于当前话题", 404
+                    )
             if occurrence.start < previous_end or occurrence.end > len(text):
                 raise ServiceError("mention_position_invalid", "引用位置越界或重叠", 422)
             if text[occurrence.start : occurrence.end] != "@" + reference.label:
@@ -613,7 +667,7 @@ class KrimRepository:
             session.add(run)
             await session.flush()
             if action != "regenerate":
-                snapshot = self._prompt_snapshot(topic, text, occurrences)
+                snapshot = await self._prompt_snapshot(topic, text, occurrences, session)
                 try:
                     skill_snapshot = SkillSnapshot.model_validate(
                         {**topic.skills, "selected_names": skill_names}

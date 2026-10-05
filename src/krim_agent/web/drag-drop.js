@@ -6,14 +6,16 @@ const MAX_FILE_BYTES = 32768;
 export class DragDropUI {
     accept;
     notice;
+    upload;
     topicId = null;
     busy = false;
     dropping = false;
     preview = null;
     generation = 0;
-    constructor(accept, notice) {
+    constructor(accept, notice, upload) {
         this.accept = accept;
         this.notice = notice;
+        this.upload = upload;
         const area = node("composer");
         area.addEventListener("dragenter", (event) => {
             const drag = event;
@@ -71,8 +73,12 @@ export class DragDropUI {
                 throw new Error(t("一次只能拖入一个文本文件"));
             const file = data.files[0];
             const textType = file.type.startsWith("text/") || ["application/json", "application/xml"].includes(file.type) || (!file.type && /\.(?:txt|md|json|csv|py|ts|js|yaml|yml|toml|xml|log|rst)$/i.test(file.name));
-            if (!textType || file.size > MAX_FILE_BYTES)
-                throw new Error(t("只接受有限 UTF-8 文本文件"));
+            if (!textType || file.size > MAX_FILE_BYTES) {
+                if (!this.upload)
+                    throw new Error(t("只接受有限 UTF-8 文本文件"));
+                await this.upload(id, file);
+                return;
+            }
             let content;
             try {
                 content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());

@@ -1,5 +1,6 @@
 """本地 API 边界；EXT 安全补全，不宣称提供租户隔离或沙箱。"""
 
+import re
 import secrets
 from urllib.parse import urlsplit
 
@@ -7,6 +8,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from krim_agent.attachment import MAX_ATTACHMENT_BASE64
 from krim_agent.config import Settings
 
 from .web import PUBLIC_UI_PATHS
@@ -54,14 +56,19 @@ class LocalBoundary:
                 await reject("unauthorized", "需要有效的 Bearer API Key", 401)
                 return
         body = bytearray()
+        attachment_upload = scope["method"] == "POST" and bool(
+            re.fullmatch(r"/v1/topics/[A-Za-z0-9_-]{1,128}/attachments", scope["path"])
+        )
+        body_limit = MAX_ATTACHMENT_BASE64 + 2048 if attachment_upload else 65536
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
-            body.extend(message.get("body", b""))
-            if len(body) > 65536:
-                await reject("body_too_large", "请求体超过 64 KiB", 413)
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > body_limit:
+                await reject("body_too_large", "请求体超过此接口允许的大小", 413)
                 return
+            body.extend(chunk)
             if not message.get("more_body", False):
                 break
         delivered = False

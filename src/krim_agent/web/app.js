@@ -6,6 +6,7 @@ import { SkillsUI } from "./skills-ui.js";
 import { DragDropUI } from "./drag-drop.js";
 import { ChangeListUI } from "./change-list-ui.js";
 import { CheckpointUI } from "./checkpoint-ui.js";
+import { AttachmentsUI } from "./attachments-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
@@ -23,9 +24,10 @@ const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random(
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
-const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
+const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice, (topicId, file) => attachmentsUI.uploadFile(file, topicId));
 const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000));
 const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
+const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 let localeChangeQueue = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice = "";
@@ -46,6 +48,7 @@ function redrawLocale() {
     dragDropUI.refreshLocale();
     changeListUI.refreshLocale();
     checkpointUI.refreshLocale();
+    attachmentsUI.refreshLocale();
     $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
     $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
     $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -195,6 +198,7 @@ function disableComposer(value) {
     promptContextUI.setBusy(value);
     skillsUI.setBusy(value);
     dragDropUI.setBusy(value);
+    attachmentsUI.setBusy(value);
     $("send").disabled = value;
     text("prompt").disabled = value;
     $("compact-preview").disabled = value || !state.topicId;
@@ -822,6 +826,7 @@ async function loadTopic(topicId) {
     await skillsUI.selectTopic(topicId);
     await changeListUI.selectTopic(topicId);
     await checkpointUI.selectTopic(topicId);
+    await attachmentsUI.selectTopic(topicId);
     if (state.topicId === topicId)
         await restoreLocale(tree.topic.locale);
 }

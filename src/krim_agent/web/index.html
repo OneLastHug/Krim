@@ -19,6 +19,13 @@
     </form>
     <main class="layout">
       <aside class="sidebar" aria-label="话题和 Agent" data-i18n-aria-label="话题和 Agent">
+        <section class="panel attachment-panel">
+          <div class="panel-heading"><h2 data-i18n="附件">附件</h2><button id="attachment-refresh" class="icon-button" type="button" data-i18n-title="刷新附件" aria-label="刷新附件">↻</button></div>
+          <input id="attachment-file" type="file" aria-label="选择附件" data-i18n-aria-label="选择附件" />
+          <button id="attachment-upload" class="secondary" type="button" data-i18n="上传并插入附件">上传并插入附件</button>
+          <p class="muted" data-i18n="附件只提供描述，尚未解析正文">附件只提供描述，尚未解析正文</p>
+          <div id="attachment-list" class="stack"></div>
+        </section>
         <section class="panel">
           <div class="panel-heading"><h2 data-i18n="话题">话题</h2><button id="new-topic" class="icon-button" type="button" title="新建话题" aria-label="新建话题" data-i18n-title="新建话题" data-i18n-aria-label="新建话题">+</button></div>
           <label class="sr-only" for="topic-title" data-i18n="新话题标题">新话题标题</label><input id="topic-title" class="compact-input" placeholder="新话题标题" maxlength="120" data-i18n-placeholder="新话题标题" />

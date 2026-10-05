@@ -46,7 +46,7 @@ test("拖入非文本 File 被拒绝且不会写入目录", async ({ page, reque
     const data = new DataTransfer(); data.items.add(new File([new Uint8Array([0, 1, 2])], "binary.bin", { type: "application/octet-stream" }));
     element.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: data }));
   });
-  await expect(page.locator("#notice")).toContainText("只接受有限 UTF-8 文本文件");
+  await expect(page.locator("#notice")).toContainText("附件为空、过大或媒体类型不允许");
   expect((await (await request.get(`/v1/topics/${topic.id}/prompt-context`)).json()).mentions).toHaveLength(0);
 });
 

@@ -1,5 +1,6 @@
 """M1 SQLite 持久化边界。"""
 
+from .attachments import AttachmentRepository
 from .change_lists import ChangeListRepository
 from .checkpoints import CheckpointRepository
 from .database import (
@@ -23,6 +24,7 @@ __all__ = [
     "InteractionRow",
     "ChangeListRepository",
     "CheckpointRepository",
+    "AttachmentRepository",
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
 ]
