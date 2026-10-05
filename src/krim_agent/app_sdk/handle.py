@@ -15,6 +15,17 @@ from krim_agent.change_list import (
     ChangeReceipt,
     ChangeSync,
 )
+from krim_agent.checkpoint import (
+    CheckpointCanRollback,
+    CheckpointCatalog,
+    CheckpointCheck,
+    CheckpointCheckResult,
+    CheckpointCreate,
+    CheckpointExecution,
+    CheckpointOperation,
+    CheckpointReceipt,
+    CheckpointRollback,
+)
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.interactions import InteractionReply, InteractionView
@@ -77,6 +88,76 @@ class AppHandle:
             return None
 
         return self.on("changeList/item/click", consume)
+
+    def on_checkpoint_create(
+        self, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        return self._checkpoint_handler("checkpoint/create", handler)
+
+    def on_checkpoint_rollback(
+        self, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        return self._checkpoint_handler("checkpoint/rollback", handler)
+
+    def _checkpoint_handler(
+        self, channel: str, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            receipt = await handler(CheckpointExecution.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(receipt.model_dump(mode="json"))
+
+        return self.on(channel, consume)
+
+    def on_checkpoint_can_rollback(
+        self, handler: Callable[[CheckpointCheck], Awaitable[CheckpointCheckResult]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            result = await handler(CheckpointCheck.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(result.model_dump(mode="json"))
+
+        return self.on("checkpoint/canRollback", consume)
+
+    async def create_checkpoint(
+        self, topic_id: str, request: CheckpointCreate
+    ) -> CheckpointOperation:
+        value = await self._checkpoint_call(
+            "checkpoint/create",
+            {"topic_id": topic_id, **request.model_dump(mode="json")},
+            request.timeout_seconds,
+        )
+        return CheckpointOperation.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def checkpoints(self, topic_id: str) -> CheckpointCatalog:
+        value = await self._call("checkpoint/list", {"topic_id": topic_id})
+        return CheckpointCatalog.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def rollback_checkpoint(
+        self, topic_id: str, request: CheckpointRollback
+    ) -> CheckpointOperation:
+        value = await self._checkpoint_call(
+            "checkpoint/rollback",
+            {"topic_id": topic_id, **request.model_dump(mode="json")},
+            request.timeout_seconds,
+        )
+        return CheckpointOperation.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def can_rollback_checkpoint(
+        self, topic_id: str, request: CheckpointCanRollback
+    ) -> CheckpointCheckResult:
+        value = await self._checkpoint_call(
+            "checkpoint/canRollback",
+            {"topic_id": topic_id, **request.model_dump(mode="json")},
+            request.timeout_seconds,
+        )
+        return CheckpointCheckResult.model_validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def _checkpoint_call(
+        self, channel: str, data: JsonValue, timeout_seconds: float
+    ) -> JsonValue:
+        result = await self._bridge.emit(channel, data, timeout=timeout_seconds + 2)
+        if not result.ok:
+            raise ServiceError("channel_error", result.error or "Checkpoint 宿主调用失败")
+        return result.data
 
     async def change_list(self, topic_id: str) -> ChangeListView:
         return ChangeListView.model_validate(

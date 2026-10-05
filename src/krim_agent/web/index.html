@@ -49,6 +49,12 @@
           <div class="actions"><button id="change-refresh" class="secondary" type="button" data-i18n="刷新变更">刷新变更</button><button id="change-undo-all" class="secondary" type="button" data-i18n="全部撤销">全部撤销</button><button id="change-keep-all" class="secondary" type="button" data-i18n="全部保留">全部保留</button><button id="change-clear" class="secondary" type="button" data-i18n="清空清单">清空清单</button><button id="change-cancel" class="secondary" type="button" data-i18n="取消变更操作">取消变更操作</button></div>
           <p id="change-status" role="status"></p><div id="change-items" class="stack"></div><div id="change-results" aria-live="polite"></div>
         </details>
+        <details class="change-list-panel">
+          <summary data-i18n="资源快照">资源快照</summary>
+          <div class="actions"><label for="checkpoint-title" data-i18n="快照名称">快照名称</label><input id="checkpoint-title" maxlength="120" /></div>
+          <div class="actions"><button id="checkpoint-refresh" class="secondary" type="button" data-i18n="刷新快照">刷新快照</button><button id="checkpoint-create" class="secondary" type="button" data-i18n="创建快照">创建快照</button></div>
+          <p id="checkpoint-status" role="status"></p><div id="checkpoint-items" class="stack"></div>
+        </details>
         <details class="workflow-panel">
           <summary data-i18n="Workflow 运行面板">Workflow 运行面板</summary>
           <div class="workflow-grid">

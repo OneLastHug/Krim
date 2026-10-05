@@ -21,6 +21,17 @@ from krim_agent.change_list import (
     ChangeReceipt,
     ChangeSync,
 )
+from krim_agent.checkpoint import (
+    CheckpointCanRollback,
+    CheckpointCatalog,
+    CheckpointCheck,
+    CheckpointCheckResult,
+    CheckpointCreate,
+    CheckpointExecution,
+    CheckpointOperation,
+    CheckpointReceipt,
+    CheckpointRollback,
+)
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.host import (
     HostCommand,
@@ -125,6 +136,103 @@ class RemoteHostHandle:
 
     async def state(self) -> HostUIState:
         return HostUIState.model_validate(await self._call("host/get-state"))
+
+    async def checkpoints(self, topic_id: str) -> CheckpointCatalog:
+        response = await self._http.get(f"/v1/topics/{topic_id}/checkpoints")
+        self._check(response)
+        return CheckpointCatalog.model_validate_json(response.content)
+
+    async def create_checkpoint(
+        self, topic_id: str, request: CheckpointCreate
+    ) -> CheckpointOperation:
+        payload = CheckpointCreate.model_validate(
+            {**request.model_dump(mode="json"), "host_session_id": self.session_id}
+        )
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints",
+            json=payload.model_dump(mode="json"),
+            timeout=payload.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    async def rollback_checkpoint(
+        self, topic_id: str, request: CheckpointRollback
+    ) -> CheckpointOperation:
+        payload = CheckpointRollback.model_validate(
+            {**request.model_dump(mode="json"), "host_session_id": self.session_id}
+        )
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/{payload.checkpoint_id}/rollback",
+            json=payload.model_dump(mode="json"),
+            timeout=payload.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    async def can_rollback_checkpoint(
+        self, topic_id: str, request: CheckpointCanRollback
+    ) -> CheckpointCheckResult:
+        payload = CheckpointCanRollback.model_validate(
+            {**request.model_dump(mode="json"), "host_session_id": self.session_id}
+        )
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/can-rollback",
+            json=payload.model_dump(mode="json"),
+            timeout=payload.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointCheckResult.model_validate_json(response.content)
+
+    async def checkpoint_operation(self, topic_id: str, operation_id: str) -> CheckpointOperation:
+        response = await self._http.get(
+            f"/v1/topics/{topic_id}/checkpoints/operations/{operation_id}"
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    async def cancel_checkpoint(self, topic_id: str, operation_id: str) -> CheckpointOperation:
+        response = await self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/operations/{operation_id}/cancel"
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    async def resolve_checkpoint(self, receipt: CheckpointReceipt) -> CheckpointOperation:
+        response = await self._http.post(
+            f"/v1/topics/{receipt.topic_id}/checkpoints/operations/{receipt.operation_id}/resolve",
+            json=receipt.model_dump(mode="json"),
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    def on_checkpoint_create(
+        self, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        return self._on_checkpoint("checkpoint/create", handler)
+
+    def on_checkpoint_rollback(
+        self, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        return self._on_checkpoint("checkpoint/rollback", handler)
+
+    def _on_checkpoint(
+        self, channel: str, handler: Callable[[CheckpointExecution], Awaitable[CheckpointReceipt]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            receipt = await handler(CheckpointExecution.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(receipt.model_dump(mode="json"))
+
+        return self.on_request(channel, consume)
+
+    def on_checkpoint_can_rollback(
+        self, handler: Callable[[CheckpointCheck], Awaitable[CheckpointCheckResult]]
+    ) -> Callable[[], None]:
+        async def consume(data: JsonValue) -> JsonValue:
+            result = await handler(CheckpointCheck.model_validate(data))
+            return TypeAdapter(JsonValue).validate_python(result.model_dump(mode="json"))
+
+        return self.on_request("checkpoint/canRollback", consume)
 
     async def change_list(self, topic_id: str) -> ChangeListView:
         return ChangeListView.model_validate(

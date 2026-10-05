@@ -22,6 +22,7 @@ from krim_agent.application.agents import (
     AgentView,
 )
 from krim_agent.application.change_lists import ChangeListService
+from krim_agent.application.checkpoints import CheckpointService
 from krim_agent.application.host import HostSessions
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
@@ -37,6 +38,20 @@ from krim_agent.change_list import (
     ChangeRevision,
     ChangeSync,
 )
+from krim_agent.checkpoint import (
+    CheckpointCanRollback,
+    CheckpointCanRollbackRequest,
+    CheckpointCatalog,
+    CheckpointCheck,
+    CheckpointCheckResult,
+    CheckpointCreate,
+    CheckpointCreateRequest,
+    CheckpointExecution,
+    CheckpointOperation,
+    CheckpointReceipt,
+    CheckpointRollback,
+    CheckpointRollbackRequest,
+)
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextCompactRequest, ContextCompactResponse, ContextError
 from krim_agent.drag import DragPreview, DragState
@@ -46,6 +61,7 @@ from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.change_lists import ChangeListRepository
+from krim_agent.persistence.checkpoints import CheckpointRepository
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -139,17 +155,21 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     host_sessions = HostSessions()
     change_repository = ChangeListRepository(database)
     change_service = ChangeListService(change_repository)
+    checkpoint_repository = CheckpointRepository(database)
+    checkpoint_service = CheckpointService(checkpoint_repository)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             await database.initialize()
             await change_repository.recover_interrupted()
+            await checkpoint_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
             yield
         finally:
             await change_service.close()
+            await checkpoint_service.close()
             await host_sessions.shutdown()
             try:
                 await workflow_service.close()
@@ -184,6 +204,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.agents = agent_service
     app.state.host_sessions = host_sessions
     app.state.change_lists = change_service
+    app.state.checkpoints = checkpoint_service
     mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
@@ -286,6 +307,66 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             )
             operation = await invoke_change(request.topic_id, payload)
             return ChannelResult(ok=True, data=operation.model_dump(mode="json"))
+        if command.envelope.channel in {
+            "checkpoint/create",
+            "checkpoint/rollback",
+            "checkpoint/canRollback",
+        }:
+            if command.envelope.kind != "call":
+                raise ServiceError("host_channel_invalid", "Checkpoint 操作必须是 call", 422)
+            try:
+                if command.envelope.channel == "checkpoint/create":
+                    checkpoint_request = CheckpointCreateRequest.model_validate(
+                        command.envelope.data
+                    )
+                    checkpoint_payload = CheckpointCreate.model_validate(
+                        {
+                            **checkpoint_request.model_dump(exclude={"topic_id"}),
+                            "host_session_id": session_id,
+                            "timeout_seconds": min(
+                                command.timeout_seconds, checkpoint_request.timeout_seconds
+                            ),
+                        }
+                    )
+                    checkpoint_operation = await create_checkpoint(
+                        checkpoint_request.topic_id, checkpoint_payload
+                    )
+                    return ChannelResult(ok=True, data=checkpoint_operation.model_dump(mode="json"))
+                if command.envelope.channel == "checkpoint/rollback":
+                    rollback_request = CheckpointRollbackRequest.model_validate(
+                        command.envelope.data
+                    )
+                    rollback_payload = CheckpointRollback.model_validate(
+                        {
+                            **rollback_request.model_dump(exclude={"topic_id"}),
+                            "host_session_id": session_id,
+                            "timeout_seconds": min(
+                                command.timeout_seconds, rollback_request.timeout_seconds
+                            ),
+                        }
+                    )
+                    checkpoint_operation = await rollback_checkpoint(
+                        rollback_request.topic_id,
+                        rollback_request.checkpoint_id,
+                        rollback_payload,
+                    )
+                    return ChannelResult(ok=True, data=checkpoint_operation.model_dump(mode="json"))
+                can_request = CheckpointCanRollbackRequest.model_validate(command.envelope.data)
+                can_payload = CheckpointCanRollback.model_validate(
+                    {
+                        **can_request.model_dump(exclude={"topic_id"}),
+                        "host_session_id": session_id,
+                        "timeout_seconds": min(
+                            command.timeout_seconds, can_request.timeout_seconds
+                        ),
+                    }
+                )
+                answer = await can_rollback_checkpoint(can_request.topic_id, can_payload)
+                return ChannelResult(ok=True, data=answer.model_dump(mode="json"))
+            except ValueError:
+                raise ServiceError(
+                    "checkpoint_input_invalid", "Checkpoint 请求结构无效", 422
+                ) from None
         return await host_sessions.request(session_id, command)
 
     @app.post("/v1/host/sessions/{session_id}/cancel/{request_id}")
@@ -460,6 +541,105 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/topics/{topic_id}/change-list")
     async def change_list(topic_id: str) -> ChangeListView:
         return await change_repository.get(topic_id)
+
+    async def checkpoint_execute(
+        execution: CheckpointExecution, session_id: str | None, timeout_seconds: float
+    ) -> CheckpointReceipt:
+        if session_id is None:
+            raise ServiceError("host_not_ready", "Checkpoint 操作需要可信 Python Host", 409)
+        result = await host_sessions.request(
+            session_id,
+            HostCommand(
+                envelope=ProtocolEnvelope(
+                    kind="call",
+                    id=execution.operation_id,
+                    channel=f"checkpoint/{execution.action}",
+                    data=execution.model_dump(mode="json"),
+                ),
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        if not result.ok:
+            raise ServiceError("executor_failed", "Checkpoint 宿主未返回有效业务回执", 502)
+        return CheckpointReceipt.model_validate(result.data)
+
+    @app.get("/v1/topics/{topic_id}/checkpoints")
+    async def checkpoints(topic_id: str) -> CheckpointCatalog:
+        return await checkpoint_repository.catalog(topic_id)
+
+    @app.post("/v1/topics/{topic_id}/checkpoints")
+    async def create_checkpoint(topic_id: str, payload: CheckpointCreate) -> CheckpointOperation:
+        async def execute(execution: CheckpointExecution) -> CheckpointReceipt:
+            return await checkpoint_execute(
+                execution, payload.host_session_id, payload.timeout_seconds
+            )
+
+        return await checkpoint_service.create(topic_id, payload, execute)
+
+    @app.post("/v1/topics/{topic_id}/checkpoints/{checkpoint_id}/rollback")
+    async def rollback_checkpoint(
+        topic_id: str, checkpoint_id: str, payload: CheckpointRollback
+    ) -> CheckpointOperation:
+        if checkpoint_id != payload.checkpoint_id:
+            raise ServiceError("checkpoint_input_invalid", "Checkpoint 路由与请求 ID 不匹配", 409)
+
+        async def execute(execution: CheckpointExecution) -> CheckpointReceipt:
+            return await checkpoint_execute(
+                execution, payload.host_session_id, payload.timeout_seconds
+            )
+
+        return await checkpoint_service.rollback(topic_id, payload, execute)
+
+    @app.post("/v1/topics/{topic_id}/checkpoints/can-rollback")
+    async def can_rollback_checkpoint(
+        topic_id: str, payload: CheckpointCanRollback
+    ) -> CheckpointCheckResult:
+        async def execute(check: CheckpointCheck) -> CheckpointCheckResult:
+            if payload.host_session_id is None:
+                raise ServiceError("host_not_ready", "Checkpoint 校验需要可信 Python Host", 409)
+            result = await host_sessions.request(
+                payload.host_session_id,
+                HostCommand(
+                    envelope=ProtocolEnvelope(
+                        kind="call",
+                        id=str(uuid4()),
+                        channel="checkpoint/canRollback",
+                        data=check.model_dump(mode="json"),
+                    ),
+                    timeout_seconds=payload.timeout_seconds,
+                ),
+            )
+            if not result.ok:
+                raise ServiceError("executor_failed", "Checkpoint 宿主校验失败", 502)
+            return CheckpointCheckResult.model_validate(result.data)
+
+        return await checkpoint_service.can_rollback(topic_id, payload, execute)
+
+    @app.get("/v1/topics/{topic_id}/checkpoints/operations/{operation_id}")
+    async def checkpoint_operation(topic_id: str, operation_id: str) -> CheckpointOperation:
+        return await checkpoint_repository.operation(topic_id, operation_id)
+
+    @app.get("/v1/topics/{topic_id}/checkpoints/operations")
+    async def checkpoint_operations(topic_id: str) -> list[CheckpointOperation]:
+        return await checkpoint_repository.operations(topic_id)
+
+    @app.get("/v1/topics/{topic_id}/checkpoints/operations/{operation_id}/history")
+    async def checkpoint_history(topic_id: str, operation_id: str) -> list[CheckpointReceipt]:
+        return await checkpoint_repository.history(topic_id, operation_id)
+
+    @app.post("/v1/topics/{topic_id}/checkpoints/operations/{operation_id}/cancel")
+    async def checkpoint_cancel(topic_id: str, operation_id: str) -> CheckpointOperation:
+        return await checkpoint_service.cancel(topic_id, operation_id)
+
+    @app.post("/v1/topics/{topic_id}/checkpoints/operations/{operation_id}/resolve")
+    async def checkpoint_resolve(
+        topic_id: str, operation_id: str, payload: CheckpointReceipt
+    ) -> CheckpointOperation:
+        if payload.topic_id != topic_id or payload.operation_id != operation_id:
+            raise ServiceError(
+                "checkpoint_receipt_mismatch", "Checkpoint 核实回执与路由不匹配", 409
+            )
+        return await checkpoint_service.resolve(payload)
 
     @app.put("/v1/topics/{topic_id}/change-list")
     async def sync_change_list(topic_id: str, payload: ChangeSync) -> ChangeListView:

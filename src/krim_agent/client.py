@@ -21,6 +21,15 @@ from .change_list import (
     ChangeRevision,
     ChangeSync,
 )
+from .checkpoint import (
+    CheckpointCanRollback,
+    CheckpointCatalog,
+    CheckpointCheckResult,
+    CheckpointCreate,
+    CheckpointOperation,
+    CheckpointReceipt,
+    CheckpointRollback,
+)
 from .context_engine import ContextCompactRequest, ContextCompactResponse, ContextOptions
 from .drag import DragPreview, DragState
 from .interactions import InteractionReply, InteractionView
@@ -118,6 +127,62 @@ class KrimClient:
         response = self._http.get(f"/v1/topics/{topic_id}/change-list")
         self._check(response)
         return ChangeListView.model_validate_json(response.content)
+
+    def checkpoints(self, topic_id: str) -> CheckpointCatalog:
+        response = self._http.get(f"/v1/topics/{topic_id}/checkpoints")
+        self._check(response)
+        return CheckpointCatalog.model_validate_json(response.content)
+
+    def create_checkpoint(self, topic_id: str, request: CheckpointCreate) -> CheckpointOperation:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints",
+            json=request.model_dump(mode="json"),
+            timeout=request.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    def rollback_checkpoint(
+        self, topic_id: str, request: CheckpointRollback
+    ) -> CheckpointOperation:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/{request.checkpoint_id}/rollback",
+            json=request.model_dump(mode="json"),
+            timeout=request.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    def can_rollback_checkpoint(
+        self, topic_id: str, request: CheckpointCanRollback
+    ) -> CheckpointCheckResult:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/can-rollback",
+            json=request.model_dump(mode="json"),
+            timeout=request.timeout_seconds + 2,
+        )
+        self._check(response)
+        return CheckpointCheckResult.model_validate_json(response.content)
+
+    def checkpoint_operation(self, topic_id: str, operation_id: str) -> CheckpointOperation:
+        response = self._http.get(f"/v1/topics/{topic_id}/checkpoints/operations/{operation_id}")
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    def cancel_checkpoint(self, topic_id: str, operation_id: str) -> CheckpointOperation:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/checkpoints/operations/{operation_id}/cancel"
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
+
+    def resolve_checkpoint(self, receipt: CheckpointReceipt) -> CheckpointOperation:
+        response = self._http.post(
+            f"/v1/topics/{receipt.topic_id}/checkpoints/operations/{receipt.operation_id}/resolve",
+            json=receipt.model_dump(mode="json"),
+        )
+        self._check(response)
+        return CheckpointOperation.model_validate_json(response.content)
 
     def sync_changes(self, topic_id: str, request: ChangeSync) -> ChangeListView:
         response = self._http.put(

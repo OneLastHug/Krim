@@ -24,6 +24,7 @@ import { PromptContextUI } from "./prompt-context-ui.js";
 import { SkillsUI } from "./skills-ui.js";
 import { DragDropUI } from "./drag-drop.js";
 import { ChangeListUI } from "./change-list-ui.js";
+import { CheckpointUI } from "./checkpoint-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 
 type State = {
@@ -66,6 +67,7 @@ const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000));
+const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";
@@ -81,6 +83,7 @@ function redrawLocale(): void {
   skillsUI.refreshLocale();
   dragDropUI.refreshLocale();
   changeListUI.refreshLocale();
+  checkpointUI.refreshLocale();
   $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
   $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
   $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -130,8 +133,9 @@ function setupHostBridge(): void {
   hostEndpoint.on("host/set-session", (data) => {
     const id = hostObject(data).session_id;
     if (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) throw new Error("Host session 无效");
-    changeListUI.setSession(id); return { session_id: id };
+    changeListUI.setSession(id); checkpointUI.setSession(id); return { session_id: id };
   });
+
   hostEndpoint.on("host/set-key", async (data) => {
     const key = hostObject(data).key;
     if (typeof key !== "string" || key.length > 512) throw new Error("访问密钥无效");
@@ -440,6 +444,7 @@ async function loadTopic(topicId: string): Promise<void> {
   await promptContextUI.selectTopic(topicId);
   await skillsUI.selectTopic(topicId);
   await changeListUI.selectTopic(topicId);
+  await checkpointUI.selectTopic(topicId);
   if (state.topicId === topicId) await restoreLocale(tree.topic.locale);
 }
 async function loadTopics(): Promise<void> {
