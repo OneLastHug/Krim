@@ -217,3 +217,9 @@ class GenerateResult(StrictModel):
     @property
     def all_text(self) -> str:
         return "".join(step.text for step in self.steps)
+
+
+class GenerateObjectResult(StrictModel):
+    value: JsonValue
+    generation: GenerateResult
+    schema_fingerprint: str

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 from collections.abc import AsyncGenerator, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from krim_agent.config import Settings
 from krim_agent.context_engine import (
@@ -26,7 +29,8 @@ from krim_agent.protocol.domain import (
     RunView,
     ServiceError,
 )
-from krim_agent.protocol.models import StreamFrame, check_json
+from krim_agent.protocol.json_data import parse_json
+from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
@@ -34,6 +38,7 @@ from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadResult
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolResult
+from krim_agent.tools.output import OutputContract, OutputSchema
 
 from .types import (
     ContextBudgetPart,
@@ -41,6 +46,7 @@ from .types import (
     ContextNoticePart,
     ContextProposalPart,
     FinishReason,
+    GenerateObjectResult,
     GenerateResult,
     InteractionPart,
     ModelStepPart,
@@ -67,6 +73,10 @@ if TYPE_CHECKING:
 
 class SDKOutputError(ValueError):
     """运行结果未能通过调用方声明的 Pydantic 输出校验。"""
+
+    def __init__(self, message: str, *, result: GenerateResult | None = None) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 def _finish(frame: StreamFrame) -> StreamFinish:
@@ -277,7 +287,7 @@ class StreamTextResult:
         if result.finish_reason != "stop":
             raise SDKOutputError("只有正常完成的文本可读取结构化结果")
         try:
-            check_json(TypeAdapter(JsonValue).validate_json(result.text))
+            parse_json(result.text)
             return schema.model_validate_json(result.text, strict=True)
         except (ValueError, ValidationError) as error:
             raise SDKOutputError("生成结果不是有效 JSON 或不符合输出 Schema") from error
@@ -407,6 +417,74 @@ class PythonAI:
         from .snapshots import read_generation_result
 
         return await read_generation_result(self.runtime.repository, run.id)
+
+    async def generate_object(
+        self,
+        prompt: str,
+        *,
+        schema: OutputSchema,
+        topic_id: str | None = None,
+        idempotency_key: str | None = None,
+        budget_account_ids: tuple[str, ...] = (),
+    ) -> GenerateObjectResult:
+        """声明 JSON 输出、执行一次真实生成并校验；失败保留 Run，不自动修复/重试。"""
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("结构化生成需要非空文本提示")
+        contract = OutputContract(schema)
+        declaration = json.dumps(
+            contract.schema(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        request = (
+            "请只输出符合以下 JSON Schema 的 JSON，不加代码围栏。\n"
+            f"Schema：{declaration}\n请求：{prompt}"
+        )
+        if len(request) > 8192:
+            raise ValueError("结构化提示与 Schema 超过输入容量")
+        start = asyncio.create_task(
+            self.stream_text(
+                request,
+                topic_id=topic_id,
+                idempotency_key=idempotency_key,
+                budget_account_ids=budget_account_ids,
+            )
+        )
+        stream: StreamTextResult | None = None
+        try:
+            stream = await asyncio.shield(start)
+            result = await stream.collect()
+        except BaseException:
+
+            async def cleanup() -> None:
+                nonlocal stream
+                if stream is None:
+                    try:
+                        stream = await start
+                    except Exception:
+                        return
+                await stream.abort()
+
+            closing = asyncio.create_task(cleanup())
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                await closing
+            raise
+        if result.finish_reason != "stop":
+            raise SDKOutputError("结构化生成没有正常完成", result=result)
+        try:
+            value = parse_json(result.text)
+            contract.validate(value)
+            if isinstance(schema, type) and issubclass(schema, BaseModel):
+                schema.model_validate_json(result.text, strict=True)
+        except ValueError:
+            raise SDKOutputError("生成结果不符合声明的 JSON 输出合约", result=result) from None
+        return GenerateObjectResult(
+            value=value,
+            generation=result,
+            schema_fingerprint=hashlib.sha256(declaration.encode("utf-8")).hexdigest(),
+        )
 
     async def evaluate(
         self,
