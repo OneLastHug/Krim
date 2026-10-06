@@ -15,7 +15,7 @@ from krim_agent.tools.output import OutputSchema
 
 from .files import load_dataset, load_report, parse_json, save_report
 from .reports import compare_reports
-from .runner import evaluate, rescore
+from .runner import rescore
 from .scorers import (
     ContainsScorer,
     EvalScorer,
@@ -68,6 +68,29 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     score.add_argument("--output", required=True)
     score.add_argument("--threshold", type=float)
     _score_arguments(score)
+    jobs = actions.add_parser("jobs", help="jobs（任务）：进度、部分报告、暂停/取消/恢复")
+    jobs.add_argument(
+        "action",
+        choices=(
+            "list",
+            "get",
+            "items",
+            "report",
+            "partial",
+            "pause",
+            "cancel",
+            "resume",
+            "events",
+        ),
+    )
+    jobs.add_argument("job_id", nargs="?")
+    jobs.add_argument("--url", help="url（服务地址）：使用远端公开接口")
+    jobs.add_argument("--database", default=".data/evals/runs.sqlite")
+    jobs.add_argument("--scope", default="python", choices=("python", "api"))
+    jobs.add_argument("--from-seq", type=int, default=0)
+    jobs.add_argument("--retry-uncertain", action="store_true")
+    jobs.add_argument("--skip-uncertain", action="store_true")
+    jobs.add_argument("--prompt-prefix", default="")
     compare = actions.add_parser("compare", help="compare（比较）：同数据集与配置的回归检查")
     compare.add_argument("baseline", help="baseline（基线）：之前的报告")
     compare.add_argument("candidate", help="candidate（候选）：新版本报告")
@@ -128,13 +151,15 @@ async def _run(args: argparse.Namespace) -> EvalReport:
     )
     async with await PythonAI.create(settings=settings) as ai:
         if args.target == "text":
-            return await ai.evaluate(
+            handle = await ai.start_evaluation(
                 dataset,
                 scorers=scorers,
                 config=options,
                 version=args.version,
                 prompt_prefix=args.prompt_prefix,
             )
+            await handle.wait()
+            return await handle.report()
         manager = AgentManager(
             ai.runtime.repository, max_concurrent=options.concurrency, tracer=ai.runtime.tracer
         )
@@ -150,7 +175,7 @@ async def _run(args: argparse.Namespace) -> EvalReport:
             usage_budget=settings.agent_usage_budget,
         )
         try:
-            return await evaluate(
+            handle = await ai.evaluation_service().start(
                 dataset,
                 AgentTarget(
                     manager, definition, version=args.version, prompt_prefix=args.prompt_prefix
@@ -158,11 +183,17 @@ async def _run(args: argparse.Namespace) -> EvalReport:
                 scorers=scorers,
                 config=options,
             )
+            await handle.wait()
+            return await handle.report()
         finally:
             await manager.close()
 
 
 def execute(args: argparse.Namespace) -> int:
+    if args.eval_action == "jobs":
+        from .job_cli import execute_jobs
+
+        return execute_jobs(args)
     if args.eval_action == "validate":
         data = load_dataset(args.dataset)
         print(

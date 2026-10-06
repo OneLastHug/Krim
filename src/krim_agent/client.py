@@ -40,6 +40,7 @@ from .context_engine import (
     ContextProposalView,
 )
 from .drag import DragPreview, DragState
+from .evaluation.remote import SyncEvalClient
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
 from .observability import ObservationStatus, SpanRecord, TraceView
@@ -109,6 +110,10 @@ class KrimClient:
         if response.is_success:
             return
         raise ClientError(f"HTTP 请求失败: {response.status_code}；请检查服务、权限或运行状态")
+
+    @property
+    def evaluations(self) -> SyncEvalClient:
+        return SyncEvalClient(http=self._http)
 
     def create_topic(self, title: str = "新话题", *, locale: str = "zh-CN") -> TopicView:
         request = TopicCreate(title=title, locale=locale)

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
+
+from pydantic import JsonValue
 
 from .scorers import EvalScorer, ExactMatchScorer
 from .types import (
@@ -37,16 +39,71 @@ class EvalAttempt:
     case_id: str
     repetition: int
     output: EvalOutput | None = None
+    generation: int = 1
+    bindings: dict[str, JsonValue] = field(default_factory=dict)
+    checkpoint: Callable[[dict[str, JsonValue]], Awaitable[None]] | None = None
+
+    async def save_binding(self, values: dict[str, JsonValue]) -> None:
+        if self.checkpoint is not None:
+            task = asyncio.ensure_future(self.checkpoint(values))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                self.bindings = values
+                raise
+        self.bindings = values
 
     @property
     def idempotency_key(self) -> str:
-        return f"eval:{self.report_id}:{fingerprint(self.case_id)[:16]}:{self.repetition}"
+        return (
+            f"eval:{self.report_id}:{fingerprint(self.case_id)[:16]}:"
+            f"{self.repetition}:{self.generation}"
+        )
 
 
 class EvalTarget(Protocol):
     def describe(self) -> EvalTargetInfo: ...
 
     async def run(self, case: EvalCase, attempt: EvalAttempt) -> EvalOutput: ...
+
+
+async def execute_case(
+    case: EvalCase,
+    repetition: int,
+    report_id: str,
+    target: EvalTarget,
+    scorers: list[EvalScorer],
+    infos: list[EvalScorerInfo],
+    config: EvalConfig,
+) -> EvalCaseResult:
+    """执行一个样本；持久任务和一次性评估共用同一取消/评分语义。"""
+    attempt = EvalAttempt(report_id, case.id, repetition)
+    started = time.monotonic()
+    output: EvalOutput | None = None
+    error_code: str | None = None
+    try:
+        async with asyncio.timeout(config.timeout_seconds):
+            value = await target.run(case.model_copy(deep=True), attempt)
+        output = EvalOutput.model_validate(value.model_dump())
+    except EvalCleanupError:
+        raise
+    except TimeoutError:
+        output, error_code = attempt.output, "eval_timeout"
+    except Exception:
+        output, error_code = attempt.output, "eval_execution_error"
+    duration = (time.monotonic() - started) * 1000
+    scores, scoring = await _score(case, output, error_code, scorers, infos, config)
+    return EvalCaseResult(
+        case_id=case.id,
+        repetition=repetition,
+        status=classify(output, scores, config, error_code),
+        output=output,
+        scores=scores,
+        error_code=error_code,
+        duration_ms=duration,
+        scoring_ms=scoring,
+    )
 
 
 def _scorers(values: Sequence[EvalScorer] | None) -> tuple[list[EvalScorer], list[EvalScorerInfo]]:
@@ -66,14 +123,21 @@ async def _score(
     scorers: list[EvalScorer],
     infos: list[EvalScorerInfo],
     config: EvalConfig,
+    *,
+    saved_scores: list[EvalScore] | None = None,
+    on_score: Callable[[list[EvalScore], float], Awaitable[None]] | None = None,
 ) -> tuple[list[EvalScore], float]:
     started = time.monotonic()
-    scores = []
-    for scorer, info in zip(scorers, infos, strict=True):
+    scores = list(saved_scores or [])
+    if [s.name for s in scores] != [i.name for i in infos[: len(scores)]]:
+        raise ValueError("已保存评分来源不一致")
+    for scorer, info in list(zip(scorers, infos, strict=True))[len(scores) :]:
         if output is None or output.status != "completed" or error_code is not None:
             scores.append(
                 EvalScore(name=info.name, status="skipped", reason="target_not_completed")
             )
+            if on_score is not None:
+                await on_score(scores, (time.monotonic() - started) * 1000)
             continue
         try:
             async with asyncio.timeout(config.scorer_timeout_seconds):
@@ -86,6 +150,8 @@ async def _score(
         except Exception:
             score = EvalScore(name=info.name, status="error", reason="scorer_error")
         scores.append(score)
+        if on_score is not None:
+            await on_score(scores, (time.monotonic() - started) * 1000)
     return scores, (time.monotonic() - started) * 1000
 
 
@@ -115,31 +181,8 @@ async def evaluate(
 
     async def worker() -> None:
         for index, (case, repetition) in pending:
-            attempt = EvalAttempt(report_id, case.id, repetition)
-            started = time.monotonic()
-            output = None
-            error_code = None
-            try:
-                async with asyncio.timeout(options.timeout_seconds):
-                    value = await target.run(case.model_copy(deep=True), attempt)
-                output = EvalOutput.model_validate(value.model_dump())
-            except EvalCleanupError:
-                raise
-            except TimeoutError:
-                output, error_code = attempt.output, "eval_timeout"
-            except Exception:
-                output, error_code = attempt.output, "eval_execution_error"
-            duration = (time.monotonic() - started) * 1000
-            scores, scoring = await _score(case, output, error_code, selected, infos, options)
-            results[index] = EvalCaseResult(
-                case_id=case.id,
-                repetition=repetition,
-                status=classify(output, scores, options, error_code),
-                output=output,
-                scores=scores,
-                error_code=error_code,
-                duration_ms=duration,
-                scoring_ms=scoring,
+            results[index] = await execute_case(
+                case, repetition, report_id, target, selected, infos, options
             )
 
     workers = [

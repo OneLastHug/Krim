@@ -64,6 +64,24 @@ from krim_agent.context_engine import (
     ContextProposalView,
 )
 from krim_agent.drag import DragPreview, DragState
+from krim_agent.evaluation import (
+    AgentTarget,
+    EvalRemoteResumeRequest,
+    EvalRemoteStartRequest,
+    GenerationTarget,
+    builtin_scorers,
+)
+from krim_agent.evaluation.jobs import (
+    EvalEvent,
+    EvalItemPage,
+    EvalJobView,
+    EvalPartialReport,
+    EvalResumeRequest,
+)
+from krim_agent.evaluation.runner import EvalTarget
+from krim_agent.evaluation.scorers import EvalScorer
+from krim_agent.evaluation.service import EvaluationService
+from krim_agent.evaluation.types import EvalReport
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
@@ -94,7 +112,7 @@ from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from krim_agent.tools.builtins import builtin_registry
-from krim_agent.tools.core import ToolAudit, ToolInfo
+from krim_agent.tools.core import ToolAudit, ToolError, ToolInfo
 from krim_agent.ui_locale import LocaleResources, locale_resources
 from krim_agent.usage import RunUsageView
 from krim_agent.workflow import (
@@ -168,6 +186,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         max_active_runs=config.max_active_runs,
     )
     agent_service = AgentService(service, config)
+    evaluation_service = EvaluationService(
+        database, scope="api", max_concurrency=config.max_active_runs
+    )
+    evaluation_ai = PythonAI(service)
     host_sessions = HostSessions()
     change_repository = ChangeListRepository(database)
     change_service = ChangeListService(change_repository)
@@ -189,6 +211,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
             await agent_service.restore_persistent()
             yield
         finally:
+            await evaluation_service.close()
             await change_service.close()
             await checkpoint_service.close()
             await host_sessions.shutdown()
@@ -227,6 +250,7 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     app.state.change_lists = change_service
     app.state.checkpoints = checkpoint_service
     app.state.attachments = attachment_repository
+    app.state.evaluation = evaluation_service
     mount_browser_ui(app)
 
     @app.exception_handler(ServiceError)
@@ -282,6 +306,110 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/healthz")
     async def healthz() -> HealthResponse:
         return HealthResponse(provider=service.provider.name)
+
+    def evaluation_target(payload: EvalRemoteStartRequest | EvalRemoteResumeRequest) -> EvalTarget:
+        if payload.target == "text":
+            return GenerationTarget(
+                evaluation_ai, version=payload.version, prompt_prefix=payload.prompt_prefix
+            )
+        try:
+            definition = agent_service.catalog.get(payload.agent_name).definition
+        except ToolError:
+            raise ServiceError("eval_target_not_found", "评估 Agent 未登记", 404) from None
+        return AgentTarget(
+            agent_service.manager,
+            definition,
+            version=payload.version,
+            prompt_prefix=payload.prompt_prefix,
+        )
+
+    def evaluation_scorers(names: list[str]) -> list[EvalScorer]:
+        try:
+            return builtin_scorers(names)
+        except ValueError:
+            raise ServiceError("eval_scorer_invalid", "评分目录或名称无效", 422) from None
+
+    @app.post("/v1/evals", status_code=202)
+    async def start_evaluation(payload: EvalRemoteStartRequest) -> EvalJobView:
+        handle = await evaluation_service.start(
+            payload.dataset,
+            evaluation_target(payload),
+            scorers=evaluation_scorers(payload.scorers),
+            config=payload.config,
+            request_key=payload.request_key,
+        )
+        return await handle.view()
+
+    @app.get("/v1/evals")
+    async def list_evaluations(limit: int = Query(default=100, ge=1, le=1000)) -> list[EvalJobView]:
+        return await evaluation_service.store.list_jobs(limit=limit)
+
+    @app.get("/v1/evals/{eval_id}")
+    async def get_evaluation(eval_id: str) -> EvalJobView:
+        return await evaluation_service.handle(eval_id).view()
+
+    @app.get("/v1/evals/{eval_id}/items")
+    async def evaluation_items(
+        eval_id: str,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> EvalItemPage:
+        return await evaluation_service.handle(eval_id).items(offset=offset, limit=limit)
+
+    @app.get("/v1/evals/{eval_id}/events")
+    async def evaluation_events(
+        eval_id: str,
+        from_seq: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> list[EvalEvent]:
+        return await evaluation_service.store.events(eval_id, from_seq=from_seq, limit=limit)
+
+    @app.get("/v1/evals/{eval_id}/stream")
+    async def evaluation_event_stream(
+        eval_id: str, from_seq: int = Query(default=0, ge=0)
+    ) -> StreamingResponse:
+        await evaluation_service.store.events(eval_id, from_seq=from_seq, limit=1)
+
+        async def stream() -> AsyncIterator[str]:
+            async for event in evaluation_service.handle(eval_id).events(from_seq):
+                if event is None:
+                    yield ": heartbeat\n\n"
+                else:
+                    yield f"id: {event.seq}\nevent: eval-event\ndata: {event.model_dump_json()}\n\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/v1/evals/{eval_id}/report")
+    async def evaluation_report(eval_id: str) -> EvalReport:
+        return await evaluation_service.handle(eval_id).report()
+
+    @app.get("/v1/evals/{eval_id}/partial-report")
+    async def evaluation_partial_report(eval_id: str) -> EvalPartialReport:
+        return await evaluation_service.handle(eval_id).partial_report()
+
+    @app.post("/v1/evals/{eval_id}/pause")
+    async def pause_evaluation(eval_id: str) -> EvalJobView:
+        return await evaluation_service.handle(eval_id).pause()
+
+    @app.post("/v1/evals/{eval_id}/cancel")
+    async def cancel_evaluation(eval_id: str) -> EvalJobView:
+        return await evaluation_service.handle(eval_id).cancel()
+
+    @app.post("/v1/evals/{eval_id}/resume")
+    async def resume_evaluation(eval_id: str, payload: EvalRemoteResumeRequest) -> EvalJobView:
+        handle = await evaluation_service.resume(
+            eval_id,
+            target=evaluation_target(payload),
+            scorers=evaluation_scorers(payload.scorers),
+            request=EvalResumeRequest(
+                retry_uncertain=payload.retry_uncertain, skip_uncertain=payload.skip_uncertain
+            ),
+        )
+        return await handle.view()
 
     @app.get("/v1/tools")
     async def list_tools() -> ToolsResponse:

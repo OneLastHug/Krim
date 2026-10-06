@@ -1,6 +1,7 @@
 """Krim Agent 本地 eval（评估）SDK。"""
 
 from .files import load_dataset, load_report, parse_json, save_dataset, save_report
+from .jobs import EvalRemoteResumeRequest, EvalRemoteStartRequest
 from .reports import compare_reports
 from .runner import EvalAttempt, EvalTarget, EvaluationRunner, evaluate, rescore
 from .scorers import (
@@ -12,6 +13,8 @@ from .scorers import (
     JsonSchemaScorer,
     SuccessScorer,
     ToolCallsScorer,
+    builtin_scorer,
+    builtin_scorers,
 )
 from .targets import AgentTarget, CallableTarget, GenerationTarget, generation_output
 from .types import (
@@ -33,6 +36,8 @@ __all__ = [
     "AgentTarget",
     "CallableTarget",
     "CallableScorer",
+    "builtin_scorer",
+    "builtin_scorers",
     "ContainsScorer",
     "EvalCase",
     "EvalAttempt",
@@ -49,6 +54,8 @@ __all__ = [
     "EvalTargetInfo",
     "EvalTarget",
     "EvalToolCall",
+    "EvalRemoteResumeRequest",
+    "EvalRemoteStartRequest",
     "EvaluationRunner",
     "GenerationTarget",
     "ExactMatchScorer",

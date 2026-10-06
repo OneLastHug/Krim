@@ -59,7 +59,12 @@ class LocalBoundary:
         attachment_upload = scope["method"] == "POST" and bool(
             re.fullmatch(r"/v1/topics/[A-Za-z0-9_-]{1,128}/attachments", scope["path"])
         )
-        body_limit = MAX_ATTACHMENT_BASE64 + 2048 if attachment_upload else 65536
+        eval_upload = scope["method"] == "POST" and scope["path"] == "/v1/evals"
+        body_limit = (
+            (16 * 1024 * 1024 + 65536)
+            if eval_upload
+            else (MAX_ATTACHMENT_BASE64 + 2048 if attachment_upload else 65536)
+        )
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":

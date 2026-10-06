@@ -62,6 +62,7 @@ from .types import (
 if TYPE_CHECKING:
     from krim_agent.evaluation import EvalConfig, EvalDataset, EvalReport
     from krim_agent.evaluation.scorers import EvalScorer
+    from krim_agent.evaluation.service import EvalRunHandle, EvaluationService
 
 
 class SDKOutputError(ValueError):
@@ -262,46 +263,14 @@ class StreamTextResult:
 
     async def collect(self) -> GenerateResult:
         finish: StreamFinish | None = None
-        start: StreamStart | None = None
         async for part in self.full_stream():
-            if isinstance(part, StreamStart):
-                start = part
             if isinstance(part, StreamFinish):
                 finish = part
         if finish is None:
             raise ServiceError("incomplete_sdk_stream", "生成流没有终帧", 409)
-        repository = self.runtime.repository
-        messages = await repository.run_messages(self.run.id)
-        steps = _steps(messages)
-        response_messages = [message for message in messages if message.role != "user"]
-        run_usage = await repository.usage_view(self.run.id)
-        for step in steps:
-            observed = next((item for item in run_usage.steps if item.step == step.step), None)
-            if observed is not None:
-                step.token_usage = observed.usage
-                step.usage_complete = bool(
-                    observed.completed
-                    and observed.final
-                    and observed.usage is not None
-                    and all(
-                        getattr(observed.usage, name) is not None
-                        for name in ("input_tokens", "output_tokens", "total_tokens")
-                    )
-                )
-        return GenerateResult(
-            text=steps[-1].text if steps else "",
-            run=await repository.get_run(self.run.id),
-            finish_reason=finish.finish_reason,
-            steps=steps,
-            response_messages=response_messages,
-            audits=await repository.audits(self.run.id),
-            error=finish.error,
-            code=finish.code,
-            token_usage=run_usage.token_usage,
-            usage_complete=run_usage.usage_complete,
-            model_steps=run_usage.steps,
-            trace_context=start.trace_context if start is not None else None,
-        )
+        from .snapshots import read_generation_result
+
+        return await read_generation_result(self.runtime.repository, self.run.id)
 
     async def output[Output: BaseModel](self, schema: type[Output]) -> Output:
         result = await self.collect()
@@ -328,6 +297,7 @@ class PythonAI:
         self._owned_database = owned_database
         self._owned_provider = owned_provider
         self._closed = False
+        self._evaluation_service: EvaluationService | None = None
 
     @classmethod
     async def create(
@@ -434,7 +404,9 @@ class PythonAI:
         run = await self.runtime.repository.get_run(run_id)
         if run.status not in TERMINAL_STATUSES:
             raise ServiceError("result_not_terminal", "运行尚未终态，不能只读评估结果", 409)
-        return await StreamTextResult(self.runtime, run).collect()
+        from .snapshots import read_generation_result
+
+        return await read_generation_result(self.runtime.repository, run.id)
 
     async def evaluate(
         self,
@@ -455,6 +427,60 @@ class PythonAI:
             GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
             scorers=scorers,
             config=config,
+        )
+
+    def evaluation_service(self) -> EvaluationService:
+        from krim_agent.evaluation.service import EvaluationService
+
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        if self._evaluation_service is None:
+            self._evaluation_service = EvaluationService(self.runtime.repository.database)
+        return self._evaluation_service
+
+    async def start_evaluation(
+        self,
+        dataset: EvalDataset,
+        *,
+        scorers: Sequence[EvalScorer] | None = None,
+        config: EvalConfig | None = None,
+        version: str = "1",
+        prompt_prefix: str = "",
+        request_key: str | None = None,
+    ) -> EvalRunHandle:
+        from krim_agent.evaluation import GenerationTarget
+
+        return await self.evaluation_service().start(
+            dataset,
+            GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            scorers=scorers,
+            config=config,
+            request_key=request_key,
+        )
+
+    def evaluation(self, job_id: str) -> EvalRunHandle:
+        return self.evaluation_service().handle(job_id)
+
+    async def resume_evaluation(
+        self,
+        job_id: str,
+        *,
+        scorers: Sequence[EvalScorer] | None = None,
+        version: str = "1",
+        prompt_prefix: str = "",
+        retry_uncertain: bool = False,
+        skip_uncertain: bool = False,
+    ) -> EvalRunHandle:
+        from krim_agent.evaluation import GenerationTarget
+        from krim_agent.evaluation.jobs import EvalResumeRequest
+
+        return await self.evaluation_service().resume(
+            job_id,
+            target=GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            scorers=scorers,
+            request=EvalResumeRequest(
+                retry_uncertain=retry_uncertain, skip_uncertain=skip_uncertain
+            ),
         )
 
     async def skills(self, topic_id: str) -> SkillCatalogView:
@@ -501,6 +527,8 @@ class PythonAI:
         if self._closed:
             return
         self._closed = True
+        if self._evaluation_service is not None:
+            await self._evaluation_service.close()
         if self._owned_database is not None:
             try:
                 await self.runtime.close()
