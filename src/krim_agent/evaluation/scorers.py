@@ -125,10 +125,33 @@ class SuccessScorer(RuleScorer):
         self.require_tools_success = require_tools_success
 
     async def score(self, case: EvalCase, output: EvalOutput) -> EvalScore:
-        passed = output.status == "completed"
-        if self.require_tools_success and output.tools is not None:
+        passed = output.status == case.expected_status and (
+            case.expected_code is None or output.code == case.expected_code
+        )
+        if self.require_tools_success and output.status == "completed" and output.tools is not None:
             passed = passed and all(tool.ok is True for tool in output.tools)
         return self.result(passed)
+
+
+class ConversationScorer(RuleScorer):
+    def __init__(self) -> None:
+        super().__init__("conversation_turns")
+
+    async def score(self, case: EvalCase, output: EvalOutput) -> EvalScore:
+        if not case.turns or not output.turns:
+            return self.skipped("missing_conversation_observations")
+        if len(output.turns) != len(case.turns) + 1:
+            return self.result(False, "incomplete_conversation")
+        return self.result(
+            all(
+                actual.output.status == expected.expected_status
+                and (expected.expected_code is None or actual.output.code == expected.expected_code)
+                and (
+                    expected.expected is None or json_equal(actual.output.value, expected.expected)
+                )
+                for expected, actual in zip(case.turns, output.turns[1:], strict=True)
+            )
+        )
 
 
 class ExpectedToolCall(StrictModel):
@@ -223,6 +246,7 @@ def builtin_scorer(name: str) -> EvalScorer:
         "json-match": JsonMatchScorer,
         "success": SuccessScorer,
         "tool-calls": ToolCallsScorer,
+        "conversation-turns": ConversationScorer,
     }
     factory = values.get(name)
     if factory is None:

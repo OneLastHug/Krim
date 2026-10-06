@@ -66,6 +66,7 @@ from krim_agent.context_engine import (
 from krim_agent.drag import DragPreview, DragState
 from krim_agent.evaluation import (
     AgentTarget,
+    ConversationTarget,
     EvalRemoteResumeRequest,
     EvalRemoteStartRequest,
     GenerationTarget,
@@ -308,6 +309,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
         return HealthResponse(provider=service.provider.name)
 
     def evaluation_target(payload: EvalRemoteStartRequest | EvalRemoteResumeRequest) -> EvalTarget:
+        if payload.target == "conversation":
+            return ConversationTarget(
+                evaluation_ai, version=payload.version, prompt_prefix=payload.prompt_prefix
+            )
         if payload.target == "text":
             return GenerationTarget(
                 evaluation_ai, version=payload.version, prompt_prefix=payload.prompt_prefix

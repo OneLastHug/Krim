@@ -25,7 +25,7 @@ from .jobs import (
     EvalResumeRequest,
     JobStatus,
 )
-from .runner import EvalAttempt, EvalCleanupError, EvalTarget, _score, _scorers
+from .runner import EvalAttempt, EvalCleanupError, EvalScoringUnknown, EvalTarget, _score, _scorers
 from .scorers import EvalScorer
 from .types import (
     EvalCase,
@@ -301,9 +301,17 @@ class EvaluationService:
             workers = [asyncio.create_task(worker()) for _ in range(spec.config.concurrency)]
             await asyncio.gather(*workers)
             items = await self._items(job_id)
-            if any(item.phase == "uncertain" for item in items):
+            if any(item.phase in {"uncertain", "grading_uncertain"} for item in items):
                 await self.store.finish(
-                    job_id, self.owner, epoch, "interrupted", error_code="eval_resolution_required"
+                    job_id,
+                    self.owner,
+                    epoch,
+                    "interrupted",
+                    error_code=(
+                        "eval_grading_resolution_required"
+                        if any(item.phase == "grading_uncertain" for item in items)
+                        else "eval_resolution_required"
+                    ),
                 )
                 return
             results = [item.result for item in items if item.result is not None]
@@ -362,21 +370,44 @@ class EvaluationService:
     ) -> None:
         case = spec.dataset.cases[item.ordinal // spec.config.repetitions]
         bindings = dict(item.bindings)
+        target_bindings = bindings.get("target", {})
+        score_bindings = bindings.get("scores", {})
+        if not isinstance(target_bindings, dict) or not isinstance(score_bindings, dict):
+            raise ServiceError("eval_binding_invalid", "评估绑定结构无效", 409)
 
         async def binding(values: dict[str, JsonValue]) -> None:
-            nonlocal bindings
-            bindings = {**bindings, "target": values}
-            await self.store.mutate(job_id, self.owner, epoch, item.ordinal, bindings=bindings)
+            nonlocal target_bindings
+            target_bindings = values
+            await self.store.mutate(
+                job_id,
+                self.owner,
+                epoch,
+                item.ordinal,
+                bindings={**bindings, "target": target_bindings, "scores": score_bindings},
+            )
 
-        raw = bindings.get("target")
-        state = raw if isinstance(raw, dict) else {}
+        async def score_binding(values: dict[str, JsonValue]) -> None:
+            nonlocal score_bindings
+            score_bindings = values
+            await self.store.mutate(
+                job_id,
+                self.owner,
+                epoch,
+                item.ordinal,
+                bindings={**bindings, "target": target_bindings, "scores": score_bindings},
+            )
+
         attempt = EvalAttempt(
             job_id,
             case.id,
             item.repetition,
             generation=item.generation,
-            bindings=state,
+            bindings=target_bindings,
             checkpoint=binding,
+            score_bindings=score_bindings,
+            score_checkpoint=score_binding,
+            retry_scoring=request.retry_uncertain,
+            skip_scoring=request.skip_uncertain,
         )
         output, error_code = item.output, item.error_code
         started = time.monotonic()
@@ -407,6 +438,7 @@ class EvaluationService:
                         item.phase = "executed"
                     else:
                         item.phase = "pending"
+                        error_code = None
                 except Exception:
                     await _commit(
                         self.store.mutate(
@@ -503,20 +535,36 @@ class EvaluationService:
                     )
                 )
 
-            scores, added = await _score(
-                case,
-                output,
-                error_code,
-                scorers,
-                spec.scorers,
-                spec.config,
-                saved_scores=item.scores,
-                on_score=score_checkpoint,
-            )
+            try:
+                scores, added = await _score(
+                    case,
+                    output,
+                    error_code,
+                    scorers,
+                    spec.scorers,
+                    spec.config,
+                    saved_scores=item.scores,
+                    on_score=score_checkpoint,
+                    attempt=attempt,
+                )
+            except EvalScoringUnknown:
+                await _commit(
+                    self.store.mutate(
+                        job_id,
+                        self.owner,
+                        epoch,
+                        item.ordinal,
+                        phase="grading_uncertain",
+                        output=output,
+                        error_code=error_code,
+                        duration_ms=duration,
+                    )
+                )
+                return
             result = EvalCaseResult(
                 case_id=case.id,
                 repetition=item.repetition,
-                status=classify(output, scores, spec.config, error_code),
+                status=classify(output, scores, spec.config, error_code, case),
                 output=output,
                 scores=scores,
                 error_code=error_code,

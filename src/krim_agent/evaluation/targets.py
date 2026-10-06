@@ -58,6 +58,8 @@ def generation_output(result: GenerateResult, *, agent_id: str | None = None) ->
 
 
 def _prompt(case: EvalCase, prefix: str) -> str:
+    if case.turns:
+        raise ValueError("多轮样本须使用 ConversationTarget，避免遗漏后续轮次")
     if not isinstance(case.input, str) or not case.input.strip():
         raise ValueError("生成与 Agent 评估需要非空文本输入")
     return prefix + case.input

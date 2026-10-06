@@ -173,7 +173,7 @@ class EvaluationStore:
                 total=len(phases),
                 pending=phases.count("pending"),
                 completed=phases.count("done"),
-                uncertain=phases.count("uncertain"),
+                uncertain=phases.count("uncertain") + phases.count("grading_uncertain"),
                 active=sum(p in {"executing", "executed", "scoring"} for p in phases),
                 can_resume=row.status not in {"completed", "failed"}
                 and (row.owner_id is None or (row.lease_expires_at or 0) <= time.time()),

@@ -1,12 +1,21 @@
 """Krim Agent 本地 eval（评估）SDK。"""
 
+from .conversation import ConversationTarget
 from .files import load_dataset, load_report, parse_json, save_dataset, save_report
 from .jobs import EvalRemoteResumeRequest, EvalRemoteStartRequest
 from .reports import compare_reports
-from .runner import EvalAttempt, EvalTarget, EvaluationRunner, evaluate, rescore
+from .runner import (
+    EvalAttempt,
+    EvalScoringUnknown,
+    EvalTarget,
+    EvaluationRunner,
+    evaluate,
+    rescore,
+)
 from .scorers import (
     CallableScorer,
     ContainsScorer,
+    ConversationScorer,
     EvalScorer,
     ExactMatchScorer,
     JsonMatchScorer,
@@ -23,6 +32,7 @@ from .types import (
     EvalComparison,
     EvalConfig,
     EvalDataset,
+    EvalMetricPolicy,
     EvalOutput,
     EvalReport,
     EvalScore,
@@ -30,6 +40,8 @@ from .types import (
     EvalSummary,
     EvalTargetInfo,
     EvalToolCall,
+    EvalTurn,
+    EvalTurnResult,
 )
 
 __all__ = [
@@ -39,21 +51,27 @@ __all__ = [
     "builtin_scorer",
     "builtin_scorers",
     "ContainsScorer",
+    "ConversationScorer",
+    "ConversationTarget",
     "EvalCase",
     "EvalAttempt",
     "EvalCaseResult",
     "EvalComparison",
     "EvalConfig",
     "EvalDataset",
+    "EvalMetricPolicy",
     "EvalOutput",
     "EvalReport",
     "EvalScore",
+    "EvalScoringUnknown",
     "EvalScorer",
     "EvalScorerInfo",
     "EvalSummary",
     "EvalTargetInfo",
     "EvalTarget",
     "EvalToolCall",
+    "EvalTurn",
+    "EvalTurnResult",
     "EvalRemoteResumeRequest",
     "EvalRemoteStartRequest",
     "EvaluationRunner",

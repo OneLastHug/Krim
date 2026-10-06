@@ -416,15 +416,18 @@ class PythonAI:
         config: EvalConfig | None = None,
         version: str = "1",
         prompt_prefix: str = "",
+        conversation: bool = False,
     ) -> EvalReport:
         """隔离每个样本，复用真实生成/工具链并在超时或取消时停止生产。"""
-        from krim_agent.evaluation import GenerationTarget, evaluate
+        from krim_agent.evaluation import ConversationTarget, GenerationTarget, evaluate
 
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
         return await evaluate(
             dataset,
-            GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            (ConversationTarget if conversation else GenerationTarget)(
+                self, version=version, prompt_prefix=prompt_prefix
+            ),
             scorers=scorers,
             config=config,
         )
@@ -447,12 +450,15 @@ class PythonAI:
         version: str = "1",
         prompt_prefix: str = "",
         request_key: str | None = None,
+        conversation: bool = False,
     ) -> EvalRunHandle:
-        from krim_agent.evaluation import GenerationTarget
+        from krim_agent.evaluation import ConversationTarget, GenerationTarget
 
         return await self.evaluation_service().start(
             dataset,
-            GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            (ConversationTarget if conversation else GenerationTarget)(
+                self, version=version, prompt_prefix=prompt_prefix
+            ),
             scorers=scorers,
             config=config,
             request_key=request_key,
@@ -470,13 +476,16 @@ class PythonAI:
         prompt_prefix: str = "",
         retry_uncertain: bool = False,
         skip_uncertain: bool = False,
+        conversation: bool = False,
     ) -> EvalRunHandle:
-        from krim_agent.evaluation import GenerationTarget
+        from krim_agent.evaluation import ConversationTarget, GenerationTarget
         from krim_agent.evaluation.jobs import EvalResumeRequest
 
         return await self.evaluation_service().resume(
             job_id,
-            target=GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            target=(ConversationTarget if conversation else GenerationTarget)(
+                self, version=version, prompt_prefix=prompt_prefix
+            ),
             scorers=scorers,
             request=EvalResumeRequest(
                 retry_uncertain=retry_uncertain, skip_uncertain=skip_uncertain

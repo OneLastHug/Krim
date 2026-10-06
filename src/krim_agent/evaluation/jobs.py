@@ -22,7 +22,9 @@ from .types import (
 JobStatus = Literal[
     "queued", "running", "paused", "cancelled", "interrupted", "completed", "failed"
 ]
-ItemPhase = Literal["pending", "executing", "executed", "scoring", "done", "uncertain"]
+ItemPhase = Literal[
+    "pending", "executing", "executed", "scoring", "done", "uncertain", "grading_uncertain"
+]
 
 
 class EvalJobSpec(StrictModel):
@@ -37,11 +39,17 @@ class EvalJobSpec(StrictModel):
             raise ValueError("评估尝试数超过 10000")
         if len({s.name for s in self.scorers}) != len(self.scorers):
             raise ValueError("评分器名称必须唯一")
+        self.config.validate_metrics([s.name for s in self.scorers])
         return self
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(self.model_dump(mode="json"))
+        values = self.model_dump(mode="json")
+        values["dataset"]["cases"] = [case.fingerprint_content() for case in self.dataset.cases]
+        for name, default in (("metrics", {}), ("aggregate_threshold", None)):
+            if values["config"][name] == default:
+                values["config"].pop(name)
+        return fingerprint(values)
 
 
 class EvalJobView(StrictModel):
@@ -117,7 +125,7 @@ class EvalResumeRequest(StrictModel):
 
 
 class EvalRemoteStartRequest(StrictModel):
-    target: Literal["text", "agent"] = "text"
+    target: Literal["text", "agent", "conversation"] = "text"
     agent_name: str = Field(default="default", min_length=1, max_length=64)
     dataset: EvalDataset
     config: EvalConfig = Field(default_factory=EvalConfig)
@@ -128,7 +136,7 @@ class EvalRemoteStartRequest(StrictModel):
 
 
 class EvalRemoteResumeRequest(StrictModel):
-    target: Literal["text", "agent"] = "text"
+    target: Literal["text", "agent", "conversation"] = "text"
     agent_name: str = Field(default="default", min_length=1, max_length=64)
     scorers: list[str] = Field(default_factory=lambda: ["exact-match"], min_length=1, max_length=32)
     version: str = Field(default="1", min_length=1, max_length=128)
