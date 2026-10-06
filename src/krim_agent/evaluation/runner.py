@@ -187,6 +187,16 @@ async def _score(
             score = EvalScore(name=info.name, status="error", reason="scorer_timeout")
         except Exception:
             score = EvalScore(name=info.name, status="error", reason="scorer_error")
+        if score.status == "error" and score.run_id is None and attempt is not None:
+            observed = attempt.score_outputs.get(info.name)
+            if observed is not None:
+                score.run_id, score.topic_id = observed.run_id, observed.topic_id
+                score.code = score.code or score.reason
+                score.token_usage, score.usage_complete = (
+                    observed.token_usage,
+                    observed.usage_complete,
+                )
+                score.attempts = [observed]
         scores.append(score)
         if on_score is not None:
             await on_score(scores, (time.monotonic() - started) * 1000)

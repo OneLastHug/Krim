@@ -18,6 +18,7 @@ from .jobs import (
     EvalRemoteResumeRequest,
     EvalRemoteStartRequest,
 )
+from .statistics import EvalStatistics
 from .types import EvalReport
 
 
@@ -88,6 +89,9 @@ class SyncEvalClient:
 
     def report(self, job_id: str) -> EvalReport:
         return _parse(self.http.get(f"/v1/evals/{job_id}/report"), EvalReport)
+
+    def statistics(self, job_id: str) -> EvalStatistics:
+        return _parse(self.http.get(f"/v1/evals/{job_id}/statistics"), EvalStatistics)
 
     def partial_report(self, job_id: str) -> EvalPartialReport:
         return _parse(self.http.get(f"/v1/evals/{job_id}/partial-report"), EvalPartialReport)
@@ -194,6 +198,9 @@ class AsyncEvalClient:
 
     async def report(self, job_id: str) -> EvalReport:
         return _parse(await self.http.get(f"/v1/evals/{job_id}/report"), EvalReport)
+
+    async def statistics(self, job_id: str) -> EvalStatistics:
+        return _parse(await self.http.get(f"/v1/evals/{job_id}/statistics"), EvalStatistics)
 
     async def partial_report(self, job_id: str) -> EvalPartialReport:
         return _parse(await self.http.get(f"/v1/evals/{job_id}/partial-report"), EvalPartialReport)

@@ -45,7 +45,7 @@ class EvalJobSpec(StrictModel):
     @property
     def fingerprint(self) -> str:
         values = self.model_dump(mode="json")
-        values["dataset"]["cases"] = [case.fingerprint_content() for case in self.dataset.cases]
+        values["dataset"] = self.dataset.fingerprint_content()
         for name, default in (("metrics", {}), ("aggregate_threshold", None)):
             if values["config"][name] == default:
                 values["config"].pop(name)

@@ -108,7 +108,9 @@ class EvalRunHandle:
                 heartbeat = time.monotonic()
                 yield record
             view = await self.view()
-            if view.status not in {"queued", "running"} and cursor >= view.event_count:
+            if (
+                view.status not in {"queued", "running"} or view.can_resume
+            ) and cursor >= view.event_count:
                 return
             if time.monotonic() - heartbeat >= 15:
                 yield None
@@ -411,6 +413,9 @@ class EvaluationService:
         )
         output, error_code = item.output, item.error_code
         started = time.monotonic()
+        duration = item.duration_ms
+        execution_finished = item.phase in {"executed", "scoring", "grading_uncertain"}
+        score_started: float | None = None
         try:
             if item.phase in {"executing", "uncertain"}:
                 recover = getattr(target, "recover", None)
@@ -436,6 +441,7 @@ class EvaluationService:
                             )
                         )
                         item.phase = "executed"
+                        execution_finished = True
                     else:
                         item.phase = "pending"
                         error_code = None
@@ -502,6 +508,7 @@ class EvaluationService:
                 except Exception:
                     output, error_code = attempt.output, "eval_execution_error"
                 duration = (time.monotonic() - started) * 1000
+                execution_finished = True
                 await _commit(
                     self.store.mutate(
                         job_id,
@@ -535,6 +542,7 @@ class EvaluationService:
                     )
                 )
 
+            score_started = time.monotonic()
             try:
                 scores, added = await _score(
                     case,
@@ -558,6 +566,7 @@ class EvaluationService:
                         output=output,
                         error_code=error_code,
                         duration_ms=duration,
+                        scoring_ms=item.scoring_ms + (time.monotonic() - score_started) * 1000,
                     )
                 )
                 return
@@ -592,9 +601,12 @@ class EvaluationService:
                         phase=phase,
                         output=output or attempt.output,
                         error_code=error_code,
-                        duration_ms=(time.monotonic() - started) * 1000
-                        if item.phase in {"pending", "executing", "uncertain"}
-                        else item.duration_ms,
+                        duration_ms=duration
+                        if execution_finished
+                        else (time.monotonic() - started) * 1000,
+                        scoring_ms=item.scoring_ms + (time.monotonic() - score_started) * 1000
+                        if score_started is not None
+                        else item.scoring_ms,
                     )
                 )
             except ServiceError:
