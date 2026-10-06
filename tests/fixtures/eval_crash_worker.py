@@ -16,7 +16,7 @@ async def main():
     settings = Settings(database_url=f"sqlite+aiosqlite:///{Path(sys.argv[1]).as_posix()}")
     async with await PythonAI.create(settings=settings, provider=FakeProvider(delay=0)) as ai:
         service = ai.evaluation_service()
-        service.store.lease_seconds = 2
+        service.store.lease_seconds = 10
         real = service.store.mutate
 
         async def crash(job_id, owner, epoch, ordinal, **kwargs):

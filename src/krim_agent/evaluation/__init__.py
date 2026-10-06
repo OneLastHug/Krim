@@ -1,8 +1,10 @@
 """Krim Agent 本地 eval（评估）SDK。"""
 
 from .conversation import ConversationTarget
+from .experiments import evaluate_matrix, select_dataset, start_matrix
 from .files import load_dataset, load_report, parse_json, save_dataset, save_report
 from .jobs import EvalRemoteResumeRequest, EvalRemoteStartRequest
+from .judge import ModelJudgeScorer
 from .reports import compare_reports
 from .runner import (
     EvalAttempt,
@@ -25,6 +27,7 @@ from .scorers import (
     builtin_scorer,
     builtin_scorers,
 )
+from .statistics import EvalStatistics, analyze_report
 from .targets import AgentTarget, CallableTarget, GenerationTarget, generation_output
 from .types import (
     EvalCase,
@@ -53,6 +56,12 @@ __all__ = [
     "ContainsScorer",
     "ConversationScorer",
     "ConversationTarget",
+    "ModelJudgeScorer",
+    "EvalStatistics",
+    "analyze_report",
+    "evaluate_matrix",
+    "select_dataset",
+    "start_matrix",
     "EvalCase",
     "EvalAttempt",
     "EvalCaseResult",

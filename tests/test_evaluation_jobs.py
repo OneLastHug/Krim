@@ -173,9 +173,11 @@ async def test_completed_output_and_completed_score_resume_without_reexecuting(r
             data("x"), CallableTarget("score-recovery", target), scorers=scorers
         )
         await asyncio.wait_for(entered.wait(), 5)
+        execution_ms = (await handle.items()).items[0].duration_ms
         await handle.pause()
         item = (await handle.items()).items[0]
         assert item.output.value == "x" and len(item.scores) == 1
+        assert item.duration_ms == execution_ms
         await handle.resume()
         assert (await handle.wait()).status == "completed"
         assert calls == 1 and counts == [1, 2]
@@ -265,6 +267,12 @@ async def test_job_owner_cas_rejects_second_owner_and_stale_epoch(repository):
         row = await session.get(EvalJobRow, job_id)
         row.lease_expires_at = 0
     assert (await store.view(job_id)).can_resume
+    cold = EvaluationService(repository.database)
+
+    async def read_events():
+        return [event async for event in cold.handle(job_id).events() if event]
+
+    assert len(await asyncio.wait_for(read_events(), 2)) == 2
     second = await store.claim(job_id, "second")
     assert second > epoch
     with pytest.raises(ServiceError):
@@ -358,7 +366,7 @@ async def test_real_process_crash_after_model_completion_resumes_with_zero_new_c
     assert process.returncode == 73, (stdout + stderr).decode()
     record = json.loads(marker.read_text("utf-8"))
     # 模拟进程已消失后的合法租约接管；原活跃 owner 不能被立即抢占。
-    await asyncio.sleep(2.05)
+    await asyncio.sleep(10.05)
 
     class Counting(FakeProvider):
         calls = 0

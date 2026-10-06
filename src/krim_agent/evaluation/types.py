@@ -26,7 +26,7 @@ ExpectedStatus = Literal["completed", "failed", "aborted", "interrupted"]
 
 
 class EvalTurn(StrictModel):
-    input: str = Field(min_length=1, max_length=32768)
+    input: str = Field(min_length=1, max_length=8192)
     expected: JsonValue = None
     expected_status: ExpectedStatus = "completed"
     expected_code: str | None = Field(default=None, min_length=1, max_length=128)
@@ -46,7 +46,7 @@ class EvalCase(StrictModel):
 
     @model_validator(mode="after")
     def finite_content(self) -> EvalCase:
-        check_json(self.model_dump(mode="json"))
+        check_json(self.fingerprint_content())
         if self.turns and (not isinstance(self.input, str) or not self.input.strip()):
             raise ValueError("多轮对话的首条 input 必须为非空文本")
         if any(not turn.input.strip() for turn in self.turns):
@@ -70,23 +70,28 @@ class EvalDataset(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     version: str = Field(default="1", min_length=1, max_length=64)
     cases: list[EvalCase] = Field(min_length=1, max_length=1000)
+    selection: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def unique_ids(self) -> EvalDataset:
         if len({case.id for case in self.cases}) != len(self.cases):
             raise ValueError("评估样本 ID 必须唯一")
-        check_json(self.model_dump(mode="json"), max_bytes=16 * 1024 * 1024)
+        check_json(self.fingerprint_content(), max_bytes=16 * 1024 * 1024)
         return self
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(
-            {
-                "name": self.name,
-                "version": self.version,
-                "cases": [case.fingerprint_content() for case in self.cases],
-            }
-        )
+        return fingerprint(self.fingerprint_content())
+
+    def fingerprint_content(self) -> dict[str, JsonValue]:
+        values: dict[str, JsonValue] = {
+            "name": self.name,
+            "version": self.version,
+            "cases": [case.fingerprint_content() for case in self.cases],
+        }
+        if self.selection is not None:
+            values["selection"] = self.selection
+        return values
 
 
 class EvalMetricPolicy(StrictModel):
@@ -184,8 +189,9 @@ class EvalScore(StrictModel):
     run_id: str | None = None
     topic_id: str | None = None
     code: str | None = None
-    token_usage: UsageTotals | None = None
+    token_usage: UsageTotals | EvalUsageTotals | None = None
     usage_complete: bool = False
+    attempts: list[EvalObservation] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def valid_score(self) -> EvalScore:

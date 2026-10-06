@@ -26,6 +26,7 @@ from .scorers import (
     SuccessScorer,
     ToolCallsScorer,
 )
+from .statistics import analyze_report
 from .targets import AgentTarget
 from .types import EvalConfig, EvalReport
 
@@ -45,6 +46,10 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
         "eval", help="eval（evaluation，评估）：本地数据集、评分与回归报告"
     )
     actions = root.add_subparsers(dest="eval_action", required=True)
+    stats = actions.add_parser(
+        "stats", help="stats（statistics，统计）：标签/指标覆盖/耗时/评分用量"
+    )
+    stats.add_argument("report", help="原始完整 JSON 报告")
     validate = actions.add_parser("validate", help="validate（校验）：检查数据集")
     validate.add_argument("dataset", help="JSON 或 JSONL 数据集路径")
     run = actions.add_parser("run", help="run（运行）：批量评估生成或 Agent")
@@ -222,6 +227,9 @@ async def _run(args: argparse.Namespace) -> EvalReport:
 
 
 def execute(args: argparse.Namespace) -> int:
+    if args.eval_action == "stats":
+        print(analyze_report(load_report(args.report)).model_dump_json(indent=2))
+        return 0
     if args.eval_action == "jobs":
         from .job_cli import execute_jobs
 

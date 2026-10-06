@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
@@ -25,10 +26,7 @@ if TYPE_CHECKING:
     from krim_agent.sdk import PythonAI
 
 
-def conversation_output(turns: list[EvalTurnResult]) -> EvalOutput:
-    if not turns:
-        raise ValueError("会话必须有实际轮次输出")
-    outputs = [turn.output for turn in turns]
+def combine_usage(outputs: Sequence[EvalObservation]) -> UsageTotals | EvalUsageTotals | None:
     usage = [output.token_usage for output in outputs]
     known = [value for value in usage if value is not None]
     totals: UsageTotals | EvalUsageTotals | None = None
@@ -54,6 +52,14 @@ def conversation_output(turns: list[EvalTurnResult]) -> EvalOutput:
             usage_complete=all(output.usage_complete for output in outputs),
         )
         totals = model.model_validate(fields)
+    return totals
+
+
+def conversation_output(turns: list[EvalTurnResult]) -> EvalOutput:
+    if not turns:
+        raise ValueError("会话必须有实际轮次输出")
+    outputs = [turn.output for turn in turns]
+    totals = combine_usage(outputs)
     last = outputs[-1]
     return EvalOutput(
         **{

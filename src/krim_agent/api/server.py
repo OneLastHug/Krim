@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import quote
@@ -69,7 +69,10 @@ from krim_agent.evaluation import (
     ConversationTarget,
     EvalRemoteResumeRequest,
     EvalRemoteStartRequest,
+    EvalStatistics,
     GenerationTarget,
+    analyze_report,
+    builtin_scorer,
     builtin_scorers,
 )
 from krim_agent.evaluation.jobs import (
@@ -159,7 +162,12 @@ class ErrorResponse(BaseModel):
     error: ErrorDetails
 
 
-def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime: ChatRuntime | None = None,
+    eval_scorers: Mapping[str, EvalScorer] | None = None,
+) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
     owned_provider: OwnedProvider | None = None
@@ -330,7 +338,14 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
 
     def evaluation_scorers(names: list[str]) -> list[EvalScorer]:
         try:
-            return builtin_scorers(names)
+            if eval_scorers is None:
+                return builtin_scorers(names)
+            if not names or len(set(names)) != len(names):
+                raise ValueError("评分器名称必须唯一")
+            return [
+                eval_scorers[name] if name in eval_scorers else builtin_scorer(name)
+                for name in names
+            ]
         except ValueError:
             raise ServiceError("eval_scorer_invalid", "评分目录或名称无效", 422) from None
 
@@ -395,6 +410,10 @@ def create_app(settings: Settings | None = None, *, runtime: ChatRuntime | None 
     @app.get("/v1/evals/{eval_id}/partial-report")
     async def evaluation_partial_report(eval_id: str) -> EvalPartialReport:
         return await evaluation_service.handle(eval_id).partial_report()
+
+    @app.get("/v1/evals/{eval_id}/statistics")
+    async def evaluation_statistics(eval_id: str) -> EvalStatistics:
+        return analyze_report(await evaluation_service.handle(eval_id).report())
 
     @app.post("/v1/evals/{eval_id}/pause")
     async def pause_evaluation(eval_id: str) -> EvalJobView:
