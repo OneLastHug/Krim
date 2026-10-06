@@ -7,30 +7,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from pydantic import JsonValue, TypeAdapter
-
-from krim_agent.protocol.models import check_json
+from krim_agent.protocol.json_data import parse_json as parse_json
 
 from .types import EvalCase, EvalDataset, EvalReport
-
-
-def parse_json(raw: str) -> JsonValue:
-    def unique(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
-        result: dict[str, JsonValue] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("JSON 对象不能包含重复键")
-            result[key] = value
-        return result
-
-    try:
-        value: JsonValue = TypeAdapter(JsonValue).validate_python(
-            json.loads(raw, object_pairs_hook=unique), strict=True
-        )
-        check_json(value, max_bytes=32 * 1024 * 1024)
-        return value
-    except (RecursionError, OverflowError) as error:
-        raise ValueError("JSON 嵌套或数值超过限制") from error
 
 
 def _read(path: str | Path, limit: int) -> str:
