@@ -88,7 +88,7 @@ uv run --no-sync krim serve
 
 ## Git
 
-仓库已有 M1 提交。AUTH-004 要求每个已完成并验证的功能单独 `commit`（本地提交），说明首行以精炼中文写明“模块：功能”供审计；尚未授权 `push`（推送远程）。查看状态使用：
+仓库已有 M1 提交。AUTH-004 要求每个已完成并验证的功能单独 `commit`（本地提交），说明首行以精炼中文写明“模块：功能”供审计；AUTH-006 已授权将已验证提交普通 `push`（推送）到现有 GitHub 仓库 `origin/main`，未完成工作继续留在工作区。查看状态使用：
 
 ```powershell
 # git status 的 status 是“状态”，--short 是简短格式，--branch 显示分支信息。
