@@ -213,3 +213,24 @@ class CallableScorer:
         if not isinstance(value, (int, float, bool)):
             raise ValueError("评分回调必须返回有限数值、布尔值或 EvalScore")
         return EvalScore(name=self.info.name, value=float(value))
+
+
+def builtin_scorer(name: str) -> EvalScorer:
+    """只返回服务端内建评分器；远端请求不能反序列化 Python callable。"""
+    values: dict[str, Callable[[], EvalScorer]] = {
+        "exact-match": ExactMatchScorer,
+        "contains": ContainsScorer,
+        "json-match": JsonMatchScorer,
+        "success": SuccessScorer,
+        "tool-calls": ToolCallsScorer,
+    }
+    factory = values.get(name)
+    if factory is None:
+        raise ValueError("不支持的内建评估评分器")
+    return factory()
+
+
+def builtin_scorers(names: list[str]) -> list[EvalScorer]:
+    if not names or len(names) > 32 or len(set(names)) != len(names):
+        raise ValueError("评估评分器名称必须唯一且不超过32个")
+    return [builtin_scorer(name) for name in names]

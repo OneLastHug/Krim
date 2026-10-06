@@ -17,6 +17,7 @@ from .types import EvalCase, EvalOutput, EvalTargetInfo, EvalToolCall, fingerpri
 
 if TYPE_CHECKING:
     from krim_agent.agents.manager import AgentHandle
+    from krim_agent.persistence import KrimRepository
     from krim_agent.sdk import GenerateResult, PythonAI, StreamTextResult
 
 
@@ -97,13 +98,26 @@ class GenerationTarget:
 
     async def run(self, case: EvalCase, attempt: EvalAttempt) -> EvalOutput:
         prompt = _prompt(case, self.prompt_prefix)
+        topic_id = None
+        if attempt.checkpoint is not None:
+            previous = attempt.bindings.get("topic_id")
+            topic_id = (
+                previous
+                if isinstance(previous, str)
+                else (await self.ai.runtime.repository.create_topic("评估样本")).id
+            )
+            await attempt.save_binding(
+                {"topic_id": topic_id, "request_key": attempt.idempotency_key}
+            )
         # start 也受清理保护：取消发生在话题/Run 写入期间时，先取得真正 Run，再停止。
         start = asyncio.create_task(
-            self.ai.stream_text(prompt, idempotency_key=attempt.idempotency_key)
+            self.ai.stream_text(prompt, topic_id=topic_id, idempotency_key=attempt.idempotency_key)
         )
         stream: StreamTextResult | None = None
         try:
             stream = await asyncio.shield(start)
+            if attempt.checkpoint is not None:
+                await attempt.save_binding({**attempt.bindings, "run_id": stream.run.id})
             attempt.output = generation_output(await stream.collect())
             return attempt.output
         except BaseException:
@@ -123,6 +137,9 @@ class GenerationTarget:
 
             await _cleanup(cleanup())
             raise
+
+    async def recover(self, case: EvalCase, attempt: EvalAttempt) -> EvalOutput | None:
+        return await _recover_run(self.ai.runtime.repository, attempt)
 
 
 class AgentTarget:
@@ -157,6 +174,14 @@ class AgentTarget:
         handle: AgentHandle | None = None
         try:
             handle = await asyncio.shield(spawn)
+            if attempt.checkpoint is not None:
+                await attempt.save_binding(
+                    {
+                        "topic_id": handle.topic_id,
+                        "agent_id": handle.agent_id,
+                        "request_key": attempt.idempotency_key,
+                    }
+                )
             executed = await handle.execute(prompt, attempt.idempotency_key)
             if executed.run_id is None:
                 attempt.output = EvalOutput(
@@ -189,6 +214,12 @@ class AgentTarget:
 
             await _cleanup(cleanup())
 
+    async def recover(self, case: EvalCase, attempt: EvalAttempt) -> EvalOutput | None:
+        value = await _recover_run(self.manager.repository, attempt)
+        if value is not None:
+            value.agent_id = str(attempt.bindings.get("agent_id", "")) or None
+        return value
+
 
 TargetFunction = Callable[[EvalCase, EvalAttempt], Awaitable[EvalOutput]]
 
@@ -212,3 +243,28 @@ class CallableTarget:
 
     async def run(self, case: EvalCase, attempt: EvalAttempt) -> EvalOutput:
         return await self.function(case, attempt)
+
+
+async def _recover_run(repository: KrimRepository, attempt: EvalAttempt) -> EvalOutput | None:
+    from sqlalchemy import select
+
+    from krim_agent.persistence.database import RunRow
+    from krim_agent.protocol.domain import ServiceError
+    from krim_agent.sdk.snapshots import read_generation_result
+
+    topic = attempt.bindings.get("topic_id")
+    key = attempt.bindings.get("request_key")
+    if topic is None:
+        return None
+    if not isinstance(topic, str) or key != attempt.idempotency_key:
+        raise ServiceError("eval_binding_invalid", "评估运行绑定不正确", 409)
+    async with repository.database.write_lock, repository.database.sessions() as session:
+        run_id = await session.scalar(
+            select(RunRow.id).where(RunRow.topic_id == topic, RunRow.idempotency_key == key)
+        )
+    if run_id is None:
+        return None
+    run = await repository.get_run(run_id)
+    if run.status in {"queued", "running"}:
+        raise ServiceError("eval_source_active", "原评估生产仍活跃，不能重放", 409)
+    return generation_output(await read_generation_result(repository, run_id))

@@ -31,4 +31,4 @@ def test_project_branding_and_unique_requirements():
     matrix = Path("docs/requirements/requirements-traceability.md").read_text("utf-8")
     matrix = matrix.split("## M1 实际证据", 1)[0]
     identifiers = re.findall(r"^\| (REQ-[A-Z]+-\d+) \|", matrix, re.MULTILINE)
-    assert len(identifiers) == 58 and len(set(identifiers)) == 58
+    assert len(identifiers) == 62 and len(set(identifiers)) == 62
