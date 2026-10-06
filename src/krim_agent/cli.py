@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    from .evaluation.cli import add_parser as add_eval_parser
+
+    add_eval_parser(subparsers)
     trace = subparsers.add_parser("trace", help="trace（追踪）：读取脱敏 span 与观测状态")
     trace.add_argument("action", choices=["run", "workflow", "get", "status"])
     trace.add_argument("value", nargs="?")
@@ -167,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "eval":
+        from .evaluation.cli import execute as execute_eval
+
+        try:
+            status = execute_eval(args)
+        except KeyboardInterrupt:
+            parser.exit(130, "评估已取消，当前运行已收束。\n")
+        except (OSError, ValueError):
+            parser.exit(2, "评估数据或配置无效；请检查本地文件与参数。\n")
+        parser.exit(status)
     if args.command == "version":
         print(f"Krim Agent {__version__}")
         return

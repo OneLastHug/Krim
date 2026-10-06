@@ -33,6 +33,8 @@ Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部
 
 已接通 [宿主 Checkpoint](docs/api/checkpoint.md)：真实 Python callback 创建外部快照、canRollback 检查与文件回滚，0014、revision/幂等、uncertain/resolve、REST/client/Local/Remote Host/同源 UI；完整本机门禁通过，生产资源沙箱与阶段人工验收仍未完成。
 
+当前开发优先级已按 AUTH-005 调整为 **eval 与相关 Python SDK**，其他未完成功能暂缓。已接通本地数据集、生成/Agent、评分、报告与版本对比，入口见 [Python Eval SDK](docs/sdk/python-evaluation.md)；可直接运行 `python -m krim_agent eval run`，无需先启动 HTTP 服务。
+
 ## 快速开始
 
 ```powershell

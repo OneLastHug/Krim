@@ -288,7 +288,15 @@ async def test_cancelled_run_and_model_are_cancelled_and_logger_hides_error(repo
 
 async def test_api_client_cli_read_same_private_facts(server_url, runtime, repository):
     runtime.tracer.enabled = True
+    # 此用例验证完整事实读取；默认 0.25 秒的 best-effort 写入允许因负载丢失。
+    # 与观测专项 fixture 一样给实际写入 2 秒，并等待生产和队列真正收束。
+    runtime.tracer.timeout_seconds = 2
     result = await PythonAI(runtime).generate_text(CANARY)
+    production = runtime.production_task(result.run.id)
+    assert production is not None
+    await production
+    assert await runtime.tracer.flush(5)
+    assert runtime.tracer.status().store_failures == 0
     with KrimClient(server_url) as client:
         spans = await asyncio.to_thread(client.run_trace, result.run.id)
         view = await asyncio.to_thread(client.trace, spans[0].trace_id)

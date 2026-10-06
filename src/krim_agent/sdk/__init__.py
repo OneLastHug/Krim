@@ -1,5 +1,7 @@
 """Python 生成 SDK；参考 Vercel AI SDK 的语义，运行时全部为 Python。"""
 
+from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
+
 from .text import PythonAI, SDKOutputError, StreamTextResult
 from .types import (
     ContextBudgetPart,
@@ -26,6 +28,10 @@ from .types import (
 )
 
 __all__ = [
+    "EvalCase",
+    "EvalConfig",
+    "EvalDataset",
+    "EvalReport",
     "ContextBudgetPart",
     "ModelStepPart",
     "ContextCompactPart",
