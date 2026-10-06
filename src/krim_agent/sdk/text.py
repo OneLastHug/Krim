@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from types import TracebackType
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
@@ -18,7 +19,13 @@ from krim_agent.context_engine import (
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.prompt_context import MentionOccurrence
 from krim_agent.prompt_nodes import PromptNode
-from krim_agent.protocol.domain import ChatRequest, MessageView, RunView, ServiceError
+from krim_agent.protocol.domain import (
+    TERMINAL_STATUSES,
+    ChatRequest,
+    MessageView,
+    RunView,
+    ServiceError,
+)
 from krim_agent.protocol.models import StreamFrame, check_json
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
 from krim_agent.providers.factory import OwnedProvider
@@ -51,6 +58,10 @@ from .types import (
     UsageBudgetPart,
     UsagePart,
 )
+
+if TYPE_CHECKING:
+    from krim_agent.evaluation import EvalConfig, EvalDataset, EvalReport
+    from krim_agent.evaluation.scorers import EvalScorer
 
 
 class SDKOutputError(ValueError):
@@ -251,7 +262,10 @@ class StreamTextResult:
 
     async def collect(self) -> GenerateResult:
         finish: StreamFinish | None = None
+        start: StreamStart | None = None
         async for part in self.full_stream():
+            if isinstance(part, StreamStart):
+                start = part
             if isinstance(part, StreamFinish):
                 finish = part
         if finish is None:
@@ -285,6 +299,8 @@ class StreamTextResult:
             code=finish.code,
             token_usage=run_usage.token_usage,
             usage_complete=run_usage.usage_complete,
+            model_steps=run_usage.steps,
+            trace_context=start.trace_context if start is not None else None,
         )
 
     async def output[Output: BaseModel](self, schema: type[Output]) -> Output:
@@ -410,6 +426,36 @@ class PythonAI:
             budget_account_ids=budget_account_ids,
         )
         return await stream.collect()
+
+    async def read_result(self, run_id: str) -> GenerateResult:
+        """只读取已终态的持久生成结果，不再次调用模型或执行工具。"""
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        run = await self.runtime.repository.get_run(run_id)
+        if run.status not in TERMINAL_STATUSES:
+            raise ServiceError("result_not_terminal", "运行尚未终态，不能只读评估结果", 409)
+        return await StreamTextResult(self.runtime, run).collect()
+
+    async def evaluate(
+        self,
+        dataset: EvalDataset,
+        *,
+        scorers: Sequence[EvalScorer] | None = None,
+        config: EvalConfig | None = None,
+        version: str = "1",
+        prompt_prefix: str = "",
+    ) -> EvalReport:
+        """隔离每个样本，复用真实生成/工具链并在超时或取消时停止生产。"""
+        from krim_agent.evaluation import GenerationTarget, evaluate
+
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return await evaluate(
+            dataset,
+            GenerationTarget(self, version=version, prompt_prefix=prompt_prefix),
+            scorers=scorers,
+            config=config,
+        )
 
     async def skills(self, topic_id: str) -> SkillCatalogView:
         return await self.runtime.repository.skill_catalog(topic_id)

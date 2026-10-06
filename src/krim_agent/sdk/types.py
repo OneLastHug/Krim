@@ -14,7 +14,7 @@ from krim_agent.protocol.domain import MessageView, RunView
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelToolCall
 from krim_agent.tools.core import ToolAudit, ToolResult
-from krim_agent.usage import TokenUsage, UsageTotals
+from krim_agent.usage import ModelStepUsage, TokenUsage, UsageTotals
 
 FinishReason = Literal["stop", "tool-calls", "length", "abort", "error", "interrupted"]
 
@@ -211,6 +211,8 @@ class GenerateResult(StrictModel):
     code: str | None = None
     token_usage: UsageTotals | None = None
     usage_complete: bool = False
+    model_steps: list[ModelStepUsage] = Field(default_factory=list)
+    trace_context: TraceContext | None = None
 
     @property
     def all_text(self) -> str:
