@@ -33,6 +33,10 @@ class EvalCleanupError(RuntimeError):
     """生产无法收束时终止批次，避免继续扩大未回收运行。"""
 
 
+class EvalScoringUnknown(RuntimeError):
+    """评分器的真实调用尚未能确认终态，必须交给恢复者裁决。"""
+
+
 @dataclass
 class EvalAttempt:
     report_id: str
@@ -42,6 +46,12 @@ class EvalAttempt:
     generation: int = 1
     bindings: dict[str, JsonValue] = field(default_factory=dict)
     checkpoint: Callable[[dict[str, JsonValue]], Awaitable[None]] | None = None
+    namespace: str = ""
+    score_bindings: dict[str, JsonValue] = field(default_factory=dict)
+    score_checkpoint: Callable[[dict[str, JsonValue]], Awaitable[None]] | None = None
+    retry_scoring: bool = False
+    skip_scoring: bool = False
+    score_outputs: dict[str, EvalOutput] = field(default_factory=dict)
 
     async def save_binding(self, values: dict[str, JsonValue]) -> None:
         if self.checkpoint is not None:
@@ -56,10 +66,21 @@ class EvalAttempt:
 
     @property
     def idempotency_key(self) -> str:
-        return (
+        base = (
             f"eval:{self.report_id}:{fingerprint(self.case_id)[:16]}:"
             f"{self.repetition}:{self.generation}"
         )
+        return base + (f":{self.namespace}" if self.namespace else "")
+
+    async def save_score_binding(self, name: str, values: dict[str, JsonValue]) -> None:
+        self.score_bindings[name] = values
+        if self.score_checkpoint is not None:
+            task = asyncio.ensure_future(self.score_checkpoint(self.score_bindings))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
 
 
 class EvalTarget(Protocol):
@@ -93,11 +114,13 @@ async def execute_case(
     except Exception:
         output, error_code = attempt.output, "eval_execution_error"
     duration = (time.monotonic() - started) * 1000
-    scores, scoring = await _score(case, output, error_code, scorers, infos, config)
+    scores, scoring = await _score(
+        case, output, error_code, scorers, infos, config, attempt=attempt
+    )
     return EvalCaseResult(
         case_id=case.id,
         repetition=repetition,
-        status=classify(output, scores, config, error_code),
+        status=classify(output, scores, config, error_code, case),
         output=output,
         scores=scores,
         error_code=error_code,
@@ -126,13 +149,18 @@ async def _score(
     *,
     saved_scores: list[EvalScore] | None = None,
     on_score: Callable[[list[EvalScore], float], Awaitable[None]] | None = None,
+    attempt: EvalAttempt | None = None,
 ) -> tuple[list[EvalScore], float]:
     started = time.monotonic()
     scores = list(saved_scores or [])
     if [s.name for s in scores] != [i.name for i in infos[: len(scores)]]:
         raise ValueError("已保存评分来源不一致")
     for scorer, info in list(zip(scorers, infos, strict=True))[len(scores) :]:
-        if output is None or output.status != "completed" or error_code is not None:
+        if (
+            output is None
+            or (output.status != "completed" and output.status != case.expected_status)
+            or error_code is not None
+        ):
             scores.append(
                 EvalScore(name=info.name, status="skipped", reason="target_not_completed")
             )
@@ -141,10 +169,20 @@ async def _score(
             continue
         try:
             async with asyncio.timeout(config.scorer_timeout_seconds):
-                value = await scorer.score(case.model_copy(deep=True), output.model_copy(deep=True))
+                with_attempt = getattr(scorer, "score_with_attempt", None)
+                if with_attempt is not None:
+                    value = await with_attempt(
+                        case.model_copy(deep=True), output.model_copy(deep=True), attempt
+                    )
+                else:
+                    value = await scorer.score(
+                        case.model_copy(deep=True), output.model_copy(deep=True)
+                    )
             score = EvalScore.model_validate(value.model_dump())
             if score.name != info.name:
                 raise ValueError("评分来源不一致")
+        except EvalScoringUnknown:
+            raise
         except TimeoutError:
             score = EvalScore(name=info.name, status="error", reason="scorer_timeout")
         except Exception:
@@ -166,6 +204,7 @@ async def evaluate(
     snapshot = EvalDataset.model_validate(dataset.model_dump())
     options = EvalConfig.model_validate((config or EvalConfig()).model_dump())
     selected, infos = _scorers(scorers)
+    options.validate_metrics([info.name for info in infos])
     target_info = EvalTargetInfo.model_validate(target.describe().model_dump())
     if len(snapshot.cases) * options.repetitions > 10000:
         raise ValueError("评估总尝试数不能超过 10000")
@@ -215,12 +254,22 @@ async def rescore(
     *,
     scorers: Sequence[EvalScorer] | None = None,
     threshold: float | None = None,
+    config: EvalConfig | None = None,
 ) -> EvalReport:
     previous = EvalReport.model_validate(report.model_dump())
     selected, infos = _scorers(scorers)
-    options = previous.config.model_copy(deep=True)
+    options = (
+        EvalConfig.model_validate(config.model_dump())
+        if config
+        else previous.config.model_copy(deep=True)
+    )
+    if any(getattr(scorer, "requires_model", False) for scorer in selected):
+        raise ValueError("离线重评分禁止模型评委；显式评分请使用持久任务")
+    if options.repetitions != previous.config.repetitions:
+        raise ValueError("重评分不能改变已执行的重复次数")
     if threshold is not None:
         options = EvalConfig.model_validate({**options.model_dump(), "threshold": threshold})
+    options.validate_metrics([info.name for info in infos])
     created = datetime.now(UTC)
     cases = {case.id: case for case in previous.dataset.cases}
     results = []
@@ -234,7 +283,9 @@ async def rescore(
                     **item.model_dump(),
                     "scores": scores,
                     "scoring_ms": scoring,
-                    "status": classify(item.output, scores, options, item.error_code),
+                    "status": classify(
+                        item.output, scores, options, item.error_code, cases[item.case_id]
+                    ),
                 }
             )
         )

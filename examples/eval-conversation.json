@@ -1,0 +1,13 @@
+{
+  "name": "离线多轮试运行",
+  "version": "1",
+  "cases": [
+    {
+      "id": "follow-up",
+      "input": "你好",
+      "turns": [{"input": "继续", "expected": "[fake] 收到：继续"}],
+      "expected": "[fake] 收到：继续",
+      "tags": ["conversation", "offline"]
+    }
+  ]
+}

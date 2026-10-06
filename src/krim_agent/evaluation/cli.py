@@ -18,6 +18,7 @@ from .reports import compare_reports
 from .runner import rescore
 from .scorers import (
     ContainsScorer,
+    ConversationScorer,
     EvalScorer,
     ExactMatchScorer,
     JsonMatchScorer,
@@ -28,7 +29,15 @@ from .scorers import (
 from .targets import AgentTarget
 from .types import EvalConfig, EvalReport
 
-SCORERS = ("exact-match", "contains", "json-match", "json-schema", "success", "tool-calls")
+SCORERS = (
+    "exact-match",
+    "contains",
+    "json-match",
+    "json-schema",
+    "success",
+    "tool-calls",
+    "conversation-turns",
+)
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -43,7 +52,10 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     run.add_argument("--output", required=True, help="output（输出）：本地报告路径")
     run.add_argument("--database", default=".data/evals/runs.sqlite", help="独立评估 SQLite 路径")
     run.add_argument(
-        "--target", choices=("text", "agent"), default="text", help="target（目标）：生成或 Agent"
+        "--target",
+        choices=("text", "agent", "conversation"),
+        default="text",
+        help="target（目标）：生成、Agent 或多轮",
     )
     run.add_argument("--version", default="1", help="version（版本）：目标代码/Prompt 版本")
     run.add_argument("--prompt-prefix", default="", help="Prompt 前缀")
@@ -107,6 +119,7 @@ def _score_arguments(parser: argparse.ArgumentParser) -> None:
         help="scorer（评分器）：可重复指定，默认精确匹配",
     )
     parser.add_argument("--schema", help="schema（模式）：json-schema 评分所需的本地 JSON Schema")
+    parser.add_argument("--policy", help="policy（策略）：本地 JSON 的 metrics/aggregate_threshold")
 
 
 def _scorers(args: argparse.Namespace) -> list[EvalScorer]:
@@ -128,20 +141,38 @@ def _scorers(args: argparse.Namespace) -> list[EvalScorer]:
             selected.append(JsonSchemaScorer(schema))
         elif name == "success":
             selected.append(SuccessScorer())
+        elif name == "conversation-turns":
+            selected.append(ConversationScorer())
         else:
             selected.append(ToolCallsScorer())
     return selected
 
 
+def _policy(options: EvalConfig, path: str | None) -> EvalConfig:
+    if path is None:
+        return options
+    with Path(path).open("rb") as handle:
+        raw = handle.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("评分策略文件过大")
+    value = parse_json(raw.decode("utf-8"))
+    if not isinstance(value, dict) or set(value) - {"metrics", "aggregate_threshold"}:
+        raise ValueError("策略只允许 metrics 与 aggregate_threshold")
+    return EvalConfig.model_validate({**options.model_dump(), **value})
+
+
 async def _run(args: argparse.Namespace) -> EvalReport:
     dataset = load_dataset(args.dataset)
     scorers = _scorers(args)
-    options = EvalConfig(
-        concurrency=args.concurrency,
-        repetitions=args.repetitions,
-        timeout_seconds=args.timeout,
-        scorer_timeout_seconds=args.scorer_timeout,
-        threshold=args.threshold,
+    options = _policy(
+        EvalConfig(
+            concurrency=args.concurrency,
+            repetitions=args.repetitions,
+            timeout_seconds=args.timeout,
+            scorer_timeout_seconds=args.scorer_timeout,
+            threshold=args.threshold,
+        ),
+        args.policy,
     )
     path = await asyncio.to_thread(Path(args.database).resolve)
     await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
@@ -150,13 +181,14 @@ async def _run(args: argparse.Namespace) -> EvalReport:
         {**base.model_dump(), "database_url": f"sqlite+aiosqlite:///{path.as_posix()}"}
     )
     async with await PythonAI.create(settings=settings) as ai:
-        if args.target == "text":
+        if args.target in {"text", "conversation"}:
             handle = await ai.start_evaluation(
                 dataset,
                 scorers=scorers,
                 config=options,
                 version=args.version,
                 prompt_prefix=args.prompt_prefix,
+                conversation=args.target == "conversation",
             )
             await handle.wait()
             return await handle.report()
@@ -215,8 +247,14 @@ def execute(args: argparse.Namespace) -> int:
         print(comparison.model_dump_json(indent=2))
         return 0 if comparison.compatible and not comparison.regressions else 1
     if args.eval_action == "rescore":
+        previous = load_report(args.report)
         report = asyncio.run(
-            rescore(load_report(args.report), scorers=_scorers(args), threshold=args.threshold)
+            rescore(
+                previous,
+                scorers=_scorers(args),
+                threshold=args.threshold,
+                config=_policy(previous.config, args.policy),
+            )
         )
     else:
         report = asyncio.run(_run(args))

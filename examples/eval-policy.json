@@ -1,0 +1,7 @@
+{
+  "metrics": {
+    "conversation_turns": {"required": true, "threshold": 1, "weight": 2},
+    "exact_match": {"required": true, "threshold": 1, "weight": 1}
+  },
+  "aggregate_threshold": 1
+}

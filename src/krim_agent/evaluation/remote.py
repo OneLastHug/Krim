@@ -142,9 +142,10 @@ class AsyncEvalClient:
         base_url: str = "http://127.0.0.1:8765",
         api_key: str = "",
         *,
+        http: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.http = httpx.AsyncClient(
+        self.http = http or httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             timeout=60,
@@ -152,6 +153,7 @@ class AsyncEvalClient:
             follow_redirects=False,
             transport=transport,
         )
+        self.owns = http is None
 
     async def __aenter__(self) -> AsyncEvalClient:
         return self
@@ -165,7 +167,8 @@ class AsyncEvalClient:
         await self.close()
 
     async def close(self) -> None:
-        await self.http.aclose()
+        if self.owns:
+            await self.http.aclose()
 
     async def start(self, request: EvalRemoteStartRequest) -> EvalJobView:
         return _parse(

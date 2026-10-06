@@ -13,10 +13,12 @@ from krim_agent.persistence import Database
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.sdk import PythonAI
 
+from .conversation import ConversationTarget
 from .jobs import EvalResumeRequest
 from .remote import SyncEvalClient
 from .scorers import (
     ContainsScorer,
+    ConversationScorer,
     EvalScorer,
     ExactMatchScorer,
     JsonMatchScorer,
@@ -50,6 +52,8 @@ def restore_scorers(infos: list[EvalScorerInfo]) -> list[EvalScorer]:
             result.append(
                 SuccessScorer(require_tools_success=config.get("require_tools_success") is True)
             )
+        elif info.name == "conversation_turns":
+            result.append(ConversationScorer())
         elif info.name == "tool_calls":
             result.append(
                 ToolCallsScorer(
@@ -99,16 +103,16 @@ async def _local(args: argparse.Namespace) -> BaseModel | list[BaseModel]:
         if not (await handle.view()).can_resume:
             raise ServiceError("eval_busy_or_terminal", "评估已被持有或不能恢复", 409)
         spec = await service.store.spec(args.job_id)
-        if spec.target.kind != "pythonai":
+        if spec.target.kind not in {"pythonai", "conversation"}:
             raise ValueError("此目标须由原 SDK/服务端可信定义恢复")
         async with await PythonAI.create(
             settings=Settings(database_url=str(database.engine.url))
         ) as ai:
             handle = await service.resume(
                 args.job_id,
-                target=GenerationTarget(
-                    ai, version=spec.target.version, prompt_prefix=args.prompt_prefix
-                ),
+                target=(
+                    ConversationTarget if spec.target.kind == "conversation" else GenerationTarget
+                )(ai, version=spec.target.version, prompt_prefix=args.prompt_prefix),
                 scorers=restore_scorers(spec.scorers),
                 request=EvalResumeRequest(
                     retry_uncertain=args.retry_uncertain, skip_uncertain=args.skip_uncertain

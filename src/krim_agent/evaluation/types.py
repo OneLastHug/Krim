@@ -22,6 +22,17 @@ def fingerprint(value: object) -> str:
     ).hexdigest()
 
 
+ExpectedStatus = Literal["completed", "failed", "aborted", "interrupted"]
+
+
+class EvalTurn(StrictModel):
+    input: str = Field(min_length=1, max_length=32768)
+    expected: JsonValue = None
+    expected_status: ExpectedStatus = "completed"
+    expected_code: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict, max_length=64)
+
+
 class EvalCase(StrictModel):
     id: str = Field(min_length=1, max_length=128)
     input: JsonValue
@@ -29,11 +40,30 @@ class EvalCase(StrictModel):
     expected: JsonValue = None
     metadata: dict[str, JsonValue] = Field(default_factory=dict, max_length=64)
     tags: list[str] = Field(default_factory=list, max_length=32)
+    expected_status: ExpectedStatus = "completed"
+    expected_code: str | None = Field(default=None, min_length=1, max_length=128)
+    turns: list[EvalTurn] = Field(default_factory=list, max_length=15)
 
     @model_validator(mode="after")
     def finite_content(self) -> EvalCase:
         check_json(self.model_dump(mode="json"))
+        if self.turns and (not isinstance(self.input, str) or not self.input.strip()):
+            raise ValueError("多轮对话的首条 input 必须为非空文本")
+        if any(not turn.input.strip() for turn in self.turns):
+            raise ValueError("多轮对话输入不能只有空白")
         return self
+
+    def fingerprint_content(self) -> dict[str, JsonValue]:
+        values = self.model_dump(mode="json")
+        # 只省略此次新增的默认字段；旧五字段的编码完全保留。
+        for name, default in (
+            ("expected_status", "completed"),
+            ("expected_code", None),
+            ("turns", []),
+        ):
+            if values[name] == default:
+                values.pop(name)
+        return values
 
 
 class EvalDataset(StrictModel):
@@ -50,7 +80,26 @@ class EvalDataset(StrictModel):
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(self.model_dump(mode="json"))
+        return fingerprint(
+            {
+                "name": self.name,
+                "version": self.version,
+                "cases": [case.fingerprint_content() for case in self.cases],
+            }
+        )
+
+
+class EvalMetricPolicy(StrictModel):
+    required: bool = True
+    threshold: float | None = Field(default=None, ge=0, le=1)
+    weight: float = Field(default=1, gt=0, le=1000)
+    allow_skipped: bool = False
+
+    @model_validator(mode="after")
+    def optional_skip(self) -> EvalMetricPolicy:
+        if self.required and self.allow_skipped:
+            raise ValueError("必选指标不能忽略未评分")
+        return self
 
 
 class EvalConfig(StrictModel):
@@ -59,6 +108,12 @@ class EvalConfig(StrictModel):
     timeout_seconds: float = Field(default=60, gt=0, le=300)
     scorer_timeout_seconds: float = Field(default=10, gt=0, le=60)
     threshold: float = Field(default=1, ge=0, le=1)
+    metrics: dict[str, EvalMetricPolicy] = Field(default_factory=dict, max_length=32)
+    aggregate_threshold: float | None = Field(default=None, ge=0, le=1)
+
+    def validate_metrics(self, names: list[str]) -> None:
+        if set(self.metrics) - set(names):
+            raise ValueError("指标策略必须绑定已注册评分器")
 
 
 class EvalToolCall(StrictModel):
@@ -70,22 +125,30 @@ class EvalToolCall(StrictModel):
     result: JsonValue = None
 
 
-class EvalOutput(StrictModel):
+class EvalUsageTotals(UsageTotals):
+    """多轮用量的相同字段语义；扩大轮次上限，不改变单 Run 用量合约。"""
+
+    attempted_steps: int = Field(ge=0, le=512)
+    reported_steps: int = Field(ge=0, le=512)
+    confirmed_steps: int = Field(ge=0, le=512)
+
+
+class EvalObservation(StrictModel):
     value: JsonValue = None
-    status: Literal["completed", "failed", "aborted", "interrupted"] = "completed"
+    status: ExpectedStatus = "completed"
     run_id: str | None = None
     topic_id: str | None = None
     agent_id: str | None = None
     finish_reason: str | None = None
     code: str | None = None
-    tools: list[EvalToolCall] | None = Field(default=None, max_length=128)
-    model_steps: int | None = Field(default=None, ge=0, le=32)
-    token_usage: UsageTotals | None = None
+    tools: list[EvalToolCall] | None = Field(default=None, max_length=2048)
+    model_steps: int | None = Field(default=None, ge=0, le=512)
+    token_usage: UsageTotals | EvalUsageTotals | None = None
     usage_complete: bool = False
     trace_context: TraceContext | None = None
 
     @model_validator(mode="after")
-    def finite_output(self) -> EvalOutput:
+    def finite_output(self) -> EvalObservation:
         check_json(self.model_dump(mode="json"), max_bytes=1024 * 1024)
         if self.usage_complete and (
             self.token_usage is None or not self.token_usage.usage_complete
@@ -94,16 +157,45 @@ class EvalOutput(StrictModel):
         return self
 
 
+class EvalTurnResult(StrictModel):
+    index: int = Field(ge=0, le=15)
+    input: str
+    output: EvalObservation
+
+
+class EvalOutput(EvalObservation):
+    turns: list[EvalTurnResult] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def ordered_turns(self) -> EvalOutput:
+        if [turn.index for turn in self.turns] != list(range(len(self.turns))):
+            raise ValueError("多轮输出必须从0连续排列")
+        if len({turn.output.topic_id for turn in self.turns}) > 1:
+            raise ValueError("多轮输出必须来自同一话题")
+        return self
+
+
 class EvalScore(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     value: float | None = Field(default=None, ge=0, le=1)
     status: Literal["scored", "skipped", "error"] = "scored"
     reason: str | None = Field(default=None, max_length=512)
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
+    run_id: str | None = None
+    topic_id: str | None = None
+    code: str | None = None
+    token_usage: UsageTotals | None = None
+    usage_complete: bool = False
 
     @model_validator(mode="after")
     def valid_score(self) -> EvalScore:
         if (self.status == "scored") != (self.value is not None):
             raise ValueError("有效评分需要数值；跳过或失败不能伪造评分")
+        check_json(self.evidence)
+        if self.usage_complete and (
+            self.token_usage is None or not self.token_usage.usage_complete
+        ):
+            raise ValueError("评分完整用量需要实际报告")
         return self
 
 
@@ -164,21 +256,55 @@ class EvalSummary(StrictModel):
 
 
 def classify(
-    output: EvalOutput | None, scores: list[EvalScore], config: EvalConfig, error_code: str | None
+    output: EvalOutput | None,
+    scores: list[EvalScore],
+    config: EvalConfig,
+    error_code: str | None,
+    case: EvalCase | None = None,
 ) -> CaseStatus:
     if error_code == "eval_timeout":
         return "timed_out"
-    if error_code is not None or output is None or output.status != "completed":
+    if error_code is not None or output is None:
         return "error"
+    expected = case.expected_status if case else "completed"
+    if output.status != expected:
+        return "error" if expected == "completed" else "failed"
+    if case and case.expected_code is not None and output.code != case.expected_code:
+        return "failed"
     if any(score.status == "error" for score in scores):
         return "error"
-    if not scores or any(score.status == "skipped" for score in scores):
+    if not scores or any(
+        score.status == "skipped"
+        and not (
+            (policy := config.metrics.get(score.name, EvalMetricPolicy())).allow_skipped
+            and not policy.required
+        )
+        for score in scores
+    ):
         return "unscored"
-    return (
-        "passed"
-        if all(score.value is not None and score.value >= config.threshold for score in scores)
-        else "failed"
-    )
+    usable = [s for s in scores if s.value is not None]
+    if not usable:
+        return "unscored"
+    for score in usable:
+        policy = config.metrics.get(score.name, EvalMetricPolicy())
+        threshold = config.threshold if policy.threshold is None else policy.threshold
+        if policy.required and (score.value is None or score.value < threshold):
+            return "failed"
+    value = weighted_score(scores, config)
+    if config.aggregate_threshold is not None and (
+        value is None or value < config.aggregate_threshold
+    ):
+        return "failed"
+    return "passed"
+
+
+def weighted_score(scores: list[EvalScore], config: EvalConfig) -> float | None:
+    values = [
+        (s.value, config.metrics.get(s.name, EvalMetricPolicy()).weight)
+        for s in scores
+        if s.status == "scored" and s.value is not None
+    ]
+    return sum(v * w for v, w in values) / sum(w for _, w in values) if values else None
 
 
 def summarize(results: list[EvalCaseResult], scorers: list[EvalScorerInfo]) -> EvalSummary:
@@ -251,6 +377,7 @@ class EvalReport(StrictModel):
         names = [scorer.name for scorer in self.scorers]
         if len(set(names)) != len(names):
             raise ValueError("评分器名称必须唯一")
+        self.config.validate_metrics(names)
         expected = [
             (case.id, repetition)
             for case in self.dataset.cases
@@ -258,11 +385,12 @@ class EvalReport(StrictModel):
         ]
         if [(result.case_id, result.repetition) for result in self.results] != expected:
             raise ValueError("报告的样本、重复次数或排列不完整")
+        cases = {case.id: case for case in self.dataset.cases}
         for result in self.results:
             if [score.name for score in result.scores] != names:
                 raise ValueError("报告的评分来源或顺序不一致")
             if result.status != classify(
-                result.output, result.scores, self.config, result.error_code
+                result.output, result.scores, self.config, result.error_code, cases[result.case_id]
             ):
                 raise ValueError("报告的通过状态与评分不一致")
         if self.summary != summarize(self.results, self.scorers):
