@@ -129,6 +129,8 @@ class ChatRuntime:
         agent_id: str | None = None,
         system_prompt: str = "",
         agent_definition_hash: str | None = None,
+        agent_session_id: str | None = None,
+        agent_owner_id: str | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -163,6 +165,8 @@ class ChatRuntime:
         self.agent_id = agent_id
         self.system_prompt = system_prompt
         self.agent_definition_hash = agent_definition_hash
+        self.agent_session_id = agent_session_id
+        self.agent_owner_id = agent_owner_id
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
         )
@@ -439,6 +443,9 @@ class ChatRuntime:
                 allow_new=active < self.settings.max_active_runs,
                 action=action,
                 source_message_id=source_message_id,
+                agent_session_id=self.agent_session_id,
+                agent_id=self.agent_id,
+                agent_owner_id=self.agent_owner_id,
             )
             if not created:
                 return run
@@ -492,6 +499,10 @@ class ChatRuntime:
             }
             if state.trace_context is not None:
                 start_data["trace_context"] = state.trace_context.model_dump(mode="json")
+            if self.agent_session_id is not None:
+                start_data["agent_id"] = self.agent_id
+                start_data["session_id"] = self.agent_session_id
+                start_data["agent_definition_hash"] = self.agent_definition_hash
             await state.publish("start", start_data)
             snapshot = asyncio.create_task(self.repository.run_skill_snapshot(state.run.id))
             try:
@@ -1004,6 +1015,7 @@ class ChatRuntime:
                         call_id=call.id,
                         policy=self.tool_policy,
                         agent_id=self.agent_id,
+                        session_id=self.agent_session_id,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,

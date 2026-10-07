@@ -74,6 +74,8 @@ if TYPE_CHECKING:
     from krim_agent.evaluation.scorers import EvalScorer
     from krim_agent.evaluation.service import EvalRunHandle, EvaluationService
 
+    from .agents import AgentSession
+
 
 class SDKOutputError(ValueError):
     """运行结果未能通过调用方声明的 Pydantic 输出校验。"""
@@ -540,6 +542,26 @@ class PythonAI:
         if self._agent_service is None:
             self._agent_service = AgentService(self.runtime, self.runtime.settings)
         return self._agent_service
+
+    async def agent(
+        self,
+        name: str = "default",
+        *,
+        persistent: bool = False,
+        profile_revision: int | None = None,
+    ) -> AgentSession:
+        from .agents import AgentSession
+
+        view = await self.agents().spawn(
+            name, persistent=persistent, profile_revision=profile_revision
+        )
+        return AgentSession(self.agents(), view.agent_id)
+
+    def agent_session(self, agent_id: str) -> AgentSession:
+        """按稳定标识取得会话门面；查询只读，恢复与执行须显式调用。"""
+        from .agents import AgentSession
+
+        return AgentSession(self.agents(), agent_id)
 
     async def start_evaluation(
         self,

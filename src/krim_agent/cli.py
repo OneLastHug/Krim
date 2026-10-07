@@ -69,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
             "disable",
             "inventory",
             "restore",
+            "session",
+            "turns",
+            "close",
+            "reopen",
             "list",
             "get",
             "spawn",
@@ -84,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     agent.add_argument("--idempotency-key", help="重试去重键")
     agent.add_argument("--from-seq", type=int, default=0, help="events 起始序号")
+    agent.add_argument("--run-id", help="run ID（运行标识）：固定要续读的 Agent 轮次")
     agent.add_argument("--revision", type=int, help="revision（配置版本）：新建选择或更新预期版本")
     agent.add_argument(
         "--persistent", action="store_true", help="persistent（持久）：spawn 句柄可由后续进程恢复"
@@ -397,6 +402,28 @@ def main() -> None:
                         print(client.agent(args.value).model_dump_json(indent=2))
                     elif args.action == "restore":
                         print(client.agent_restore(args.value).model_dump_json(indent=2))
+                    elif args.action == "session":
+                        print(client.agent_session(args.value).model_dump_json(indent=2))
+                    elif args.action == "turns":
+                        print(
+                            json.dumps(
+                                [
+                                    item.model_dump(mode="json")
+                                    for item in client.agent_turns(args.value)
+                                ],
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                        )
+                    elif args.action in {"close", "reopen"}:
+                        if args.revision is None:
+                            parser.error("close/reopen需要--revision会话预期版本")
+                        controlled_session = (
+                            client.agent_session_close(args.value, args.revision)
+                            if args.action == "close"
+                            else client.agent_session_reopen(args.value, args.revision)
+                        )
+                        print(controlled_session.model_dump_json(indent=2))
                     elif args.action in {"execute", "resume"}:
                         if not args.prompt:
                             parser.error("agent execute/resume 需要 prompt")
@@ -407,7 +434,9 @@ def main() -> None:
                         )
                         print(view.model_dump_json(indent=2))
                     elif args.action == "events":
-                        for frame in client.agent_events(args.value, args.from_seq):
+                        for frame in client.agent_events(
+                            args.value, args.from_seq, run_id=args.run_id
+                        ):
                             print(frame.model_dump_json(exclude_none=True))
                     elif args.action == "stop":
                         print(client.agent_stop(args.value).model_dump_json(indent=2))

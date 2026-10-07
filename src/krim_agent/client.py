@@ -10,6 +10,7 @@ import httpx
 from pydantic import TypeAdapter
 
 from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion
+from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
 
 from .agents import AgentDescriptor
 from .application.agents import AgentInventoryView, AgentPromptRequest, AgentView
@@ -73,7 +74,9 @@ from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
 
 class ClientError(Exception):
-    pass
+    def __init__(self, message: str, *, code: str | None = None, status: int | None = None) -> None:
+        super().__init__(message)
+        self.code, self.status = code, status
 
 
 class KrimClient:
@@ -112,7 +115,20 @@ class KrimClient:
     def _check(response: httpx.Response) -> None:
         if response.is_success:
             return
-        raise ClientError(f"HTTP 请求失败: {response.status_code}；请检查服务、权限或运行状态")
+        code: str | None = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+                value = payload["error"].get("code")
+                if isinstance(value, str) and len(value) <= 128 and value.isascii():
+                    code = value
+        except ValueError:
+            pass
+        raise ClientError(
+            f"HTTP 请求失败: {response.status_code}；{code or '请检查服务、权限或运行状态'}",
+            code=code,
+            status=response.status_code,
+        )
 
     @property
     def evaluations(self) -> SyncEvalClient:
@@ -395,6 +411,32 @@ class KrimClient:
         self._check(response)
         return AgentView.model_validate_json(response.content)
 
+    def agent_session(self, agent_id: str) -> AgentSessionView:
+        response = self._http.get(f"/v1/agents/{agent_id}/session")
+        self._check(response)
+        return AgentSessionView.model_validate_json(response.content)
+
+    def agent_turns(self, agent_id: str) -> list[AgentTurnView]:
+        response = self._http.get(f"/v1/agents/{agent_id}/turns")
+        self._check(response)
+        return TypeAdapter(list[AgentTurnView]).validate_json(response.content)
+
+    def agent_session_close(self, agent_id: str, expected_revision: int) -> AgentSessionView:
+        request = AgentSessionControl(expected_revision=expected_revision)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/session/close", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return AgentSessionView.model_validate_json(response.content)
+
+    def agent_session_reopen(self, agent_id: str, expected_revision: int) -> AgentSessionView:
+        request = AgentSessionControl(expected_revision=expected_revision)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/session/reopen", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return AgentSessionView.model_validate_json(response.content)
+
     def agent_profiles(self) -> list[AgentProfileVersion]:
         response = self._http.get("/v1/agents/profiles")
         self._check(response)
@@ -463,17 +505,23 @@ class KrimClient:
         self._check(response)
         return AgentView.model_validate_json(response.content)
 
-    def agent_events(self, agent_id: str, from_seq: int = 0) -> Iterator[StreamFrame]:
+    def agent_events(
+        self, agent_id: str, from_seq: int = 0, *, run_id: str | None = None
+    ) -> Iterator[StreamFrame]:
+        params: dict[str, str | int] = {"from_seq": from_seq}
+        if run_id is not None:
+            params["run_id"] = run_id
         with self._http.stream(
             "GET",
             f"/v1/agents/{agent_id}/events",
-            params={"from_seq": from_seq},
+            params=params,
             timeout=httpx.Timeout(30, read=45),
         ) as response:
             self._check(response)
-            run_id = response.headers.get("x-krim-agent-run-id")
-            if not run_id:
+            bound_run_id = response.headers.get("x-krim-agent-run-id")
+            if not bound_run_id or (run_id is not None and run_id != bound_run_id):
                 raise ClientError("Agent SSE 缺少运行关联")
+            run_id = bound_run_id
             data: list[str] = []
             event_id = ""
             event_kind = ""

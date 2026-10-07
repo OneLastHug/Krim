@@ -23,6 +23,7 @@ class AgentProfile(StrictModel):
     timeout_seconds: float = Field(default=60, gt=0, le=300)
     tool_timeout_seconds: float = Field(default=10, gt=0, le=120)
     persistent: bool = False
+    session_ttl_seconds: float | None = Field(default=None, gt=0, le=86400)
     context_config: ContextRunConfig = Field(default_factory=ContextRunConfig)
     usage_budget: UsageBudgetConfig | None = None
 

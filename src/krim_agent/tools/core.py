@@ -84,6 +84,7 @@ class ToolContext:
     call_id: str = field(default_factory=lambda: str(uuid4()))
     arguments: dict[str, Any] = field(default_factory=dict)
     agent_id: str | None = None
+    session_id: str | None = None
     approval_handler: ApprovalHandler | None = None
     question_handler: QuestionHandler | None = None
     interaction_publisher: InteractionPublisher | None = None
@@ -108,6 +109,7 @@ class ToolContext:
             policy=self.policy,
             call_id=self.call_id if self.depth == 0 else str(uuid4()),
             agent_id=self.agent_id,
+            session_id=self.session_id,
             approval_handler=self.approval_handler,
             question_handler=self.question_handler,
             interaction_publisher=self.interaction_publisher,

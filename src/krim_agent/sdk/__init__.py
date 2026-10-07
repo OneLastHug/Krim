@@ -4,6 +4,7 @@ from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
 from krim_agent.evaluation.remote import AsyncEvalClient, SyncEvalClient
 from krim_agent.evaluation.service import EvalRunHandle
 
+from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
 from .types import (
     ContextBudgetPart,
@@ -31,6 +32,7 @@ from .types import (
 )
 
 __all__ = [
+    "AgentSession",
     "EvalRunHandle",
     "AsyncEvalClient",
     "SyncEvalClient",
