@@ -124,7 +124,7 @@ export class BackgroundStreams {
             if (data?.type === "tool_call")
                 session.activity.push(`调用工具 ${String(data.name)}`);
             if (data?.type === "tool_result")
-                session.activity.push(`工具 ${String(data.name)}：${data.ok ? "完成" : "失败"}`);
+                session.activity.push(`工具 ${String(data.name)}：${data.is_error ? "失败" : "完成"}`);
             if (session.activity.length > 128)
                 session.activity.splice(0, session.activity.length - 128);
             if (data?.type === "step_finish")

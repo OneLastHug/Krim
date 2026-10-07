@@ -9,7 +9,7 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter
 
-from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion
+from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion, AgentResourceView
 from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
 
 from .agents import AgentDescriptor
@@ -405,6 +405,11 @@ class KrimClient:
         response = self._http.get("/v1/agents/inventory")
         self._check(response)
         return TypeAdapter(list[AgentInventoryView]).validate_json(response.content)
+
+    def agent_resources(self) -> list[AgentResourceView]:
+        response = self._http.get("/v1/agents/resources")
+        self._check(response)
+        return TypeAdapter(list[AgentResourceView]).validate_json(response.content)
 
     def agent_restore(self, agent_id: str) -> AgentView:
         response = self._http.post(f"/v1/agents/{agent_id}/restore")

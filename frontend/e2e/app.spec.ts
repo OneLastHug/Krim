@@ -332,6 +332,7 @@ test("Agent 卡片执行时使用同一审批与问答回程", async ({ page, re
   await page.getByRole("button", { name: "提交答案" }).click();
   const card = page.locator(".agent-card").filter({ hasText: agent.agent_id });
   await expect(card).toContainText("Agent 的真实答案");
+  await expect(card.locator("strong")).toContainText("已完成");
   const finished = await (await request.get(`/v1/agents/${agent.agent_id}`)).json();
   expect(finished.status).toBe("completed");
   const history = await (await request.get(`/v1/runs/${finished.current_run_id}/interactions`)).json();

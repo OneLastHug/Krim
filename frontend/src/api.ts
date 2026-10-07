@@ -97,6 +97,8 @@ export interface AgentDescriptor {
   max_turns: number;
   exposed_as_tool: boolean;
   profile_revision?: number | null;
+  available: boolean;
+  error_code: string | null;
 }
 export interface AgentSessionView {
   session_id: string; status: "open" | "closed" | "expired" | "destroyed";

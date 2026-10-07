@@ -599,7 +599,8 @@ function renderAgents() {
     for (const agent of state.agents) {
         const option = document.createElement("option");
         option.value = agent.name;
-        option.textContent = `${agent.name} · ${agent.risk === "read" ? t("只读任务") : t("受控任务")}`;
+        option.disabled = !agent.available;
+        option.textContent = `${agent.name} · ${agent.available ? agent.risk === "read" ? t("只读任务") : t("受控任务") : t("资源不可用")}`;
         select.append(option);
     }
     if (state.agents.some((agent) => agent.name === selected))

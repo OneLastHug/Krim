@@ -40,6 +40,8 @@ class AgentDescriptor(StrictModel):
     persistent: bool = False
     exposed_as_tool: bool = True
     profile_revision: int | None = None
+    available: bool = True
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,14 @@ class AgentCatalog:
         self.manager = manager
         self._entries: dict[str, CatalogEntry] = {}
 
+    @staticmethod
+    def tool_name(name: str) -> str:
+        normalized = name.lower().replace("-", "_")
+        if len(normalized) <= 58:
+            return f"agent_{normalized}"
+        digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+        return f"agent_{normalized[:49]}_{digest}"
+
     def register(
         self,
         name: str,
@@ -84,11 +94,7 @@ class AgentCatalog:
             raise ValueError("目录名称必须与 AgentDefinition.name 一致")
         if name in self._entries:
             raise ValueError("Agent 目录名称重复")
-        public_name = (
-            tool_name
-            if tool_name is not None
-            else f"agent_{definition.name.lower().replace('-', '_')}"
-        )
+        public_name = tool_name if tool_name is not None else self.tool_name(definition.name)
         entry = CatalogEntry(definition, description, risk, public_name, expose_as_tool)
         descriptor = entry.descriptor()
         if not description.strip() or len(description) > 4096:
