@@ -9,6 +9,7 @@ import { CheckpointUI } from "./checkpoint-ui.js";
 import { AttachmentsUI } from "./attachments-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 import { BackgroundStreams } from "./background-streams.js";
+import { AgentsUI } from "./agents-ui.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
@@ -28,6 +29,13 @@ const statuses = { created: "待执行", queued: "排队中", running: "执行�
 const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const backgroundStreams = new BackgroundStreams((session, item) => {
     renderTopics();
+    if (state.handles.some(agent => agent.topic_id === session.run.topic_id)) {
+        agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));
+        if (item?.frame.kind === "end")
+            void loadAgents().catch(() => undefined);
+        if (item?.frame.data?.type === "interaction_request")
+            void loadInteractions().catch(() => undefined);
+    }
     if (state.topicId !== session.run.topic_id)
         return;
     projectCurrentSession();
@@ -68,7 +76,7 @@ function projectCurrentSession() {
         state.streaming = state.disconnected = false;
         state.streamText = "";
     }
-    disableComposer(Boolean(creatingTopic || (session && !session.terminal) || (state.topicId && pendingSends.has(state.topicId))));
+    disableComposer(Boolean(state.tree?.topic.agent_session_id || creatingTopic || (session && !session.terminal) || (state.topicId && pendingSends.has(state.topicId))));
 }
 async function reloadCurrentHistory(topicId) {
     const [messages, tree] = await Promise.all([
@@ -97,6 +105,16 @@ let lastNoticeError = false;
 let lastNoticeLocal = true;
 let workflowRuns = [];
 const localStatus = (status) => t(statuses[status] || status);
+const agentsUI = new AgentsUI($("agents"), {
+    start: startAgent,
+    stop: async (agent) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/stop`, { method: "POST" }); await loadAgents(); },
+    destroy: async (agent) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}`, { method: "DELETE" }); state.handles = state.handles.filter(item => item.agent_id !== agent.agent_id); renderAgents(); },
+    control: async (agent, action) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/session/${action}`, { method: "POST", body: JSON.stringify({ expected_revision: agent.session.revision }) }); await loadAgents(); },
+    openTopic: loadTopic, prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
+});
+let agentsLoading = false;
+let agentsReloadNeeded = false;
+const completedAgentRuns = new Set();
 function promptNodes(prompt) {
     const points = Array.from(prompt);
     const occurrences = [...promptContextUI.occurrences].sort((left, right) => left.start - right.start);
@@ -381,7 +399,7 @@ function renderMessages() {
             details.append(title, output);
             node.append(details);
         }
-        if (message.role === "user" || message.role === "assistant") {
+        if (!state.tree?.topic.agent_session_id && (message.role === "user" || message.role === "assistant")) {
             const controls = document.createElement("div");
             controls.className = "message-controls";
             if (message.role === "user") {
@@ -476,6 +494,11 @@ function renderInteractions() {
         card.dataset.interactionId = interaction.id;
         const title = document.createElement("strong");
         title.textContent = interaction.kind === "approval" ? t("工具执行需要批准：{tool}", { tool: interaction.tool_name || "" }) : t("请回答问题");
+        const owner = state.handles.find(agent => agent.current_run_id === interaction.run_id || backgroundStreams.forTopic(agent.topic_id)?.interactionRuns.has(interaction.run_id));
+        if (owner) {
+            card.dataset.agentId = owner.agent_id;
+            title.textContent = `${owner.name} · ${title.textContent}`;
+        }
         const detail = document.createElement("p");
         detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || t("问题"));
         const actions = document.createElement("div");
@@ -582,43 +605,7 @@ function renderAgents() {
     if (state.agents.some((agent) => agent.name === selected))
         select.value = selected;
     $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
-    const root = $("agents");
-    root.replaceChildren();
-    for (const agent of state.handles) {
-        const card = document.createElement("div");
-        card.className = "agent-card";
-        const title = document.createElement("strong");
-        title.textContent = `${agent.name} · ${localStatus(agent.status)}`;
-        const id = document.createElement("small");
-        id.textContent = agent.agent_id;
-        const actions = document.createElement("div");
-        actions.className = "actions";
-        const resume = document.createElement("button");
-        resume.className = "secondary";
-        resume.type = "button";
-        resume.textContent = t("继续任务");
-        resume.disabled = ["created", "queued", "running"].includes(agent.status);
-        resume.onclick = () => void resumeAgent(agent.agent_id);
-        const stop = document.createElement("button");
-        stop.className = "secondary";
-        stop.type = "button";
-        stop.textContent = t("停止");
-        stop.disabled = !["queued", "running"].includes(agent.status);
-        stop.onclick = () => stopAgent(agent.agent_id);
-        const destroy = document.createElement("button");
-        destroy.className = "secondary";
-        destroy.type = "button";
-        destroy.textContent = t("销毁");
-        destroy.onclick = () => destroyAgent(agent.agent_id);
-        actions.append(resume, stop, destroy);
-        card.append(title, id, actions);
-        if (agent.result?.text) {
-            const output = document.createElement("pre");
-            output.textContent = agent.result.text;
-            card.append(output);
-        }
-        root.append(card);
-    }
+    agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));
 }
 function graphFromEditor() {
     const value = JSON.parse(text("workflow-json").value);
@@ -978,11 +965,36 @@ async function loadTopics() {
         await loadTopic(state.topics[0].id);
 }
 async function loadAgents() {
-    state.agents = await requestJson("/v1/agents/catalog");
-    state.handles = await requestJson("/v1/agents");
-    renderAgents();
-    await renderAgentInventory();
-    await loadInteractions();
+    if (agentsLoading) {
+        agentsReloadNeeded = true;
+        return;
+    }
+    agentsLoading = true;
+    try {
+        const [directory, handles] = await Promise.all([requestJson("/v1/agents/catalog"), requestJson("/v1/agents")]);
+        state.agents = directory;
+        state.handles = handles;
+        for (const agent of handles) {
+            if (agent.current_run_id && !backgroundStreams.forRun(agent.current_run_id)) {
+                backgroundStreams.track(await requestJson(`/v1/runs/${encodeURIComponent(agent.current_run_id)}`));
+            }
+        }
+        renderAgents();
+        await renderAgentInventory();
+        await loadInteractions();
+        for (const agent of handles)
+            if (agent.current_run_id && !["created", "queued", "running"].includes(agent.status) && !completedAgentRuns.has(agent.current_run_id)) {
+                completedAgentRuns.add(agent.current_run_id);
+                showNotice(() => t("Agent {status}", { status: localStatus(agent.status) }));
+            }
+    }
+    finally {
+        agentsLoading = false;
+        if (agentsReloadNeeded) {
+            agentsReloadNeeded = false;
+            void loadAgents().catch(() => undefined);
+        }
+    }
 }
 async function createTopic() {
     if (creatingTopic)
@@ -1090,7 +1102,8 @@ async function stopRun() {
         return;
     try {
         const runId = state.runId;
-        await requestJson(`/v1/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" });
+        const owner = state.handles.find(agent => agent.current_run_id === runId);
+        await requestJson(owner ? `/v1/agents/${encodeURIComponent(owner.agent_id)}/stop` : `/v1/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" });
         for (let attempt = 0; attempt < 20; attempt += 1) {
             const run = await requestJson(`/v1/runs/${encodeURIComponent(runId)}`);
             if (["completed", "failed", "aborted", "interrupted"].includes(run.status)) {
@@ -1135,69 +1148,45 @@ async function compact(confirm) {
         showNotice(errorText(error), true);
     }
 }
+const agentRequests = new Map();
+async function startAgent(agent, prompt) {
+    const previous = agentRequests.get(agent.agent_id);
+    const request = previous?.prompt === prompt ? previous : { prompt, key: idempotency() };
+    agentRequests.set(agent.agent_id, request);
+    const accepted = await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/start`, { method: "POST", body: JSON.stringify({ prompt, idempotency_key: request.key }) });
+    agentRequests.delete(agent.agent_id);
+    state.handles = state.handles.map(item => item.agent_id === agent.agent_id ? accepted : item);
+    if (text("agent-prompt").value.trim() === prompt)
+        text("agent-prompt").value = "";
+    renderAgents();
+    await loadAgents();
+    const completed = state.handles.find(item => item.agent_id === agent.agent_id);
+    if (completed)
+        showNotice(() => t("Agent {status}", { status: localStatus(completed.status) }));
+}
 async function createAgent() {
-    const name = ($("agent-kind").value || "default");
-    const prompt = text("agent-prompt").value.trim();
+    const name = ($("agent-kind").value || "default"), prompt = text("agent-prompt").value.trim();
     if (!prompt) {
         showNotice("请先输入交给 Agent 的任务");
         return;
     }
-    let timer;
+    const button = $("agent-create");
+    button.disabled = true;
     try {
         const agent = await requestJson("/v1/agents", { method: "POST", body: JSON.stringify({ name, persistent: $("agent-persistent").checked }) });
         state.handles = [...state.handles, agent];
         renderAgents();
-        timer = setInterval(() => void loadAgents().catch(() => undefined), 500);
-        const result = await requestJson(`/v1/agents/${agent.agent_id}/execute`, { method: "POST", body: JSON.stringify({ prompt, idempotency_key: idempotency() }) });
-        state.handles = [...state.handles.filter((item) => item.agent_id !== agent.agent_id), result];
-        text("agent-prompt").value = "";
-        renderAgents();
-        showNotice(() => t("Agent {status}", { status: localStatus(result.status) }));
+        await startAgent(agent, prompt);
+        state.topics = (await requestJson("/v1/topics")).topics;
+        renderTopics();
     }
     catch (error) {
         showNotice(errorText(error), true);
     }
     finally {
-        if (timer)
-            clearInterval(timer);
+        button.disabled = false;
     }
 }
-async function resumeAgent(agentId) {
-    const prompt = text("agent-prompt").value.trim();
-    if (!prompt) {
-        showNotice("请先输入要继续的 Agent 任务");
-        return;
-    }
-    const timer = setInterval(() => void loadAgents().catch(() => undefined), 500);
-    try {
-        const agent = await requestJson(`/v1/agents/${agentId}/resume`, { method: "POST", body: JSON.stringify({ prompt, idempotency_key: idempotency() }) });
-        state.handles = state.handles.map((item) => item.agent_id === agentId ? agent : item);
-        renderAgents();
-        showNotice(() => t("Agent {status}", { status: localStatus(agent.status) }));
-    }
-    catch (error) {
-        showNotice(errorText(error), true);
-    }
-    finally {
-        clearInterval(timer);
-    }
-}
-async function stopAgent(agentId) { try {
-    const agent = await requestJson(`/v1/agents/${agentId}/stop`, { method: "POST" });
-    state.handles = state.handles.map((item) => item.agent_id === agentId ? agent : item);
-    renderAgents();
-}
-catch (error) {
-    showNotice(errorText(error), true);
-} }
-async function destroyAgent(agentId) { try {
-    await requestJson(`/v1/agents/${agentId}`, { method: "DELETE" });
-    state.handles = state.handles.filter((item) => item.agent_id !== agentId);
-    renderAgents();
-}
-catch (error) {
-    showNotice(errorText(error), true);
-} }
 async function refresh() { if (state.topicId)
     await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents()]); }
 function setup() {
@@ -1247,7 +1236,7 @@ async function boot() { clearLinkCache(); try {
     await backgroundStreams.start();
     await restoreLocale(currentLocale());
     renderTopics();
-    renderAgents();
+    await loadAgents();
     if (!state.topicId && state.topics[0]) {
         const selected = new URLSearchParams(location.search).get("topic");
         await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id);
@@ -1268,6 +1257,8 @@ setupHostBridge();
 setup();
 void boot();
 setInterval(() => {
+    if (state.handles.some(agent => ["queued", "running"].includes(agent.status)))
+        void loadAgents().catch(() => undefined);
     if (backgroundStreams.all().some((session) => !session.terminal)) {
         void loadInteractions().catch(() => undefined);
         void loadProposals().catch(() => undefined);
@@ -1311,12 +1302,14 @@ async function renderAgentInventory() {
     if (!root)
         return;
     const items = await requestJson("/v1/agents/inventory");
+    const reasons = { agent_not_found: "宿主尚未登记此 Agent", agent_profile_not_found: "原配置版本缺失", agent_profile_provider: "模型资源尚未登记", agent_profile_tool: "原配置中的工具缺失", agent_definition_changed: "模型、工具或权限定义已变化，需使用原资源版本", parent_agent_missing: "父 Agent 尚未恢复", agent_busy: "实例仍由其他进程持有", agent_limit: "当前实例数量已达上限", agent_session_definition: "原会话定义不可恢复" };
     root.replaceChildren();
     for (const item of items.filter(value => !value.available)) {
         const card = document.createElement("div");
         card.className = "agent-card";
+        card.dataset.agentId = item.agent_id;
         const detail = document.createElement("p");
-        detail.textContent = `${item.name} · 暂不可恢复 · ${item.error_code || "实例未接管"}`;
+        detail.textContent = `${item.name} · 暂不可恢复 · ${item.error_code ? reasons[item.error_code] || item.error_code : "实例未接管"} · ${localStatus(item.status)} · ${item.session_status}`;
         const restore = document.createElement("button");
         restore.type = "button";
         restore.textContent = "尝试恢复";

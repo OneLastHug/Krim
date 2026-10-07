@@ -6,6 +6,7 @@ export interface TopicView {
   updated_at: string;
   active_branches: Record<string, string | null>;
   locale: "zh-CN" | "en-US";
+  agent_session_id: string | null;
 }
 export interface LocaleView { requested: string; effective: "zh-CN" | "en-US"; fallback_chain: string[]; }
 export interface MessageView {
@@ -95,7 +96,14 @@ export interface AgentDescriptor {
   risk: "read" | "write";
   max_turns: number;
   exposed_as_tool: boolean;
+  profile_revision?: number | null;
 }
+export interface AgentSessionView {
+  session_id: string; status: "open" | "closed" | "expired" | "destroyed";
+  revision: number; turn: number; profile_revision: number | null;
+  expires_at: number | null; permissions: Record<string, unknown>;
+}
+export interface AgentTurnView { run_id: string; turn: number; status: string; }
 export interface AgentView {
   agent_id: string;
   name: string;
@@ -104,6 +112,8 @@ export interface AgentView {
   current_run_id: string | null;
   turn: number;
   result: { text: string; code: string | null; error: string | null } | null;
+  session_id: string;
+  session: AgentSessionView;
 }
 export interface WorkflowRunView {
   run_id: string;

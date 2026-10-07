@@ -7,9 +7,11 @@ from typing import Literal
 import uvicorn
 from pydantic import SecretStr
 
+from krim_agent.agents import AgentDefinition
 from krim_agent.api import create_app
 from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import FakeProvider
 from krim_agent.runtime import ChatRuntime
@@ -54,5 +56,34 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
             }
         )
         return {"mode": payload.mode}
+
+    class TestAgentInventory(StrictModel):
+        action: Literal["create", "register"]
+
+    inventory_definition = AgentDefinition(
+        name="restoreworker",
+        provider=runtime.provider,
+        tools=runtime.tools,
+        persistent=True,
+        policy=runtime.tool_policy,
+    )
+
+    @app.post("/_test/agent-inventory")
+    async def agent_inventory_setup(payload: TestAgentInventory) -> dict[str, str]:
+        agents = app.state.agents
+        if payload.action == "create":
+            handle = await agents.manager.spawn(inventory_definition)
+            identifier = handle.agent_id
+            await handle.detach()
+            try:
+                await agents.restore(identifier)
+            except ServiceError:
+                pass
+            return {"agent_id": identifier}
+        if not any(item.name == "restoreworker" for item in agents.catalog.descriptors()):
+            agents.catalog.register(
+                "restoreworker", inventory_definition, description="恢复测试", expose_as_tool=False
+            )
+        return {"name": "restoreworker"}
 
     uvicorn.run(app, host="127.0.0.1", port=8876, log_level="error")

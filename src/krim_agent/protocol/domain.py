@@ -81,6 +81,7 @@ class TopicView(View):
     updated_at: datetime
     active_branches: dict[str, str | None] = Field(default_factory=dict)
     locale: LocaleTag = "zh-CN"
+    agent_session_id: str | None = None
 
 
 class MessageView(View):

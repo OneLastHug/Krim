@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
             "get",
             "spawn",
             "execute",
+            "start",
+            "wait",
             "resume",
             "events",
             "stop",
@@ -424,12 +426,14 @@ def main() -> None:
                             else client.agent_session_reopen(args.value, args.revision)
                         )
                         print(controlled_session.model_dump_json(indent=2))
-                    elif args.action in {"execute", "resume"}:
+                    elif args.action in {"execute", "resume", "start"}:
                         if not args.prompt:
                             parser.error("agent execute/resume 需要 prompt")
                         view = (
                             client.agent_execute(args.value, args.prompt, args.idempotency_key)
                             if args.action == "execute"
+                            else client.agent_start(args.value, args.prompt, args.idempotency_key)
+                            if args.action == "start"
                             else client.agent_resume(args.value, args.prompt, args.idempotency_key)
                         )
                         print(view.model_dump_json(indent=2))
@@ -440,6 +444,8 @@ def main() -> None:
                             print(frame.model_dump_json(exclude_none=True))
                     elif args.action == "stop":
                         print(client.agent_stop(args.value).model_dump_json(indent=2))
+                    elif args.action == "wait":
+                        print(client.agent_wait(args.value).model_dump_json(indent=2))
                     elif args.action == "destroy":
                         print(client.agent_destroy(args.value).model_dump_json(indent=2))
                 return
