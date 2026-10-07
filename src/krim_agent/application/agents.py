@@ -34,6 +34,7 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
 from krim_agent.tools import ToolError
+from krim_agent.tools.core import ToolDefinition
 
 AgentViewStatus = Literal[
     "created", "queued", "running", "completed", "failed", "aborted", "interrupted", "destroyed"
@@ -72,6 +73,18 @@ class AgentView(StrictModel):
     profile_revision: int | None = None
 
 
+class AgentInventoryView(StrictModel):
+    agent_id: str
+    name: str
+    topic_id: str
+    profile_revision: int | None = None
+    status: str
+    available: bool
+    error_code: str | None = None
+    current_run_id: str | None = None
+    turn: int
+
+
 class AgentService:
     """当前进程句柄门面；查询读持久 Run，不修改执行句柄的 current_run 指针。"""
 
@@ -94,6 +107,7 @@ class AgentService:
         self.catalog = AgentCatalog(self.manager)
         self.profiles = AgentProfileStore(runtime.repository.database)
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
+        self.restore_errors: dict[str, str] = {}
         self.catalog.register(
             "default",
             AgentDefinition(
@@ -182,7 +196,11 @@ class AgentService:
             profile_revision=handle.definition.profile_revision,
         )
 
-    async def _profile_definition(self, name: str, revision: int | None = None) -> AgentDefinition:
+    async def _profile_definition(
+        self, name: str, revision: int | None = None, *, restoring: bool = False
+    ) -> AgentDefinition:
+        if not restoring and not (await self.profiles.get(name)).enabled:
+            raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
         profile = await self.profiles.get(name, revision)
         if not profile.enabled:
             raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
@@ -215,6 +233,7 @@ class AgentService:
             tools=tools,
             max_turns=profile.config.max_turns,
             max_steps=profile.config.max_steps,
+            persistent=profile.config.persistent,
             timeout_seconds=profile.config.timeout_seconds,
             tool_timeout_seconds=profile.config.tool_timeout_seconds,
             context_config=selected_context,
@@ -273,6 +292,23 @@ class AgentService:
             raise ServiceError("agent_profile_tool", "工具未登记", 422)
         return await self.profiles.put(request)
 
+    async def definition(self, name: str, revision: int | None = None) -> AgentDefinition:
+        if revision is None:
+            try:
+                return self.catalog.get(name).definition
+            except ToolError:
+                pass
+        return await self._profile_definition(name, revision)
+
+    async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
+        """可信组合层显式取得固定版本工具；不由HTTP配置自动安装工具。"""
+        definition = replace(await self.definition(name, revision), persistent=False, agent_id="")
+        directory = AgentCatalog(self.manager)
+        directory.register(
+            name, definition, description=f"委派给 {name} 的固定版本 Agent", risk="write"
+        )
+        return directory.as_tool(name)
+
     async def restore_persistent(self) -> int:
         restored = 0
         stored = await self.manager.store.list()
@@ -281,7 +317,7 @@ class AgentService:
                 continue
             try:
                 definition = (
-                    await self._profile_definition(item.name, item.profile_revision)
+                    await self._profile_definition(item.name, item.profile_revision, restoring=True)
                     if item.profile_revision is not None
                     else self.catalog.get(item.name).definition
                 )
@@ -294,9 +330,50 @@ class AgentService:
                         handle.current_run.id
                     )
                 restored += 1
-            except (AgentError, ServiceError, ToolError):
+                self.restore_errors.pop(item.agent_id, None)
+            except (AgentError, ServiceError, ToolError) as error:
+                self.restore_errors[item.agent_id] = error.code
                 continue
         return restored
+
+    async def inventory(self) -> list[AgentInventoryView]:
+        return [
+            AgentInventoryView(
+                agent_id=item.agent_id,
+                name=item.name,
+                topic_id=item.topic_id,
+                profile_revision=item.profile_revision,
+                status=item.status,
+                available=item.agent_id in self.manager._handles,
+                error_code=self.restore_errors.get(item.agent_id),
+                current_run_id=item.current_run_id,
+                turn=item.turn,
+            )
+            for item in await self.manager.store.list()
+        ]
+
+    async def restore(self, agent_id: str) -> AgentView:
+        if agent_id in self.manager._handles:
+            return await self.get(agent_id)
+        stored = next(
+            (item for item in await self.manager.store.list() if item.agent_id == agent_id), None
+        )
+        if stored is None:
+            raise ServiceError("agent_not_found", "持久Agent不存在", 404)
+        try:
+            definition = (
+                await self._profile_definition(stored.name, stored.profile_revision, restoring=True)
+                if stored.profile_revision is not None
+                else self.catalog.get(stored.name).definition
+            )
+            handle = await self.manager.restore(definition, stored)
+        except (AgentError, ServiceError, ToolError) as error:
+            self.restore_errors[agent_id] = error.code
+            if isinstance(error, ServiceError):
+                raise
+            raise ServiceError(error.code, str(error), 409) from error
+        self.restore_errors.pop(agent_id, None)
+        return await self.view(handle)
 
     async def assert_inventory_available(self) -> None:
         """启动恢复前先拒绝有效的其它 owner，不能中断仍在生产的进程。"""
@@ -314,6 +391,27 @@ class AgentService:
 
     def catalog_views(self) -> list[AgentDescriptor]:
         return self.catalog.descriptors()
+
+    async def catalog_all(self) -> list[AgentDescriptor]:
+        values = self.catalog_views()
+        for profile in await self.profiles.list():
+            if not profile.enabled:
+                continue
+            definition = await self._profile_definition(profile.name, profile.revision)
+            values.append(
+                AgentDescriptor(
+                    name=profile.name,
+                    description=profile.config.description,
+                    tool_name=f"agent_{profile.name.lower()}",
+                    risk="write",
+                    max_turns=definition.max_turns,
+                    max_steps=definition.max_steps,
+                    persistent=definition.persistent,
+                    exposed_as_tool=False,
+                    profile_revision=profile.revision,
+                )
+            )
+        return values
 
     async def views(self) -> list[AgentView]:
         handles = tuple(self.manager._handles.values())

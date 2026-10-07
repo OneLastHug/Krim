@@ -46,3 +46,38 @@ test("后台生成时可切换话题并独立停止", async ({ page, playwright,
     await api.dispose();
   }
 });
+
+test("版本化配置保存后可从目录创建并执行 Agent", async ({ page }) => {
+  await page.goto("/ui/");
+  await page.getByLabel("服务访问密钥").fill("browser-test-key");
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await page.locator("#agent-config-panel summary").click();
+  const name = `worker_${Date.now()}`;
+  await page.locator("#agent-config-name").fill(name);
+  await page.locator("#agent-config-description").fill("验证工具执行与持久配置");
+  await page.locator("#agent-config-instructions").fill("按任务规则回答");
+  await page.locator("#agent-config-tools").fill("add");
+  await page.locator("#agent-config-save").click();
+  await expect(page.locator("#agent-config-revision")).toHaveValue("1");
+  const original = await page.request.get(`/v1/agents/profiles/${name}`, { headers: { Authorization: "Bearer browser-test-key" } });
+  const configured = await original.json();
+  const enriched = await page.request.put(`/v1/agents/profiles/${name}`, { headers: { Authorization: "Bearer browser-test-key" }, data: { expected_revision: 1, config: { ...configured.config, max_turns: 3, timeout_seconds: 17 } } });
+  expect(enriched.ok()).toBeTruthy();
+  await page.locator("#agent-config-load").click();
+  await expect(page.locator("#agent-config-revision")).toHaveValue("2");
+  await page.locator("#agent-kind").selectOption(name);
+  await page.locator("#agent-prompt").fill("/add 2 3");
+  await page.locator("#agent-persistent").check();
+  await page.getByRole("button", { name: "创建 Agent" }).click();
+  await expect(page.locator(".agent-card").filter({ hasText: name })).toContainText('"sum": 5.0');
+  await expect(page.locator(".agent-card").filter({ hasText: name })).toContainText("已完成");
+  await page.locator("#agent-config-instructions").fill("更新指令");
+  await page.locator("#agent-config-save").click();
+  await expect(page.locator("#agent-config-revision")).toHaveValue("3");
+  await page.locator("#agent-config-load").click();
+  await expect(page.locator("#agent-config-instructions")).toHaveValue("更新指令");
+  const saved = await (await page.request.get(`/v1/agents/profiles/${name}`, { headers: { Authorization: "Bearer browser-test-key" } })).json();
+  expect(saved.config.max_turns).toBe(3);
+  expect(saved.config.timeout_seconds).toBe(17);
+});

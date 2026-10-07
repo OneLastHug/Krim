@@ -1,5 +1,6 @@
 """Agent版本配置、真实系统前缀、权限/工具子集与旧版本恢复。"""
 
+import asyncio
 
 import pytest
 
@@ -136,3 +137,191 @@ async def test_public_http_profiles_and_frozen_version(api):
     )
     assert result.status_code == 200 and result.json()["status"] == "completed"
     assert (await api.get("/v1/agents/profiles")).json()[0]["name"] == "worker"
+
+
+async def test_unavailable_inventory_explains_resource_and_can_restore_after_registration(runtime):
+    service = AgentService(runtime, runtime.settings, providers={"custom": runtime.provider})
+    await service.profile_put(
+        AgentProfileUpdate(expected_revision=0, config=profile(provider_key="custom"))
+    )
+    view = await service.spawn("worker", persistent=True)
+    await service.close()
+    cold = AgentService(runtime, runtime.settings)
+    try:
+        assert await cold.restore_persistent() == 0
+        item = (await cold.inventory())[0]
+        assert not item.available and item.error_code == "agent_profile_provider"
+        cold.providers["custom"] = runtime.provider
+        restored = await cold.restore(view.agent_id)
+        assert restored.agent_id == view.agent_id and restored.topic_id == view.topic_id
+        assert (await cold.inventory())[0].available
+    finally:
+        await cold.close()
+
+
+async def test_sdk_agent_service_owns_only_its_handles_and_persistent_cold_restore(tmp_path):
+    from krim_agent.config import Settings
+    from krim_agent.providers import FakeProvider
+    from krim_agent.sdk import PythonAI
+
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'sdk.sqlite'}")
+    async with await PythonAI.create(settings=settings, provider=FakeProvider(delay=0)) as ai:
+        agents = ai.agents()
+        await agents.profile_put(AgentProfileUpdate(expected_revision=0, config=profile()))
+        view = await agents.spawn("worker", persistent=True)
+        result = await agents.execute(view.agent_id, AgentPromptRequest(prompt="/add 2 3"))
+        assert result.status == "completed"
+        with pytest.raises(ServiceError) as busy:
+            await PythonAI.create(settings=settings, provider=FakeProvider(delay=0))
+        assert busy.value.code == "agent_inventory_busy"
+    async with await PythonAI.create(settings=settings, provider=FakeProvider(delay=0)) as cold:
+        assert await cold.agents().restore_persistent() == 1
+        result = await cold.agents().get(view.agent_id)
+        assert (
+            result.profile_revision == 1 and result.result.text == '[fake] 工具结果：{"sum": 5.0}'
+        )
+
+
+async def test_real_tcp_cli_configure_create_and_execute(server_url, tmp_path):
+    import json
+    import os
+    import sys
+
+    path = tmp_path / "agent.json"
+    path.write_text(profile().model_dump_json(), encoding="utf-8")
+
+    async def cli(*arguments):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "krim_agent",
+            "agent",
+            *arguments,
+            "--url",
+            server_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={k: v for k, v in os.environ.items() if k != "KRIM_AGENT_API_KEY"},
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 20)
+        assert process.returncode == 0, stderr.decode()
+        return json.loads(stdout)
+
+    configured = await cli("configure", str(path))
+    assert configured["revision"] == 1
+    current = await cli("profile", "worker")
+    assert current["config"]["tool_names"] == ["add"]
+    view = await cli("spawn", "worker", "--revision", "1", "--persistent")
+    result = await cli("execute", view["agent_id"], "/add 2 3")
+    assert result["status"] == "completed" and '"sum": 5.0' in result["result"]["text"]
+    inventory = await cli("inventory")
+    assert inventory[0]["agent_id"] == view["agent_id"] and inventory[0]["available"]
+    restored = await cli("restore", view["agent_id"])
+    assert restored["current_run_id"] == result["current_run_id"]
+    disabled = await cli("disable", "worker", "--revision", "1")
+    assert disabled["revision"] == 2 and not disabled["enabled"]
+    assert (await cli("profile", "worker", "--revision", "1"))["enabled"]
+    assert not (await cli("profile", "worker"))["enabled"]
+    enabled = await cli("enable", "worker", "--revision", "2")
+    assert enabled["revision"] == 3 and enabled["enabled"]
+    assert (await cli("get", view["agent_id"]))["profile_revision"] == 1
+
+
+async def test_system_prefix_capacity_fails_before_provider_dispatch(runtime):
+    from krim_agent.context_engine import ContextRunConfig
+
+    class Never:
+        name = "must-not-dispatch"
+        calls = 0
+
+        async def stream(self, _messages, _tools):
+            self.calls += 1
+            yield ModelText(text="bad")
+
+    provider = Never()
+    runtime.provider = provider
+    service = AgentService(runtime, runtime.settings)
+    try:
+        config = profile(instructions="x " * 3000).model_copy(
+            update={
+                "tool_names": [],
+                "context_config": ContextRunConfig(
+                    tokenizer="cl100k_base",
+                    reserved_output_tokens=16,
+                    model_context_window_tokens=512,
+                    model_framing_reserve_tokens=0,
+                ),
+            }
+        )
+        await service.profile_put(AgentProfileUpdate(expected_revision=0, config=config))
+        view = await service.spawn("worker")
+        result = await service.execute(view.agent_id, AgentPromptRequest(prompt="任务"))
+        assert result.status == "failed" and provider.calls == 0
+        assert result.result.code == "agent_instruction_budget"
+    finally:
+        await service.close()
+
+
+async def test_real_process_restores_frozen_old_profile_after_head_update(tmp_path):
+    import json
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).parent / "fixtures/agent_profile_worker.py"
+
+    async def run(*args):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            str(tmp_path / "process.sqlite"),
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 25)
+        assert process.returncode == 0, stderr.decode()
+        return json.loads(stdout)
+
+    first = await run("create")
+    cold = await run("restore", first["agent_id"])
+    assert first["agent_id"] == cold["agent_id"] and first["topic_id"] == cold["topic_id"]
+    assert first["run_id"] == cold["run_id"] and cold["calls"] == 0
+
+
+async def test_versioned_profile_can_be_used_as_agent_tool_and_keeps_parent_permission(runtime):
+    from krim_agent.tools import ToolContext
+    from krim_agent.tools.core import Decision
+
+    async def allow(_definition, _context) -> Decision:
+        return "allow"
+
+    runtime.tool_policy = allow
+    service = AgentService(runtime, runtime.settings)
+    try:
+        await service.profile_put(AgentProfileUpdate(expected_revision=0, config=profile()))
+        tool = await service.as_tool("worker", 1)
+        runtime.tools.register(tool)
+        result = await runtime.tools.call_tool(
+            tool.name, {"prompt": "/add 2 3"}, ToolContext(runtime.tools, policy=allow)
+        )
+        assert result["status"] == "completed" and '"sum": 5.0' in result["text"]
+        assert not service.manager._handles
+    finally:
+        await service.close()
+
+
+async def test_disabled_head_blocks_new_historical_spawn_but_keeps_existing_instance(runtime):
+    service = AgentService(runtime, runtime.settings)
+    try:
+        config = profile()
+        await service.profile_put(AgentProfileUpdate(expected_revision=0, config=config))
+        old = await service.spawn("worker", persistent=True)
+        await service.profile_put(
+            AgentProfileUpdate(expected_revision=1, config=config, enabled=False)
+        )
+        with pytest.raises(ServiceError) as disabled:
+            await service.spawn("worker", profile_revision=1)
+        assert disabled.value.code == "agent_profile_disabled"
+        assert (await service.get(old.agent_id)).profile_revision == 1
+    finally:
+        await service.close()

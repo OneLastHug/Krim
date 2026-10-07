@@ -68,7 +68,7 @@ function projectCurrentSession() {
         state.streaming = state.disconnected = false;
         state.streamText = "";
     }
-    disableComposer(Boolean((session && !session.terminal) || (state.topicId && pendingSends.has(state.topicId))));
+    disableComposer(Boolean(creatingTopic || (session && !session.terminal) || (state.topicId && pendingSends.has(state.topicId))));
 }
 async function reloadCurrentHistory(topicId) {
     const [messages, tree] = await Promise.all([
@@ -328,7 +328,9 @@ function renderTopics() {
         strong.textContent = topic.title;
         const small = document.createElement("small");
         const active = backgroundStreams.forTopic(topic.id);
-        small.textContent = active ? `${localDate(topic.updated_at)} · ${active.terminal ? localStatus(active.run.status) : active.connected ? t("后台生成中") : t("后台流断开，可重连")}` : localDate(topic.updated_at);
+        small.textContent = localDate(topic.updated_at);
+        if (active)
+            small.title = active.terminal ? localStatus(active.run.status) : active.connected ? t("后台生成中") : t("后台流断开，可重连");
         button.append(strong, small);
         button.addEventListener("click", () => void loadTopic(topic.id).catch((error) => showNotice(errorText(error), true)));
         root.append(button);
@@ -979,6 +981,7 @@ async function loadAgents() {
     state.agents = await requestJson("/v1/agents/catalog");
     state.handles = await requestJson("/v1/agents");
     renderAgents();
+    await renderAgentInventory();
     await loadInteractions();
 }
 async function createTopic() {
@@ -1141,7 +1144,7 @@ async function createAgent() {
     }
     let timer;
     try {
-        const agent = await requestJson("/v1/agents", { method: "POST", body: JSON.stringify({ name }) });
+        const agent = await requestJson("/v1/agents", { method: "POST", body: JSON.stringify({ name, persistent: $("agent-persistent").checked }) });
         state.handles = [...state.handles, agent];
         renderAgents();
         timer = setInterval(() => void loadAgents().catch(() => undefined), 500);
@@ -1271,3 +1274,54 @@ setInterval(() => {
     }
 }, 500);
 window.addEventListener("pagehide", () => backgroundStreams.close());
+async function saveAgentConfig() {
+    const name = text("agent-config-name").value.trim();
+    try {
+        const revision = Number(text("agent-config-revision").value);
+        const previous = revision > 0 ? await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}?revision=${revision}`) : undefined;
+        const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), mode: $("agent-config-mode").value };
+        const saved = await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ expected_revision: revision, enabled: previous?.enabled ?? true, config }) });
+        text("agent-config-revision").value = String(saved.revision);
+        await loadAgents();
+        showNotice("Agent 配置已保存");
+    }
+    catch (error) {
+        showNotice(errorText(error), true);
+    }
+}
+async function loadAgentConfig() {
+    try {
+        const saved = await requestJson(`/v1/agents/profiles/${encodeURIComponent(text("agent-config-name").value.trim())}`);
+        text("agent-config-description").value = saved.config.description;
+        text("agent-config-instructions").value = saved.config.instructions;
+        text("agent-config-tools").value = saved.config.tool_names.join(",");
+        text("agent-config-provider").value = saved.config.provider_key;
+        $("agent-config-mode").value = saved.config.mode;
+        text("agent-config-revision").value = String(saved.revision);
+        showNotice("Agent 配置已读取");
+    }
+    catch (error) {
+        showNotice(errorText(error), true);
+    }
+}
+$("agent-config-save").addEventListener("click", () => void saveAgentConfig());
+$("agent-config-load").addEventListener("click", () => void loadAgentConfig());
+async function renderAgentInventory() {
+    const root = $("agent-unavailable");
+    if (!root)
+        return;
+    const items = await requestJson("/v1/agents/inventory");
+    root.replaceChildren();
+    for (const item of items.filter(value => !value.available)) {
+        const card = document.createElement("div");
+        card.className = "agent-card";
+        const detail = document.createElement("p");
+        detail.textContent = `${item.name} · 暂不可恢复 · ${item.error_code || "实例未接管"}`;
+        const restore = document.createElement("button");
+        restore.type = "button";
+        restore.textContent = "尝试恢复";
+        restore.onclick = () => { void requestJson(`/v1/agents/${encodeURIComponent(item.agent_id)}/restore`, { method: "POST" }).then(() => loadAgents()).catch(error => showNotice(errorText(error), true)); };
+        card.append(detail, restore);
+        root.append(card);
+    }
+}

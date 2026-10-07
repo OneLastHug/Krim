@@ -12,7 +12,7 @@ from pydantic import TypeAdapter
 from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion
 
 from .agents import AgentDescriptor
-from .application.agents import AgentPromptRequest, AgentView
+from .application.agents import AgentInventoryView, AgentPromptRequest, AgentView
 from .attachment import AttachmentContent, AttachmentUpload, AttachmentView
 from .budgets import BudgetAccountView, BudgetRequestView, BudgetResolveRequest
 from .change_list import (
@@ -384,6 +384,16 @@ class KrimClient:
         response = self._http.get("/v1/agents")
         self._check(response)
         return TypeAdapter(list[AgentView]).validate_json(response.content)
+
+    def agent_inventory(self) -> list[AgentInventoryView]:
+        response = self._http.get("/v1/agents/inventory")
+        self._check(response)
+        return TypeAdapter(list[AgentInventoryView]).validate_json(response.content)
+
+    def agent_restore(self, agent_id: str) -> AgentView:
+        response = self._http.post(f"/v1/agents/{agent_id}/restore")
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
 
     def agent_profiles(self) -> list[AgentProfileVersion]:
         response = self._http.get("/v1/agents/profiles")
