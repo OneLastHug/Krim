@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
+from krim_agent.application.streams import MultiplexReader
 from krim_agent.config import Settings
 from krim_agent.context_engine import (
     ContextCompactRequest,
@@ -35,6 +36,7 @@ from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadResult
+from krim_agent.streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolResult
@@ -590,6 +592,24 @@ class PythonAI:
         if self._closed:
             raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
         return await self.runtime.compact(topic_id, request or ContextCompactRequest())
+
+    async def active_runs(self) -> list[ActiveRunView]:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        return [
+            ActiveRunView(run=run, events=await self.runtime.repository.event_summary(run.id))
+            for run in await self.runtime.repository.active_runs()
+        ]
+
+    async def multiplex_events(
+        self, request: MultiplexRequest
+    ) -> AsyncGenerator[RunStreamFrame | None]:
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已经关闭", 503)
+        reader = MultiplexReader(self.runtime)
+        prepared = await reader.prepare(request)
+        async for item in reader.subscribe(prepared):
+            yield item
 
     async def context_proposals(
         self, topic_id: str, *, pending_only: bool = False

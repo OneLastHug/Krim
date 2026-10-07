@@ -65,6 +65,7 @@ from .protocol.domain import (
 )
 from .protocol.models import StreamFrame
 from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
+from .streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 from .usage import RunUsageView
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
@@ -702,6 +703,61 @@ class KrimClient:
         response = self._http.get(f"/v1/runs/{run_id}/events/summary")
         self._check(response)
         return StreamEventView.model_validate_json(response.content)
+
+    def active_runs(self) -> list[ActiveRunView]:
+        response = self._http.get("/v1/runs/active")
+        self._check(response)
+        return TypeAdapter(list[ActiveRunView]).validate_json(response.content)
+
+    def multiplex_events(self, request: MultiplexRequest) -> Iterator[RunStreamFrame | None]:
+        with self._http.stream(
+            "POST",
+            "/v1/runs/events",
+            json=request.model_dump(mode="json"),
+            timeout=httpx.Timeout(30, read=45),
+        ) as response:
+            self._check(response)
+            expected = {source.run_id: source.next_seq for source in request.sources}
+            topics = {source.run_id: source.topic_id for source in request.sources}
+            data: list[str] = []
+            event_id = ""
+            event_kind = ""
+            for line in response.iter_lines():
+                if len(line.encode("utf-8")) > 262144:
+                    raise ClientError("多路 SSE 行超过大小限制")
+                if line.startswith("data:"):
+                    data.append(line[5:].lstrip(" "))
+                elif line.startswith("id:"):
+                    event_id = line[3:].strip()
+                elif line.startswith("event:"):
+                    event_kind = line[6:].strip()
+                elif not line and data:
+                    if len("\n".join(data).encode("utf-8")) > 262144:
+                        raise ClientError("多路 SSE 事件超过大小限制")
+                    value = RunStreamFrame.model_validate_json("\n".join(data))
+                    expected_seq = expected.get(value.frame.stream_id)
+                    if expected_seq is None or value.frame.seq != expected_seq:
+                        raise ClientError("多路 SSE 来源或序号不正确")
+                    if topics[value.frame.stream_id] != value.topic_id:
+                        raise ClientError("多路 SSE 话题关联不正确")
+                    if (
+                        event_kind != "run-frame"
+                        or event_id != f"{value.frame.stream_id}:{value.frame.seq}"
+                    ):
+                        raise ClientError("多路 SSE 事件关联不正确")
+                    expected[value.frame.stream_id] += 1
+                    yield value
+                    data, event_id, event_kind = [], "", ""
+                    if value.frame.kind in {"end", "error"}:
+                        expected.pop(value.frame.stream_id, None)
+                    if not expected:
+                        return
+                elif not line and not data:
+                    yield None
+            for run_id, cursor in expected.items():
+                summary = self.event_summary(run_id)
+                if not summary.terminal or summary.count != cursor:
+                    raise ClientError("多路 SSE 提前断开；可使用各来源 next_seq 续传")
 
     def workflow_run(
         self,

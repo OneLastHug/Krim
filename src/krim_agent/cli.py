@@ -16,6 +16,7 @@ from .client import ClientError, KrimClient
 from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
 from .protocol.domain import TERMINAL_STATUSES
+from .streams import MultiplexRequest
 from .workflow import WorkflowGraph
 
 
@@ -40,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--revision", type=int, help="revision（修订号）：匹配当前未知请求")
     budget.add_argument("--receipt", help="receipt（回执）：可信宿主核实依据")
     budget.add_argument("--usage", help="usage（用量）：输入/输出/总量的 JSON 报告")
+    multiplex = subparsers.add_parser(
+        "multiplex", help="multiplex（多路）：一个 SSE 连接读取多个 Run"
+    )
+    multiplex.add_argument("--sources", required=True, help="JSON 数组：run_id/topic_id/next_seq")
+    multiplex.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     interaction = subparsers.add_parser(
         "interaction", help="interaction（用户交互）：读取审批/问题和提交回应"
     )
@@ -259,6 +265,16 @@ def main() -> None:
                             }
                         )
                         print(client.budget_resolve(args.value, request).model_dump_json(indent=2))
+                return
+            if args.command == "multiplex":
+                multiplex_request = MultiplexRequest.model_validate(
+                    {"sources": json.loads(args.sources)}
+                )
+                for item in client.multiplex_events(multiplex_request):
+                    print(
+                        "null" if item is None else item.model_dump_json(exclude_none=True),
+                        flush=True,
+                    )
                 return
             if args.command == "interaction":
                 if args.action == "list":

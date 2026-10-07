@@ -25,6 +25,7 @@ from krim_agent.application.agents import (
 from krim_agent.application.change_lists import ChangeListService
 from krim_agent.application.checkpoints import CheckpointService
 from krim_agent.application.host import HostSessions
+from krim_agent.application.streams import MultiplexReader
 from krim_agent.application.workflow import WorkflowServices
 from krim_agent.application.workflow_runtime import WorkflowRuntime
 from krim_agent.attachment import AttachmentContent, AttachmentUpload, AttachmentView
@@ -115,6 +116,7 @@ from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
+from krim_agent.streams import ActiveRunView, MultiplexRequest
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolError, ToolInfo
 from krim_agent.ui_locale import LocaleResources, locale_resources
@@ -1064,6 +1066,42 @@ def create_app(
     @app.post("/v1/topics/{topic_id}/messages", status_code=202)
     async def send_message(topic_id: str, payload: ChatRequest) -> RunView:
         return await service.start(topic_id, payload)
+
+    @app.get("/v1/runs/active")
+    async def active_runs() -> list[ActiveRunView]:
+        return [
+            ActiveRunView(run=run, events=await repository.event_summary(run.id))
+            for run in await repository.active_runs()
+        ]
+
+    @app.post("/v1/runs/events")
+    async def multiplex_events(payload: MultiplexRequest) -> StreamingResponse:
+        reader = MultiplexReader(service)
+        prepared = await reader.prepare(payload)
+
+        async def event_stream() -> AsyncIterator[str]:
+            async for item in reader.subscribe(prepared):
+                if item is None:
+                    yield ": heartbeat\n\n"
+                else:
+                    data = item.model_dump_json(exclude_none=True)
+                    for delimiter, escaped in (
+                        ("\u0085", "\\u0085"),
+                        ("\u2028", "\\u2028"),
+                        ("\u2029", "\\u2029"),
+                    ):
+                        data = data.replace(delimiter, escaped)
+                    yield (
+                        f"id: {item.frame.stream_id}:{item.frame.seq}\n"
+                        "event: run-frame\n"
+                        f"data: {data}\n\n"
+                    )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/v1/runs/{run_id}")
     async def get_run(run_id: str) -> RunView:
