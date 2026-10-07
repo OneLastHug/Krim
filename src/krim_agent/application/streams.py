@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass
 
 from anyio import CancelScope
@@ -29,6 +29,17 @@ class MultiplexReader:
         if not 1 <= queue_size <= 256:
             raise ValueError("多路订阅队列必须在 1–256")
         self.runtime, self.queue_size = runtime, queue_size
+
+    @staticmethod
+    async def _read[T](operation: Awaitable[T]) -> T:
+        """取消只结束读取循环，已开始的短事务必须先结束并释放连接。"""
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with CancelScope(shield=True):
+                await asyncio.shield(task)
+            raise
 
     async def prepare(self, request: MultiplexRequest) -> list[tuple[RunCursor, RunView]]:
         prepared = []
@@ -57,8 +68,8 @@ class MultiplexReader:
                 terminal_since: float | None = None
                 while True:
                     # 每个来源最多预读一帧，背压不能堆积一整份历史日志。
-                    frames = await self.runtime.repository.event_page(
-                        source.run_id, cursor, limit=1
+                    frames = await self._read(
+                        self.runtime.repository.event_page(source.run_id, cursor, limit=1)
                     )
                     for frame in frames:
                         if frame.seq != cursor:
@@ -70,10 +81,10 @@ class MultiplexReader:
                             return
                     if frames:
                         continue
-                    summary = await self.runtime.repository.event_summary(source.run_id)
+                    summary = await self._read(self.runtime.repository.event_summary(source.run_id))
                     if summary.terminal and cursor == summary.count:
                         break
-                    run = await self.runtime.repository.get_run(source.run_id)
+                    run = await self._read(self.runtime.repository.get_run(source.run_id))
                     if run.status not in {"queued", "running"}:
                         terminal_since = terminal_since or time.monotonic()
                         if time.monotonic() - terminal_since >= 5:

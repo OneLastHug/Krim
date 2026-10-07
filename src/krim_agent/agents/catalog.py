@@ -39,6 +39,7 @@ class AgentDescriptor(StrictModel):
     max_steps: int
     persistent: bool = False
     exposed_as_tool: bool = True
+    profile_revision: int | None = None
 
 
 @dataclass(frozen=True)

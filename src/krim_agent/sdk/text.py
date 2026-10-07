@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from collections.abc import AsyncGenerator, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -68,6 +69,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from krim_agent.application.agents import AgentService
     from krim_agent.evaluation import EvalConfig, EvalDataset, EvalReport
     from krim_agent.evaluation.scorers import EvalScorer
     from krim_agent.evaluation.service import EvalRunHandle, EvaluationService
@@ -310,6 +312,7 @@ class PythonAI:
         self._owned_provider = owned_provider
         self._closed = False
         self._evaluation_service: EvaluationService | None = None
+        self._agent_service: AgentService | None = None
 
     @classmethod
     async def create(
@@ -330,6 +333,13 @@ class PythonAI:
                 selected_provider = provider
             await database.initialize()
             repository = KrimRepository(database)
+            from krim_agent.persistence.agents import AgentHandleStore
+
+            if any(
+                item.owner_id is not None and (item.lease_expires_at or 0) > time.time()
+                for item in await AgentHandleStore(database).list()
+            ):
+                raise ServiceError("agent_inventory_busy", "持久Agent仍由其他生产者持有", 409)
             await repository.recover_interrupted()
             runtime = ChatRuntime(
                 repository,
@@ -521,6 +531,16 @@ class PythonAI:
             self._evaluation_service = EvaluationService(self.runtime.repository.database)
         return self._evaluation_service
 
+    def agents(self) -> AgentService:
+        """借用同一 Runtime 的配置与实例管理；持久恢复须显式调用。"""
+        from krim_agent.application.agents import AgentService
+
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK 已关闭", 503)
+        if self._agent_service is None:
+            self._agent_service = AgentService(self.runtime, self.runtime.settings)
+        return self._agent_service
+
     async def start_evaluation(
         self,
         dataset: EvalDataset,
@@ -636,6 +656,8 @@ class PythonAI:
         self._closed = True
         if self._evaluation_service is not None:
             await self._evaluation_service.close()
+        if self._agent_service is not None:
+            await self._agent_service.close()
         if self._owned_database is not None:
             try:
                 await self.runtime.close()

@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         "action",
         choices=[
             "catalog",
+            "profiles",
+            "profile",
+            "configure",
+            "enable",
+            "disable",
+            "inventory",
+            "restore",
             "list",
             "get",
             "spawn",
@@ -77,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     agent.add_argument("--idempotency-key", help="重试去重键")
     agent.add_argument("--from-seq", type=int, default=0, help="events 起始序号")
+    agent.add_argument("--revision", type=int, help="revision（配置版本）：新建选择或更新预期版本")
     agent.add_argument(
         "--persistent", action="store_true", help="persistent（持久）：spawn 句柄可由后续进程恢复"
     )
@@ -307,7 +315,58 @@ def main() -> None:
                     )
                 return
             if args.command == "agent":
-                if args.action == "catalog":
+                if args.action == "profiles":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.agent_profiles()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                elif args.action == "profile":
+                    if not args.value:
+                        parser.error("profile需要Agent配置名")
+                    print(client.agent_profile(args.value, args.revision).model_dump_json(indent=2))
+                elif args.action == "configure":
+                    from krim_agent.agents import AgentProfile, AgentProfileUpdate
+
+                    if not args.value:
+                        parser.error("configure需要本地JSON配置路径")
+                    raw = Path(args.value).read_bytes()
+                    if len(raw) > 65536:
+                        parser.error("Agent配置不能超过64KiB")
+                    agent_config = AgentProfile.model_validate_json(raw)
+                    print(
+                        client.agent_profile_put(
+                            AgentProfileUpdate(
+                                expected_revision=args.revision or 0, config=agent_config
+                            )
+                        ).model_dump_json(indent=2)
+                    )
+                elif args.action in {"enable", "disable"}:
+                    from krim_agent.agents import AgentProfileUpdate
+
+                    if not args.value or args.revision is None or args.revision < 1:
+                        parser.error("enable/disable需要配置名和--revision预期版本")
+                    saved = client.agent_profile(args.value, args.revision)
+                    print(
+                        client.agent_profile_put(
+                            AgentProfileUpdate(
+                                expected_revision=args.revision,
+                                config=saved.config,
+                                enabled=args.action == "enable",
+                            )
+                        ).model_dump_json(indent=2)
+                    )
+                elif args.action == "inventory":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.agent_inventory()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                elif args.action == "catalog":
                     print(
                         json.dumps(
                             [item.model_dump(mode="json") for item in client.agents_catalog()],
@@ -329,11 +388,15 @@ def main() -> None:
                     if args.action == "spawn":
                         print(
                             client.agent_spawn(
-                                args.value, persistent=args.persistent
+                                args.value,
+                                persistent=args.persistent,
+                                profile_revision=args.revision,
                             ).model_dump_json(indent=2)
                         )
                     elif args.action == "get":
                         print(client.agent(args.value).model_dump_json(indent=2))
+                    elif args.action == "restore":
+                        print(client.agent_restore(args.value).model_dump_json(indent=2))
                     elif args.action in {"execute", "resume"}:
                         if not args.prompt:
                             parser.error("agent execute/resume 需要 prompt")

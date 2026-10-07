@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException
 from krim_agent import __version__
 from krim_agent.agents import AgentDescriptor, AgentProfileUpdate, AgentProfileVersion
 from krim_agent.application.agents import (
+    AgentInventoryView,
     AgentPromptRequest,
     AgentService,
     AgentSpawnRequest,
@@ -319,7 +320,9 @@ def create_app(
     async def healthz() -> HealthResponse:
         return HealthResponse(provider=service.provider.name)
 
-    def evaluation_target(payload: EvalRemoteStartRequest | EvalRemoteResumeRequest) -> EvalTarget:
+    async def evaluation_target(
+        payload: EvalRemoteStartRequest | EvalRemoteResumeRequest,
+    ) -> EvalTarget:
         if payload.target == "conversation":
             return ConversationTarget(
                 evaluation_ai, version=payload.version, prompt_prefix=payload.prompt_prefix
@@ -329,8 +332,10 @@ def create_app(
                 evaluation_ai, version=payload.version, prompt_prefix=payload.prompt_prefix
             )
         try:
-            definition = agent_service.catalog.get(payload.agent_name).definition
-        except ToolError:
+            definition = await agent_service.definition(payload.agent_name)
+        except (ToolError, ServiceError) as error:
+            if isinstance(error, ServiceError) and error.code != "agent_profile_not_found":
+                raise
             raise ServiceError("eval_target_not_found", "评估 Agent 未登记", 404) from None
         return AgentTarget(
             agent_service.manager,
@@ -356,7 +361,7 @@ def create_app(
     async def start_evaluation(payload: EvalRemoteStartRequest) -> EvalJobView:
         handle = await evaluation_service.start(
             payload.dataset,
-            evaluation_target(payload),
+            await evaluation_target(payload),
             scorers=evaluation_scorers(payload.scorers),
             config=payload.config,
             request_key=payload.request_key,
@@ -430,7 +435,7 @@ def create_app(
     async def resume_evaluation(eval_id: str, payload: EvalRemoteResumeRequest) -> EvalJobView:
         handle = await evaluation_service.resume(
             eval_id,
-            target=evaluation_target(payload),
+            target=await evaluation_target(payload),
             scorers=evaluation_scorers(payload.scorers),
             request=EvalResumeRequest(
                 retry_uncertain=payload.retry_uncertain, skip_uncertain=payload.skip_uncertain
@@ -647,7 +652,11 @@ def create_app(
 
     @app.get("/v1/agents/catalog")
     async def agent_catalog() -> list[AgentDescriptor]:
-        return agent_service.catalog_views()
+        return await agent_service.catalog_all()
+
+    @app.get("/v1/agents/inventory")
+    async def agent_inventory() -> list[AgentInventoryView]:
+        return await agent_service.inventory()
 
     @app.get("/v1/agents/profiles")
     async def agent_profiles() -> list[AgentProfileVersion]:
@@ -678,6 +687,10 @@ def create_app(
     @app.get("/v1/agents/{agent_id}")
     async def get_agent(agent_id: str) -> AgentView:
         return await agent_service.get(agent_id)
+
+    @app.post("/v1/agents/{agent_id}/restore")
+    async def restore_agent_instance(agent_id: str) -> AgentView:
+        return await agent_service.restore(agent_id)
 
     @app.post("/v1/agents/{agent_id}/execute")
     async def execute_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
