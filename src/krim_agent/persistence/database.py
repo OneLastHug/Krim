@@ -337,6 +337,7 @@ class AgentHandleRow(Base):
     definition_hash: Mapped[str] = mapped_column(String(64))
     parent_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     parent_tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    profile_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 

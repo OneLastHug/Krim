@@ -392,6 +392,12 @@ class AgentManager:
             payload["context_config"] = context
         if definition.usage_budget is not None:
             payload["usage_budget"] = definition.usage_budget.model_dump(mode="json")
+        if definition.profile_revision is not None:
+            payload["profile_revision"] = definition.profile_revision
+        if definition.instructions:
+            payload["instructions"] = definition.instructions
+        if definition.resource_version:
+            payload["resource_version"] = definition.resource_version
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     async def persist(self, handle: AgentHandle, status: str, *, release: bool = False) -> None:
@@ -538,6 +544,8 @@ class AgentManager:
             settings,
             tool_policy=definition.policy,
             agent_id=definition.agent_id,
+            system_prompt=definition.instructions,
+            agent_definition_hash=self.definition_hash(definition),
             approval_handler=parent_context.approval_handler if parent_context else None,
             question_handler=parent_context.question_handler if parent_context else None,
             interaction_publisher=parent_context.interaction_publisher
@@ -590,6 +598,7 @@ class AgentManager:
                             lease_expires_at=None,
                             parent_agent_id=definition.parent_agent_id,
                             parent_tool_call_id=definition.parent_tool_call_id,
+                            profile_revision=definition.profile_revision,
                         ),
                         self.owner_id,
                     )

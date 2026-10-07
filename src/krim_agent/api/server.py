@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
-from krim_agent.agents import AgentDescriptor
+from krim_agent.agents import AgentDescriptor, AgentProfileUpdate, AgentProfileVersion
 from krim_agent.application.agents import (
     AgentPromptRequest,
     AgentService,
@@ -111,7 +111,7 @@ from krim_agent.protocol.domain import (
     TopicView,
 )
 from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope
-from krim_agent.providers import create_provider
+from krim_agent.providers import ModelProvider, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
@@ -169,6 +169,7 @@ def create_app(
     *,
     runtime: ChatRuntime | None = None,
     eval_scorers: Mapping[str, EvalScorer] | None = None,
+    agent_providers: Mapping[str, ModelProvider] | None = None,
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -196,7 +197,7 @@ def create_app(
         ),
         max_active_runs=config.max_active_runs,
     )
-    agent_service = AgentService(service, config)
+    agent_service = AgentService(service, config, providers=agent_providers)
     evaluation_service = EvaluationService(
         database, scope="api", max_concurrency=config.max_active_runs
     )
@@ -648,9 +649,27 @@ def create_app(
     async def agent_catalog() -> list[AgentDescriptor]:
         return agent_service.catalog_views()
 
+    @app.get("/v1/agents/profiles")
+    async def agent_profiles() -> list[AgentProfileVersion]:
+        return await agent_service.profile_list()
+
+    @app.get("/v1/agents/profiles/{name}")
+    async def agent_profile(
+        name: str, revision: int | None = Query(default=None, ge=1)
+    ) -> AgentProfileVersion:
+        return await agent_service.profile_get(name, revision)
+
+    @app.put("/v1/agents/profiles/{name}")
+    async def put_agent_profile(name: str, payload: AgentProfileUpdate) -> AgentProfileVersion:
+        if payload.config.name != name:
+            raise ServiceError("agent_profile_name", "路径名称与配置名称不一致", 422)
+        return await agent_service.profile_put(payload)
+
     @app.post("/v1/agents", status_code=201)
     async def spawn_agent(payload: AgentSpawnRequest) -> AgentView:
-        return await agent_service.spawn(payload.name, persistent=payload.persistent)
+        return await agent_service.spawn(
+            payload.name, persistent=payload.persistent, profile_revision=payload.profile_revision
+        )
 
     @app.get("/v1/agents")
     async def list_agents() -> list[AgentView]:
