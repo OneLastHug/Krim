@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
 from krim_agent.agents import AgentDescriptor, AgentProfileUpdate, AgentProfileVersion
+from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
 from krim_agent.application.agents import (
     AgentInventoryView,
     AgentPromptRequest,
@@ -692,6 +693,22 @@ def create_app(
     async def restore_agent_instance(agent_id: str) -> AgentView:
         return await agent_service.restore(agent_id)
 
+    @app.get("/v1/agents/{agent_id}/session")
+    async def agent_session(agent_id: str) -> AgentSessionView:
+        return await agent_service.session(agent_id)
+
+    @app.get("/v1/agents/{agent_id}/turns")
+    async def agent_turns(agent_id: str) -> list[AgentTurnView]:
+        return await agent_service.session_turns(agent_id)
+
+    @app.post("/v1/agents/{agent_id}/session/close")
+    async def close_agent_session(agent_id: str, payload: AgentSessionControl) -> AgentSessionView:
+        return await agent_service.close_session(agent_id, payload.expected_revision)
+
+    @app.post("/v1/agents/{agent_id}/session/reopen")
+    async def reopen_agent_session(agent_id: str, payload: AgentSessionControl) -> AgentSessionView:
+        return await agent_service.reopen_session(agent_id, payload.expected_revision)
+
     @app.post("/v1/agents/{agent_id}/execute")
     async def execute_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
         return await agent_service.execute(agent_id, payload)
@@ -712,6 +729,7 @@ def create_app(
     async def agent_events(
         agent_id: str,
         from_seq: int = Query(default=0, ge=0),
+        run_id: str | None = Query(default=None, min_length=1, max_length=36),
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         if last_event_id is not None:
@@ -723,10 +741,10 @@ def create_app(
             except ValueError as exc:
                 raise ServiceError("invalid_cursor", "Last-Event-ID 必须是非负整数", 416) from exc
 
-        handle, state = await agent_service.stream_state(agent_id, from_seq)
+        reader, state = await agent_service.stream_state(agent_id, from_seq, run_id)
 
         async def event_stream() -> AsyncIterator[str]:
-            async for frame in handle.runtime.subscribe(state, from_seq):
+            async for frame in reader.subscribe(state, from_seq):
                 if frame is None:
                     yield ": heartbeat\n\n"
                 else:

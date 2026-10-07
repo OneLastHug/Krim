@@ -24,6 +24,7 @@ from krim_agent.agents import (
     ExecResult,
 )
 from krim_agent.agents.permissions import profile_policy
+from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence.agent_profiles import AgentProfileStore
@@ -61,6 +62,7 @@ class AgentPromptRequest(StrictModel):
 
 class AgentView(StrictModel):
     agent_id: str
+    session_id: str
     name: str
     topic_id: str
     status: AgentViewStatus
@@ -71,6 +73,7 @@ class AgentView(StrictModel):
     parent_tool_call_id: str | None = None
     result: ExecResult | None = None
     profile_revision: int | None = None
+    session: AgentSessionView
 
 
 class AgentInventoryView(StrictModel):
@@ -83,6 +86,9 @@ class AgentInventoryView(StrictModel):
     error_code: str | None = None
     current_run_id: str | None = None
     turn: int
+    session_id: str | None = None
+    session_status: str | None = None
+    lifecycle_status: str | None = None
 
 
 class AgentService:
@@ -106,6 +112,7 @@ class AgentService:
         )
         self.catalog = AgentCatalog(self.manager)
         self.profiles = AgentProfileStore(runtime.repository.database)
+        self.sessions = self.manager.sessions
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
         self.catalog.register(
@@ -184,6 +191,7 @@ class AgentService:
             status = "queued"
         return AgentView(
             agent_id=handle.agent_id,
+            session_id=handle.agent_id,
             name=handle.definition.name,
             topic_id=handle.topic_id,
             status=status,
@@ -194,6 +202,7 @@ class AgentService:
             parent_tool_call_id=handle.definition.parent_tool_call_id,
             result=result,
             profile_revision=handle.definition.profile_revision,
+            session=await handle.session(),
         )
 
     async def _profile_definition(
@@ -244,6 +253,8 @@ class AgentService:
             resource_version=hashlib.sha256(
                 json.dumps(resource, sort_keys=True).encode()
             ).hexdigest(),
+            mode=profile.config.mode,
+            session_ttl_seconds=profile.config.session_ttl_seconds,
         )
 
     async def spawn(
@@ -265,7 +276,11 @@ class AgentService:
                 self.runtime.settings.usage_budget,
             )
             handle = await self.manager.spawn(
-                replace(definition, agent_id="", persistent=persistent),
+                replace(
+                    definition,
+                    agent_id="",
+                    persistent=persistent or definition.persistent,
+                ),
                 budget_account_ids=parent_accounts,
             )
         except ToolError as exc:
@@ -337,20 +352,28 @@ class AgentService:
         return restored
 
     async def inventory(self) -> list[AgentInventoryView]:
-        return [
-            AgentInventoryView(
-                agent_id=item.agent_id,
-                name=item.name,
-                topic_id=item.topic_id,
-                profile_revision=item.profile_revision,
-                status=item.status,
-                available=item.agent_id in self.manager._handles,
-                error_code=self.restore_errors.get(item.agent_id),
-                current_run_id=item.current_run_id,
-                turn=item.turn,
+        values = []
+        for item in await self.manager.store.list():
+            session = await self.sessions.for_agent(item.agent_id)
+            current = session.current_run_id or item.current_run_id
+            run = await self.runtime.repository.get_run(current) if current is not None else None
+            values.append(
+                AgentInventoryView(
+                    agent_id=item.agent_id,
+                    name=item.name,
+                    topic_id=item.topic_id,
+                    profile_revision=item.profile_revision,
+                    status=run.status if run is not None else "created",
+                    available=item.agent_id in self.manager._handles,
+                    error_code=self.restore_errors.get(item.agent_id),
+                    current_run_id=current,
+                    turn=max(session.turn, item.turn),
+                    session_id=session.session_id,
+                    session_status=session.status,
+                    lifecycle_status=item.status,
+                )
             )
-            for item in await self.manager.store.list()
-        ]
+        return values
 
     async def restore(self, agent_id: str) -> AgentView:
         if agent_id in self.manager._handles:
@@ -420,7 +443,32 @@ class AgentService:
     async def get(self, agent_id: str) -> AgentView:
         return await self.view(self._handle(agent_id))
 
+    async def session(self, agent_id: str) -> AgentSessionView:
+        """持久事实只读；不要求当前进程已恢复实例。"""
+        return await self.sessions.for_agent(agent_id)
+
+    async def session_turns(self, agent_id: str) -> list[AgentTurnView]:
+        return await self.sessions.turns((await self.session(agent_id)).session_id)
+
+    async def close_session(self, agent_id: str, expected_revision: int) -> AgentSessionView:
+        try:
+            return await self._handle(agent_id).close_session(expected_revision)
+        except AgentError as error:
+            raise ServiceError(error.code, str(error), 409) from error
+
+    async def reopen_session(self, agent_id: str, expected_revision: int) -> AgentSessionView:
+        try:
+            return await self._handle(agent_id).reopen_session(expected_revision)
+        except AgentError as error:
+            raise ServiceError(error.code, str(error), 409) from error
+
     def _remember(self, handle: AgentHandle, result: ExecResult) -> None:
+        if result.run_id is not None and (
+            handle.current_run is None
+            or result.run_id != handle.current_run.id
+            or result.turn != handle.turn
+        ):
+            return
         if handle.agent_id in self.manager._handles:
             self._results[handle.agent_id] = (
                 handle.current_run.id if handle.current_run else None,
@@ -448,7 +496,10 @@ class AgentService:
         except AgentError as exc:
             raise ServiceError(exc.code, str(exc), 409) from exc
         self._remember(handle, result)
-        return await self.view(handle)
+        value = await self.view(handle)
+        if result.run_id is not None and result.run_id != value.current_run_id:
+            return value.model_copy(update={"result": result})
+        return value
 
     async def resume(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
         handle = self._handle(agent_id)
@@ -470,7 +521,10 @@ class AgentService:
         except AgentError as exc:
             raise ServiceError(exc.code, str(exc), 409) from exc
         self._remember(handle, result)
-        return await self.view(handle)
+        value = await self.view(handle)
+        if result.run_id is not None and result.run_id != value.current_run_id:
+            return value.model_copy(update={"result": result})
+        return value
 
     async def stop(self, agent_id: str) -> AgentView:
         handle = self._handle(agent_id)
@@ -491,12 +545,18 @@ class AgentService:
         self._results.pop(handle.agent_id, None)
         return value
 
-    async def stream_state(self, agent_id: str, from_seq: int) -> tuple[AgentHandle, RunState]:
-        handle = self._handle(agent_id)
-        if handle.current_run is None:
+    async def stream_state(
+        self, agent_id: str, from_seq: int, run_id: str | None = None
+    ) -> tuple[ChatRuntime, RunState]:
+        session = await self.session(agent_id)
+        selected = run_id or session.current_run_id
+        if selected is None:
             raise ServiceError("agent_not_started", "Agent 尚未启动运行", 409)
-        state = await handle.runtime.stream_state(handle.current_run.id, from_seq)
-        return handle, state
+        await self.sessions.assert_run(session.session_id, selected)
+        handle = self.manager._handles.get(agent_id)
+        reader = handle.runtime if handle is not None else self.runtime
+        state = await reader.stream_state(selected, from_seq)
+        return reader, state
 
     async def close(self) -> None:
         await self.manager.close()

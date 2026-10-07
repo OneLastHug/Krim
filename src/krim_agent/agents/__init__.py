@@ -3,6 +3,7 @@
 from .catalog import AgentCatalog, AgentDescriptor, AgentToolInput
 from .manager import AgentHandle, AgentManager
 from .profiles import AgentProfile, AgentProfileUpdate, AgentProfileVersion
+from .sessions import AgentSessionControl, AgentSessionView, AgentTurnView
 from .types import AgentDefinition, AgentError, ExecResult
 
 __all__ = [
@@ -17,4 +18,7 @@ __all__ = [
     "AgentProfileUpdate",
     "AgentProfileVersion",
     "ExecResult",
+    "AgentSessionControl",
+    "AgentSessionView",
+    "AgentTurnView",
 ]

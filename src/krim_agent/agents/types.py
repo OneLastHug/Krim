@@ -17,6 +17,8 @@ from krim_agent.tools import ToolRegistry
 from krim_agent.tools.core import Policy
 from krim_agent.usage import UsageTotals
 
+from .sessions import SessionMode
+
 AgentStatus = Literal[
     "queued", "running", "completed", "failed", "aborted", "interrupted", "destroyed"
 ]
@@ -60,6 +62,8 @@ class AgentDefinition:
     profile_revision: int | None = None
     instructions: str = ""
     resource_version: str = ""
+    mode: SessionMode = "agent"
+    session_ttl_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
@@ -70,6 +74,10 @@ class AgentDefinition:
             raise ValueError("timeout_seconds 必须在 0–300 秒之间")
         if len(self.instructions) > 8192:
             raise ValueError("Agent instructions 不能超过8192字符")
+        if self.mode not in {"agent", "ask", "plan", "auto"}:
+            raise ValueError("无效 Agent 会话模式")
+        if self.session_ttl_seconds is not None and not 0 < self.session_ttl_seconds <= 86400:
+            raise ValueError("Agent 会话 TTL 须在 0–86400 秒之间")
         if not 1 <= self.max_steps <= 32:
             raise ValueError("max_steps 必须在 1–32 之间")
         if not 0 < self.tool_timeout_seconds <= 120:

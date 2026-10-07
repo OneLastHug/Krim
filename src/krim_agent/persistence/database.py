@@ -341,6 +341,41 @@ class AgentHandleRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AgentSessionRow(Base):
+    """一个 Agent 实例对应一个稳定 session；会话账本不保存 callable 或密钥。"""
+
+    __tablename__ = "agent_sessions"
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(36), unique=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), unique=True)
+    name: Mapped[str] = mapped_column(String(64))
+    persistent: Mapped[bool] = mapped_column(Boolean)
+    profile_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    definition_hash: Mapped[str] = mapped_column(String(64))
+    parent_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    permissions: Mapped[dict[str, JsonValue]] = mapped_column(JSON, default=dict)
+    turn: Mapped[int] = mapped_column(Integer, default=0)
+    current_run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+
+
+class AgentSessionTurnRow(Base):
+    __tablename__ = "agent_session_turns"
+    __table_args__ = (UniqueConstraint("session_id", "turn"),)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_sessions.session_id"), primary_key=True
+    )
+    turn: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(36))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class UsageBudgetAccountRow(Base):
     __tablename__ = "usage_budget_accounts"
     __table_args__ = (UniqueConstraint("owner_kind", "owner_id"),)
@@ -689,6 +724,9 @@ class KrimRepository:
         allow_new: bool = True,
         action: Literal["send", "edit", "regenerate"] = "send",
         source_message_id: str | None = None,
+        agent_session_id: str | None = None,
+        agent_id: str | None = None,
+        agent_owner_id: str | None = None,
     ) -> tuple[RunView, bool]:
         text = "" if isinstance(request, RegenerateRequest) else request.text
         explicit_parent = request.parent_message_id if isinstance(request, ChatRequest) else None
@@ -747,9 +785,14 @@ class KrimRepository:
             )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         async with self.database.write_lock, self.database.sessions.begin() as session:
+            from .agent_sessions import assert_session_open, guard_agent_topic
+
             topic = await session.get(TopicRow, topic_id)
             if topic is None:
                 raise ServiceError("topic_not_found", "话题不存在", 404)
+            agent_session = await guard_agent_topic(
+                session, topic_id, agent_session_id, agent_id, agent_owner_id
+            )
             existing = await session.scalar(
                 select(RunRow).where(
                     RunRow.topic_id == topic_id, RunRow.idempotency_key == request.idempotency_key
@@ -759,6 +802,11 @@ class KrimRepository:
                 if existing.input_hash != digest:
                     raise ServiceError("idempotency_conflict", "同一幂等键不能用于不同输入", 409)
                 return RunView.model_validate(existing), False
+            if agent_session is not None:
+                await assert_session_open(session, agent_session)
+                limit = agent_session.permissions.get("max_turns", 128)
+                if isinstance(limit, int) and agent_session.turn >= limit:
+                    raise ServiceError("max_turns", "Agent 超过会话轮次预算", 409)
             if nodes:
                 context = PromptContext.model_validate(topic.prompt_context)
                 references = {item.id: item for item in context.mentions}
@@ -809,6 +857,18 @@ class KrimRepository:
             )
             session.add(run)
             await session.flush()
+            if agent_session is not None:
+                agent_session.turn += 1
+                agent_session.current_run_id = run.id
+                session.add(
+                    AgentSessionTurnRow(
+                        session_id=agent_session.session_id,
+                        agent_id=agent_session.agent_id,
+                        turn=agent_session.turn,
+                        run_id=run.id,
+                        created_at=utc_now(),
+                    )
+                )
             if action != "regenerate":
                 snapshot = await self._prompt_snapshot(topic, text, occurrences, session)
                 try:
