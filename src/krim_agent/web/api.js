@@ -146,3 +146,65 @@ export async function consumeWorkflowEvents(runId, fromSeq, onEvent) {
     }
     return cursor;
 }
+export async function consumeMultiplex(sources, onFrame, signal) {
+    const response = await fetch("/v1/runs/events", { method: "POST", headers: headers(), body: JSON.stringify({ sources }), signal });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+    if (!response.body)
+        throw new Error("浏览器未提供流式响应");
+    const expected = new Map(sources.map((source) => [source.run_id, source.next_seq]));
+    const topics = new Map(sources.map((source) => [source.run_id, source.topic_id]));
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let buffer = "";
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+            if (buffer.length > 524288)
+                throw new Error("多路流帧超过大小限制");
+            for (const block of blocks) {
+                if (block.startsWith(":"))
+                    continue;
+                let id = "", kind = "";
+                const lines = [];
+                for (const line of block.split("\n")) {
+                    if (line.startsWith("data:"))
+                        lines.push(line.slice(5).trimStart());
+                    if (line.startsWith("id:"))
+                        id = line.slice(3).trim();
+                    if (line.startsWith("event:"))
+                        kind = line.slice(6).trim();
+                }
+                if (!lines.length)
+                    continue;
+                const raw = lines.join("\n");
+                if (new TextEncoder().encode(raw).length > 262144)
+                    throw new Error("多路流事件超过大小限制");
+                const item = JSON.parse(raw);
+                const frame = item.frame;
+                const next = expected.get(frame.stream_id);
+                if (item.type !== "run-frame" || kind !== "run-frame" || item.topic_id !== topics.get(frame.stream_id)
+                    || next === undefined || frame.seq !== next || id !== `${frame.stream_id}:${frame.seq}`)
+                    throw new Error("多路流来源或序号不正确");
+                expected.set(frame.stream_id, next + 1);
+                onFrame(item);
+                if (frame.kind === "end" || frame.kind === "error")
+                    expected.delete(frame.stream_id);
+            }
+            if (!expected.size) {
+                await reader.cancel();
+                return;
+            }
+            if (done)
+                break;
+        }
+    }
+    finally {
+        reader.releaseLock();
+    }
+    if (expected.size)
+        throw new Error("连接已断开，可从已保存的游标继续读取");
+}

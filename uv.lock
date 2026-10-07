@@ -475,6 +475,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "anyio" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -506,6 +507,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "alembic", specifier = ">=1.14,<2" },
+    { name = "anyio", specifier = ">=4,<5" },
     { name = "cryptography", specifier = ">=42,<51" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },

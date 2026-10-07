@@ -4,6 +4,8 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "后台生成中": "Generating in background",
+    "后台流断开，可重连": "Background stream disconnected; reconnect available",
     "拒绝压缩": "Reject compaction",
     "压缩已拒绝": "Compaction rejected",
     "压缩提案已过期": "Compaction proposal expired",

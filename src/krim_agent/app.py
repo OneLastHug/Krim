@@ -7,6 +7,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 from .app_sdk import AppHandle
 from .application.change_lists import ChangeListService
 from .application.checkpoints import CheckpointService
+from .application.streams import MultiplexReader
 from .change_list import (
     ChangeClearRequest,
     ChangeClickRequest,
@@ -60,6 +61,7 @@ from .skills import (
     SkillRemoveRequest,
     SkillTopicRequest,
 )
+from .streams import ActiveRunView, MultiplexRequest
 
 
 class SendRequest(ChatRequest):
@@ -382,6 +384,22 @@ class LocalApp:
                 if frame is not None:
                     yield TypeAdapter(JsonValue).validate_json(frame.model_dump_json())
 
+        async def active_runs(_data: JsonValue) -> JsonValue:
+            values = [
+                ActiveRunView(run=run, events=await runtime.repository.event_summary(run.id))
+                for run in await runtime.repository.active_runs()
+            ]
+            return TypeAdapter(JsonValue).validate_python(
+                [value.model_dump(mode="json") for value in values]
+            )
+
+        async def multiplex(data: JsonValue) -> AsyncGenerator[JsonValue, None]:
+            reader = MultiplexReader(runtime)
+            prepared = await reader.prepare(MultiplexRequest.model_validate(data))
+            async for item in reader.subscribe(prepared):
+                if item is not None:
+                    yield TypeAdapter(JsonValue).validate_python(item.model_dump(mode="json"))
+
         async def get_context(data: JsonValue) -> JsonValue:
             payload = PromptContextRequest.model_validate(data)
             value = await runtime.repository.get_prompt_context(payload.topic_id)
@@ -505,6 +523,8 @@ class LocalApp:
         self._app.on("chat/edit", edit)
         self._app.on("chat/regenerate", regenerate)
         self._app.on_stream("chat/stream", events)
+        self._app.on("chat/active-runs", active_runs)
+        self._app.on_stream("chat/multiplex", multiplex)
         self._app.on("mention/get", get_context)
         self._app.on("mention/add", add_mention)
         self._app.on("drag/enter", drag_enter)

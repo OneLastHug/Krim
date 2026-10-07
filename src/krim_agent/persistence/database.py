@@ -1208,6 +1208,15 @@ class KrimRepository:
                 raise ServiceError("run_not_found", "运行不存在", 404)
             return RunView.model_validate(row)
 
+    async def active_runs(self) -> list[RunView]:
+        async with self.database.write_lock, self.database.sessions() as session:
+            rows = await session.scalars(
+                select(RunRow)
+                .where(RunRow.status.in_(("queued", "running")))
+                .order_by(RunRow.created_at, RunRow.id)
+            )
+            return [RunView.model_validate(row) for row in rows]
+
     async def run_messages(self, run_id: str) -> list[MessageView]:
         await self.get_run(run_id)
         async with self.database.write_lock, self.database.sessions() as session:
@@ -1288,22 +1297,52 @@ class KrimRepository:
     async def usage_view(self, run_id: str) -> RunUsageView:
         return usage_from_events(run_id, await self.list_events(run_id))
 
+    async def event_page(self, run_id: str, from_seq: int, *, limit: int = 16) -> list[StreamFrame]:
+        if from_seq < 0 or not 1 <= limit <= 64:
+            raise ValueError("事件分页参数无效")
+        await self.get_run(run_id)
+        async with self.database.write_lock, self.database.sessions() as session:
+            rows = await session.scalars(
+                select(RunEventRow)
+                .where(RunEventRow.run_id == run_id, RunEventRow.seq >= from_seq)
+                .order_by(RunEventRow.seq)
+                .limit(limit)
+            )
+            return [
+                StreamFrame(
+                    stream_id=row.run_id,
+                    seq=row.seq,
+                    kind=row.kind,
+                    data=row.data,
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+
     async def event_summary(self, run_id: str) -> StreamEventView:
-        events = await self.list_events(run_id)
-        if not events:
-            return StreamEventView(
-                run_id=run_id,
-                first_seq=0,
-                last_seq=-1,
-                count=0,
-                durable=self.database.is_persistent,
+        await self.get_run(run_id)
+        async with self.database.write_lock, self.database.sessions() as session:
+            counts = (
+                await session.execute(
+                    select(
+                        func.count(RunEventRow.seq),
+                        func.min(RunEventRow.seq),
+                        func.max(RunEventRow.seq),
+                    ).where(RunEventRow.run_id == run_id)
+                )
+            ).one()
+            last_kind = await session.scalar(
+                select(RunEventRow.kind)
+                .where(RunEventRow.run_id == run_id)
+                .order_by(RunEventRow.seq.desc())
+                .limit(1)
             )
         return StreamEventView(
             run_id=run_id,
-            first_seq=events[0].seq,
-            last_seq=events[-1].seq,
-            count=len(events),
-            terminal=events[-1].kind in {"end", "error"},
+            first_seq=counts[1] if counts[1] is not None else 0,
+            last_seq=counts[2] if counts[2] is not None else -1,
+            count=counts[0],
+            terminal=last_kind in {"end", "error"},
             durable=self.database.is_persistent,
         )
 

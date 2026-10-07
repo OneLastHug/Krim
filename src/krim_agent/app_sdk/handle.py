@@ -56,6 +56,7 @@ from krim_agent.protocol.domain import (
     TopicView,
 )
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
+from krim_agent.streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 
 
 class AppHandle:
@@ -455,3 +456,14 @@ class AppHandle:
 
     async def destroy(self) -> None:
         await self._bridge.close()
+
+    async def active_runs(self) -> list[ActiveRunView]:
+        value = await self._call("chat/active-runs", None)
+        return TypeAdapter(list[ActiveRunView]).validate_json(json.dumps(value, ensure_ascii=False))
+
+    async def multiplex_events(self, request: MultiplexRequest) -> AsyncIterator[RunStreamFrame]:
+        async for frame in self._bridge.stream("chat/multiplex", request.model_dump(mode="json")):
+            if frame.kind == "error":
+                raise ServiceError("stream_error", "宿主多路流读取失败")
+            if frame.kind == "chunk":
+                yield RunStreamFrame.model_validate_json(json.dumps(frame.data, ensure_ascii=False))

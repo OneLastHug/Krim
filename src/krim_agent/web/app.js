@@ -1,4 +1,4 @@
-import { consumeWorkflowEvents, consumeEvents, errorText, requestJson, setApiKey, } from "./api.js";
+import { consumeWorkflowEvents, errorText, requestJson, setApiKey, } from "./api.js";
 import { HostEndpoint } from "./host.js";
 import { appendLinks, clearLinkCache } from "./links.js";
 import { PromptContextUI } from "./prompt-context-ui.js";
@@ -8,6 +8,7 @@ import { ChangeListUI } from "./change-list-ui.js";
 import { CheckpointUI } from "./checkpoint-ui.js";
 import { AttachmentsUI } from "./attachments-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
+import { BackgroundStreams } from "./background-streams.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
@@ -18,10 +19,70 @@ const state = {
 const $ = (id) => document.getElementById(id);
 let interactionLoadVersion = 0;
 let proposalLoadVersion = 0;
+let topicLoadVersion = 0;
+const pendingSends = new Set();
+let creatingTopic = false;
 const text = (id) => $(id);
 const labels = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
 const statuses = { created: "待执行", queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断", destroyed: "已销毁", paused: "已暂停" };
 const idempotency = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+const backgroundStreams = new BackgroundStreams((session, item) => {
+    renderTopics();
+    if (state.topicId !== session.run.topic_id)
+        return;
+    projectCurrentSession();
+    renderMessages();
+    if (item?.frame.data?.type === "step_finish" || item?.frame.kind === "end")
+        void reloadCurrentHistory(session.run.topic_id).catch(() => undefined);
+    if (item?.frame.data?.type === "interaction_request")
+        void loadInteractions().catch(() => undefined);
+    if (item?.frame.data?.type === "context_compact_proposal") {
+        void loadProposals().catch(() => undefined);
+        if (item.frame.data.phase === "pending")
+            showNotice("等待确认压缩后继续生成");
+    }
+    if (item?.frame.data?.type === "context_compact")
+        showNotice("上下文已压缩并继续生成");
+    if (item?.frame.data?.type === "skill_loaded" && typeof item.frame.data.name === "string")
+        skillsUI.loadedSkill(item.frame.data.name, typeof item.frame.data.resource === "string" ? item.frame.data.resource : null);
+    if (item?.frame.kind === "end") {
+        showNotice(() => t("生成{status}", { status: localStatus(session.run.status) }));
+        void loadInteractions().catch(() => undefined);
+        void loadProposals().catch(() => undefined);
+    }
+}, (message) => { if (state.topicId && backgroundStreams.forTopic(state.topicId)?.connected === false)
+    showNotice(message, true); });
+function projectCurrentSession() {
+    const session = state.topicId ? backgroundStreams.forTopic(state.topicId) : undefined;
+    if (session) {
+        state.runId = session.run.id;
+        state.cursor = session.cursor;
+        state.streaming = !session.terminal && session.connected;
+        state.disconnected = !session.terminal && !session.connected;
+        const persisted = state.messages.some((message) => message.run_id === session.run.id && message.role === "assistant" && message.details.step === session.step);
+        state.streamText = persisted ? "" : session.draft;
+    }
+    else {
+        state.runId = null;
+        state.cursor = 0;
+        state.streaming = state.disconnected = false;
+        state.streamText = "";
+    }
+    disableComposer(Boolean((session && !session.terminal) || (state.topicId && pendingSends.has(state.topicId))));
+}
+async function reloadCurrentHistory(topicId) {
+    const [messages, tree] = await Promise.all([
+        requestJson(`/v1/topics/${encodeURIComponent(topicId)}/messages`),
+        requestJson(`/v1/topics/${encodeURIComponent(topicId)}/tree`),
+    ]);
+    if (state.topicId !== topicId)
+        return;
+    state.messages = messages.messages;
+    state.tree = tree;
+    projectCurrentSession();
+    renderMessages();
+    renderBranchSelect();
+}
 const hostEndpoint = new HostEndpoint();
 const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
@@ -240,11 +301,11 @@ function disableComposer(value) {
     text("prompt").disabled = value;
     $("compact-preview").disabled = value || !state.topicId;
     renderCompact(state.compactPreview);
-    $("new-topic").disabled = value;
+    $("new-topic").disabled = creatingTopic;
     $("branch-select").disabled = value;
     $("run-stop").disabled = !state.runId || !(state.streaming || state.disconnected);
-    $("run-resume").disabled = !state.runId || state.streaming || !state.disconnected;
-    for (const button of document.querySelectorAll(".topic-button, .message-controls button"))
+    $("run-resume").disabled = !state.runId || !(state.streaming || state.disconnected);
+    for (const button of document.querySelectorAll(".message-controls button"))
         button.disabled = value;
     hostEndpoint.notify("host/state", { connected: $("connection").classList.contains("ready"), topic_id: state.topicId, run_id: state.runId, iframe: window.parent !== window, locale: document.documentElement.lang || "zh-CN" });
 }
@@ -262,11 +323,12 @@ function renderTopics() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = `topic-button${topic.id === state.topicId ? " active" : ""}`;
-        button.disabled = state.busy;
+        button.disabled = false;
         const strong = document.createElement("strong");
         strong.textContent = topic.title;
         const small = document.createElement("small");
-        small.textContent = localDate(topic.updated_at);
+        const active = backgroundStreams.forTopic(topic.id);
+        small.textContent = active ? `${localDate(topic.updated_at)} · ${active.terminal ? localStatus(active.run.status) : active.connected ? t("后台生成中") : t("后台流断开，可重连")}` : localDate(topic.updated_at);
         button.append(strong, small);
         button.addEventListener("click", () => void loadTopic(topic.id).catch((error) => showNotice(errorText(error), true)));
         root.append(button);
@@ -466,6 +528,12 @@ async function loadInteractions() {
     const ids = new Set(state.interactionRuns);
     if (state.runId)
         ids.add(state.runId);
+    for (const session of backgroundStreams.all())
+        if (!session.terminal) {
+            ids.add(session.run.id);
+            for (const run of session.interactionRuns)
+                ids.add(run);
+        }
     for (const agent of state.handles)
         if (agent.current_run_id)
             ids.add(agent.current_run_id);
@@ -849,20 +917,27 @@ catch (error) {
     showNotice(errorText(error), true);
 } }
 async function loadTopic(topicId) {
-    if (state.streaming)
-        return;
+    const version = ++topicLoadVersion;
     const switched = state.topicId !== topicId;
     if (switched) {
+        state.editingMessageId = null;
+        $("edit-cancel").hidden = true;
+        $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
+        promptContextUI.setText("", true);
         state.runId = null;
         state.cursor = 0;
         state.disconnected = false;
+        state.streaming = false;
         state.streamText = "";
+        state.messages = [];
+        state.tree = null;
         state.interactionRuns.clear();
         state.interactions = [];
         interactionLoadVersion += 1;
         renderInteractions();
     }
     state.topicId = topicId;
+    projectCurrentSession();
     dragDropUI.selectTopic(topicId);
     const topic = state.topics.find((item) => item.id === topicId);
     $("topic-heading").textContent = topic?.title || t("话题");
@@ -870,7 +945,7 @@ async function loadTopic(topicId) {
         requestJson(`/v1/topics/${encodeURIComponent(topicId)}/messages`),
         requestJson(`/v1/topics/${encodeURIComponent(topicId)}/tree`),
     ]);
-    if (state.topicId !== topicId)
+    if (state.topicId !== topicId || version !== topicLoadVersion)
         return;
     const url = new URL(location.href);
     url.searchParams.set("topic", topicId);
@@ -884,30 +959,19 @@ async function loadTopic(topicId) {
     renderMessages();
     renderCompact(null);
     state.topics = state.topics.map((item) => item.id === topicId ? tree.topic : item);
-    if (switched && state.messages.at(-1)) {
-        const latest = state.messages.at(-1);
-        const run = await requestJson(`/v1/runs/${encodeURIComponent(latest.run_id)}`);
-        if (state.topicId === topicId && ["queued", "running"].includes(run.status)) {
-            state.runId = run.id;
-            state.cursor = 0;
-            state.disconnected = true;
-            showNotice("此话题仍在生成，可以继续读取或停止");
-        }
-    }
-    disableComposer(state.busy);
+    projectCurrentSession();
     await loadProposals();
     await loadInteractions();
-    await promptContextUI.selectTopic(topicId);
-    await skillsUI.selectTopic(topicId);
-    await changeListUI.selectTopic(topicId);
-    await checkpointUI.selectTopic(topicId);
-    await attachmentsUI.selectTopic(topicId);
+    if (state.topicId !== topicId || version !== topicLoadVersion)
+        return;
+    await Promise.all([promptContextUI.selectTopic(topicId), skillsUI.selectTopic(topicId), changeListUI.selectTopic(topicId), checkpointUI.selectTopic(topicId), attachmentsUI.selectTopic(topicId)]);
     if (state.topicId === topicId)
         await restoreLocale(tree.topic.locale);
 }
 async function loadTopics() {
     state.topics = (await requestJson("/v1/topics")).topics;
     renderTopics();
+    await backgroundStreams.start();
     if (!state.topicId && state.topics[0])
         await loadTopic(state.topics[0].id);
 }
@@ -918,9 +982,10 @@ async function loadAgents() {
     await loadInteractions();
 }
 async function createTopic() {
-    if (state.busy)
+    if (creatingTopic)
         return;
-    disableComposer(true);
+    creatingTopic = true;
+    projectCurrentSession();
     try {
         const title = text("topic-title").value.trim() || t("新话题");
         const topic = await requestJson("/v1/topics", { method: "POST", body: JSON.stringify({ title, locale: currentLocale() }) });
@@ -932,94 +997,53 @@ async function createTopic() {
         showNotice(errorText(error), true);
     }
     finally {
-        disableComposer(false);
+        creatingTopic = false;
+        projectCurrentSession();
     }
 }
-async function consume(runId, fromSeq = 0) {
-    state.runId = runId;
-    state.cursor = fromSeq;
-    state.streaming = true;
-    state.disconnected = false;
-    if (fromSeq === 0)
-        state.streamText = "";
-    disableComposer(true);
-    renderTopics();
-    renderMessages();
-    const controller = new AbortController();
-    state.streamAbort = controller;
-    const interactionTimer = setInterval(() => { void loadInteractions().catch(() => undefined); void loadProposals().catch(() => undefined); }, 500);
-    try {
-        state.cursor = await consumeEvents(runId, fromSeq, (frame) => {
-            state.cursor = frame.seq + 1;
-            if (frame.kind === "chunk" && frame.data?.type === "text_delta") {
-                state.streamText += String(frame.data.text || "");
-                renderMessages();
-            }
-            if (frame.kind === "chunk" && frame.data?.type === "context_compact")
-                showNotice("上下文已压缩并继续生成");
-            if (frame.kind === "chunk" && frame.data?.type === "context_compact_proposal") {
-                void loadProposals().catch(() => undefined);
-                if (frame.data.phase === "pending")
-                    showNotice("等待确认压缩后继续生成");
-            }
-            if (frame.kind === "chunk" && frame.data?.type === "context_notice")
-                showNotice("历史较长，可以预览压缩");
-            if (frame.kind === "chunk" && frame.data?.type === "skill_loaded" && typeof frame.data.name === "string")
-                skillsUI.loadedSkill(frame.data.name, typeof frame.data.resource === "string" ? frame.data.resource : null);
-            if (frame.kind === "chunk" && frame.data?.type === "interaction_request") {
-                const interaction = frame.data.interaction;
-                if (interaction?.run_id)
-                    state.interactionRuns.add(interaction.run_id);
-                void loadInteractions().catch(() => undefined);
-            }
-            if (frame.kind === "end")
-                showNotice(() => t("生成{status}", { status: localStatus(String(frame.data?.status || "结束")) }));
-        }, controller.signal);
-    }
-    catch (error) {
-        state.disconnected = true;
-        throw error;
-    }
-    finally {
-        clearInterval(interactionTimer);
-        interactionLoadVersion += 1;
-        state.streaming = false;
-        state.streamAbort = null;
-        state.interactions = [];
-        state.interactionRuns.clear();
-        renderInteractions();
-        disableComposer(false);
+async function consume(runId, _fromSeq = 0) {
+    const run = await requestJson(`/v1/runs/${encodeURIComponent(runId)}`);
+    const session = backgroundStreams.track(run);
+    backgroundStreams.retry(runId);
+    if (state.topicId === session.run.topic_id) {
+        projectCurrentSession();
         renderTopics();
         renderMessages();
     }
-    if (state.topicId)
-        await loadTopic(state.topicId);
 }
 async function sendMessage(event) {
     event.preventDefault();
     if (!state.topicId || state.busy)
         return;
+    const topicId = state.topicId;
     const prompt = text("prompt").value;
     if (!prompt.trim())
         return;
-    disableComposer(true);
+    pendingSends.add(topicId);
+    projectCurrentSession();
     showNotice("生成中……");
     try {
-        const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(state.topicId)}/messages`;
+        const path = state.editingMessageId ? `/v1/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(state.editingMessageId)}/edit` : `/v1/topics/${encodeURIComponent(topicId)}/messages`;
         const body = { text: prompt, idempotency_key: idempotency(), mentions: promptContextUI.occurrences, skill_names: skillsUI.selectedNames, nodes: promptNodes(prompt) };
         const run = await requestJson(path, { method: "POST", body: JSON.stringify(body) });
-        state.editingMessageId = null;
-        promptContextUI.setText("", true);
-        $("edit-cancel").hidden = true;
-        $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
-        skillsUI.clearSelection();
-        await loadTopic(run.topic_id);
-        await consume(run.id);
+        backgroundStreams.track(run);
+        pendingSends.delete(topicId);
+        if (state.topicId === topicId) {
+            state.editingMessageId = null;
+            promptContextUI.setText("", true);
+            $("edit-cancel").hidden = true;
+            $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行");
+            skillsUI.clearSelection();
+            await loadTopic(topicId);
+        }
     }
     catch (error) {
-        showNotice(errorText(error), true);
-        state.streaming = false;
-        disableComposer(false);
+        if (state.topicId === topicId)
+            showNotice(errorText(error), true);
+    }
+    finally {
+        pendingSends.delete(topicId);
+        projectCurrentSession();
     }
 }
 async function selectBranch(messageId) {
@@ -1039,16 +1063,23 @@ function beginEdit(message) { if (state.busy)
 async function regenerateMessage(messageId) {
     if (!state.topicId || state.busy)
         return;
-    disableComposer(true);
+    const topicId = state.topicId;
+    pendingSends.add(topicId);
+    projectCurrentSession();
     try {
-        const run = await requestJson(`/v1/topics/${encodeURIComponent(state.topicId)}/messages/${encodeURIComponent(messageId)}/regenerate`, { method: "POST", body: JSON.stringify({ idempotency_key: idempotency() }) });
-        await consume(run.id);
+        const run = await requestJson(`/v1/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(messageId)}/regenerate`, { method: "POST", body: JSON.stringify({ idempotency_key: idempotency() }) });
+        backgroundStreams.track(run);
+        pendingSends.delete(topicId);
+        if (state.topicId === topicId)
+            await loadTopic(topicId);
     }
     catch (error) {
-        showNotice(errorText(error), true);
+        if (state.topicId === topicId)
+            showNotice(errorText(error), true);
     }
     finally {
-        disableComposer(false);
+        pendingSends.delete(topicId);
+        projectCurrentSession();
     }
 }
 async function stopRun() {
@@ -1074,6 +1105,8 @@ async function stopRun() {
 async function resumeRun() { if (!state.runId)
     return; try {
     await consume(state.runId, state.cursor);
+    if (state.topicId)
+        await reloadCurrentHistory(state.topicId);
 }
 catch (error) {
     showNotice(errorText(error), true);
@@ -1208,6 +1241,7 @@ async function boot() { clearLinkCache(); try {
     state.agents = await requestJson("/v1/agents/catalog");
     state.handles = await requestJson("/v1/agents");
     await loadWorkflowRuns();
+    await backgroundStreams.start();
     await restoreLocale(currentLocale());
     renderTopics();
     renderAgents();
@@ -1230,3 +1264,10 @@ catch (error) {
 setupHostBridge();
 setup();
 void boot();
+setInterval(() => {
+    if (backgroundStreams.all().some((session) => !session.terminal)) {
+        void loadInteractions().catch(() => undefined);
+        void loadProposals().catch(() => undefined);
+    }
+}, 500);
+window.addEventListener("pagehide", () => backgroundStreams.close());
