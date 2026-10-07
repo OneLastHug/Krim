@@ -21,11 +21,13 @@ from krim_agent.persistence.agent_sessions import AgentSessionStore
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame
+from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import Decision, Policy, ToolDefinition
 
 from .permissions import profile_policy
+from .resources import provider_fingerprint
 from .sessions import AgentSessionView, SessionStatus
 from .types import AgentDefinition, AgentError, AgentStatus, ExecResult
 
@@ -463,6 +465,8 @@ class AgentManager:
             "timeout_seconds": definition.timeout_seconds,
             "tool_timeout_seconds": definition.tool_timeout_seconds,
         }
+        if isinstance(definition.provider, OpenAICompatibleProvider):
+            payload["provider_configuration"] = provider_fingerprint(definition.provider)
         if (
             definition.context_config is not None
             and definition.context_config != ContextRunConfig()
@@ -627,7 +631,7 @@ class AgentManager:
             raise AgentError("manager_closed", "AgentManager 已关闭")
         if len(self._handles) >= self.max_agents:
             raise AgentError("agent_limit", "Agent 数量超过限制")
-        definition = definition.with_id()
+        definition = replace(definition.with_id(), tools=copy_tools(definition.tools))
         if definition.agent_id in self._handles:
             raise AgentError("agent_id_conflict", "Agent ID 已存在")
         depth = 1
@@ -664,6 +668,8 @@ class AgentManager:
             agent_id=definition.agent_id,
             agent_session_id=definition.agent_id,
             agent_owner_id=self.owner_id,
+            allow_skill_tool=definition.profile_revision is None
+            or any(tool.name == "read_skill" for tool in definition.tools.definitions),
             system_prompt=definition.instructions,
             agent_definition_hash=self.definition_hash(definition),
             approval_handler=parent_context.approval_handler if parent_context else None,
@@ -744,6 +750,7 @@ class AgentManager:
             "usage_budget": definition.usage_budget.model_dump(mode="json")
             if definition.usage_budget
             else None,
+            "resources": definition.resource_manifest,
         }
         try:
             if stored is not None:

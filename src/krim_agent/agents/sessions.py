@@ -1,44 +1,17 @@
-"""Agent 会话与轮次合约；权限字段仅反映可信宿主冻结配置。"""
+"""Agent 会话公开类型的兼容导出。"""
 
-from datetime import datetime
-from typing import Literal
+from krim_agent.agent_session import (
+    AgentSessionControl,
+    AgentSessionView,
+    AgentTurnView,
+    SessionMode,
+    SessionStatus,
+)
 
-from pydantic import Field, JsonValue
-
-from krim_agent.protocol.models import StrictModel
-
-SessionMode = Literal["agent", "ask", "plan", "auto"]
-SessionStatus = Literal["open", "closed", "expired", "destroyed"]
-
-
-class AgentSessionView(StrictModel):
-    session_id: str
-    agent_id: str
-    topic_id: str
-    name: str
-    persistent: bool
-    profile_revision: int | None = None
-    definition_hash: str
-    parent_session_id: str | None = None
-    status: SessionStatus
-    revision: int = Field(ge=0)
-    owner_id: str | None = None
-    expires_at: float | None = None
-    created_at: datetime
-    closed_at: datetime | None = None
-    permissions: dict[str, JsonValue]
-    turn: int = Field(ge=0)
-    current_run_id: str | None = None
-
-
-class AgentSessionControl(StrictModel):
-    expected_revision: int = Field(ge=0)
-
-
-class AgentTurnView(StrictModel):
-    session_id: str
-    agent_id: str
-    run_id: str
-    turn: int = Field(ge=1)
-    status: str
-    created_at: datetime
+__all__ = [
+    "AgentSessionControl",
+    "AgentSessionView",
+    "AgentTurnView",
+    "SessionMode",
+    "SessionStatus",
+]

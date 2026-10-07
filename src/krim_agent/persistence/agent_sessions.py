@@ -7,10 +7,10 @@ from collections.abc import Mapping
 from typing import cast
 
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from krim_agent.agents.sessions import AgentSessionView, AgentTurnView, SessionStatus
+from krim_agent.agent_session import AgentSessionView, AgentTurnView, SessionStatus
 from krim_agent.protocol.domain import RunView, ServiceError
 from krim_agent.protocol.models import utc_now
 
@@ -96,6 +96,26 @@ async def guard_agent_topic(
 class AgentSessionStore:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    async def recover_transient(self) -> int:
+        """仅由合法单生产者启动调用；普通实例退出后只保留不可执行的历史。"""
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            identifiers = await session.scalars(
+                update(AgentSessionRow)
+                .where(
+                    AgentSessionRow.persistent.is_(False),
+                    AgentSessionRow.status.in_(("open", "closed")),
+                    AgentSessionRow.owner_id.is_not(None),
+                )
+                .values(
+                    status="destroyed",
+                    owner_id=None,
+                    closed_at=utc_now(),
+                    revision=AgentSessionRow.revision + 1,
+                )
+                .returning(AgentSessionRow.session_id)
+            )
+            return len(list(identifiers))
 
     async def create(
         self,

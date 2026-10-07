@@ -68,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
             "enable",
             "disable",
             "inventory",
+            "resources",
             "restore",
             "session",
             "turns",
@@ -369,6 +370,14 @@ def main() -> None:
                     print(
                         json.dumps(
                             [item.model_dump(mode="json") for item in client.agent_inventory()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                elif args.action == "resources":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.agent_resources()],
                             ensure_ascii=False,
                             indent=2,
                         )

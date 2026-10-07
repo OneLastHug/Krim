@@ -17,6 +17,8 @@ test("会话关闭重开保留草稿和历史轮次，专属话题只读", async
     await page.locator("#refresh").click();
     const card = page.locator(`article.agent-card[data-agent-id="${agent.agent_id}"]`);
     await expect(card.locator(".agent-result")).toContainText('"sum": 5.0');
+    await card.getByText("执行步骤与工具", { exact: true }).click();
+    await expect(card.locator("ol")).toContainText("工具 add：完成");
     const input = card.locator("textarea");
     await input.fill("保留草稿");
     await card.getByRole("button", { name: "关闭会话" }).click();

@@ -452,7 +452,7 @@ async function replyInteraction(interaction: InteractionView, action: "approve" 
 }
 function renderAgents(): void {
   const select = $("agent-kind") as HTMLSelectElement; const selected = select.value; select.replaceChildren();
-  for (const agent of state.agents) { const option = document.createElement("option"); option.value = agent.name; option.textContent = `${agent.name} · ${agent.risk === "read" ? t("只读任务") : t("受控任务")}`; select.append(option); }
+  for (const agent of state.agents) { const option = document.createElement("option"); option.value = agent.name; option.disabled = !agent.available; option.textContent = `${agent.name} · ${agent.available ? agent.risk === "read" ? t("只读任务") : t("受控任务") : t("资源不可用")}`; select.append(option); }
   if (state.agents.some((agent) => agent.name === selected)) select.value = selected;
   $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
   agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));

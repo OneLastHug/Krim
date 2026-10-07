@@ -15,7 +15,12 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
-from krim_agent.agents import AgentDescriptor, AgentProfileUpdate, AgentProfileVersion
+from krim_agent.agents import (
+    AgentDescriptor,
+    AgentProfileUpdate,
+    AgentProfileVersion,
+    AgentResourceView,
+)
 from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
 from krim_agent.application.agents import (
     AgentInventoryView,
@@ -220,6 +225,7 @@ def create_app(
             await checkpoint_repository.recover_interrupted()
             if owns_database:
                 await repository.recover_interrupted()
+                await agent_service.sessions.recover_transient()
                 await service.tracer.store.recover()
             await service.budget_store.recover()
             await agent_service.restore_persistent()
@@ -658,6 +664,10 @@ def create_app(
     @app.get("/v1/agents/inventory")
     async def agent_inventory() -> list[AgentInventoryView]:
         return await agent_service.inventory()
+
+    @app.get("/v1/agents/resources")
+    async def agent_resources() -> list[AgentResourceView]:
+        return agent_service.resource_inventory()
 
     @app.get("/v1/agents/profiles")
     async def agent_profiles() -> list[AgentProfileVersion]:

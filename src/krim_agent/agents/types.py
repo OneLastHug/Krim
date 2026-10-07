@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from krim_agent.budgets import UsageBudgetConfig
 from krim_agent.context_engine.types import ContextRunConfig
-from krim_agent.protocol.models import StrictModel
+from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.core import Policy
@@ -64,8 +65,12 @@ class AgentDefinition:
     resource_version: str = ""
     mode: SessionMode = "agent"
     session_ttl_seconds: float | None = None
+    resource_manifest: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
+        if self.resource_manifest is not None:
+            check_json(self.resource_manifest)
+            object.__setattr__(self, "resource_manifest", deepcopy(self.resource_manifest))
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
             raise ValueError("Agent 名称必须为 1–64 字符的字母、数字、下划线或连字符")
         if not 1 <= self.max_turns <= 128:

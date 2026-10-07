@@ -131,6 +131,7 @@ class ChatRuntime:
         agent_definition_hash: str | None = None,
         agent_session_id: str | None = None,
         agent_owner_id: str | None = None,
+        allow_skill_tool: bool = True,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -194,7 +195,7 @@ class ChatRuntime:
         )
         if existing_skill_tool is not None and existing_skill_tool is not skill_tool_definition():
             raise ValueError("read_skill 是运行时保留工具名称")
-        if existing_skill_tool is None:
+        if existing_skill_tool is None and allow_skill_tool:
             self.tools.register(skill_tool_definition())
 
     def _engine_for_context(self, config: ContextRunConfig) -> ContextEngine:

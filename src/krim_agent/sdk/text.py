@@ -69,6 +69,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from krim_agent.agents import AgentResourceView
     from krim_agent.application.agents import AgentService
     from krim_agent.evaluation import EvalConfig, EvalDataset, EvalReport
     from krim_agent.evaluation.scorers import EvalScorer
@@ -343,6 +344,9 @@ class PythonAI:
             ):
                 raise ServiceError("agent_inventory_busy", "持久Agent仍由其他生产者持有", 409)
             await repository.recover_interrupted()
+            from krim_agent.persistence.agent_sessions import AgentSessionStore
+
+            await AgentSessionStore(database).recover_transient()
             runtime = ChatRuntime(
                 repository,
                 selected_provider,
@@ -543,6 +547,10 @@ class PythonAI:
             self._agent_service = AgentService(self.runtime, self.runtime.settings)
         return self._agent_service
 
+    def agent_resources(self) -> list[AgentResourceView]:
+        """读取宿主登记的 Provider/工具公开指纹；不返回 URL、密钥或 callable。"""
+        return self.agents().resource_inventory()
+
     async def agent(
         self,
         name: str = "default",
@@ -676,16 +684,20 @@ class PythonAI:
         if self._closed:
             return
         self._closed = True
-        if self._evaluation_service is not None:
-            await self._evaluation_service.close()
-        if self._agent_service is not None:
-            await self._agent_service.close()
-        if self._owned_database is not None:
+        try:
+            if self._evaluation_service is not None:
+                await self._evaluation_service.close()
+        finally:
             try:
-                await self.runtime.close()
+                if self._agent_service is not None:
+                    await self._agent_service.close()
             finally:
-                try:
-                    await self._owned_database.close()
-                finally:
-                    if self._owned_provider is not None:
-                        await self._owned_provider.close()
+                if self._owned_database is not None:
+                    try:
+                        await self.runtime.close()
+                    finally:
+                        try:
+                            await self._owned_database.close()
+                        finally:
+                            if self._owned_provider is not None:
+                                await self._owned_provider.close()

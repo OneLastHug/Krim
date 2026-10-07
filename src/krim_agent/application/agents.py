@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -22,6 +20,8 @@ from krim_agent.agents import (
     AgentManager,
     AgentProfileUpdate,
     AgentProfileVersion,
+    AgentResourceRegistry,
+    AgentResourceView,
     ExecResult,
 )
 from krim_agent.agents.permissions import profile_policy
@@ -32,7 +32,6 @@ from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
-from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
 from krim_agent.tools import ToolError
@@ -103,6 +102,11 @@ class AgentService:
         providers: Mapping[str, ModelProvider] | None = None,
     ) -> None:
         self.runtime = runtime
+        if (
+            providers is not None
+            and providers.get("runtime", runtime.provider) is not runtime.provider
+        ):
+            raise ValueError("runtime资源只能由宿主Runtime管理")
         self.providers = {"runtime": runtime.provider, **dict(providers or {})}
         self.manager = AgentManager(
             runtime.repository,
@@ -114,6 +118,7 @@ class AgentService:
         self.catalog = AgentCatalog(self.manager)
         self.profiles = AgentProfileStore(runtime.repository.database)
         self.sessions = self.manager.sessions
+        self.resources = AgentResourceRegistry(self.providers, runtime.tools)
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
@@ -227,28 +232,32 @@ class AgentService:
         profile = await self.profiles.get(name, revision)
         if not profile.enabled:
             raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
-        if profile.config.provider_key not in self.providers:
+        if profile.config.provider_key not in self.resources.providers:
             raise ServiceError("agent_profile_provider", "Agent Provider 未登记", 422)
         definitions = {definition.name: definition for definition in self.runtime.tools.definitions}
         unknown = set(profile.config.tool_names) - set(definitions)
         if unknown:
             raise ServiceError("agent_profile_tool", "Agent配置包含未登记工具", 422)
         tools = self.runtime.tools.select(profile.config.tool_names)
-        provider = self.providers[profile.config.provider_key]
-        resource = {
-            "key": profile.config.provider_key,
-            "name": provider.name,
-            "model": provider.config.model
-            if isinstance(provider, OpenAICompatibleProvider)
-            else None,
-        }
+        try:
+            provider = self.resources.provider(profile.config.provider_key)
+        except KeyError:
+            raise ServiceError("agent_profile_provider", "Agent Provider已停用", 422) from None
+        resource_version = self.resources.fingerprint(
+            profile.config.provider_key, profile.config.tool_names
+        )
         base = self.catalog.get("default").definition
         host_context = ContextRunConfig.from_settings(self.runtime.settings)
-        selected_context = (
-            host_context
-            if profile.config.context_config == ContextRunConfig()
-            else profile.config.context_config.restricted_by(host_context)
-        )
+        try:
+            selected_context = (
+                host_context
+                if profile.config.context_config == ContextRunConfig()
+                else profile.config.context_config.restricted_by(host_context)
+            )
+        except ValueError:
+            raise ServiceError(
+                "agent_profile_context", "Agent与宿主上下文预算不兼容", 422
+            ) from None
         return replace(
             base,
             name=profile.config.name,
@@ -264,9 +273,10 @@ class AgentService:
             profile_revision=profile.revision,
             instructions=profile.config.instructions,
             policy=profile_policy(profile.config.mode, self.runtime.tool_policy),
-            resource_version=hashlib.sha256(
-                json.dumps(resource, sort_keys=True).encode()
-            ).hexdigest(),
+            resource_version=resource_version,
+            resource_manifest=self.resources.manifest(
+                profile.config.provider_key, profile.config.tool_names
+            ),
             mode=profile.config.mode,
             session_ttl_seconds=profile.config.session_ttl_seconds,
         )
@@ -276,7 +286,7 @@ class AgentService:
     ) -> AgentView:
         try:
             try:
-                definition = self.catalog.get(name).definition
+                definition = self._catalog_definition(name)
             except ToolError:
                 try:
                     definition = await self._profile_definition(name, profile_revision)
@@ -314,20 +324,75 @@ class AgentService:
     async def profile_put(self, request: AgentProfileUpdate) -> AgentProfileVersion:
         if request.config.name in {entry.name for entry in self.catalog.descriptors()}:
             raise ServiceError("agent_profile_reserved", "宿主静态Agent名称不能被配置覆盖", 409)
-        if request.config.provider_key not in self.providers:
+        if request.config.provider_key not in self.resources.providers:
             raise ServiceError("agent_profile_provider", "Agent Provider未登记", 422)
+        try:
+            self.resources.provider(request.config.provider_key)
+        except KeyError:
+            raise ServiceError("agent_profile_provider", "Agent Provider已停用", 422) from None
         available = {definition.name for definition in self.runtime.tools.definitions}
         if set(request.config.tool_names) - available:
             raise ServiceError("agent_profile_tool", "工具未登记", 422)
+        if request.config.context_config != ContextRunConfig():
+            try:
+                request.config.context_config.restricted_by(
+                    ContextRunConfig.from_settings(self.runtime.settings)
+                )
+            except ValueError:
+                raise ServiceError(
+                    "agent_profile_context", "Agent与宿主上下文预算不兼容", 422
+                ) from None
         return await self.profiles.put(request)
+
+    def register_provider(
+        self,
+        key: str,
+        provider: ModelProvider,
+        *,
+        version: str,
+        owned: bool = False,
+    ) -> None:
+        """可信宿主注册或替换 Provider；HTTP/配置不能调用此入口。"""
+        if key == "runtime" and provider is not self.runtime.provider:
+            raise ValueError("runtime资源须保持宿主Runtime的Provider对象")
+        if owned and provider is self.runtime.provider:
+            raise ValueError("Runtime自身Provider不能转交所有权")
+        self.resources.register_provider(key, provider, version=version, owned=owned)
+        self.providers[key] = provider
+
+    def disable_provider(self, key: str) -> None:
+        self.resources.disable_provider(key)
+
+    def register_tool_version(self, name: str, version: str) -> None:
+        self.resources.register_tool_version(name, version)
+
+    def resource_inventory(self) -> list[AgentResourceView]:
+        return self.resources.views()
 
     async def definition(self, name: str, revision: int | None = None) -> AgentDefinition:
         if revision is None:
             try:
-                return self.catalog.get(name).definition
+                return self._catalog_definition(name)
             except ToolError:
                 pass
         return await self._profile_definition(name, revision)
+
+    def _catalog_definition(self, name: str) -> AgentDefinition:
+        definition = self.catalog.get(name).definition
+        if name != "default":
+            return definition
+        names = [tool.name for tool in definition.tools.definitions]
+        try:
+            manifest = self.resources.manifest("runtime", names)
+        except KeyError:
+            raise ServiceError("agent_profile_provider", "Runtime模型资源已停用", 422) from None
+        version = (
+            self.resources.fingerprint("runtime", names)
+            if "runtime" in self.resources.provider_versions
+            or any(tool in self.resources.tool_versions for tool in names)
+            else definition.resource_version
+        )
+        return replace(definition, resource_version=version, resource_manifest=manifest)
 
     async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
         """可信组合层显式取得固定版本工具；不由HTTP配置自动安装工具。"""
@@ -340,29 +405,39 @@ class AgentService:
 
     async def restore_persistent(self) -> int:
         restored = 0
-        stored = await self.manager.store.list()
-        for item in stored:
-            if not item.persistent:
-                continue
-            try:
-                definition = (
-                    await self._profile_definition(item.name, item.profile_revision, restoring=True)
-                    if item.profile_revision is not None
-                    else self.catalog.get(item.name).definition
-                )
-                handle = await self.manager.restore(definition, item)
-                if handle.current_run is not None and handle.current_run.status in {
-                    "queued",
-                    "running",
-                }:
-                    handle.current_run = await self.runtime.repository.get_run(
-                        handle.current_run.id
+        pending = {
+            item.agent_id: item
+            for item in await self.manager.store.list()
+            if item.persistent and item.agent_id not in self.manager._handles
+        }
+        while pending:
+            progress = False
+            for identifier, item in list(pending.items()):
+                if item.parent_agent_id in pending:
+                    continue
+                progress = True
+                pending.pop(identifier)
+                try:
+                    definition = (
+                        await self._profile_definition(
+                            item.name, item.profile_revision, restoring=True
+                        )
+                        if item.profile_revision is not None
+                        else self._catalog_definition(item.name)
                     )
-                restored += 1
-                self.restore_errors.pop(item.agent_id, None)
-            except (AgentError, ServiceError, ToolError) as error:
-                self.restore_errors[item.agent_id] = error.code
-                continue
+                    handle = await self.manager.restore(definition, item)
+                    if handle.current_run is not None:
+                        handle.current_run = await self.runtime.repository.get_run(
+                            handle.current_run.id
+                        )
+                    restored += 1
+                    self.restore_errors.pop(identifier, None)
+                except (AgentError, ServiceError, ToolError) as error:
+                    self.restore_errors[identifier] = error.code
+            if not progress:
+                for identifier in pending:
+                    self.restore_errors[identifier] = "parent_agent_missing"
+                break
         return restored
 
     async def inventory(self) -> list[AgentInventoryView]:
@@ -409,7 +484,7 @@ class AgentService:
             definition = (
                 await self._profile_definition(stored.name, stored.profile_revision, restoring=True)
                 if stored.profile_revision is not None
-                else self.catalog.get(stored.name).definition
+                else self._catalog_definition(stored.name)
             )
             handle = await self.manager.restore(definition, stored)
         except (AgentError, ServiceError, ToolError) as error:
@@ -438,22 +513,36 @@ class AgentService:
         return self.catalog.descriptors()
 
     async def catalog_all(self) -> list[AgentDescriptor]:
-        values = self.catalog_views()
+        values = []
+        for entry in self.catalog_views():
+            try:
+                self._catalog_definition(entry.name)
+                values.append(entry)
+            except ServiceError as error:
+                values.append(
+                    entry.model_copy(update={"available": False, "error_code": error.code})
+                )
         for profile in await self.profiles.list():
             if not profile.enabled:
                 continue
-            definition = await self._profile_definition(profile.name, profile.revision)
+            error_code = None
+            try:
+                await self._profile_definition(profile.name, profile.revision)
+            except ServiceError as error:
+                error_code = error.code
             values.append(
                 AgentDescriptor(
                     name=profile.name,
                     description=profile.config.description,
-                    tool_name=f"agent_{profile.name.lower()}",
+                    tool_name=self.catalog.tool_name(profile.name),
                     risk="write",
-                    max_turns=definition.max_turns,
-                    max_steps=definition.max_steps,
-                    persistent=definition.persistent,
+                    max_turns=profile.config.max_turns,
+                    max_steps=profile.config.max_steps,
+                    persistent=profile.config.persistent,
                     exposed_as_tool=False,
                     profile_revision=profile.revision,
+                    available=error_code is None,
+                    error_code=error_code,
                 )
             )
         return values
@@ -700,7 +789,12 @@ class AgentService:
     async def close(self) -> None:
         async with self._start_lock:
             self._closed = True
-        await self.manager.close()
-        await asyncio.gather(*(task for _, task, _ in self._tasks.values()), return_exceptions=True)
-        self._tasks.clear()
-        self._results.clear()
+        try:
+            await self.manager.close()
+            await asyncio.gather(
+                *(task for _, task, _ in self._tasks.values()), return_exceptions=True
+            )
+        finally:
+            self._tasks.clear()
+            self._results.clear()
+            await self.resources.close()
