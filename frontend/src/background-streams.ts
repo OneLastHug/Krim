@@ -9,6 +9,7 @@ export interface RunSession {
   terminal: boolean;
   connected: boolean;
   interactionRuns: Set<string>;
+  activity: string[];
 }
 
 export class BackgroundStreams {
@@ -21,6 +22,16 @@ export class BackgroundStreams {
   private polling = false;
   private closed = false;
 
+  private prune(): void {
+    for (const [runId, session] of this.sessions) {
+      if (this.sessions.size <= 128) break;
+      if (session.terminal) {
+        this.sessions.delete(runId);
+        if (this.topics.get(session.run.topic_id) === runId) this.topics.delete(session.run.topic_id);
+      }
+    }
+  }
+
   constructor(private changed: (session: RunSession, item?: RunStreamFrame) => void, private failed: (message: string) => void) {}
 
   forTopic(topicId: string): RunSession | undefined {
@@ -28,11 +39,12 @@ export class BackgroundStreams {
   }
 
   all(): RunSession[] { return [...this.sessions.values()]; }
+  forRun(runId: string): RunSession | undefined { return this.sessions.get(runId); }
 
   track(run: RunView): RunSession {
     const existing = this.sessions.get(run.id);
     if (existing) return existing;
-    const session: RunSession = { run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set() };
+    const session: RunSession = { run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set(), activity: [] };
     const previous = this.topics.get(run.topic_id);
     if (previous && this.sessions.get(previous)?.terminal) this.sessions.delete(previous);
     this.sessions.set(run.id, session); this.topics.set(run.topic_id, run.id);
@@ -47,7 +59,7 @@ export class BackgroundStreams {
       let added = false;
       for (const view of active) {
         if (!this.sessions.has(view.run.id)) {
-          const session: RunSession = { run: view.run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set() };
+          const session: RunSession = { run: view.run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set(), activity: [] };
           this.sessions.set(view.run.id, session); this.topics.set(view.run.topic_id, view.run.id); this.changed(session); added = true;
         }
       }
@@ -91,6 +103,10 @@ export class BackgroundStreams {
       const data = item.frame.data;
       if (data?.type === "model_step" && data.phase === "start") { session.step = Number(data.step); session.draft = ""; }
       if (data?.type === "text_delta") session.draft += String(data.text || "");
+      if (data?.type === "model_step" && data.phase === "start") session.activity.push(`步骤 ${Number(data.step) + 1}：模型生成`);
+      if (data?.type === "tool_call") session.activity.push(`调用工具 ${String(data.name)}`);
+      if (data?.type === "tool_result") session.activity.push(`工具 ${String(data.name)}：${data.ok ? "完成" : "失败"}`);
+      if (session.activity.length > 128) session.activity.splice(0, session.activity.length - 128);
       if (data?.type === "step_finish") session.draft = "";
       if (data?.type === "interaction_request") {
         const request = data.interaction as { run_id?: string } | undefined;
@@ -99,6 +115,7 @@ export class BackgroundStreams {
       if (item.frame.kind === "end" || item.frame.kind === "error") {
         session.terminal = true; session.connected = false; session.draft = "";
         session.run = { ...session.run, status: String(data?.status || "failed") as RunView["status"] };
+        this.prune();
       }
       this.changed(session, item);
     }, controller.signal).catch((error: unknown) => {

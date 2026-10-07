@@ -80,6 +80,7 @@ class AgentHandle:
         self._session_lock = asyncio.Lock()
         self._expiry: asyncio.Task[None] | None = None
         self.pending_start = False
+        self._accepted = asyncio.Event()
         self._durable_revision: int | None = None
         self._durable_lock = asyncio.Lock()
         self._heartbeat: asyncio.Task[None] | None = None
@@ -94,6 +95,7 @@ class AgentHandle:
         if self._execute_lock.locked():
             raise AgentError("agent_busy", "Agent 已有活跃或排队执行")
         async with self._execute_lock:
+            self._accepted.clear()
             operation = asyncio.create_task(self._consume(prompt, idempotency_key))
             self._consumer = operation
             try:
@@ -168,6 +170,7 @@ class AgentHandle:
                 cancelled = True
             if self.current_run.id != previous_id:
                 self.turn += 1
+            self._accepted.set()
             self._production = self.runtime.production_task(self.current_run.id)
             try:
                 await self.manager.persist(self, "running")

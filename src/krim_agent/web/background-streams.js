@@ -11,6 +11,17 @@ export class BackgroundStreams {
     discovery = null;
     polling = false;
     closed = false;
+    prune() {
+        for (const [runId, session] of this.sessions) {
+            if (this.sessions.size <= 128)
+                break;
+            if (session.terminal) {
+                this.sessions.delete(runId);
+                if (this.topics.get(session.run.topic_id) === runId)
+                    this.topics.delete(session.run.topic_id);
+            }
+        }
+    }
     constructor(changed, failed) {
         this.changed = changed;
         this.failed = failed;
@@ -20,11 +31,12 @@ export class BackgroundStreams {
         return run ? this.sessions.get(run) : undefined;
     }
     all() { return [...this.sessions.values()]; }
+    forRun(runId) { return this.sessions.get(runId); }
     track(run) {
         const existing = this.sessions.get(run.id);
         if (existing)
             return existing;
-        const session = { run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set() };
+        const session = { run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set(), activity: [] };
         const previous = this.topics.get(run.topic_id);
         if (previous && this.sessions.get(previous)?.terminal)
             this.sessions.delete(previous);
@@ -43,7 +55,7 @@ export class BackgroundStreams {
             let added = false;
             for (const view of active) {
                 if (!this.sessions.has(view.run.id)) {
-                    const session = { run: view.run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set() };
+                    const session = { run: view.run, cursor: 0, step: 0, draft: "", terminal: false, connected: false, interactionRuns: new Set(), activity: [] };
                     this.sessions.set(view.run.id, session);
                     this.topics.set(view.run.topic_id, view.run.id);
                     this.changed(session);
@@ -107,6 +119,14 @@ export class BackgroundStreams {
             }
             if (data?.type === "text_delta")
                 session.draft += String(data.text || "");
+            if (data?.type === "model_step" && data.phase === "start")
+                session.activity.push(`步骤 ${Number(data.step) + 1}：模型生成`);
+            if (data?.type === "tool_call")
+                session.activity.push(`调用工具 ${String(data.name)}`);
+            if (data?.type === "tool_result")
+                session.activity.push(`工具 ${String(data.name)}：${data.ok ? "完成" : "失败"}`);
+            if (session.activity.length > 128)
+                session.activity.splice(0, session.activity.length - 128);
             if (data?.type === "step_finish")
                 session.draft = "";
             if (data?.type === "interaction_request") {
@@ -119,6 +139,7 @@ export class BackgroundStreams {
                 session.connected = false;
                 session.draft = "";
                 session.run = { ...session.run, status: String(data?.status || "failed") };
+                this.prune();
             }
             this.changed(session, item);
         }, controller.signal).catch((error) => {

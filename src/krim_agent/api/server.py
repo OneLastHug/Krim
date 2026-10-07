@@ -713,6 +713,14 @@ def create_app(
     async def execute_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
         return await agent_service.execute(agent_id, payload)
 
+    @app.post("/v1/agents/{agent_id}/start", status_code=202)
+    async def start_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
+        return await agent_service.start(agent_id, payload)
+
+    @app.post("/v1/agents/{agent_id}/wait")
+    async def wait_agent(agent_id: str) -> AgentView:
+        return await agent_service.wait(agent_id)
+
     @app.post("/v1/agents/{agent_id}/resume")
     async def resume_agent(agent_id: str, payload: AgentPromptRequest) -> AgentView:
         return await agent_service.resume(agent_id, payload)

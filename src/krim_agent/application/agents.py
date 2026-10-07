@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import Field, field_validator
 
@@ -115,6 +116,9 @@ class AgentService:
         self.sessions = self.manager.sessions
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
+        self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
+        self._start_lock = asyncio.Lock()
+        self._closed = False
         self.catalog.register(
             "default",
             AgentDefinition(
@@ -188,6 +192,16 @@ class AgentService:
             if not destroyed and not handle.destroyed:
                 status = result.status
         if handle.pending_start and not destroyed and not handle.destroyed:
+            status = "queued"
+        background = self._tasks.get(handle.agent_id)
+        if (
+            background is not None
+            and not background[1].done()
+            and background[2] == (current.id if current else None)
+            and asyncio.current_task() is not background[1]
+            and not destroyed
+            and not handle.destroyed
+        ):
             status = "queued"
         return AgentView(
             agent_id=handle.agent_id,
@@ -357,6 +371,8 @@ class AgentService:
             session = await self.sessions.for_agent(item.agent_id)
             current = session.current_run_id or item.current_run_id
             run = await self.runtime.repository.get_run(current) if current is not None else None
+            handle = self.manager._handles.get(item.agent_id)
+            available = handle is not None and not handle._lease_lost and not handle.destroyed
             values.append(
                 AgentInventoryView(
                     agent_id=item.agent_id,
@@ -364,8 +380,10 @@ class AgentService:
                     topic_id=item.topic_id,
                     profile_revision=item.profile_revision,
                     status=run.status if run is not None else "created",
-                    available=item.agent_id in self.manager._handles,
-                    error_code=self.restore_errors.get(item.agent_id),
+                    available=available,
+                    error_code="agent_lease_lost"
+                    if handle is not None and handle._lease_lost
+                    else self.restore_errors.get(item.agent_id),
                     current_run_id=current,
                     turn=max(session.turn, item.turn),
                     session_id=session.session_id,
@@ -377,7 +395,11 @@ class AgentService:
 
     async def restore(self, agent_id: str) -> AgentView:
         if agent_id in self.manager._handles:
-            return await self.get(agent_id)
+            handle = self.manager._handles[agent_id]
+            if not handle._lease_lost:
+                return await self.get(agent_id)
+            await handle.detach()
+            self._results.pop(agent_id, None)
         stored = next(
             (item for item in await self.manager.store.list() if item.agent_id == agent_id), None
         )
@@ -501,6 +523,112 @@ class AgentService:
             return value.model_copy(update={"result": result})
         return value
 
+    async def start(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
+        async with self._start_lock:
+            return await self._start_background(agent_id, request)
+
+    async def _start_background(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
+        if self._closed:
+            raise ServiceError("agent_service_closed", "Agent 服务已关闭", 503)
+        handle = self._handle(agent_id)
+        background = self._tasks.get(agent_id)
+        if background is not None and not background[1].done():
+            if request != background[0]:
+                accepted = await self.sessions.find_turn(
+                    handle.session_id, background[0].idempotency_key or ""
+                )
+                if accepted is None or accepted[0].status in {"queued", "running"}:
+                    raise ServiceError(
+                        "agent_busy", "Agent 已有后台执行，重试须使用相同输入和幂等键", 409
+                    )
+                # 终帧已保存但 consumer 正在收尾；先释放同轮资源，再接受下一轮。
+                await asyncio.shield(background[1])
+            else:
+                return await self.view(handle)
+        if handle._execute_lock.locked() or handle.pending_start:
+            raise ServiceError("agent_busy", "Agent 已有活跃执行", 409)
+        session = await handle.session()
+        if session.status != "open":
+            raise ServiceError(f"agent_session_{session.status}", "Agent 会话不可执行", 410)
+        if request.idempotency_key is not None:
+            historical = await self.sessions.find_turn(handle.session_id, request.idempotency_key)
+            if historical is not None:
+                # 验证同键输入在接受后台任务前完成；只读原 Run，不启动生产。
+                from krim_agent.protocol.domain import ChatRequest
+
+                await handle.runtime.start(
+                    handle.topic_id,
+                    ChatRequest(text=request.prompt, idempotency_key=request.idempotency_key),
+                )
+        if handle.current_run is not None:
+            current = await self.runtime.repository.get_run(handle.current_run.id)
+            if current.status in {"queued", "running"}:
+                raise ServiceError("agent_busy", "Agent 当前生产尚未结束", 409)
+        payload = request.model_copy(
+            update={"idempotency_key": request.idempotency_key or str(uuid4())}
+        )
+        handle._accepted.clear()
+        task = asyncio.create_task(self.execute(agent_id, payload))
+        self._tasks[agent_id] = (
+            payload,
+            task,
+            handle.current_run.id if handle.current_run else None,
+        )
+
+        def finished(completed: asyncio.Task[AgentView]) -> None:
+            # 观察任务异常，避免断开的请求留下未消费异常；结果仍由 Run/session 查询。
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return await self.view(handle)
+
+    async def wait(self, agent_id: str) -> AgentView:
+        background = self._tasks.get(agent_id)
+        if background is not None:
+            return await asyncio.shield(background[1])
+        handle = self._handle(agent_id)
+        try:
+            result = await handle.wait()
+        except AgentError as error:
+            raise ServiceError(error.code, str(error), 409) from error
+        self._remember(handle, result)
+        return await self.view(handle)
+
+    async def wait_started(self, agent_id: str, key: str) -> str:
+        """等待后台输入取得自己的 Run；队列拒绝不能伪装成此前的 Run。"""
+        handle = self._handle(agent_id)
+        background = self._tasks.get(agent_id)
+        if background is None or background[0].idempotency_key != key:
+            raise ServiceError("agent_start_mismatch", "没有该幂等键的后台输入", 409)
+        found = await self.sessions.find_turn(handle.session_id, key)
+        if found is not None:
+            return found[0].id
+        accepted = asyncio.create_task(handle._accepted.wait())
+        try:
+            await asyncio.wait((accepted, background[1]), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            accepted.cancel()
+            await asyncio.gather(accepted, return_exceptions=True)
+        found = await self.sessions.find_turn(handle.session_id, key)
+        if found is not None:
+            return found[0].id
+        finished = await asyncio.shield(background[1])
+        raise ServiceError(
+            finished.result.code
+            if finished.result and finished.result.code
+            else "agent_not_started",
+            "后台 Agent 输入未创建新的 Run",
+            409,
+        )
+
+    async def wait_run(self, agent_id: str, run_id: str) -> None:
+        background = self._tasks.get(agent_id)
+        if background is not None:
+            accepted = await self.sessions.find_turn(agent_id, background[0].idempotency_key or "")
+            if accepted is not None and accepted[0].id == run_id:
+                await asyncio.shield(background[1])
+
     async def resume(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
         handle = self._handle(agent_id)
         try:
@@ -528,6 +656,14 @@ class AgentService:
 
     async def stop(self, agent_id: str) -> AgentView:
         handle = self._handle(agent_id)
+        background = self._tasks.get(agent_id)
+        if (
+            background is not None
+            and not background[1].done()
+            and not handle._execute_lock.locked()
+        ):
+            background[1].cancel()
+            await asyncio.gather(background[1], return_exceptions=True)
         try:
             result = await handle.stop()
         except AgentError as exc:
@@ -542,6 +678,9 @@ class AgentService:
         except AgentError as exc:
             raise ServiceError(exc.code, str(exc), 409) from exc
         value = await self.view(handle, destroyed=True)
+        background = self._tasks.pop(agent_id, None)
+        if background is not None:
+            await asyncio.gather(background[1], return_exceptions=True)
         self._results.pop(handle.agent_id, None)
         return value
 
@@ -559,5 +698,9 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        async with self._start_lock:
+            self._closed = True
         await self.manager.close()
+        await asyncio.gather(*(task for _, task, _ in self._tasks.values()), return_exceptions=True)
+        self._tasks.clear()
         self._results.clear()

@@ -483,6 +483,16 @@ class KrimClient:
         self._check(response)
         return AgentView.model_validate_json(response.content)
 
+    def agent_start(
+        self, agent_id: str, prompt: str, idempotency_key: str | None = None
+    ) -> AgentView:
+        request = AgentPromptRequest(prompt=prompt, idempotency_key=idempotency_key)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/start", json=request.model_dump(exclude_none=True)
+        )
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
     def agent_resume(
         self, agent_id: str, prompt: str, idempotency_key: str | None = None
     ) -> AgentView:
@@ -497,6 +507,13 @@ class KrimClient:
 
     def agent_stop(self, agent_id: str) -> AgentView:
         response = self._http.post(f"/v1/agents/{agent_id}/stop")
+        self._check(response)
+        return AgentView.model_validate_json(response.content)
+
+    def agent_wait(self, agent_id: str) -> AgentView:
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/wait", timeout=httpx.Timeout(30, read=330)
+        )
         self._check(response)
         return AgentView.model_validate_json(response.content)
 

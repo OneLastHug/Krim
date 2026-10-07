@@ -4,22 +4,31 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from krim_agent.agents import AgentSessionView, AgentTurnView, ExecResult
 from krim_agent.application.agents import AgentPromptRequest, AgentService, AgentView
+from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
+    from .types import GenerateResult
 
 
 class AgentSession:
     """一个实例对应一个稳定 session；重开保留上下文、轮次和预算。"""
 
     def __init__(self, service: AgentService, agent_id: str) -> None:
-        self.service = service
+        self._service = service
         self.agent_id = agent_id
         self.session_id = agent_id
+
+    @property
+    def service(self) -> AgentService:
+        if self._service._closed:
+            raise ServiceError("sdk_closed", "Agent SDK 已关闭", 503)
+        return self._service
 
     async def state(self) -> AgentSessionView:
         return await self.service.session(self.agent_id)
@@ -33,6 +42,32 @@ class AgentSession:
         )
         assert result.result is not None
         return result.result
+
+    async def start(self, prompt: str, *, idempotency_key: str | None = None) -> AgentView:
+        return await self.service.start(
+            self.agent_id, AgentPromptRequest(prompt=prompt, idempotency_key=idempotency_key)
+        )
+
+    async def wait(self) -> ExecResult:
+        result = await self.service.wait(self.agent_id)
+        assert result.result is not None
+        return result.result
+
+    async def stream_text(
+        self, prompt: str, *, idempotency_key: str | None = None
+    ) -> StreamTextResult:
+        key = idempotency_key or str(uuid4())
+        await self.start(prompt, idempotency_key=key)
+        run_id = await self.service.wait_started(self.agent_id, key)
+        return await self.stream(run_id=run_id)
+
+    async def generate_text(
+        self, prompt: str, *, idempotency_key: str | None = None
+    ) -> GenerateResult:
+        stream = await self.stream_text(prompt, idempotency_key=idempotency_key)
+        result = await stream.collect()
+        await self.service.wait_run(self.agent_id, result.run.id)
+        return result
 
     async def resume(self, prompt: str, *, idempotency_key: str | None = None) -> ExecResult:
         result = await self.service.resume(

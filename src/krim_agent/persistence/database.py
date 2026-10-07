@@ -508,14 +508,34 @@ class KrimRepository:
             row = await session.get(TopicRow, topic_id)
             if row is None:
                 raise ServiceError("topic_not_found", "话题不存在", 404)
-            return TopicView.model_validate(row)
+            return await self._topic_view(session, row)
+
+    @staticmethod
+    async def _topic_view(session: AsyncSession, row: TopicRow) -> TopicView:
+        session_id = await session.scalar(
+            select(AgentSessionRow.session_id).where(AgentSessionRow.topic_id == row.id)
+        )
+        return TopicView.model_validate(row).model_copy(update={"agent_session_id": session_id})
 
     async def list_topics(self) -> list[TopicView]:
         async with self.database.write_lock, self.database.sessions() as session:
             rows = await session.scalars(
                 select(TopicRow).order_by(TopicRow.created_at, TopicRow.id)
             )
-            return [TopicView.model_validate(row) for row in rows]
+            agents = {
+                topic_id: session_id
+                for topic_id, session_id in (
+                    await session.execute(
+                        select(AgentSessionRow.topic_id, AgentSessionRow.session_id)
+                    )
+                ).all()
+            }
+            return [
+                TopicView.model_validate(row).model_copy(
+                    update={"agent_session_id": agents.get(row.id)}
+                )
+                for row in rows
+            ]
 
     async def get_prompt_context(self, topic_id: str) -> PromptContext:
         async with self.database.write_lock, self.database.sessions() as session:
@@ -951,7 +971,7 @@ class KrimRepository:
             messages = await self._messages(session, topic_id)
             path = MessageTree(messages).active_path(topic.active_branches)
             return MessageTreeView(
-                topic=TopicView.model_validate(topic),
+                topic=await self._topic_view(session, topic),
                 messages=messages,
                 active_path=[message.id for message in path],
             )
@@ -1222,7 +1242,7 @@ class KrimRepository:
             tree.active_path(choices)
             topic.active_branches = choices
             topic.updated_at = utc_now()
-            return TopicView.model_validate(topic)
+            return await self._topic_view(session, topic)
 
     async def add_message(
         self, run: RunView, role: str, content: str, details: dict[str, JsonValue] | None = None
