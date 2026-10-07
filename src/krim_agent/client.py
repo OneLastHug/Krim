@@ -9,6 +9,8 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter
 
+from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion
+
 from .agents import AgentDescriptor
 from .application.agents import AgentPromptRequest, AgentView
 from .attachment import AttachmentContent, AttachmentUpload, AttachmentView
@@ -383,8 +385,32 @@ class KrimClient:
         self._check(response)
         return TypeAdapter(list[AgentView]).validate_json(response.content)
 
-    def agent_spawn(self, name: str, *, persistent: bool = False) -> AgentView:
-        response = self._http.post("/v1/agents", json={"name": name, "persistent": persistent})
+    def agent_profiles(self) -> list[AgentProfileVersion]:
+        response = self._http.get("/v1/agents/profiles")
+        self._check(response)
+        return TypeAdapter(list[AgentProfileVersion]).validate_json(response.content)
+
+    def agent_profile(self, name: str, revision: int | None = None) -> AgentProfileVersion:
+        response = self._http.get(
+            f"/v1/agents/profiles/{name}", params={"revision": revision} if revision else {}
+        )
+        self._check(response)
+        return AgentProfileVersion.model_validate_json(response.content)
+
+    def agent_profile_put(self, request: AgentProfileUpdate) -> AgentProfileVersion:
+        response = self._http.put(
+            f"/v1/agents/profiles/{request.config.name}", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return AgentProfileVersion.model_validate_json(response.content)
+
+    def agent_spawn(
+        self, name: str, *, persistent: bool = False, profile_revision: int | None = None
+    ) -> AgentView:
+        response = self._http.post(
+            "/v1/agents",
+            json={"name": name, "persistent": persistent, "profile_revision": profile_revision},
+        )
         self._check(response)
         return AgentView.model_validate_json(response.content)
 

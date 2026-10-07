@@ -91,6 +91,14 @@ class ToolRegistry:
         self._definitions[definition.name] = definition
         return definition
 
+    def select(self, names: list[str]) -> ToolRegistry:
+        if len(names) != len(set(names)):
+            raise ValueError("工具子集不能重复")
+        selected = {name: self.get(name) for name in names}
+        result = self.fork()
+        result._definitions = selected
+        return result
+
     def register_many(self, *definitions: ToolDefinition) -> None:
         for definition in definitions:
             self.register(definition)

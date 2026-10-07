@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
 
@@ -16,12 +19,18 @@ from krim_agent.agents import (
     AgentError,
     AgentHandle,
     AgentManager,
+    AgentProfileUpdate,
+    AgentProfileVersion,
     ExecResult,
 )
+from krim_agent.agents.permissions import profile_policy
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
+from krim_agent.providers import ModelProvider
+from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
 from krim_agent.tools import ToolError
@@ -34,6 +43,7 @@ AgentViewStatus = Literal[
 class AgentSpawnRequest(StrictModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
     persistent: bool = False
+    profile_revision: int | None = Field(default=None, ge=1)
 
 
 class AgentPromptRequest(StrictModel):
@@ -59,13 +69,21 @@ class AgentView(StrictModel):
     parent_agent_id: str | None = None
     parent_tool_call_id: str | None = None
     result: ExecResult | None = None
+    profile_revision: int | None = None
 
 
 class AgentService:
     """当前进程句柄门面；查询读持久 Run，不修改执行句柄的 current_run 指针。"""
 
-    def __init__(self, runtime: ChatRuntime, settings: Settings) -> None:
+    def __init__(
+        self,
+        runtime: ChatRuntime,
+        settings: Settings,
+        *,
+        providers: Mapping[str, ModelProvider] | None = None,
+    ) -> None:
         self.runtime = runtime
+        self.providers = {"runtime": runtime.provider, **dict(providers or {})}
         self.manager = AgentManager(
             runtime.repository,
             max_agents=settings.agent_max_agents,
@@ -74,6 +92,7 @@ class AgentService:
             tracer=runtime.tracer,
         )
         self.catalog = AgentCatalog(self.manager)
+        self.profiles = AgentProfileStore(runtime.repository.database)
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.catalog.register(
             "default",
@@ -160,18 +179,74 @@ class AgentService:
             parent_agent_id=handle.definition.parent_agent_id,
             parent_tool_call_id=handle.definition.parent_tool_call_id,
             result=result,
+            profile_revision=handle.definition.profile_revision,
         )
 
-    async def spawn(self, name: str, *, persistent: bool = False) -> AgentView:
+    async def _profile_definition(self, name: str, revision: int | None = None) -> AgentDefinition:
+        profile = await self.profiles.get(name, revision)
+        if not profile.enabled:
+            raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
+        if profile.config.provider_key not in self.providers:
+            raise ServiceError("agent_profile_provider", "Agent Provider 未登记", 422)
+        definitions = {definition.name: definition for definition in self.runtime.tools.definitions}
+        unknown = set(profile.config.tool_names) - set(definitions)
+        if unknown:
+            raise ServiceError("agent_profile_tool", "Agent配置包含未登记工具", 422)
+        tools = self.runtime.tools.select(profile.config.tool_names)
+        provider = self.providers[profile.config.provider_key]
+        resource = {
+            "key": profile.config.provider_key,
+            "name": provider.name,
+            "model": provider.config.model
+            if isinstance(provider, OpenAICompatibleProvider)
+            else None,
+        }
+        base = self.catalog.get("default").definition
+        host_context = ContextRunConfig.from_settings(self.runtime.settings)
+        selected_context = (
+            host_context
+            if profile.config.context_config == ContextRunConfig()
+            else profile.config.context_config.restricted_by(host_context)
+        )
+        return replace(
+            base,
+            name=profile.config.name,
+            provider=provider,
+            tools=tools,
+            max_turns=profile.config.max_turns,
+            max_steps=profile.config.max_steps,
+            timeout_seconds=profile.config.timeout_seconds,
+            tool_timeout_seconds=profile.config.tool_timeout_seconds,
+            context_config=selected_context,
+            usage_budget=profile.config.usage_budget,
+            profile_revision=profile.revision,
+            instructions=profile.config.instructions,
+            policy=profile_policy(profile.config.mode, self.runtime.tool_policy),
+            resource_version=hashlib.sha256(
+                json.dumps(resource, sort_keys=True).encode()
+            ).hexdigest(),
+        )
+
+    async def spawn(
+        self, name: str, *, persistent: bool = False, profile_revision: int | None = None
+    ) -> AgentView:
         try:
-            entry = self.catalog.get(name)
+            try:
+                definition = self.catalog.get(name).definition
+            except ToolError:
+                try:
+                    definition = await self._profile_definition(name, profile_revision)
+                except ServiceError as error:
+                    if error.code == "agent_profile_not_found" and profile_revision is None:
+                        raise ServiceError("agent_not_found", "未登记Agent", 404) from None
+                    raise
             parent_accounts = await self.runtime.budget_store.bind(
                 "runtime",
                 self.runtime.settings.usage_budget_scope,
                 self.runtime.settings.usage_budget,
             )
             handle = await self.manager.spawn(
-                replace(entry.definition, agent_id="", persistent=persistent),
+                replace(definition, agent_id="", persistent=persistent),
                 budget_account_ids=parent_accounts,
             )
         except ToolError as exc:
@@ -182,6 +257,22 @@ class AgentService:
             ) from exc
         return await self.view(handle)
 
+    async def profile_list(self) -> list[AgentProfileVersion]:
+        return await self.profiles.list()
+
+    async def profile_get(self, name: str, revision: int | None = None) -> AgentProfileVersion:
+        return await self.profiles.get(name, revision)
+
+    async def profile_put(self, request: AgentProfileUpdate) -> AgentProfileVersion:
+        if request.config.name in {entry.name for entry in self.catalog.descriptors()}:
+            raise ServiceError("agent_profile_reserved", "宿主静态Agent名称不能被配置覆盖", 409)
+        if request.config.provider_key not in self.providers:
+            raise ServiceError("agent_profile_provider", "Agent Provider未登记", 422)
+        available = {definition.name for definition in self.runtime.tools.definitions}
+        if set(request.config.tool_names) - available:
+            raise ServiceError("agent_profile_tool", "工具未登记", 422)
+        return await self.profiles.put(request)
+
     async def restore_persistent(self) -> int:
         restored = 0
         stored = await self.manager.store.list()
@@ -189,8 +280,12 @@ class AgentService:
             if not item.persistent:
                 continue
             try:
-                entry = self.catalog.get(item.name)
-                handle = await self.manager.restore(entry.definition, item)
+                definition = (
+                    await self._profile_definition(item.name, item.profile_revision)
+                    if item.profile_revision is not None
+                    else self.catalog.get(item.name).definition
+                )
+                handle = await self.manager.restore(definition, item)
                 if handle.current_run is not None and handle.current_run.status in {
                     "queued",
                     "running",

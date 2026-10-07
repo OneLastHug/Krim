@@ -38,6 +38,7 @@ from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
     EditRequest,
+    MessageView,
     RegenerateRequest,
     RunStatus,
     RunView,
@@ -126,6 +127,8 @@ class ChatRuntime:
         *,
         tool_policy: Policy | None = None,
         agent_id: str | None = None,
+        system_prompt: str = "",
+        agent_definition_hash: str | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -158,6 +161,8 @@ class ChatRuntime:
         if self.tool_policy is None and settings.interactive_tools:
             self.tool_policy = self._confirm_writes
         self.agent_id = agent_id
+        self.system_prompt = system_prompt
+        self.agent_definition_hash = agent_definition_hash
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
         )
@@ -586,6 +591,23 @@ class ChatRuntime:
         for _step in range(self.settings.max_steps):
             state.step = _step
             history = await self.repository.list_messages(state.run.topic_id)
+            system = (
+                MessageView(
+                    id=f"agent-config:{self.agent_id}",
+                    topic_id=state.run.topic_id,
+                    run_id=state.run.id,
+                    sequence=-1,
+                    role="system",
+                    content=self.system_prompt,
+                    details={
+                        "source": "agent_config",
+                        "definition_hash": self.agent_definition_hash,
+                    },
+                    created_at=state.run.created_at,
+                )
+                if self.system_prompt
+                else None
+            )
             assert state.discovery is not None
             tool_step = state.discovery.prepare()
             tool_tokens = (
@@ -630,6 +652,12 @@ class ChatRuntime:
                         "threshold": config.notice_messages,
                     },
                 )
+            if system is not None and token_limit is not None:
+                token_limit -= tokenizer.count([system])
+                if token_limit <= config.reserved_output_tokens:
+                    raise ContextError(
+                        "Agent系统指令超过上下文容量", code="agent_instruction_budget"
+                    )
             try:
                 options = ContextOptions(
                     strategy=config.strategy,
@@ -668,7 +696,7 @@ class ChatRuntime:
                         "最新完整上下文与输出预留超过模型窗口", code="model_input_budget"
                     ) from error
                 raise
-            messages = context.messages
+            messages = [system, *context.messages] if system is not None else context.messages
             if context.compacted:
                 await state.publish(
                     "chunk",

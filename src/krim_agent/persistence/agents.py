@@ -28,6 +28,7 @@ class StoredAgentHandle:
     lease_expires_at: float | None
     parent_agent_id: str | None
     parent_tool_call_id: str | None
+    profile_revision: int | None = None
 
 
 class AgentHandleStore:
@@ -53,6 +54,7 @@ class AgentHandleStore:
             lease_expires_at=row.lease_expires_at,
             parent_agent_id=row.parent_agent_id,
             parent_tool_call_id=row.parent_tool_call_id,
+            profile_revision=row.profile_revision,
         )
 
     async def list(self) -> list[StoredAgentHandle]:
@@ -101,6 +103,7 @@ class AgentHandleStore:
                 definition_hash=value.definition_hash,
                 parent_agent_id=value.parent_agent_id,
                 parent_tool_call_id=value.parent_tool_call_id,
+                profile_revision=value.profile_revision,
                 updated_at=utc_now(),
             )
             session.add(row)

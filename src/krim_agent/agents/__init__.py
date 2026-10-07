@@ -2,6 +2,7 @@
 
 from .catalog import AgentCatalog, AgentDescriptor, AgentToolInput
 from .manager import AgentHandle, AgentManager
+from .profiles import AgentProfile, AgentProfileUpdate, AgentProfileVersion
 from .types import AgentDefinition, AgentError, ExecResult
 
 __all__ = [
@@ -12,5 +13,8 @@ __all__ = [
     "AgentHandle",
     "AgentManager",
     "AgentToolInput",
+    "AgentProfile",
+    "AgentProfileUpdate",
+    "AgentProfileVersion",
     "ExecResult",
 ]

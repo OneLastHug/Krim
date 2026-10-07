@@ -57,6 +57,9 @@ class AgentDefinition:
     tool_timeout_seconds: float = 10
     context_config: ContextRunConfig | None = None
     usage_budget: UsageBudgetConfig | None = None
+    profile_revision: int | None = None
+    instructions: str = ""
+    resource_version: str = ""
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name) is None:
@@ -65,6 +68,8 @@ class AgentDefinition:
             raise ValueError("max_turns 必须在 1–128 之间")
         if not 0 < self.timeout_seconds <= 300:
             raise ValueError("timeout_seconds 必须在 0–300 秒之间")
+        if len(self.instructions) > 8192:
+            raise ValueError("Agent instructions 不能超过8192字符")
         if not 1 <= self.max_steps <= 32:
             raise ValueError("max_steps 必须在 1–32 之间")
         if not 0 < self.tool_timeout_seconds <= 120:
