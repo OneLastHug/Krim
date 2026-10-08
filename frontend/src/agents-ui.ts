@@ -4,6 +4,7 @@ import { RunSession } from "./background-streams.js";
 import { t } from "./i18n.js";
 import { TasksUI } from "./tasks-ui.js";
 import { WorkspaceUI } from "./workspace-ui.js";
+import { WorkspaceChangesUI } from "./workspace-changes-ui.js";
 
 type Actions = {
   start: (agent: AgentView, prompt: string) => Promise<void>;
@@ -23,6 +24,7 @@ type Card = {
   transcript: HTMLElement; historyTurn: number; historyVersion: number;
   tasks: TasksUI;
   workspace: WorkspaceUI;
+  changes: WorkspaceChangesUI;
 };
 
 export class AgentsUI {
@@ -38,6 +40,10 @@ export class AgentsUI {
       card.view = agent;
       card.tasks.update();
       card.workspace.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open");
+      card.changes.update(
+        Boolean(agent.session.permissions.workspace), agent.session.status === "open",
+        agent.session.permissions.mode,
+      );
       card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
       const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
       card.meta.textContent = `${t(sessionLabels[agent.session.status])} · ${t("轮次")} ${agent.turn}/${Number(agent.session.permissions.max_turns || 0)} · ${t("配置版本")} ${agent.session.profile_revision ?? "—"}`;
@@ -77,8 +83,9 @@ export class AgentsUI {
     historyTitle.textContent = t("轮次历史"); turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`); transcript.className = "agent-history"; history.append(historyTitle, turns, transcript);
     const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
     const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
-    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace };
+    const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
+    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root);
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes };
     execute.onclick = () => {
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }

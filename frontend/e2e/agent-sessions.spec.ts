@@ -19,7 +19,7 @@ test("会话关闭重开保留草稿和历史轮次，专属话题只读", async
     await expect(card.locator(".agent-result")).toContainText('"sum": 5.0');
     await card.getByText("执行步骤与工具", { exact: true }).click();
     await expect(card.locator("ol")).toContainText("工具 add：完成");
-    const input = card.locator("textarea");
+    const input = card.getByLabel("default 后续任务", { exact: true });
     await input.fill("保留草稿");
     await card.getByRole("button", { name: "关闭会话" }).click();
     await expect(card).toContainText("会话关闭");
@@ -57,10 +57,10 @@ test("多个后台Agent独立显示部分文本和停止，刷新保留原Run", 
     await expect(first.locator(".agent-draft")).toContainText("甲");
     await expect(second.locator(".agent-draft")).toContainText("乙");
     await expect(first.locator(".agent-draft")).not.toContainText("乙");
-    await first.locator("textarea").fill("下一轮草稿");
+    await first.getByLabel("default 后续任务", { exact: true }).fill("下一轮草稿");
     await first.getByRole("button", { name: "停止", exact: true }).click();
     await expect(first.locator("strong")).toContainText("已停止");
-    await expect(first.locator("textarea")).toHaveValue("下一轮草稿");
+    await expect(first.getByLabel("default 后续任务", { exact: true })).toHaveValue("下一轮草稿");
     const before = await (await page.request.get(`/v1/agents/${two.agent_id}`, { headers })).json();
     expect(["running", "completed"]).toContain(before.status);
     await connect(page);
@@ -87,7 +87,7 @@ test("持久清单解释不可恢复原因，资源补齐后恢复同一实例",
     await expect(unavailable).toHaveCount(0);
     const restored = page.locator(`article.agent-card[data-agent-id="${agent.agent_id}"]`);
     await expect(restored).toContainText("待执行");
-    await restored.locator("textarea").fill("/echo restored-agent");
+    await restored.getByLabel("restoreworker 后续任务", { exact: true }).fill("/echo restored-agent");
     await restored.getByRole("button", { name: "执行任务" }).click();
     await expect(restored.locator(".agent-result")).toContainText("restored-agent");
   } finally { await page.request.delete(`/v1/agents/${agent.agent_id}`, { headers }); }

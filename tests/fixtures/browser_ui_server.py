@@ -1,11 +1,12 @@
 """Playwright 的本机 Python 服务；临时 SQLite、合作式慢 fake 流与测试 Key。"""
 
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
 import uvicorn
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 
 from krim_agent.agents import AgentDefinition
 from krim_agent.api import create_app
@@ -46,6 +47,40 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         '<img src=x onerror="window.workspaceExecuted=1">', encoding="utf-8"
     )
     app.state.agents.register_workspace("demo", workspace_root, version="browser-v1")
+    write_root = Path(directory) / "write-workspace"
+    write_root.mkdir()
+    app.state.agents.register_workspace(
+        "edit", write_root, version="browser-write-v1", writable=True
+    )
+
+    class TestWorkspaceControl(StrictModel):
+        action: Literal["seed", "fail_save", "large"]
+        path: str = Field(default="file.txt", pattern=r"^[A-Za-z0-9_-]+\.txt$")
+        content: str = Field(default="old\n", max_length=24000)
+
+    fail_next_save = False
+    original_settle = app.state.agents.workspace_edits.settle
+
+    async def controlled_settle(*args, **kwargs):
+        global fail_next_save
+        if fail_next_save:
+            fail_next_save = False
+            raise OSError("injected browser receipt save failure")
+        return await original_settle(*args, **kwargs)
+
+    app.state.agents.workspace_edits.settle = controlled_settle
+
+    @app.post("/_test/workspace")
+    async def configure_workspace(payload: TestWorkspaceControl) -> dict[str, str]:
+        global fail_next_save
+        if payload.action == "fail_save":
+            fail_next_save = True
+        else:
+            content = "x" * 50000 if payload.action == "large" else payload.content
+            await asyncio.to_thread(
+                (write_root / payload.path).write_text, content, encoding="utf-8"
+            )
+        return {"action": payload.action}
 
     class TestContextConfig(StrictModel):
         mode: Literal["automatic", "confirmation"] = "automatic"
