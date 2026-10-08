@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执与SDK/REST/CLI已接通，浏览器修改与清单/快照联动、命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执与SDK/REST/CLI/浏览器已接通，清单/快照联动、命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
 
 ## 快速开始
 
@@ -50,7 +50,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 | 对话与流 | 消息树/编辑/重生成/分支、持久事件/独立游标、断开重连、后台多话题读取 |
 | SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
 | 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
-| 工作区 | 宿主根目录授权、Profile/资源冻结、文件读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理及SDK/REST/CLI；浏览器修改仍接续 |
+| 工作区 | 宿主根目录授权、Profile/资源冻结、文件读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理及SDK/REST/CLI/浏览器；清单与快照联动继续 |
 | 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
 | Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
 | 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
@@ -63,7 +63,8 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [任务状态架构与理由](docs/architecture/task-state-design.md)
 - [工作区架构与设计理由](docs/architecture/workspace-design.md)
 - [工作区API、SDK与CLI使用](docs/api/workspace.md)
-- [工作区修改命令行指南](docs/user-guide/workspace-changes.md)
+- [工作区浏览器与命令行修改指南](docs/user-guide/workspace-changes.md)
+- [浏览器文件修改架构与理由](docs/architecture/workspace-browser-design.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)

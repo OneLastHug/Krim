@@ -117,11 +117,34 @@ export interface AgentView {
   session_id: string;
   session: AgentSessionView;
 }
-export interface WorkspaceView { key: string; version: string; fingerprint: string; available: boolean; tool_names: string[]; max_file_bytes: number; }
+export interface WorkspaceView { key: string; version: string; fingerprint: string; available: boolean; tool_names: string[]; max_file_bytes: number; writable: boolean; }
 export interface WorkspaceEntry { path: string; kind: "directory" | "file"; byte_size: number; }
 export interface WorkspaceListing { path: string; entries: WorkspaceEntry[]; truncated: boolean; entries_scanned: number; }
 export interface WorkspaceFile { path: string; sha256: string; byte_size: number; start_line: number; lines: number; content: string; truncated: boolean; }
 export interface WorkspaceSearch { matches: Array<{ path: string; line: number; text: string }>; files_scanned: number; files_skipped: number; truncated: boolean; }
+export type WorkspaceAction = "apply" | "undo" | "keep";
+export interface FileChangeSpec {
+  path: string; operation: "write" | "replace" | "delete"; expected_sha256: string | null;
+  content?: string | null; replacements?: Array<{ old_text: string; new_text: string; occurrences: number }>;
+}
+export interface WorkspaceChangeView {
+  proposal_id: string; scope_id: string; topic_id: string; workspace_key: string;
+  resource_fingerprint: string; revision: number;
+  status: "proposed" | "applying" | "applied" | "undoing" | "undone" | "keeping" | "kept" | "rejected" | "uncertain";
+  preview: { path: string; operation: "write" | "replace" | "delete"; before_sha256: string | null;
+    after_sha256: string | null; before_bytes: number; after_bytes: number; diff: string; truncated: boolean };
+  active_operation_id: string | null; expires_at: number; created_at: string; updated_at: string;
+}
+export interface WorkspaceChangeAction {
+  proposal_id: string; action: WorkspaceAction; expected_revision: number; request_key: string;
+}
+export interface WorkspaceAttemptView {
+  operation_id: string; proposal_id: string; scope_id: string; action: WorkspaceAction;
+  expected_revision: number; status: "running" | "done" | "rejected" | "uncertain";
+  receipt: { path: string; status: "done" | "rejected" | "uncertain"; before_sha256: string | null;
+    after_sha256: string | null; changed: boolean; error_code: string | null; recovery_required: boolean } | null;
+  cleanup_pending: boolean; run_id: string | null; call_id: string | null; created_at: string; updated_at: string;
+}
 export interface WorkflowRunView {
   run_id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";
