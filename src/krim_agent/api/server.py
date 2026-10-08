@@ -151,6 +151,7 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_list import (
+    NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
@@ -870,7 +871,15 @@ def create_app(
     ) -> NativeBatchView:
         return await agent_service.workspace_start_batch(agent_id, payload, confirmed=confirmed)
 
-    # by-key 必须排在通用 batch_id 路由之前，否则 "by-key" 会被当作批次标识。
+    # history 和 by-key 必须排在通用 batch_id 路由之前。
+    @app.get("/v1/agents/{agent_id}/workspace/native-batches/history")
+    async def agent_workspace_native_batch_history(
+        agent_id: WorkspaceIdentifier,
+        cursor: str | None = Query(default=None, max_length=1024),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> NativeBatchHistoryPage:
+        return await agent_service.workspace_batch_history(agent_id, cursor=cursor, limit=limit)
+
     @app.get("/v1/agents/{agent_id}/workspace/native-batches/by-key")
     async def agent_workspace_native_batch_by_key(
         agent_id: WorkspaceIdentifier,

@@ -49,6 +49,8 @@ export class WorkspaceChangesUI {
     history = [];
     operation;
     operationSelection;
+    proof;
+    proofError = "";
     historyLimit = PAGE_SIZE;
     stale = false;
     loaded = false;
@@ -139,6 +141,34 @@ export class WorkspaceChangesUI {
             void this.work(() => this.refresh());
     }
     setGrant(grant) { this.grant = grant; this.sync(); }
+    /** 清单导航复用当前详情，保留编辑器及其未提交草稿。 */
+    async focusProposal(proposalId, operationId) {
+        if (this.busy)
+            throw new Error(t("文件操作处理中，请稍后打开差异"));
+        if (!this.bound)
+            throw new Error(t("工作区资源已停用或关闭"));
+        this.root.open = true;
+        await this.work(async () => {
+            if (this.available) {
+                try {
+                    this.grant = await requestJson(this.base);
+                }
+                catch (error) {
+                    this.grant = undefined;
+                    this.noticeBox.textContent = errorText(error);
+                }
+            }
+            const proposal = await requestJson(`${this.base}/changes/${encodeURIComponent(proposalId)}`);
+            this.selected = proposal;
+            this.operationSelection = operationId;
+            this.operation = undefined;
+            this.history = [];
+            this.historyLimit = PAGE_SIZE;
+            await this.readSelected();
+            this.loaded = true;
+            this.detail.scrollIntoView({ block: "nearest" });
+        });
+    }
     permitted(tool) {
         return this.available && this.grant?.available === true && this.grant.writable === true
             && this.grant.tool_names.includes(tool) && this.sessionMode !== "ask"
@@ -153,14 +183,18 @@ export class WorkspaceChangesUI {
         for (const key of ["待替换原文", "替换为", "预期出现次数"])
             this.fieldRows.get(key).hidden = mode !== "replace";
         for (const control of this.buttons)
-            control.button.disabled = this.busy || !this.bound
-                || Boolean(control.tool && !this.permitted(control.tool)) || Boolean(control.allowed && !control.allowed());
+            control.button.disabled = this.buttonDisabled(control.tool, control.allowed);
         this.root.setAttribute("aria-busy", String(this.busy));
+    }
+    buttonDisabled(tool, allowed) {
+        return this.busy || !this.bound || Boolean(tool && !this.permitted(tool)) || Boolean(allowed && !allowed());
     }
     button(key, action, tool, allowed) {
         const button = text("button", key);
         button.type = "button";
         button.className = "secondary";
+        // 读取尚未收束时重建的按钮也立即遵守同一状态，避免看似可点但被work忽略。
+        button.disabled = this.buttonDisabled(tool, allowed);
         button.onclick = () => { if (!button.disabled)
             void this.work(action); };
         this.buttons.push({ button, tool, allowed });
@@ -309,8 +343,22 @@ export class WorkspaceChangesUI {
         this.history = history;
         this.operation = history.find(item => item.operation_id === this.operationSelection)
             || history.find(item => item.operation_id === proposal.active_operation_id) || history.at(-1);
+        await this.readProof();
         this.stale = false;
         this.renderDetail();
+    }
+    async readProof() {
+        this.proof = undefined;
+        this.proofError = "";
+        const operation = this.operation;
+        if (!operation)
+            return;
+        try {
+            this.proof = await requestJson(`${this.base}/operations/${encodeURIComponent(operation.operation_id)}/proof`);
+        }
+        catch (error) {
+            this.proofError = errorText(error);
+        }
     }
     renderDetail() {
         this.buttons = this.buttons.filter(control => !this.detail.contains(control.button));
@@ -346,6 +394,7 @@ export class WorkspaceChangesUI {
             item.append(this.button("查看操作回执", async () => {
                 this.operation = operation;
                 this.operationSelection = operation.operation_id;
+                await this.readProof();
                 this.renderDetail();
             }));
             history.append(item);
@@ -393,6 +442,24 @@ export class WorkspaceChangesUI {
         result.className = "workspace-operation-result";
         result.textContent = `${statusLabel(operation.status)} · ${operation.operation_id}${operation.receipt?.error_code ? ` · ${operation.receipt.error_code}` : ""}`;
         this.detail.append(result);
+        if (this.proof?.operation_id === operation.operation_id) {
+            const proof = document.createElement("p");
+            proof.className = "workspace-operation-proof";
+            const labels = { not_applicable: "此操作不适用保留证明", exact_after: "原目标保留证明", successor_chain: "连续后继保留证明" };
+            proof.textContent = `${t(labels[this.proof.kind])} · ${statusLabel(this.proof.status)}`;
+            if (this.proof.kind !== "not_applicable") {
+                proof.textContent += `\n${t("证明链尾操作")} ${this.proof.tip_operation_id || "—"}\n${t("保留时核实的版本")} ${this.proof.tip_after_sha256 || t("删除文件")}\n${t("文件效果顺序")} ${this.proof.effect_sequence ?? "—"} · ${t("后继数量")} ${this.proof.successor_count}`;
+                if (this.proof.status !== "done")
+                    proof.textContent += `\n${t("该证明尚未确认保留成功")}`;
+            }
+            this.detail.append(proof);
+        }
+        else if (this.proofError) {
+            const error = document.createElement("p");
+            error.className = "workspace-operation-proof";
+            error.textContent = this.proofError;
+            this.detail.append(error);
+        }
         if (operation.status === "running")
             this.detail.append(text("p", "请等待原操作完成，刷新读取结果"));
         if (operation.status === "uncertain")

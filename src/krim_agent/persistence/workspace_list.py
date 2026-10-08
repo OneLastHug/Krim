@@ -162,7 +162,9 @@ class NativeChangeListStore:
         if filter not in {"active", "history", "all"}:
             raise ServiceError("workspace_list_filter_invalid", "修改清单筛选无效", 422)
         decoded = _decode_cursor(cursor, scope_id, filter) if cursor is not None else None
-        async with self.edits.database.sessions() as session:
+        # 即使查询不写SQL，也需与同一本进程的写事务串行；默认SDK使用共享
+        # SQLite :memory: 连接，绕过锁会触发“cannot start a transaction within a transaction”。
+        async with self.edits.database.write_lock, self.edits.database.sessions() as session:
             await self.edits._scope(session, scope_id, writing=False)
             revision, items = await self.snapshot(session, scope_id)
         if decoded is not None and decoded[0] != revision:

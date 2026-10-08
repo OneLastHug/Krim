@@ -85,6 +85,7 @@ from .workspace_change import (
     WorkspacePreviewRequest,
 )
 from .workspace_list import (
+    NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
@@ -602,6 +603,19 @@ class KrimClient:
         )
         self._check(response)
         return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_native_batch_history(
+        self, agent_id: str, *, cursor: str | None = None, limit: int = 32
+    ) -> NativeBatchHistoryPage:
+        params: dict[str, str | int] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches/history",
+            params=params,
+        )
+        self._check(response)
+        return NativeBatchHistoryPage.model_validate_json(response.content)
 
     def agent_workspace_native_batch_by_key(
         self, agent_id: str, request_key: str

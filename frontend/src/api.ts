@@ -145,6 +145,46 @@ export interface WorkspaceAttemptView {
     after_sha256: string | null; changed: boolean; error_code: string | null; recovery_required: boolean } | null;
   cleanup_pending: boolean; run_id: string | null; call_id: string | null; created_at: string; updated_at: string;
 }
+export interface WorkspaceOperationProofView {
+  operation_id: string; proposal_id: string; scope_id: string;
+  status: WorkspaceAttemptView["status"]; kind: "not_applicable" | "exact_after" | "successor_chain";
+  tip_proposal_id: string | null; tip_operation_id: string | null; tip_after_sha256: string | null;
+  effect_sequence: number | null; successor_count: number;
+}
+export type NativeListFilter = "active" | "history" | "all";
+export interface NativeChangeItem {
+  proposal_id: string; revision: number; path: string; operation: "write" | "replace" | "delete";
+  status: "applying" | "applied" | "undoing" | "undone" | "keeping" | "kept" | "uncertain";
+  workspace_key: string; resource_fingerprint: string; apply_sequence: number | null;
+  order_known: boolean; active_operation_id: string | null;
+}
+export interface NativeChangePage {
+  source: "workspace"; scope_id: string; snapshot_revision: string; filter: NativeListFilter;
+  total: number; items: NativeChangeItem[]; next_cursor: string | null;
+}
+export interface NativeBatchRequest {
+  action: "keep" | "undo"; snapshot_revision: string;
+  targets: Array<{ proposal_id: string; expected_revision: number }>; request_key: string;
+}
+export interface NativeBatchItemView {
+  position: number; proposal_id: string; expected_revision: number; path: string;
+  apply_sequence: number | null; status: "pending" | "running" | "done" | "rejected" | "uncertain" | "skipped";
+  operation: WorkspaceAttemptView | null; error_code: string | null;
+}
+export interface NativeBatchView {
+  source: "workspace"; batch_id: string; scope_id: string; request_key: string; snapshot_revision: string;
+  action: "keep" | "undo"; status: "running" | "done" | "partial" | "failed" | "uncertain" | "cancelled" | "interrupted";
+  producer_status: "running" | "finished" | "cancelled" | "interrupted";
+  items: NativeBatchItemView[]; stop_reason: string | null; created_at: string; updated_at: string;
+}
+export interface NativeBatchSummary {
+  batch_id: string; request_key: string; action: "keep" | "undo"; status: NativeBatchView["status"];
+  producer_status: NativeBatchView["producer_status"]; snapshot_revision: string; item_count: number; done_count: number;
+  stop_reason: string | null; created_at: string; updated_at: string;
+}
+export interface NativeBatchHistoryPage {
+  source: "workspace"; scope_id: string; total: number; items: NativeBatchSummary[]; next_cursor: string | null;
+}
 export interface WorkflowRunView {
   run_id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";
@@ -172,17 +212,33 @@ function headers(): Headers {
   if (apiKey) value.set("Authorization", `Bearer ${apiKey}`);
   return value;
 }
-export async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code: string | null) {
+    super(message); this.name = "ApiError";
+  }
+}
+async function readJson(path: string, init: RequestInit): Promise<unknown> {
   const merged = headers();
   new Headers(init.headers).forEach((value, key) => merged.set(key, value));
   const response = await fetch(path, { ...init, headers: merged });
-  const value: unknown = await response.json().catch(() => null);
+  let value: unknown;
+  try { value = await response.json(); }
+  catch { throw new ApiError(`HTTP ${response.status} · 服务没有返回有效的数据，请检查连接`, response.status, null); }
   if (!response.ok) {
-    const body = value as { error?: { message?: string } } | null;
-    throw new Error(body?.error?.message || `HTTP ${response.status}`);
+    const body = value as { error?: { message?: unknown; code?: unknown } } | null;
+    throw new ApiError(typeof body?.error?.message === "string" ? body.error.message : `HTTP ${response.status}`,
+      response.status, typeof body?.error?.code === "string" ? body.error.code : null);
   }
+  return value;
+}
+export async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const value = await readJson(path, init);
   if (value === null) throw new Error("服务没有返回有效的数据，请检查连接");
   return value as T;
+}
+/** 只有明确允许 null 的查询使用此入口；空正文或无效 JSON 仍拒绝。 */
+export async function requestJsonNullable<T>(path: string, init: RequestInit = {}): Promise<T | null> {
+  return await readJson(path, init) as T | null;
 }
 export async function consumeEvents(
   runId: string,

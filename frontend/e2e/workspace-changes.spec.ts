@@ -3,8 +3,9 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 const headers = { Authorization: "Bearer browser-test-key" };
 const tools = ["workspace_read", "workspace_list", "workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize"];
 
-async function connect(page: Page): Promise<void> {
-  await page.goto("/ui/");
+async function connect(page: Page, topicId = new URL(page.url()).searchParams.get("topic")): Promise<void> {
+  // 共用测试服务的其他话题可能已切换语言；固定本用例的作用域。
+  await page.goto(topicId ? `/ui/?topic=${encodeURIComponent(topicId)}` : "/ui/");
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
   await expect(page.locator("#connection")).toContainText("本地服务已连接");
@@ -16,7 +17,7 @@ async function agent(page: Page, name: string, mode = "agent", selectedTools = t
   } });
   expect(saved.ok()).toBeTruthy();
   const view = await (await page.request.post("/v1/agents", { headers, data: { name } })).json();
-  await connect(page);
+  await connect(page, view.topic_id);
   const card = page.locator(`article.agent-card[data-agent-id="${view.agent_id}"]`), panel = card.locator(".workspace-changes");
   await panel.getByText("文件修改与历史", { exact: true }).click();
   await expect(panel.getByLabel("修改方式", { exact: true })).toBeVisible();
@@ -85,14 +86,31 @@ test("真实Diff确认、应用、保留、撤销、清理与刷新历史", asyn
 test("新建和删除版本保护、HTML纯文本展示与草稿保留", async ({ page }) => {
   const { id, card, panel } = await agent(page, "browser-create");
   const html = '<img src=x onerror="window.browserFileExecuted=1">';
+  let releaseRead: (() => void) | undefined;
   try {
     await panel.getByLabel("修改文件路径", { exact: true }).fill("created.txt");
     await panel.getByLabel("完整新内容", { exact: true }).fill(html);
     await panel.getByRole("button", { name: "刷新修改历史", exact: true }).click();
     await expect(panel.getByLabel("完整新内容", { exact: true })).toHaveValue(html);
+    // 预览已有Diff但原历史仍在读取时，不能展示可点却会被busy忽略的动作。
+    await expect(panel.getByRole("button", { name: "预览文件修改", exact: true })).toBeEnabled();
+    let observedRead: (() => void) | undefined;
+    const entered = new Promise<void>(resolve => { observedRead = resolve; });
+    const paused = new Promise<void>(resolve => { releaseRead = resolve; });
+    let armed = true;
+    await page.route(`**/v1/agents/${id}/workspace/changes?offset=0&limit=20`, async route => {
+      if (!armed) { await route.continue(); return; }
+      armed = false;
+      const response = await route.fetch(); observedRead!(); await paused;
+      await route.fulfill({ response });
+    });
     await panel.getByRole("button", { name: "预览文件修改", exact: true }).click();
+    await entered;
     await expect(panel.locator(".workspace-diff")).toContainText(html);
     await expect(panel.locator(".workspace-diff img")).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "应用修改", exact: true })).toBeDisabled();
+    releaseRead!();
+    await expect(panel.getByRole("button", { name: "应用修改", exact: true })).toBeEnabled();
     await confirmed(panel, page, "应用修改");
     await expect(panel.locator(".workspace-change-detail strong")).toContainText("文件已应用");
     expect(await file(page, id, "created.txt")).toBe(html);
@@ -108,7 +126,7 @@ test("新建和删除版本保护、HTML纯文本展示与草稿保留", async (
     await expect(panel.locator(".workspace-change-detail strong")).toContainText("文件已撤销");
     expect(await file(page, id, "created.txt")).toBe(html);
     await card.getByRole("button", { name: "关闭会话", exact: true }).click();
-  } finally { await page.request.delete(`/v1/agents/${id}`, { headers }); }
+  } finally { releaseRead?.(); await page.request.delete(`/v1/agents/${id}`, { headers }); }
 });
 
 test("截断原文不能完整写回，精确替换可以预览并恢复", async ({ page }) => {

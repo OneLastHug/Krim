@@ -14,8 +14,10 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_list import (
+    NativeBatchHistoryPage,
     NativeBatchItemView,
     NativeBatchRequest,
+    NativeBatchSummary,
     NativeBatchTarget,
     NativeBatchView,
     NativeChangeItem,
@@ -50,6 +52,8 @@ from .types import (
 )
 
 __all__ = [
+    "NativeBatchHistoryPage",
+    "NativeBatchSummary",
     "NativeBatchItemView",
     "NativeBatchRequest",
     "NativeBatchTarget",

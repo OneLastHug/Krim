@@ -4,6 +4,55 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "清单来源": "Change list source",
+    "Host 当前话题": "Host current topic",
+    "修改筛选": "Change filter",
+    "活动修改": "Active changes",
+    "已撤销历史": "Undone history",
+    "全部修改": "All changes",
+    "文件批次历史": "File batch history",
+    "较新批次": "Newer batches",
+    "较早批次": "Older batches",
+    "批次标识或原请求键": "Batch ID or original request key",
+    "按批次查询": "Find by batch ID",
+    "按原键找回": "Find by original key",
+    "等待原批次": "Wait for original batch",
+    "撤销本页": "Undo this page",
+    "保留本页": "Keep this page",
+    "文件效果顺序": "File effect order",
+    "历史顺序未知": "Historical order unknown",
+    "清单快照": "List snapshot",
+    "第{page}页 · 本页{count}项 · 共{total}项": (
+        "Page {page} · {count} items on this page · {total} total"
+    ),
+    "批次历史共{total}项": "{total} batches in history",
+    "批次响应未确认，请按原键找回": ("Batch response is unconfirmed; find it by the original key"),
+    "未找到原批次，结果尚未确认，请按原键继续查询": (
+        "Original batch not found; the result is unconfirmed. Query the original key again"
+    ),
+    "当前会话只能查询修改历史": "This session can only read change history",
+    "文件操作处理中，请稍后打开差异": "File operation is running; open the diff later",
+    "查看文件差异与证明": "View file diff and proof",
+    "尚无关联文件操作": "No associated file operation yet",
+    "尚未执行": "Not started",
+    "批次部分完成": "Batch partially completed",
+    "批次失败": "Batch failed",
+    "批次已取消": "Batch cancelled",
+    "批次已中断": "Batch interrupted",
+    "原目标保留证明": "Original target keep proof",
+    "连续后继保留证明": "Successor chain keep proof",
+    "此操作不适用保留证明": "Keep proof does not apply to this operation",
+    "证明链尾操作": "Proof tip operation",
+    "保留时核实的版本": "Verified version at keep",
+    "后继数量": "Successor count",
+    "该证明尚未确认保留成功": "This proof has not confirmed a successful keep",
+    "清单已变化，已返回第一页，请重新审阅": (
+        "The list changed; returned to the first page. Review it again"
+    ),
+    "Agent 实例不可用": "Agent instance unavailable",
+    "确认{action}当前页的{count}项修改？": (
+        "Confirm {action} for {count} changes on the current page?"
+    ),
     "工作区": "Workspace",
     "文件修改与历史": "File changes and history",
     "准备文件修改": "Prepare file change",
