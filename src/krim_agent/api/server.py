@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, Query, Request
+from fastapi import Path as PathParameter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -141,9 +142,20 @@ from krim_agent.workflow import (
     WorkflowStartRequest,
 )
 from krim_agent.workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
+from krim_agent.workspace_change import (
+    WorkspaceAttemptView,
+    WorkspaceChangeAction,
+    WorkspaceChangeView,
+    WorkspaceOperationRequest,
+    WorkspacePreviewRequest,
+)
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
+
+WorkspaceIdentifier = Annotated[
+    str, PathParameter(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$")
+]
 
 
 class TopicsResponse(BaseModel):
@@ -757,6 +769,72 @@ def create_app(
     @app.post("/v1/agents/{agent_id}/workspace/search")
     async def agent_workspace_search(agent_id: str, payload: SearchFilesInput) -> WorkspaceSearch:
         return await agent_service.workspace_search(agent_id, payload)
+
+    @app.post("/v1/agents/{agent_id}/workspace/changes/preview")
+    async def agent_workspace_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: WorkspacePreviewRequest,
+        confirmed: bool = Query(default=False),
+    ) -> WorkspaceChangeView:
+        return await agent_service.workspace_preview(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/changes")
+    async def agent_workspace_change(
+        agent_id: WorkspaceIdentifier,
+        payload: WorkspaceChangeAction,
+        confirmed: bool = Query(default=False),
+    ) -> WorkspaceAttemptView:
+        return await agent_service.workspace_change(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/changes")
+    async def agent_workspace_changes(
+        agent_id: WorkspaceIdentifier,
+        offset: int = Query(default=0, ge=0, le=9007199254740991),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> list[WorkspaceChangeView]:
+        return await agent_service.workspace_proposals(agent_id, offset=offset, limit=limit)
+
+    @app.get("/v1/agents/{agent_id}/workspace/changes/{proposal_id}")
+    async def agent_workspace_proposal(
+        agent_id: WorkspaceIdentifier, proposal_id: WorkspaceIdentifier
+    ) -> WorkspaceChangeView:
+        return await agent_service.workspace_proposal(agent_id, proposal_id)
+
+    @app.get("/v1/agents/{agent_id}/workspace/changes/{proposal_id}/history")
+    async def agent_workspace_history(
+        agent_id: WorkspaceIdentifier, proposal_id: WorkspaceIdentifier
+    ) -> list[WorkspaceAttemptView]:
+        return await agent_service.workspace_history(agent_id, proposal_id)
+
+    @app.get("/v1/agents/{agent_id}/workspace/operations/{operation_id}")
+    async def agent_workspace_operation(
+        agent_id: WorkspaceIdentifier, operation_id: WorkspaceIdentifier
+    ) -> WorkspaceAttemptView:
+        return await agent_service.workspace_operation(agent_id, operation_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/operations/{operation_id}/reconcile")
+    async def agent_workspace_reconcile(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        payload: WorkspaceOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> WorkspaceAttemptView:
+        request = payload or WorkspaceOperationRequest(operation_id=operation_id)
+        if request.operation_id != operation_id:
+            raise ServiceError("workspace_operation_mismatch", "路径与操作标识不一致", 422)
+        return await agent_service.workspace_reconcile(agent_id, request, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/operations/{operation_id}/finalize")
+    async def agent_workspace_finalize(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        payload: WorkspaceOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> WorkspaceAttemptView:
+        request = payload or WorkspaceOperationRequest(operation_id=operation_id)
+        if request.operation_id != operation_id:
+            raise ServiceError("workspace_operation_mismatch", "路径与操作标识不一致", 422)
+        return await agent_service.workspace_finalize(agent_id, request, confirmed=confirmed)
 
     @app.post("/v1/agents/{agent_id}/tasks/{kind}")
     async def write_agent_tasks(

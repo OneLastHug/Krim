@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from types import TracebackType
 from uuid import uuid4
@@ -74,12 +75,27 @@ from .tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from .usage import RunUsageView
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 from .workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
+from .workspace_change import (
+    WorkspaceAttemptView,
+    WorkspaceChangeAction,
+    WorkspaceChangeView,
+    WorkspaceOperationRequest,
+    WorkspacePreviewRequest,
+)
 
 
 class ClientError(Exception):
     def __init__(self, message: str, *, code: str | None = None, status: int | None = None) -> None:
         super().__init__(message)
         self.code, self.status = code, status
+
+
+def _workspace_identifier(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", value) is None:
+        raise ClientError(
+            "工作区Agent/提案/操作标识无效", code="workspace_identifier_invalid", status=422
+        )
+    return value
 
 
 class KrimClient:
@@ -448,6 +464,88 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceSearch.model_validate_json(response.content)
+
+    def agent_workspace_preview(
+        self, agent_id: str, request: WorkspacePreviewRequest, *, confirmed: bool = False
+    ) -> WorkspaceChangeView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/changes/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return WorkspaceChangeView.model_validate_json(response.content)
+
+    def agent_workspace_change(
+        self, agent_id: str, request: WorkspaceChangeAction, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/changes",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return WorkspaceAttemptView.model_validate_json(response.content)
+
+    def agent_workspace_changes(
+        self, agent_id: str, *, offset: int = 0, limit: int = 50
+    ) -> list[WorkspaceChangeView]:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/changes",
+            params={"offset": offset, "limit": limit},
+        )
+        self._check(response)
+        return TypeAdapter(list[WorkspaceChangeView]).validate_json(response.content)
+
+    def agent_workspace_proposal(self, agent_id: str, proposal_id: str) -> WorkspaceChangeView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/changes/"
+            f"{_workspace_identifier(proposal_id)}"
+        )
+        self._check(response)
+        return WorkspaceChangeView.model_validate_json(response.content)
+
+    def agent_workspace_history(
+        self, agent_id: str, proposal_id: str
+    ) -> list[WorkspaceAttemptView]:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/changes/"
+            f"{_workspace_identifier(proposal_id)}/history"
+        )
+        self._check(response)
+        return TypeAdapter(list[WorkspaceAttemptView]).validate_json(response.content)
+
+    def agent_workspace_operation(self, agent_id: str, operation_id: str) -> WorkspaceAttemptView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/operations/"
+            f"{_workspace_identifier(operation_id)}"
+        )
+        self._check(response)
+        return WorkspaceAttemptView.model_validate_json(response.content)
+
+    def agent_workspace_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/operations/"
+            f"{_workspace_identifier(operation_id)}/reconcile",
+            params={"confirmed": str(confirmed).lower()},
+            json=WorkspaceOperationRequest(operation_id=operation_id).model_dump(mode="json"),
+        )
+        self._check(response)
+        return WorkspaceAttemptView.model_validate_json(response.content)
+
+    def agent_workspace_finalize(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/operations/"
+            f"{_workspace_identifier(operation_id)}/finalize",
+            params={"confirmed": str(confirmed).lower()},
+            json=WorkspaceOperationRequest(operation_id=operation_id).model_dump(mode="json"),
+        )
+        self._check(response)
+        return WorkspaceAttemptView.model_validate_json(response.content)
 
     def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
         response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")
