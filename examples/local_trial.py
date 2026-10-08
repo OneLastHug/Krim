@@ -29,6 +29,7 @@ def main() -> None:
         environment = {
             key: value for key, value in os.environ.items() if not key.startswith("KRIM_AGENT_")
         }
+        environment.pop("PYTHONPATH", None)
         environment.update(
             {
                 "KRIM_AGENT_PROVIDER": "fake",
@@ -41,7 +42,7 @@ def main() -> None:
         def start() -> None:
             nonlocal process
             process = subprocess.Popen(
-                [sys.executable, "-m", "krim_agent", "serve", "--port", str(port)],
+                [sys.executable, "-I", "-m", "krim_agent", "serve", "--port", str(port)],
                 env=environment,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -146,6 +147,7 @@ def main() -> None:
             result = subprocess.run(
                 [
                     sys.executable,
+                    "-I",
                     "-m",
                     "krim_agent",
                     "eval",
