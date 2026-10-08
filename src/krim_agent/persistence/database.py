@@ -445,6 +445,7 @@ class WorkspaceEditAttemptRow(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(16))
     expected_revision: Mapped[int] = mapped_column(Integer)
+    previous_status: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="running")
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
