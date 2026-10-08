@@ -497,6 +497,60 @@ class WorkspaceFileLockRow(Base):
     )
 
 
+class NativeWorkspaceBatchRow(Base):
+    __tablename__ = "native_workspace_batches"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        CheckConstraint("action IN ('keep','undo')", name="ck_native_batch_action"),
+        CheckConstraint(
+            "producer_status IN ('running','finished','cancelled','interrupted')",
+            name="ck_native_batch_producer_status",
+        ),
+    )
+    batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    snapshot_revision: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    producer_status: Mapped[str] = mapped_column(String(16), default="running")
+    stop_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class NativeWorkspaceBatchChildRow(Base):
+    __tablename__ = "native_workspace_batch_children"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "proposal_id"),
+        CheckConstraint("position >= 0 AND position < 32", name="ck_native_batch_position"),
+        CheckConstraint(
+            "status IN ('pending','rejected','skipped')", name="ck_native_batch_child_status"
+        ),
+    )
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("native_workspace_batches.batch_id"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("workspace_edit_proposals.proposal_id"))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    path: Mapped[str] = mapped_column(String(512))
+    file_key: Mapped[str] = mapped_column(String(64))
+    apply_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_key: Mapped[str] = mapped_column(String(128), unique=True)
+    operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_attempts.operation_id"), unique=True, nullable=True
+    )
+    admission_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
 class WorkspaceLedgerGuardRow(Base):
     __tablename__ = "workspace_ledger_guards"
     guard_id: Mapped[str] = mapped_column(String(16), primary_key=True)

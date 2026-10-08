@@ -699,6 +699,9 @@ class PythonAI:
     async def close(self) -> None:
         if self._closed:
             return
+        # 在批次回调链内先拒绝重入，不能先把SDK标记关闭或释放数据库。
+        if self._agent_service is not None:
+            self._agent_service.workspace_batches.assert_external_close()
         self._closed = True
         try:
             if self._evaluation_service is not None:

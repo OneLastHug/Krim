@@ -93,6 +93,8 @@ class WorkspaceChangeService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if context.workspace_batch is not None and operation != "change":
+                raise ServiceError("workspace_batch_action", "批次子项只能执行原冻结修改动作", 403)
             if operation == "preview":
                 value = await self._preview(
                     WorkspacePreviewRequest.model_validate(payload), context
@@ -238,7 +240,9 @@ class WorkspaceChangeService:
         self, request: WorkspaceChangeAction, context: ToolContext, abort: Event
     ) -> WorkspaceAttemptView:
         scope, binding = await self._guard(context)
-        previous = await self.store.find_action(scope, request, binding.fingerprint)
+        previous = await self.store.find_action(
+            scope, request, binding.fingerprint, batch_fence=context.workspace_batch
+        )
         if previous is not None:
             return previous.view
         original = await self.store.get(scope, request.proposal_id)
@@ -254,6 +258,7 @@ class WorkspaceChangeService:
             prepared,
             run_id=context.run_id if context.run_id != "local" else None,
             call_id=context.call_id,
+            batch_fence=context.workspace_batch,
         )
         if not created:
             return attempt.view

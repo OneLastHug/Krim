@@ -13,6 +13,14 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_list import (
+    NativeBatchItemView,
+    NativeBatchRequest,
+    NativeBatchTarget,
+    NativeBatchView,
+    NativeChangeItem,
+    NativeChangePage,
+)
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -42,6 +50,12 @@ from .types import (
 )
 
 __all__ = [
+    "NativeBatchItemView",
+    "NativeBatchRequest",
+    "NativeBatchTarget",
+    "NativeBatchView",
+    "NativeChangeItem",
+    "NativeChangePage",
     "FileChangeSpec",
     "TextReplacement",
     "WorkspaceAttemptView",

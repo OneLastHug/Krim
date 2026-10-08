@@ -23,6 +23,7 @@ from .output import OutputContract, OutputSchema, WireOutputSchema
 if TYPE_CHECKING:
     from krim_agent.skills import SkillSnapshot
     from krim_agent.workspace import WorkspaceBinding
+    from krim_agent.workspace_list import NativeBatchFence
 
 if TYPE_CHECKING:
     from .registry import ToolRegistry
@@ -115,6 +116,7 @@ class ToolContext:
     # 由可信宿主绑定；模型参数和HTTP请求不能设置此字段。
     workspace: WorkspaceBinding | None = None
     workspace_changes: WorkspaceChangeBackend | None = None
+    workspace_batch: NativeBatchFence | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -142,6 +144,7 @@ class ToolContext:
             trace_owner_id=self.trace_owner_id,
             workspace=self.workspace,
             workspace_changes=self.workspace_changes,
+            workspace_batch=self.workspace_batch,
             arguments=arguments,
         )
 
