@@ -159,6 +159,12 @@ class WorkspaceChangeService:
         except Exception:
             abort.set()
 
+    async def _authorize_publication(
+        self, context: ToolContext, scope: str, operation_id: str
+    ) -> None:
+        await self._guard(context)
+        await self.store.assert_execution(scope, operation_id)
+
     @staticmethod
     def _effect(
         prepared: PreparedFileChange,
@@ -233,6 +239,30 @@ class WorkspaceChangeService:
             return attempt.view
         self._active_operation_ids.add(attempt.view.operation_id)
         renew = asyncio.create_task(self._renew(context, attempt.view.operation_id, abort))
+        loop = asyncio.get_running_loop()
+
+        def authorize() -> None:
+            # 只由Writer线程在文件锁内调用；原事件循环负责检查SQL和会话事实。
+            if loop.is_closed():
+                raise ServiceError("workspace_publication_unavailable", "发布资格无法核实", 503)
+            check = self._authorize_publication(context, scope, attempt.view.operation_id)
+            try:
+                future = asyncio.run_coroutine_threadsafe(check, loop)
+            except RuntimeError:
+                check.close()
+                raise ServiceError(
+                    "workspace_publication_unavailable", "发布资格无法核实", 503
+                ) from None
+            try:
+                future.result(timeout=writer.lock_timeout)
+            except ServiceError:
+                raise
+            except Exception:
+                future.cancel()
+                raise ServiceError(
+                    "workspace_publication_unavailable", "发布资格无法核实", 503
+                ) from None
+
         try:
             if abort.is_set():
                 effect = self._effect(prepared, "rejected", "workspace_write_cancelled")
@@ -254,6 +284,7 @@ class WorkspaceChangeService:
                         writer.apply,
                         prepared,
                         abort=lambda: abort.is_set() or not binding.available or self._closed,
+                        authorize=authorize,
                     )
                 except ServiceError as error:
                     if error.code == "workspace_write_cancelled":

@@ -597,6 +597,8 @@ class WorkspaceEditStore:
             next_status = {"apply": "applying", "undo": "undoing", "keep": "keeping"}[
                 request.action
             ]
+            # ORM会同步下方UPDATE结果；必须在SQL执行前冻结动作来源。
+            previous_status = proposal.status
             revision = await session.scalar(
                 update(WorkspaceEditProposalRow)
                 .where(
@@ -623,6 +625,7 @@ class WorkspaceEditStore:
                 request_hash=digest_value,
                 action=request.action,
                 expected_revision=request.expected_revision,
+                previous_status=previous_status,
                 status="running",
                 owner_id=self.owner_id,
                 lease_expires_at=time.time() + self.lease_seconds,
@@ -655,6 +658,23 @@ class WorkspaceEditStore:
             if row is None or row.scope_id != scope_id:
                 raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
             return self._attempt(row)
+
+    async def assert_execution(self, scope_id: str, operation_id: str) -> None:
+        """在文件锁内核对原操作资格；此检查不延长租约、不更改文件或账本。"""
+        async with self.database.write_lock, self.database.sessions() as session:
+            row = await session.get(WorkspaceEditAttemptRow, operation_id)
+            if row is None or row.scope_id != scope_id:
+                raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
+            await self._scope(session, scope_id, writing=True, run_id=row.run_id)
+            if (
+                row.status != "running"
+                or row.owner_id != self.owner_id
+                or (row.lease_expires_at or 0) <= time.time()
+            ):
+                raise ServiceError("workspace_operation_owner", "修改操作未由当前生产者持有", 409)
+            proposal = await self._proposal(session, scope_id, row.proposal_id)
+            if proposal.active_operation_id != operation_id:
+                raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
 
     async def history(self, scope_id: str, proposal_id: str) -> builtin_list[WorkspaceAttemptView]:
         async with self.database.write_lock, self.database.sessions() as session:
@@ -751,9 +771,7 @@ class WorkspaceEditStore:
             elif value.status == "uncertain":
                 proposal.status = "uncertain"
             else:
-                proposal.status = {"apply": "rejected", "undo": "applied", "keep": "applied"}[
-                    row.action
-                ]
+                proposal.status = "rejected" if row.action == "apply" else row.previous_status
             proposal.revision += 1
             proposal.updated_at = utc_now()
             if value.status != "uncertain":

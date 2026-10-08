@@ -437,6 +437,7 @@ class WorkspaceWriter:
         change: PreparedFileChange,
         *,
         abort: Callable[[], bool] | None = None,
+        authorize: Callable[[], None] | None = None,
         retain_before: bool = True,
     ) -> FileEffect:
         cancelled = abort or (lambda: False)
@@ -448,6 +449,12 @@ class WorkspaceWriter:
         if change.after is not None:
             self._text(change.after)
         with self._locked_parent(change.spec.path, cancelled) as (fd, parent, name):
+            # 校验在文件锁内，核实者不能在校验与发布之间抢先认定“没有修改”。
+            if authorize is not None:
+                try:
+                    authorize()
+                except ServiceError as error:
+                    return self._receipt(change, "rejected", error.code)
             self._check_parent(parent, change.parent_identity)
             current = self._snapshot(fd, name, missing=True)
             if not self._same_before(current, change.before):
@@ -488,6 +495,8 @@ class WorkspaceWriter:
                         os.close(stage_fd)
                     os.fsync(fd)
                 self._check_parent(parent, change.parent_identity)
+                if authorize is not None:
+                    authorize()
                 if cancelled():
                     if stage_owned is not None:
                         self._remove_owned(fd, stage, stage_owned)
