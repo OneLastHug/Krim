@@ -636,7 +636,7 @@ with Workspace(sys.argv[1], writable=True) as workspace:
                 await process.wait()
 
 
-async def test_host_write_capability_registration_does_not_add_model_write_tools(runtime, tmp_path):
+async def test_host_write_capability_registers_tools_without_granting_permission(runtime, tmp_path):
     from krim_agent.application.agents import AgentService
 
     service = AgentService(runtime, runtime.settings)
@@ -649,6 +649,25 @@ async def test_host_write_capability_registration_does_not_add_model_write_tools
         assert (await service.workspace_info(view.agent_id)).writable
         assert {
             tool.name for tool in runtime.tools.definitions if tool.name.startswith("workspace_")
-        } == {"workspace_read", "workspace_list", "workspace_search"}
+        } == {
+            "workspace_read",
+            "workspace_list",
+            "workspace_search",
+            "workspace_preview",
+            "workspace_change",
+            "workspace_reconcile",
+            "workspace_finalize",
+        }
+        from krim_agent.workspace_change import WorkspaceChangeAction
+
+        with pytest.raises(ServiceError) as error:
+            await service.workspace_change(
+                view.agent_id,
+                WorkspaceChangeAction(
+                    proposal_id="forbidden", action="apply", expected_revision=0, request_key="deny"
+                ),
+                confirmed=True,
+            )
+        assert error.value.code == "permission_denied"
     finally:
         await service.close()

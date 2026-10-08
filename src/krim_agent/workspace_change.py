@@ -42,6 +42,33 @@ class FileChangeSpec(StrictModel):
         return self
 
 
+class RestoreFileSpec(StrictModel):
+    """仅用于账本内撤销；完整旧内容留在私有快照，不扩大公开工具参数。"""
+
+    path: str = Field(min_length=1, max_length=512)
+    operation: Literal["restore"] = "restore"
+    expected_sha256: str | None = Field(pattern=SHA256)
+    mode: int | None = Field(default=None, ge=0, le=4095)
+    uid: int | None = Field(default=None, ge=0)
+    gid: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def attributes(self) -> RestoreFileSpec:
+        if (self.mode is None) != (self.uid is None) or (self.uid is None) != (self.gid is None):
+            raise ValueError("恢复属性须完整提供或完整省略")
+        return self
+
+
+class WorkspacePreviewRequest(StrictModel):
+    spec: FileChangeSpec
+    request_key: str = Field(min_length=1, max_length=128)
+    ttl_seconds: float = Field(default=3600, gt=0, le=86400)
+
+
+class WorkspaceOperationRequest(StrictModel):
+    operation_id: str = Field(min_length=1, max_length=36)
+
+
 class FileChangePreview(StrictModel):
     path: str
     operation: Literal["write", "replace", "delete"]

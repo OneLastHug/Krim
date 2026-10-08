@@ -13,6 +13,7 @@ from pydantic import JsonValue, ValidationError
 
 from krim_agent.application.context import PersistentContext
 from krim_agent.application.interactions import InteractionService
+from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.budgets import BudgetOwner, BudgetRequestView
 from krim_agent.config import Settings
 from krim_agent.context_engine import (
@@ -34,6 +35,7 @@ from krim_agent.persistence.budgets import UsageBudgetStore
 from krim_agent.persistence.budgets import digest as budget_digest
 from krim_agent.persistence.context_proposals import fingerprint
 from krim_agent.persistence.traces import TraceStore
+from krim_agent.persistence.workspace_edits import WorkspaceEditStore
 from krim_agent.protocol.domain import (
     TERMINAL_STATUSES,
     ChatRequest,
@@ -69,7 +71,7 @@ from krim_agent.tools.core import (
 )
 from krim_agent.tools.discovery import ToolDiscovery
 from krim_agent.usage import TokenUsage
-from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WorkspaceBinding
+from krim_agent.workspace import WORKSPACE_CHANGE_TOOL_NAMES, WORKSPACE_TOOL_NAMES, WorkspaceBinding
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,7 @@ class ChatRuntime:
         agent_owner_id: str | None = None,
         allow_skill_tool: bool = True,
         task_store: TaskBackend | None = None,
+        workspace_changes: WorkspaceChangeService | None = None,
         workspace: WorkspaceBinding | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
@@ -177,6 +180,10 @@ class ChatRuntime:
 
             task_store = AgentTaskStore(repository.database, owner_id=agent_owner_id)
         self.task_store = task_store
+        self._owns_workspace_changes = workspace_changes is None
+        self.workspace_changes = workspace_changes or WorkspaceChangeService(
+            WorkspaceEditStore(repository.database, owner_id=agent_owner_id)
+        )
         self.workspace = workspace
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
@@ -605,6 +612,8 @@ class ChatRuntime:
                 for definition in self.tools.definitions
                 if definition.name != "read_skill" or state.skill_snapshot.skills
                 if definition.name not in WORKSPACE_TOOL_NAMES or self.workspace is not None
+                if definition.name not in WORKSPACE_CHANGE_TOOL_NAMES
+                or (self.workspace is not None and self.workspace.workspace.writable)
             ]
             state.discovery = ToolDiscovery(definitions)
         except ValueError as error:
@@ -1030,6 +1039,7 @@ class ChatRuntime:
                         session_id=self.agent_session_id,
                         task_store=self.task_store,
                         workspace=self.workspace,
+                        workspace_changes=self.workspace_changes,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,
@@ -1180,6 +1190,8 @@ class ChatRuntime:
         for state in list(self._runs.values()):
             if state.task is not None and not state.terminal:
                 await self.stop(state.run.id)
+        if self._owns_workspace_changes:
+            await self.workspace_changes.close()
         await self.tools.close()
         if self._owns_tracer:
             await self.tracer.close()

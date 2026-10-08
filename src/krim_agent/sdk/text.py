@@ -360,6 +360,7 @@ class PythonAI:
                 task_store=AgentTaskStore(database),
             )
             ai = cls(runtime, owned_database=database, owned_provider=owned_provider)
+            await runtime.workspace_changes.store.recover_interrupted()
             if workspace_root is not None:
                 ai.agents().register_workspace(
                     "local",
