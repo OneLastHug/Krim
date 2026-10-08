@@ -701,7 +701,7 @@ async function saveAgentConfig(): Promise<void> {
   try {
     const revision = Number(text("agent-config-revision").value);
     const previous = revision > 0 ? await requestJson<{ enabled: boolean; config: Record<string, unknown> }>(`/v1/agents/profiles/${encodeURIComponent(name)}?revision=${revision}`) : undefined;
-    const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), mode: ( $("agent-config-mode") as HTMLSelectElement).value };
+    const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), workspace_key: text("agent-config-workspace").value.trim() || null, mode: ( $("agent-config-mode") as HTMLSelectElement).value };
     const saved = await requestJson<{ revision: number }>(`/v1/agents/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ expected_revision: revision, enabled: previous?.enabled ?? true, config }) });
     text("agent-config-revision").value = String(saved.revision);
     await loadAgents(); showNotice("Agent 配置已保存");
@@ -709,8 +709,9 @@ async function saveAgentConfig(): Promise<void> {
 }
 async function loadAgentConfig(): Promise<void> {
   try {
-    const saved = await requestJson<{ revision: number; config: { description: string; instructions: string; tool_names: string[]; provider_key: string; mode: string } }>(`/v1/agents/profiles/${encodeURIComponent(text("agent-config-name").value.trim())}`);
+    const saved = await requestJson<{ revision: number; config: { description: string; instructions: string; tool_names: string[]; provider_key: string; workspace_key?: string | null; mode: string } }>(`/v1/agents/profiles/${encodeURIComponent(text("agent-config-name").value.trim())}`);
     text("agent-config-description").value = saved.config.description; text("agent-config-instructions").value = saved.config.instructions; text("agent-config-tools").value = saved.config.tool_names.join(","); text("agent-config-provider").value = saved.config.provider_key; ( $("agent-config-mode") as HTMLSelectElement).value = saved.config.mode; text("agent-config-revision").value = String(saved.revision);
+    text("agent-config-workspace").value = saved.config.workspace_key || "";
     showNotice("Agent 配置已读取");
   } catch (error) { showNotice(errorText(error), true); }
 }

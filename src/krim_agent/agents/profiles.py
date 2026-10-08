@@ -26,6 +26,7 @@ class AgentProfile(StrictModel):
     session_ttl_seconds: float | None = Field(default=None, gt=0, le=86400)
     context_config: ContextRunConfig = Field(default_factory=ContextRunConfig)
     usage_budget: UsageBudgetConfig | None = None
+    workspace_key: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
     @model_validator(mode="after")
     def bounded(self) -> AgentProfile:

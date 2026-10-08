@@ -11,6 +11,8 @@ from krim_agent.application.agents import AgentPromptRequest, AgentService, Agen
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
+from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
+from krim_agent.workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -90,6 +92,28 @@ class AgentSession:
 
     async def task_history(self, kind: TaskKind = "todo") -> list[TaskOperationView]:
         return await self.service.task_history(self.agent_id, kind)
+
+    async def workspace(self) -> WorkspaceView:
+        return await self.service.workspace_info(self.agent_id)
+
+    async def read_file(
+        self, path: str, *, start_line: int = 1, max_lines: int = 200
+    ) -> WorkspaceFile:
+        return await self.service.workspace_read(
+            self.agent_id, ReadFileInput(path=path, start_line=start_line, max_lines=max_lines)
+        )
+
+    async def list_files(self, path: str = ".", *, limit: int = 200) -> WorkspaceListing:
+        return await self.service.workspace_list(
+            self.agent_id, ListFilesInput(path=path, limit=limit)
+        )
+
+    async def search_files(
+        self, query: str, *, path: str = ".", limit: int = 100
+    ) -> WorkspaceSearch:
+        return await self.service.workspace_search(
+            self.agent_id, SearchFilesInput(query=query, path=path, limit=limit)
+        )
 
     async def stream(self, *, run_id: str | None = None) -> StreamTextResult:
         from .text import StreamTextResult

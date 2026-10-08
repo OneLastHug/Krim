@@ -31,7 +31,6 @@ async def main():
         settings=Settings(database_url=f"sqlite+aiosqlite:///{sys.argv[1]}"), provider=provider
     )
     if sys.argv[2] == "crash":
-        ai.agents().manager.store.lease_seconds = 0.2
         session = await ai.agent(persistent=True)
         handle = ai.agents().manager._handles[session.agent_id]
         run = await handle.runtime.start(
@@ -39,6 +38,12 @@ async def main():
         )
         # 未调用 handle.execute/persist；模拟原子 Run 创建后的进程崩溃。
         await asyncio.wait_for(provider.entered.wait(), 5)
+        # 正常租约保护初始化；确认进入崩溃窗口后再缩短剩余租约。
+        # 只续租，不保存handle的run/turn指针，保留原故障窗口与恢复断言。
+        assert handle._durable_revision is not None
+        store = ai.agents().manager.store
+        store.lease_seconds = 0.2
+        await store.renew(handle.agent_id, ai.agents().manager.owner_id, handle._durable_revision)
         print(json.dumps({"agent_id": session.agent_id, "run_id": run.id}), flush=True)
         os._exit(0)
     async with ai:

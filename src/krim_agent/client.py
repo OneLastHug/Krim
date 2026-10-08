@@ -70,8 +70,10 @@ from .protocol.models import StreamFrame
 from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from .streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 from .task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
+from .tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from .usage import RunUsageView
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
+from .workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
 
 
 class ClientError(Exception):
@@ -411,6 +413,41 @@ class KrimClient:
         response = self._http.get("/v1/agents/resources")
         self._check(response)
         return TypeAdapter(list[AgentResourceView]).validate_json(response.content)
+
+    def agent_workspace(self, agent_id: str) -> WorkspaceView:
+        response = self._http.get(f"/v1/agents/{agent_id}/workspace")
+        self._check(response)
+        return WorkspaceView.model_validate_json(response.content)
+
+    def agent_read_file(
+        self, agent_id: str, path: str, *, start_line: int = 1, max_lines: int = 200
+    ) -> WorkspaceFile:
+        request = ReadFileInput(path=path, start_line=start_line, max_lines=max_lines)
+        response = self._http.get(
+            f"/v1/agents/{agent_id}/workspace/read", params=request.model_dump()
+        )
+        self._check(response)
+        return WorkspaceFile.model_validate_json(response.content)
+
+    def agent_list_files(
+        self, agent_id: str, path: str = ".", *, limit: int = 200
+    ) -> WorkspaceListing:
+        request = ListFilesInput(path=path, limit=limit)
+        response = self._http.get(
+            f"/v1/agents/{agent_id}/workspace/list", params=request.model_dump()
+        )
+        self._check(response)
+        return WorkspaceListing.model_validate_json(response.content)
+
+    def agent_search_files(
+        self, agent_id: str, query: str, *, path: str = ".", limit: int = 100
+    ) -> WorkspaceSearch:
+        request = SearchFilesInput(query=query, path=path, limit=limit)
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/workspace/search", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return WorkspaceSearch.model_validate_json(response.content)
 
     def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
         response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")

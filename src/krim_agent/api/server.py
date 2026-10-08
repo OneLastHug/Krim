@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
@@ -127,6 +128,7 @@ from krim_agent.streams import ActiveRunView, MultiplexRequest
 from krim_agent.task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolError, ToolInfo
+from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.ui_locale import LocaleResources, locale_resources
 from krim_agent.usage import RunUsageView
 from krim_agent.workflow import (
@@ -138,6 +140,7 @@ from krim_agent.workflow import (
     WorkflowRunView,
     WorkflowStartRequest,
 )
+from krim_agent.workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -178,6 +181,8 @@ def create_app(
     runtime: ChatRuntime | None = None,
     eval_scorers: Mapping[str, EvalScorer] | None = None,
     agent_providers: Mapping[str, ModelProvider] | None = None,
+    workspace_root: str | Path | None = None,
+    workspace_version: str = "local-v1",
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -206,6 +211,10 @@ def create_app(
         max_active_runs=config.max_active_runs,
     )
     agent_service = AgentService(service, config, providers=agent_providers)
+    if workspace_root is not None:
+        agent_service.register_workspace(
+            "local", workspace_root, version=workspace_version, default=True
+        )
     evaluation_service = EvaluationService(
         database, scope="api", max_concurrency=config.max_active_runs
     )
@@ -715,6 +724,33 @@ def create_app(
     @app.get("/v1/agents/{agent_id}/tasks/{kind}")
     async def read_agent_tasks(agent_id: str, kind: TaskKind) -> TaskSnapshot:
         return await agent_service.task_snapshot(agent_id, kind)
+
+    @app.get("/v1/agents/{agent_id}/workspace")
+    async def agent_workspace(agent_id: str) -> WorkspaceView:
+        return await agent_service.workspace_info(agent_id)
+
+    @app.get("/v1/agents/{agent_id}/workspace/read")
+    async def agent_workspace_read(
+        agent_id: str,
+        path: str = Query(min_length=1, max_length=512),
+        start_line: int = Query(default=1, ge=1),
+        max_lines: int = Query(default=200, ge=1, le=1000),
+    ) -> WorkspaceFile:
+        return await agent_service.workspace_read(
+            agent_id, ReadFileInput(path=path, start_line=start_line, max_lines=max_lines)
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/list")
+    async def agent_workspace_list(
+        agent_id: str,
+        path: str = Query(default=".", max_length=512),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> WorkspaceListing:
+        return await agent_service.workspace_list(agent_id, ListFilesInput(path=path, limit=limit))
+
+    @app.post("/v1/agents/{agent_id}/workspace/search")
+    async def agent_workspace_search(agent_id: str, payload: SearchFilesInput) -> WorkspaceSearch:
+        return await agent_service.workspace_search(agent_id, payload)
 
     @app.post("/v1/agents/{agent_id}/tasks/{kind}")
     async def write_agent_tasks(

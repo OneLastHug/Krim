@@ -16,6 +16,7 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import FakeProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools.builtins import builtin_registry
+from krim_agent.workspace import WORKSPACE_TOOL_NAMES
 
 with TemporaryDirectory(prefix="krim-browser-") as directory:
     settings = Settings(
@@ -35,6 +36,16 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         settings,
     )
     app = create_app(runtime=runtime)
+    workspace_root = Path(directory) / "workspace"
+    (workspace_root / "src").mkdir(parents=True)
+    (workspace_root / "src" / "main.py").write_text(
+        "# 浏览器工作区\nneedle = 42\n", encoding="utf-8"
+    )
+    (workspace_root / ".env").write_text("hidden", encoding="utf-8")
+    (workspace_root / "html.txt").write_text(
+        '<img src=x onerror="window.workspaceExecuted=1">', encoding="utf-8"
+    )
+    app.state.agents.register_workspace("demo", workspace_root, version="browser-v1")
 
     class TestContextConfig(StrictModel):
         mode: Literal["automatic", "confirmation"] = "automatic"
@@ -63,7 +74,13 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
     inventory_definition = AgentDefinition(
         name="restoreworker",
         provider=runtime.provider,
-        tools=runtime.tools,
+        tools=runtime.tools.select(
+            [
+                tool.name
+                for tool in runtime.tools.definitions
+                if tool.name not in WORKSPACE_TOOL_NAMES
+            ]
+        ),
         persistent=True,
         policy=runtime.tool_policy,
     )
