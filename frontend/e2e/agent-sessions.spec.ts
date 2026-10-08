@@ -32,9 +32,9 @@ test("会话关闭重开保留草稿和历史轮次，专属话题只读", async
     await card.getByRole("button", { name: "继续任务" }).click();
     await expect(card.locator(".agent-result")).toContainText("session-second");
     await card.getByText("轮次历史", { exact: true }).click();
-    await expect(card.locator("select option")).toHaveCount(2);
+    await expect(card.getByLabel("default 历史轮次").locator("option")).toHaveCount(2);
     const turns = await (await page.request.get(`/v1/agents/${agent.agent_id}/turns`, { headers })).json();
-    await card.locator("select").selectOption(turns[0].run_id);
+    await card.getByLabel("default 历史轮次").selectOption(turns[0].run_id);
     await expect(card.locator(".agent-history")).toContainText('"sum": 5.0');
     await expect(card.locator(".agent-history")).toHaveAttribute("data-run-id", turns[0].run_id);
     await card.getByRole("button", { name: "查看会话历史" }).click();

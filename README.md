@@ -1,96 +1,71 @@
 # Krim Agent
 
-Krim Agent 是一个以 Python 为核心的本地 Agent 运行时。项目内部名称已统一为 `Krim Agent`；基础 TypeScript 浏览器界面与同源 iframe Host 外壳由 Python 托管，完整 Workflow/Host 信道和生产权限能力仍在开发。
+Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-## 当前状态
-
-- M1 已在用户授权范围内实现：协议桥、工具执行链、离线 fake provider、SQLite 持久化、HTTP/OpenAPI/SSE、Python 客户端、CLI 和宿主门面。
-- M1 验收证据见 `docs/testing/reports/2026-10-02-m1-test-report.md`；实际结果以报告中的最后一轮记录为准。
-- AUTH-004 已批准继续开发 M2/M3，并要求每个已验证功能单独本地提交；消息树、跨进程续传、SubAgent、Workflow、MCP 和完整前端的实际完成状态见需求追踪。
-- M2 消息模块已接通消息树、活动分支、编辑重问、重新生成和 M1 数据迁移；[分支 API 与命令](docs/api/message-tree.md)说明实际范围。可靠流恢复、Agent、上下文、Workflow、MCP 和完整 UI 持续开发。
-- M2 已实现 [持久流事件与续传](docs/api/durable-streams.md)：SQLite 保存 SSE 帧，重启可按原序号继续读取，CLI 提供 `resume`；不重复执行旧工具。
-- M2 已接通 [持久审批与用户问答](docs/api/user-interactions.md)：SQLite 0009 保存单次 tool call/参数请求，HTTP、Python client、CLI、AppHandle、SDK 和浏览器可批准、拒绝或提交真实答案；子 Agent 权限交集、停止/超时/重启取消和旧事件不重放已验证，完整权限作用域、租户和多 worker 仍未完成。
-- 已实现 [Python 生成 SDK](docs/sdk/python-generation.md)：参考 Vercel AI SDK 的文本/完整流、步骤与结果语义，复用现有运行时与工具链，支持最终文本、严格结构化读取、Provider usage 部件/聚合和显式取消；缺失 usage 保持未知。
-- 已接通 [Python Tool SDK](docs/sdk/python-tools.md)：函数/类/Pydantic/JSON output_schema、最终消费/失败审计、MCP 输出声明、should_defer/always_load 和每次 Run 隔离的按需发现；raw call_tool 保留原始值，Schema 从搜索成功后的下一模型步骤暴露，不扩大权限。
-- 已实现 [Python SubAgent 生命周期与模型工具委派](docs/sdk/python-agents.md)：可信 Agent 目录、`agent_<name>` 工具、父调用/权限交集、子工具审计、取消/预算/资源回收和交互转送；默认 persistent 句柄已由 0016 验证跨两个 Python 进程恢复，动态模型/目录持久化和累计成本预算未完成。
-- 已接通 Agent [HTTP/client/CLI 管理面](docs/sdk/python-agents.md)：目录、execute/resume/stop/destroy、SSE 游标、基础浏览器卡片与关闭回收；persistent:true 在可信定义一致时恢复同一句柄并创建新的 Run，普通句柄仍属于当前进程，生产多 worker/目录动态更新未完成。
-- 已实现基础 [浏览器 AgentApp](docs/decisions/0023-browser-agent-app.md)：Python 同源静态托管 TypeScript DOM UI，支持话题/消息/SSE、编辑/重生成/分支、compact 预览确认、Agent 目录执行和审批/问答卡片；完整 Workflow 产品、Host SDK/iframe、附件和剩余 M3 UI 未完成。
-- 已接通 [Python Host SDK 与同源 iframe 回程](docs/api/host-sdk.md)：RemoteHostHandle、当前进程 HostSessions、版本化 postMessage、父容器、状态/Prompt/theme/resize/notice/sidebar、真实回执与销毁；完整宿主信道、跨站身份、持久 session 和生产租约未完成。
-- 已接通 [Mentions 与 Context Tags](docs/api/prompt-context.md)：话题目录、Python ID、Unicode 引用位置、发送/编辑快照、模型/压缩预算及 client/SDK/Host/浏览器 chip；受限二进制附件已由 [Attachments](docs/api/attachments.md) 接通，富文本和文件沙箱仍未完成。
-- 已接通基础 [Workflow 图/运行面板](docs/decisions/0024-browser-workflow-editor.md)：SVG 节点/边、配置/端口/开发标记、运行与持久 graph 读取；完整复杂图布局、端口拖拽、生产协同和剩余 M3 UI 未完成。
-- 已接通 [持久上下文与手动压缩](docs/api/context-engine.md)：0008 摘要来源/分支隔离、重开重建、不可信历史标记、预算复核与 Pre/PostCompact；HTTP/client/CLI、PythonAI 和 AppHandle 支持预览/确认，原始消息保留。离线 cl100k/o200k BPE、输出预留、当步工具 Schema、显式模型窗口和持久 Run 配置快照已接通。持久提案与运行中确认另见 [提案合约](docs/api/context-proposals.md)：0018、原摘要确认、TTL/revision、运行等待、SDK/HTTP/client/CLI/Host 和浏览器刷新已验证；真实 usage/成本、多模态容量和生产租户仍未完成。
-- 默认 ToolRegistry 已接入 plan/todo/question/skills 内建包；plan/todo/skills 保持宿主内存，question 在运行时 handler 注入后等待持久真实答案，均受 write 权限/审计链约束。
-- 已实现 [Python OpenAI-compatible Provider](docs/api/openai-compatible-provider.md)：显式配置后 SDK、HTTP 和 CLI 可调用兼容文本/函数工具端点；本地 TCP、取消/断流、可选 usage 持久投影与错误持久化已验证，真实商业供应商矩阵/账单尚未验证。
-- 已接通 [持久累计预算](docs/api/usage-budgets.md)：0017、Runtime/Agent/Workflow 父子额度、调用前预留、Provider 报告结算、未知结果保留与可信回执核实；token 和显式整数费率费用可限制后续派发，跨进程/幂等/并发已有本机证据。真实商业费率/账单与生产租户仍未验证。
-- 已接通 [可选安全观测](docs/api/observability.md)：0019、默认关闭/采样、Run/model/tool/Agent/Workflow 父子 trace/span、正文/秘密白名单净化、有限队列与 SQLite/JSONL/标准 OTLP HTTP/JSON 本机导出、REST/client/CLI 和 SDK TraceContext。生产 Collector/多 worker、Langfuse 与完整可视化仍未完成。
-- 已实现 [OAuth 持久密文与刷新租约](docs/api/mcp-oauth.md)：配置/主体隔离、SQLite 0005、单飞刷新、CAS 删除保护和密钥轮换；真实本机双进程刷新及显式 MCP HTTP Auth 已验证，浏览器/跨进程授权状态未完成。
-- 已实现 OAuth metadata/DCR 组件：issuer/S256/endpoint 安全校验、path-aware discovery、动态注册、PKCE exchange 与显式 401 Auth；本机 TCP 已验证，浏览器回调仍未完成。
-- 已实现显式 MCP Streamable HTTP OAuth Auth：401 触发受控 PKCE 回调、持久令牌复用和一次请求重放；真实本机 MCP tools/list/call 已验证，宿主仍需提供回调，不自动打开浏览器。
-- 已实现 [Workflow SQLite 检查点](docs/api/workflow-engine.md)：节点事件/输出一致保存、稳定嵌套进度、暂停前后与跨进程恢复、租约/版本保护及副作用裁决；已接通管理面和基础浏览器，完整复杂图/生产协同未完成。
-- 已接通 [Workflow HTTP/client/CLI](docs/api/workflow-http-cli.md)：0007 幂等创建、持久结果、SSE/游标、暂停/继续/停止/恢复/重跑，默认工具/模型复用原权限链；完整浏览器和生产多 worker 未完成。
-
-已接通 [Change List 持久清单与真实宿主执行](docs/api/change-list.md)：0013、revision/幂等、单条/批量 undo/keep、Python callback、异常/超时/重启后的 uncertain、可信 resolve 和点击通知；REST/client/Local/Remote Host/浏览器均有实际文件资源验证。宿主 Checkpoint 见后续合约；生产租约和 M2/M3 整体验收仍未完成。
-
-已接通 [宿主 Checkpoint](docs/api/checkpoint.md)：真实 Python callback 创建外部快照、canRollback 检查与文件回滚，0014、revision/幂等、uncertain/resolve、REST/client/Local/Remote Host/同源 UI；完整本机门禁通过，生产资源沙箱与阶段人工验收仍未完成。
-
-当前开发优先级已按 AUTH-005 调整为 **eval 与相关 Python SDK**，其他未完成功能暂缓。已接通本地数据集、生成/Agent、评分、报告与版本对比，入口见 [Python Eval SDK](docs/sdk/python-evaluation.md)；可直接运行 `python -m krim_agent eval run`，无需先启动 HTTP 服务。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期，文件工作区、命令隔离、Skills文件包、完整Host/多模态及生产运行能力尚在后续阶段。
 
 ## 快速开始
 
-```powershell
-# uv 是 Python 项目管理工具；sync 表示按 uv.lock 创建/同步项目虚拟环境。
+需要Python 3.12–3.14与uv。以下命令在仓库根目录执行：
+
+```bash
+# sync（同步）按锁文件准备项目环境；dev是development（开发依赖）。
 uv sync --locked --group dev
 
-# krim 是 CLI（Command-Line Interface，命令行界面）；serve 表示启动本地 HTTP/SSE 服务。
+# serve（提供服务）启动Python HTTP/SSE；run（运行）不再次同步环境。
 uv run --no-sync krim serve
 ```
 
-默认只绑定 `127.0.0.1:8765`。无 `KRIM_AGENT_API_KEY` 时拒绝非本机 Host；配置 API Key 后，除健康检查外需要 `Authorization: Bearer <key>`。
+浏览器打开 <http://127.0.0.1:8765/ui/>。默认使用离线FakeProvider，可以输入`/add 2 3`或`/echo hello`验证工具执行；普通文本为确定性回显，不代表模型推理能力。现有服务必须单工作进程运行。
 
-启动后访问 `http://127.0.0.1:8765/ui/` 可使用基础浏览器 AgentApp。配置访问密钥时，静态页面可加载，但业务请求仍需在页面输入 Key；它只保存在当前页面内存。前端构建和浏览器验证说明见 [开发指南](docs/development/browser-ui.md)。
+Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。当前机器已有环境时可直接执行：
 
-也可以直接使用内置解释器和项目环境：
-
-```powershell
-.venv\Scripts\python.exe -m krim_agent version
-.venv\Scripts\python.exe -m pytest -q
+```bash
+.venv/bin/python -m krim_agent serve
 ```
 
-## M1 入口
+访问密钥通过`KRIM_AGENT_API_KEY`设置，模型端点密钥通过`KRIM_AGENT_PROVIDER_API_KEY`设置，两者独立。`.env.example`是模板，不会自动加载；明确加载时用`uv run --env-file .env --no-sync krim serve`。详细说明见 [安装与本地试运行](docs/user-guide/local-agent.md)。
 
-- `src/krim_agent/protocol`：v2 内部信封和进程内 `emit`、`notify`、`stream`、`on`。
-- `src/krim_agent/tools`：Pydantic 输入模型、JSON Schema、权限、Hook、超时、取消、嵌套限制和审计。
-- `src/krim_agent/runtime`：模型→工具→模型循环、后台运行、幂等、stop、SSE 事件。
-- `src/krim_agent/persistence`：SQLAlchemy 2 + SQLite 的话题、消息、运行和工具审计。
-- `src/krim_agent/api`：FastAPI、OpenAPI、HTTP/SSE 和本地安全边界。
-- `src/krim_agent/client.py`、`src/krim_agent/cli.py`：Python 客户端和 `krim` 命令。
-- `src/krim_agent/app_sdk`、`src/krim_agent/app.py`：最小宿主语义门面和进程内桥。
+## 可运行的演练
 
-## 技术边界
+```bash
+# 使用临时数据库与真实CLI/TCP，验证两轮执行、任务、服务重启、历史和eval。
+.venv/bin/python examples/local_trial.py
 
-- 后端、Agent 运行时、协议、数据库、API 和 CLI 使用 Python。
-- 前端只使用 TypeScript；`frontend` 通过固定依赖生成静态 HTML/JS/CSS，由 Python 服务托管，浏览器端不运行 Node 业务服务。
-- `FakeProvider` 是离线确定性演示，不是真实模型、不调用商业服务，也不执行网络、Shell 或文件工具。
-- 默认 Provider 为 fake；仅当宿主配置 `KRIM_AGENT_PROVIDER=openai-compatible` 和模型端点时按配置发请求。模型端点密钥与 Krim API 访问密钥独立。
-- 当前 SQLite 保存消息、运行终态、审计和 SSE 帧；持久事件支持重启与读进程恢复，活跃生产仍要求单进程，不承诺多 worker 并发生产。
-- 物理工作区仍可能位于旧目录名下；项目文本、Python 包、CLI 和环境变量统一使用 `Krim Agent` / `krim_agent` / `krim` / `KRIM_AGENT_`。
+# SDK会话示例：关闭/重开、独立Run与原事件读取。
+.venv/bin/python examples/python_agent_sessions.py
 
-## 文档入口
+# 显式离线兼容端点模拟：真实Provider适配/工具循环，不发商业请求。
+.venv/bin/python examples/python_openai_provider.py
+```
 
-- [文档总目录](docs/README.md)
-- [实施计划](docs/plan/2026-10-02-krim-agent-implementation-plan.md)
-- [授权与里程碑](docs/plan/milestones.md)
+`-m`是module（模块入口），SDK是Software Development Kit（软件开发工具包），CLI是Command-Line Interface（命令行界面），SSE是Server-Sent Events（服务端事件流）。
+
+## 已有能力
+
+| 模块 | 当前可用行为 |
+|---|---|
+| Agent | Profile历史版本/CAS、可信模型与工具选择、agent/ask/plan/auto边界、父子权限/预算、persistent恢复、后台start/wait/stop与资源清理 |
+| 会话与任务 | 独立session/topic/turn、绝对TTL、关闭/重开/销毁、0023计划/待办、CAS/幂等/历史和会话隔离 |
+| 对话与流 | 消息树/编辑/重生成/分支、持久事件/独立游标、断开重连、后台多话题读取 |
+| SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
+| 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
+| 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
+| Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
+| 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
+
+商业模型质量、真实账单、文件/命令沙箱、生产多worker/租户、PostgreSQL/Redis与部署演练尚未完成。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+
+## 设计、进度与验证
+
+- [Agent架构与审阅顺序](docs/architecture/agent-design.md)
+- [任务状态架构与理由](docs/architecture/task-state-design.md)
+- [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
+- [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)
-- [M1 本地运行指南](docs/user-guide/m1-local.md)
-- [M1 HTTP API](docs/api/m1-http.md)
-- [测试报告](docs/testing/reports/2026-10-02-m1-test-report.md)
-- [实施工作记录](docs/progress/2026-10-02-m1-implementation.md)
+- [当前进度](docs/progress/README.md)
+- [Agent已验证基线：Python972/浏览器58](docs/testing/reports/2026-10-07-agent-completion.md)
+- [P01任务模块测试报告](docs/testing/reports/2026-10-08-agent-tasks.md)
+- [文档中心](docs/README.md)
 
-## Git
-
-仓库已有 M1 提交。AUTH-004 要求每个已完成并验证的功能单独 `commit`（本地提交），说明首行以精炼中文写明“模块：功能”供审计；AUTH-006 已授权将已验证提交普通 `push`（推送）到现有 GitHub 仓库 `origin/main`，未完成工作继续留在工作区。查看状态使用：
-
-```powershell
-# git status 的 status 是“状态”，--short 是简短格式，--branch 显示分支信息。
-git -c "safe.directory=$($PWD.Path -replace '\\', '/')" status --short --branch
-```
+每个完成并验证的功能独立使用中文“模块：功能”提交并普通推送到既有GitHub仓库；架构、来源、测试和限制随功能同步。未完成阶段不记为项目目标完成，人工验收和生产上线事实单独记录。
