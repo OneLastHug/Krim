@@ -20,6 +20,7 @@ from .eval_models import EvalEventRow, EvalItemRow, EvalJobRow
 from .tasks import AgentTaskStore
 from .traces import TraceStore
 from .workflow import WorkflowCheckpointError, WorkflowCheckpointStore
+from .workspace_edits import WorkspaceEditStore
 
 __all__ = [
     "Database",
@@ -40,6 +41,7 @@ __all__ = [
     "WorkflowCheckpointStore",
     "TraceStore",
     "AgentTaskStore",
+    "WorkspaceEditStore",
     "TaskItemView",
     "TaskMutation",
     "TaskSnapshot",

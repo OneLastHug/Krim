@@ -113,7 +113,7 @@ async def main():
                     head = (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
                     ).scalar()
-                    assert head == "0023_agent_tasks"
+                    assert head == "0024_workspace_edits"
             print(
                 json.dumps(
                     {
