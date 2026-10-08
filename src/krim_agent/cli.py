@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
     )
+    serve.add_argument(
+        "--workspace-write",
+        action="store_true",
+        help="workspace write（工作区写入）：启用底层条件修改能力",
+    )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
     from .evaluation.cli import add_parser as add_eval_parser
 
@@ -265,7 +270,10 @@ def main() -> None:
             parser.error("无 API Key 时不能监听非本机地址")
         try:
             app = create_app(
-                settings, workspace_root=args.workspace, workspace_version=args.workspace_version
+                settings,
+                workspace_root=args.workspace,
+                workspace_version=args.workspace_version,
+                workspace_writable=args.workspace_write,
             )
         except (ValueError, OSError, ServiceError) as error:
             parser.error(f"工作区配置无效：{error}")
