@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from . import __version__
 from .budgets import BudgetResolveRequest
@@ -19,6 +20,7 @@ from .protocol.domain import TERMINAL_STATUSES, ServiceError
 from .streams import MultiplexRequest
 from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
+from .workspace_change import WorkspaceAttemptView, WorkspaceChangeAction, WorkspacePreviewRequest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,29 +29,60 @@ def build_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve", help="serve（提供服务）：启动 Python HTTP/SSE")
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
-    serve.add_argument("--workspace", help="workspace（工作区）：宿主明确授权的只读根目录")
+    serve.add_argument("--workspace", help="workspace（工作区）：宿主明确授权的根目录，默认只读")
     serve.add_argument(
         "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
     )
     serve.add_argument(
         "--workspace-write",
         action="store_true",
-        help="workspace write（工作区写入）：启用底层条件修改能力",
+        help="workspace write（工作区写入）：启用受权限控制的文件修改工具",
     )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
     from .evaluation.cli import add_parser as add_eval_parser
 
     add_eval_parser(subparsers)
     workspace = subparsers.add_parser(
-        "workspace", help="workspace（工作区）：查看Agent授权、目录、文件与搜索"
+        "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
     )
-    workspace.add_argument("action", choices=["info", "list", "read", "search"])
+    workspace.add_argument(
+        "action",
+        choices=[
+            "info",
+            "list",
+            "read",
+            "search",
+            "changes",
+            "proposal",
+            "history",
+            "operation",
+            "preview",
+            "apply",
+            "undo",
+            "keep",
+            "reconcile",
+            "finalize",
+        ],
+    )
     workspace.add_argument("agent_id", help="Agent实例标识")
-    workspace.add_argument("value", nargs="?", help="read（读取）的相对路径或search（搜索）的文本")
+    workspace.add_argument(
+        "value", nargs="?", help="文件相对路径、搜索文本、proposal/operation标识"
+    )
     workspace.add_argument("--path", default=".", help="path（路径）：列出/搜索的相对目录")
     workspace.add_argument("--limit", type=int, help="limit（上限）：目录项或搜索匹配数")
     workspace.add_argument("--start-line", type=int, default=1, help="start line（起始行）")
     workspace.add_argument("--max-lines", type=int, default=200, help="max lines（最大行数）")
+    workspace.add_argument("--request", help="request（请求）：preview的本地JSON文件，包含spec/键")
+    workspace.add_argument(
+        "--revision", type=int, help="revision（修订号）：apply/undo/keep预期版本"
+    )
+    workspace.add_argument("--request-key", help="request key（请求键）：apply/undo/keep固定幂等键")
+    workspace.add_argument(
+        "--offset", type=int, default=0, help="offset（偏移）：changes列表起始项"
+    )
+    workspace.add_argument(
+        "--confirm", action="store_true", help="confirm（确认）：本次原参数的Host确认，不覆盖deny"
+    )
     workspace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
     tasks.add_argument("action", choices=["get", "history", "update"])
@@ -218,6 +251,90 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _workspace_command(
+    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    result: BaseModel | Sequence[BaseModel]
+    if args.action == "info":
+        result = client.agent_workspace(args.agent_id)
+    elif args.action == "list":
+        result = client.agent_list_files(
+            args.agent_id, args.path, limit=args.limit if args.limit is not None else 200
+        )
+    elif args.action == "read":
+        if not args.value:
+            parser.error("workspace read需要相对文件路径")
+        result = client.agent_read_file(
+            args.agent_id, args.value, start_line=args.start_line, max_lines=args.max_lines
+        )
+    elif args.action == "search":
+        if not args.value:
+            parser.error("workspace search需要搜索文本")
+        result = client.agent_search_files(
+            args.agent_id,
+            args.value,
+            path=args.path,
+            limit=args.limit if args.limit is not None else 100,
+        )
+    elif args.action == "changes":
+        result = client.agent_workspace_changes(
+            args.agent_id, offset=args.offset, limit=args.limit if args.limit is not None else 50
+        )
+    elif args.action == "preview":
+        if not args.request:
+            parser.error("workspace preview需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("文件修改请求不能超过64KiB")
+            preview = WorkspacePreviewRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("文件修改请求无效；请检查本地JSON文件的spec、request_key和ttl_seconds")
+        result = client.agent_workspace_preview(args.agent_id, preview, confirmed=args.confirm)
+    else:
+        if not args.value:
+            parser.error("workspace动作需要proposal或operation标识")
+        if args.action == "proposal":
+            result = client.agent_workspace_proposal(args.agent_id, args.value)
+        elif args.action == "history":
+            result = client.agent_workspace_history(args.agent_id, args.value)
+        elif args.action == "operation":
+            result = client.agent_workspace_operation(args.agent_id, args.value)
+        elif args.action == "reconcile":
+            result = client.agent_workspace_reconcile(
+                args.agent_id, args.value, confirmed=args.confirm
+            )
+        elif args.action == "finalize":
+            result = client.agent_workspace_finalize(
+                args.agent_id, args.value, confirmed=args.confirm
+            )
+        else:
+            if args.revision is None or not args.request_key:
+                parser.error("workspace apply/undo/keep需要--revision和--request-key")
+            request = WorkspaceChangeAction(
+                proposal_id=args.value,
+                action=args.action,
+                expected_revision=args.revision,
+                request_key=args.request_key,
+            )
+            result = client.agent_workspace_change(args.agent_id, request, confirmed=args.confirm)
+    if isinstance(result, BaseModel):
+        print(result.model_dump_json(indent=2))
+    else:
+        print(
+            json.dumps(
+                [item.model_dump(mode="json") for item in result], ensure_ascii=False, indent=2
+            )
+        )
+    if (
+        args.action in {"apply", "undo", "keep", "reconcile"}
+        and isinstance(result, WorkspaceAttemptView)
+        and result.status != "done"
+    ):
+        parser.exit(1)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -282,38 +399,7 @@ def main() -> None:
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
             if args.command == "workspace":
-                if args.action == "info":
-                    print(client.agent_workspace(args.agent_id).model_dump_json(indent=2))
-                elif args.action == "list":
-                    print(
-                        client.agent_list_files(
-                            args.agent_id,
-                            args.path,
-                            limit=args.limit if args.limit is not None else 200,
-                        ).model_dump_json(indent=2)
-                    )
-                elif args.action == "read":
-                    if not args.value:
-                        parser.error("workspace read需要相对文件路径")
-                    print(
-                        client.agent_read_file(
-                            args.agent_id,
-                            args.value,
-                            start_line=args.start_line,
-                            max_lines=args.max_lines,
-                        ).model_dump_json(indent=2)
-                    )
-                else:
-                    if not args.value:
-                        parser.error("workspace search需要搜索文本")
-                    print(
-                        client.agent_search_files(
-                            args.agent_id,
-                            args.value,
-                            path=args.path,
-                            limit=args.limit if args.limit is not None else 100,
-                        ).model_dump_json(indent=2)
-                    )
+                _workspace_command(client, args, parser)
                 return
             if args.command == "tasks":
                 if args.action == "get":
