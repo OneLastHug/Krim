@@ -9,7 +9,7 @@ import os
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from typing import Literal
 
 from pydantic import Field, JsonValue
@@ -66,10 +66,13 @@ class WorkspaceView(StrictModel):
     available: bool
     tool_names: list[str]
     max_file_bytes: int
+    writable: bool = False
 
 
 class Workspace:
-    def __init__(self, root: str | Path, *, max_file_bytes: int = 1_048_576) -> None:
+    def __init__(
+        self, root: str | Path, *, max_file_bytes: int = 1_048_576, writable: bool = False
+    ) -> None:
         if (
             os.name != "posix"
             or not all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"))
@@ -85,8 +88,13 @@ class Workspace:
         except (OSError, RuntimeError):
             raise ServiceError("workspace_root", "宿主工作区根目录无法打开", 422) from None
         self._max_file_bytes = max_file_bytes
+        if type(writable) is not bool:
+            os.close(self._fd)
+            raise ValueError("工作区写能力须明确为bool")
+        self._writable = writable
         self._closed = False
         self._lock = Lock()
+        self._write_lock = RLock()
         info = os.fstat(self._fd)
         self.fingerprint = hashlib.sha256(
             json.dumps(
@@ -96,6 +104,7 @@ class Workspace:
                     "inode": info.st_ino,
                     "max_file_bytes": max_file_bytes,
                     "policy": WORKSPACE_POLICY_VERSION,
+                    **({"write_policy": "renameat2-v1"} if writable else {}),
                 },
                 sort_keys=True,
             ).encode()
@@ -108,6 +117,10 @@ class Workspace:
     @property
     def max_file_bytes(self) -> int:
         return self._max_file_bytes
+
+    @property
+    def writable(self) -> bool:
+        return self._writable
 
     @property
     def closed(self) -> bool:
@@ -168,6 +181,7 @@ class Workspace:
                     "*.p12",
                     "*.pfx",
                     "*.keystore",
+                    "._krim-tx-*",
                 )
             ):
                 raise ServiceError("workspace_sensitive", "工作区敏感或内部路径不可读取", 403)
@@ -396,4 +410,5 @@ class WorkspaceBinding:
             available=self.available,
             tool_names=tool_names,
             max_file_bytes=self.workspace.max_file_bytes,
+            writable=self.workspace.writable,
         )

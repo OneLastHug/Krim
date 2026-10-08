@@ -183,6 +183,7 @@ def create_app(
     agent_providers: Mapping[str, ModelProvider] | None = None,
     workspace_root: str | Path | None = None,
     workspace_version: str = "local-v1",
+    workspace_writable: bool = False,
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -213,7 +214,11 @@ def create_app(
     agent_service = AgentService(service, config, providers=agent_providers)
     if workspace_root is not None:
         agent_service.register_workspace(
-            "local", workspace_root, version=workspace_version, default=True
+            "local",
+            workspace_root,
+            version=workspace_version,
+            default=True,
+            writable=workspace_writable,
         )
     evaluation_service = EvaluationService(
         database, scope="api", max_concurrency=config.max_active_runs

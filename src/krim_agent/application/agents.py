@@ -406,8 +406,11 @@ class AgentService:
         version: str,
         owned: bool = False,
         default: bool = False,
+        writable: bool = False,
     ) -> WorkspaceBinding:
-        binding = self.resources.register_workspace(key, root, version=version, owned=owned)
+        binding = self.resources.register_workspace(
+            key, root, version=version, owned=owned, writable=writable
+        )
         if default:
             self.runtime.workspace = binding
         return binding

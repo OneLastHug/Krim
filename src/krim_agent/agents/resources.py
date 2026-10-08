@@ -121,6 +121,7 @@ class AgentResourceRegistry:
         *,
         version: str,
         owned: bool = False,
+        writable: bool = False,
     ) -> WorkspaceBinding:
         """可信宿主登记工作区；HTTP/模型不能调用此入口或提供root。"""
         if self._closed:
@@ -137,9 +138,11 @@ class AgentResourceRegistry:
             )
             if existing is not None and existing is not tool:
                 raise ValueError("工作区工具名称已被其他宿主工具占用")
-        workspace = root if isinstance(root, Workspace) else Workspace(root)
+        workspace = root if isinstance(root, Workspace) else Workspace(root, writable=writable)
         if workspace.closed:
             raise ValueError("不能登记已关闭的工作区")
+        if writable and not workspace.writable:
+            raise ValueError("已有Workspace未授权写能力")
         binding = WorkspaceBinding(
             key=selected_key,
             workspace=workspace,

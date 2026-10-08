@@ -327,6 +327,7 @@ class PythonAI:
         tools: ToolRegistry | None = None,
         workspace_root: str | Path | None = None,
         workspace_version: str = "local-v1",
+        workspace_writable: bool = False,
     ) -> PythonAI:
         config = settings or Settings(database_url="sqlite+aiosqlite:///:memory:")
         database = Database(config.database_url)
@@ -361,7 +362,11 @@ class PythonAI:
             ai = cls(runtime, owned_database=database, owned_provider=owned_provider)
             if workspace_root is not None:
                 ai.agents().register_workspace(
-                    "local", workspace_root, version=workspace_version, default=True
+                    "local",
+                    workspace_root,
+                    version=workspace_version,
+                    default=True,
+                    writable=workspace_writable,
                 )
             return ai
         except BaseException:
