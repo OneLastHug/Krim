@@ -17,6 +17,7 @@ from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
 from krim_agent.tools.core import Policy
 from krim_agent.usage import UsageTotals
+from krim_agent.workspace import WorkspaceBinding
 
 from .sessions import SessionMode
 
@@ -66,8 +67,11 @@ class AgentDefinition:
     mode: SessionMode = "agent"
     session_ttl_seconds: float | None = None
     resource_manifest: dict[str, JsonValue] | None = None
+    workspace: WorkspaceBinding | None = None
 
     def __post_init__(self) -> None:
+        if self.workspace is not None and not isinstance(self.workspace, WorkspaceBinding):
+            raise ValueError("workspace必须是可信宿主WorkspaceBinding")
         if self.resource_manifest is not None:
             check_json(self.resource_manifest)
             object.__setattr__(self, "resource_manifest", deepcopy(self.resource_manifest))

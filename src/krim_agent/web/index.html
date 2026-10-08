@@ -39,6 +39,7 @@
             <label for="agent-config-instructions">系统指令</label><textarea id="agent-config-instructions" rows="3" maxlength="8192"></textarea>
             <label for="agent-config-tools">允许工具（逗号分隔）</label><input id="agent-config-tools" placeholder="add,echo" />
             <label for="agent-config-provider">模型资源</label><input id="agent-config-provider" value="runtime" maxlength="64" />
+            <label for="agent-config-workspace" data-i18n="工作区资源（留空不授权）">工作区资源（留空不授权）</label><input id="agent-config-workspace" maxlength="64" placeholder="local" />
             <label for="agent-config-mode">执行模式</label><select id="agent-config-mode"><option value="agent">Agent：按宿主权限执行</option><option value="ask">问答：不调用工具</option><option value="plan">规划：只读工具</option><option value="auto">自动：仅宿主已允许范围</option></select>
             <label for="agent-config-revision">预期版本（新建为0）</label><input id="agent-config-revision" type="number" min="0" value="0" />
             <button id="agent-config-save" type="button">保存 Agent 配置</button><button id="agent-config-load" type="button">读取 Agent 配置</button>

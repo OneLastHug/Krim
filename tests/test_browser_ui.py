@@ -63,6 +63,7 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert (await client.get("/v1/locales")).status_code == 401
         assert (await client.get("/ui/i18n.js")).status_code == 200
         assert (await client.get("/ui/change-list-ui.js")).status_code == 200
+        assert (await client.get("/ui/workspace-ui.js")).status_code == 200
         authorized = await client.get(
             "/v1/agents/catalog", headers={"Authorization": "Bearer ui-key"}
         )

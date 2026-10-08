@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from krim_agent.agents import (
     AgentError,
     AgentHandle,
     AgentManager,
+    AgentProfile,
     AgentProfileUpdate,
     AgentProfileVersion,
     AgentResourceRegistry,
@@ -29,14 +31,25 @@ from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence.agent_profiles import AgentProfileStore
+from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
-from krim_agent.tools import ToolError
-from krim_agent.tools.core import ToolDefinition
+from krim_agent.tools import ToolContext, ToolError
+from krim_agent.tools.core import ToolDefinition, ToolResult
+from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
+from krim_agent.workspace import (
+    WORKSPACE_TOOL_NAMES,
+    Workspace,
+    WorkspaceBinding,
+    WorkspaceFile,
+    WorkspaceListing,
+    WorkspaceSearch,
+    WorkspaceView,
+)
 
 AgentViewStatus = Literal[
     "created", "queued", "running", "completed", "failed", "aborted", "interrupted", "destroyed"
@@ -123,6 +136,7 @@ class AgentService:
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
+        self._workspace_operations: set[asyncio.Task[ToolResult]] = set()
         self._start_lock = asyncio.Lock()
         self._closed = False
         self.catalog.register(
@@ -240,12 +254,15 @@ class AgentService:
         if unknown:
             raise ServiceError("agent_profile_tool", "Agent配置包含未登记工具", 422)
         tools = self.runtime.tools.select(profile.config.tool_names)
+        workspace = self._profile_workspace(profile.config)
         try:
             provider = self.resources.provider(profile.config.provider_key)
         except KeyError:
             raise ServiceError("agent_profile_provider", "Agent Provider已停用", 422) from None
         resource_version = self.resources.fingerprint(
-            profile.config.provider_key, profile.config.tool_names
+            profile.config.provider_key,
+            profile.config.tool_names,
+            workspace_key=profile.config.workspace_key,
         )
         base = self.catalog.get("default").definition
         host_context = ContextRunConfig.from_settings(self.runtime.settings)
@@ -276,8 +293,11 @@ class AgentService:
             policy=profile_policy(profile.config.mode, self.runtime.tool_policy),
             resource_version=resource_version,
             resource_manifest=self.resources.manifest(
-                profile.config.provider_key, profile.config.tool_names
+                profile.config.provider_key,
+                profile.config.tool_names,
+                workspace_key=profile.config.workspace_key,
             ),
+            workspace=workspace,
             mode=profile.config.mode,
             session_ttl_seconds=profile.config.session_ttl_seconds,
         )
@@ -334,6 +354,7 @@ class AgentService:
         available = {definition.name for definition in self.runtime.tools.definitions}
         if set(request.config.tool_names) - available:
             raise ServiceError("agent_profile_tool", "工具未登记", 422)
+        self._profile_workspace(request.config)
         if request.config.context_config != ContextRunConfig():
             try:
                 request.config.context_config.restricted_by(
@@ -367,6 +388,33 @@ class AgentService:
     def register_tool_version(self, name: str, version: str) -> None:
         self.resources.register_tool_version(name, version)
 
+    def _profile_workspace(self, config: AgentProfile) -> WorkspaceBinding | None:
+        if config.workspace_key is None:
+            if set(config.tool_names) & WORKSPACE_TOOL_NAMES:
+                raise ServiceError("agent_profile_workspace", "文件工具需要已登记工作区", 422)
+            return None
+        try:
+            return self.resources.workspace(config.workspace_key)
+        except KeyError:
+            raise ServiceError("agent_profile_workspace", "工作区未登记或已停用", 422) from None
+
+    def register_workspace(
+        self,
+        key: str,
+        root: str | Path | Workspace,
+        *,
+        version: str,
+        owned: bool = False,
+        default: bool = False,
+    ) -> WorkspaceBinding:
+        binding = self.resources.register_workspace(key, root, version=version, owned=owned)
+        if default:
+            self.runtime.workspace = binding
+        return binding
+
+    def disable_workspace(self, key: str) -> None:
+        self.resources.disable_workspace(key)
+
     def resource_inventory(self) -> list[AgentResourceView]:
         return self.resources.views()
 
@@ -382,18 +430,139 @@ class AgentService:
         definition = self.catalog.get(name).definition
         if name != "default":
             return definition
-        names = [tool.name for tool in definition.tools.definitions]
+        workspace = self.runtime.workspace
+        names = [
+            tool.name
+            for tool in definition.tools.definitions
+            if tool.name not in WORKSPACE_TOOL_NAMES or workspace is not None
+        ]
         try:
-            manifest = self.resources.manifest("runtime", names)
+            manifest = self.resources.manifest(
+                "runtime", names, workspace_key=workspace.key if workspace else None
+            )
         except KeyError:
-            raise ServiceError("agent_profile_provider", "Runtime模型资源已停用", 422) from None
+            raise ServiceError(
+                "agent_profile_workspace" if workspace else "agent_profile_provider",
+                "Runtime资源已停用",
+                422,
+            ) from None
         version = (
-            self.resources.fingerprint("runtime", names)
+            self.resources.fingerprint(
+                "runtime", names, workspace_key=workspace.key if workspace else None
+            )
             if "runtime" in self.resources.provider_versions
             or any(tool in self.resources.tool_versions for tool in names)
+            or workspace is not None
             else definition.resource_version
         )
-        return replace(definition, resource_version=version, resource_manifest=manifest)
+        return replace(
+            definition,
+            tools=definition.tools.select(names),
+            workspace=workspace,
+            resource_version=version,
+            resource_manifest=manifest,
+        )
+
+    async def workspace_info(self, agent_id: str) -> WorkspaceView:
+        handle = self._handle(agent_id)
+        binding = handle.definition.workspace
+        if binding is None:
+            raise ServiceError("workspace_unbound", "Agent没有工作区授权", 409)
+        names = sorted(
+            item.name
+            for item in handle.runtime.tools.definitions
+            if item.name in WORKSPACE_TOOL_NAMES
+        )
+        view = binding.view(names)
+        session = await handle.session()
+        return view.model_copy(update={"available": view.available and session.status == "open"})
+
+    async def _workspace_call(
+        self, agent_id: str, name: str, arguments: dict[str, object]
+    ) -> object:
+        if self._closed:
+            raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+        handle = self._handle(agent_id)
+        async with self.runtime.repository.database.write_lock:
+            async with self.runtime.repository.database.sessions() as session:
+                session_row = await guard_agent_topic(
+                    session,
+                    handle.topic_id,
+                    handle.session_id,
+                    handle.agent_id,
+                    self.manager.owner_id,
+                )
+                if session_row is None:
+                    raise ServiceError("agent_session_topic", "Agent工作区缺少会话绑定", 403)
+                await assert_session_open(session, session_row)
+        if self._closed:
+            raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+        if len(self._workspace_operations) >= 64:
+            raise ServiceError("workspace_busy", "工作区读取任务已达上限，请稍后重试", 429)
+        operation = asyncio.create_task(
+            handle.runtime.tools.invoke(
+                name,
+                arguments,
+                ToolContext(
+                    handle.runtime.tools,
+                    topic_id=handle.topic_id,
+                    agent_id=handle.agent_id,
+                    session_id=handle.session_id,
+                    workspace=handle.definition.workspace,
+                    policy=handle.runtime.tool_policy,
+                    timeout=handle.definition.tool_timeout_seconds,
+                    origin="host",
+                    tracer=handle.runtime.tracer,
+                    trace_owner_kind="host",
+                    trace_owner_id=handle.agent_id,
+                ),
+            )
+        )
+        self._workspace_operations.add(operation)
+        try:
+            result = await operation
+            if result.is_error:
+                raise ToolError(result.code or "execution_error", result.content[0].text)
+            return result.data
+        except ToolError as error:
+            status = {
+                "tool_not_found": 403,
+                "permission_denied": 403,
+                "approval_required": 409,
+                "workspace_unbound": 409,
+                "workspace_unavailable": 403,
+                "invalid_input": 422,
+                "workspace_path": 422,
+                "workspace_sensitive": 403,
+                "workspace_file_type": 422,
+                "workspace_not_found": 404,
+                "workspace_access": 403,
+                "workspace_link": 403,
+                "workspace_file_limit": 413,
+                "workspace_binary": 422,
+                "workspace_encoding": 422,
+                "workspace_changed": 409,
+                "workspace_closed": 503,
+                "timeout": 504,
+            }.get(error.code, 502)
+            raise ServiceError(error.code, str(error), status) from error
+        finally:
+            self._workspace_operations.discard(operation)
+
+    async def workspace_read(self, agent_id: str, request: ReadFileInput) -> WorkspaceFile:
+        return WorkspaceFile.model_validate(
+            await self._workspace_call(agent_id, "workspace_read", request.model_dump())
+        )
+
+    async def workspace_list(self, agent_id: str, request: ListFilesInput) -> WorkspaceListing:
+        return WorkspaceListing.model_validate(
+            await self._workspace_call(agent_id, "workspace_list", request.model_dump())
+        )
+
+    async def workspace_search(self, agent_id: str, request: SearchFilesInput) -> WorkspaceSearch:
+        return WorkspaceSearch.model_validate(
+            await self._workspace_call(agent_id, "workspace_search", request.model_dump())
+        )
 
     async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
         """可信组合层显式取得固定版本工具；不由HTTP配置自动安装工具。"""
@@ -810,11 +979,17 @@ class AgentService:
         async with self._start_lock:
             self._closed = True
         try:
+            operations = list(self._workspace_operations)
+            for operation in operations:
+                if not operation.cancelling():
+                    operation.cancel()
+            await asyncio.gather(*operations, return_exceptions=True)
             await self.manager.close()
             await asyncio.gather(
                 *(task for _, task, _ in self._tasks.values()), return_exceptions=True
             )
         finally:
             self._tasks.clear()
+            self._workspace_operations.clear()
             self._results.clear()
             await self.resources.close()

@@ -69,6 +69,7 @@ from krim_agent.tools.core import (
 )
 from krim_agent.tools.discovery import ToolDiscovery
 from krim_agent.usage import TokenUsage
+from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WorkspaceBinding
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ class ChatRuntime:
         agent_owner_id: str | None = None,
         allow_skill_tool: bool = True,
         task_store: TaskBackend | None = None,
+        workspace: WorkspaceBinding | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -175,6 +177,7 @@ class ChatRuntime:
 
             task_store = AgentTaskStore(repository.database, owner_id=agent_owner_id)
         self.task_store = task_store
+        self.workspace = workspace
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
         )
@@ -601,6 +604,7 @@ class ChatRuntime:
                 definition
                 for definition in self.tools.definitions
                 if definition.name != "read_skill" or state.skill_snapshot.skills
+                if definition.name not in WORKSPACE_TOOL_NAMES or self.workspace is not None
             ]
             state.discovery = ToolDiscovery(definitions)
         except ValueError as error:
@@ -1025,6 +1029,7 @@ class ChatRuntime:
                         agent_id=self.agent_id,
                         session_id=self.agent_session_id,
                         task_store=self.task_store,
+                        workspace=self.workspace,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,

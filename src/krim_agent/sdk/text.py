@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
+from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -324,6 +325,8 @@ class PythonAI:
         settings: Settings | None = None,
         provider: ModelProvider | None = None,
         tools: ToolRegistry | None = None,
+        workspace_root: str | Path | None = None,
+        workspace_version: str = "local-v1",
     ) -> PythonAI:
         config = settings or Settings(database_url="sqlite+aiosqlite:///:memory:")
         database = Database(config.database_url)
@@ -355,7 +358,12 @@ class PythonAI:
                 config,
                 task_store=AgentTaskStore(database),
             )
-            return cls(runtime, owned_database=database, owned_provider=owned_provider)
+            ai = cls(runtime, owned_database=database, owned_provider=owned_provider)
+            if workspace_root is not None:
+                ai.agents().register_workspace(
+                    "local", workspace_root, version=workspace_version, default=True
+                )
+            return ai
         except BaseException:
             try:
                 await database.close()

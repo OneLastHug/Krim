@@ -117,6 +117,11 @@ export interface AgentView {
   session_id: string;
   session: AgentSessionView;
 }
+export interface WorkspaceView { key: string; version: string; fingerprint: string; available: boolean; tool_names: string[]; max_file_bytes: number; }
+export interface WorkspaceEntry { path: string; kind: "directory" | "file"; byte_size: number; }
+export interface WorkspaceListing { path: string; entries: WorkspaceEntry[]; truncated: boolean; entries_scanned: number; }
+export interface WorkspaceFile { path: string; sha256: string; byte_size: number; start_line: number; lines: number; content: string; truncated: boolean; }
+export interface WorkspaceSearch { matches: Array<{ path: string; line: number; text: string }>; files_scanned: number; files_skipped: number; truncated: boolean; }
 export interface WorkflowRunView {
   run_id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";

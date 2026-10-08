@@ -22,6 +22,7 @@ from .output import OutputContract, OutputSchema, WireOutputSchema
 
 if TYPE_CHECKING:
     from krim_agent.skills import SkillSnapshot
+    from krim_agent.workspace import WorkspaceBinding
 
 if TYPE_CHECKING:
     from .registry import ToolRegistry
@@ -105,6 +106,8 @@ class ToolContext:
     tracer: Tracer | None = None
     trace_owner_kind: OwnerKind | None = None
     trace_owner_id: str | None = None
+    # 由可信宿主绑定；模型参数和HTTP请求不能设置此字段。
+    workspace: WorkspaceBinding | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -130,6 +133,7 @@ class ToolContext:
             tracer=self.tracer,
             trace_owner_kind=self.trace_owner_kind,
             trace_owner_id=self.trace_owner_id,
+            workspace=self.workspace,
             arguments=arguments,
         )
 

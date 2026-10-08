@@ -6,6 +6,8 @@ import hashlib
 import inspect
 import json
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 
 from pydantic import JsonValue
@@ -15,6 +17,8 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.tools import ToolRegistry
+from krim_agent.tools.workspace import workspace_tools
+from krim_agent.workspace import Workspace, WorkspaceBinding
 
 
 class ClosableProvider(ModelProvider, Protocol):
@@ -29,6 +33,12 @@ class AgentResourceView(StrictModel):
     fingerprint: str
     owned: bool = False
     available: bool = True
+
+
+@dataclass(frozen=True)
+class WorkspaceResource:
+    binding: WorkspaceBinding
+    owned: bool
 
 
 def provider_fingerprint(provider: ModelProvider) -> str:
@@ -52,6 +62,7 @@ class AgentResourceRegistry:
         self.tool_versions: dict[str, str] = {}
         self._disabled: set[str] = set()
         self._owned: dict[int, ClosableProvider] = {}
+        self.workspaces: dict[str, WorkspaceResource] = {}
         self._closed = False
 
     @staticmethod
@@ -97,7 +108,77 @@ class AgentResourceRegistry:
             raise KeyError(key)
         self._disabled.add(key)
 
-    def fingerprint(self, key: str, names: list[str]) -> str:
+    @staticmethod
+    def _resource_key(value: str, label: str) -> str:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", value) is None:
+            raise ValueError(f"{label}须为1–64字符的字母、数字、下划线或连字符")
+        return value
+
+    def register_workspace(
+        self,
+        key: str,
+        root: str | Path | Workspace,
+        *,
+        version: str,
+        owned: bool = False,
+    ) -> WorkspaceBinding:
+        """可信宿主登记工作区；HTTP/模型不能调用此入口或提供root。"""
+        if self._closed:
+            raise ServiceError("agent_resources_closed", "Agent资源登记已关闭", 503)
+        selected_key = self._resource_key(key, "Workspace key")
+        selected_version = self._version(version)
+        if selected_key in self.workspaces:
+            raise ServiceError("workspace_key_conflict", "工作区标识已登记，须重启后更换", 409)
+        if len(self.workspaces) >= 32:
+            raise ServiceError("agent_resource_limit", "Workspace登记数量已达上限", 429)
+        for tool in workspace_tools():
+            existing = next(
+                (item for item in self.tools.definitions if item.name == tool.name), None
+            )
+            if existing is not None and existing is not tool:
+                raise ValueError("工作区工具名称已被其他宿主工具占用")
+        workspace = root if isinstance(root, Workspace) else Workspace(root)
+        if workspace.closed:
+            raise ValueError("不能登记已关闭的工作区")
+        binding = WorkspaceBinding(
+            key=selected_key,
+            workspace=workspace,
+            version=selected_version,
+            fingerprint=hashlib.sha256(
+                json.dumps(
+                    {
+                        "key": selected_key,
+                        "version": selected_version,
+                        "workspace": workspace.fingerprint,
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest(),
+        )
+        self.workspaces[selected_key] = WorkspaceResource(
+            binding=binding,
+            owned=owned or not isinstance(root, Workspace),
+        )
+        for tool in workspace_tools():
+            if tool.name not in {item.name for item in self.tools.definitions}:
+                self.tools.register(tool)
+        return binding
+
+    def workspace(self, key: str) -> WorkspaceBinding:
+        if self._closed:
+            raise KeyError(key)
+        resource = self.workspaces.get(key)
+        if resource is None or not resource.binding.available:
+            raise KeyError(key)
+        return resource.binding
+
+    def disable_workspace(self, key: str) -> None:
+        resource = self.workspaces.get(key)
+        if resource is None:
+            raise KeyError(key)
+        resource.binding.revoked.set()
+
+    def fingerprint(self, key: str, names: list[str], *, workspace_key: str | None = None) -> str:
         provider = self.provider(key)
         # 缺省资源版本保持0021 Profile指纹；工具Schema已由AgentDefinition冻结。
         payload: dict[str, JsonValue] = {
@@ -114,15 +195,27 @@ class AgentResourceRegistry:
         }
         if versions:
             payload["tool_versions"] = cast(dict[str, JsonValue], versions)
+        if workspace_key is not None:
+            workspace = self.workspace(workspace_key)
+            payload["workspace_key"] = workspace.key
+            payload["workspace_fingerprint"] = workspace.fingerprint
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
-    def manifest(self, key: str, names: list[str]) -> dict[str, JsonValue]:
-        return {
+    def manifest(
+        self, key: str, names: list[str], *, workspace_key: str | None = None
+    ) -> dict[str, JsonValue]:
+        manifest: dict[str, JsonValue] = {
             "provider_key": key,
             "provider_version": self.provider_versions.get(key),
             "provider_fingerprint": self.provider_signature(key),
             "tool_versions": {name: self.tool_versions.get(name) for name in sorted(names)},
         }
+        if workspace_key is not None:
+            workspace = self.workspace(workspace_key)
+            manifest["workspace_key"] = workspace.key
+            manifest["workspace_version"] = workspace.version
+            manifest["workspace_fingerprint"] = workspace.fingerprint
+        return manifest
 
     def provider_signature(self, key: str) -> str:
         base = provider_fingerprint(self.providers[key])
@@ -170,6 +263,18 @@ class AgentResourceRegistry:
             )
             for tool in self.tools.definitions
         )
+        values.extend(
+            AgentResourceView(
+                key=resource.binding.key,
+                kind="workspace",
+                name=f"workspace:{resource.binding.key}",
+                version=resource.binding.version,
+                fingerprint=resource.binding.fingerprint,
+                owned=resource.owned,
+                available=not self._closed and resource.binding.available,
+            )
+            for resource in sorted(self.workspaces.values(), key=lambda item: item.binding.key)
+        )
         return values
 
     async def close(self) -> None:
@@ -183,5 +288,15 @@ class AgentResourceRegistry:
             except Exception:
                 failed = True
         self._owned.clear()
+        closed_workspaces: set[int] = set()
+        for resource in self.workspaces.values():
+            resource.binding.revoked.set()
+            if resource.owned and id(resource.binding.workspace) not in closed_workspaces:
+                closed_workspaces.add(id(resource.binding.workspace))
+                try:
+                    resource.binding.workspace.close()
+                except Exception:
+                    failed = True
+        self.workspaces.clear()
         if failed:
             raise ServiceError("agent_resource_close_failed", "部分Provider资源关闭失败", 503)

@@ -1271,7 +1271,7 @@ async function saveAgentConfig() {
     try {
         const revision = Number(text("agent-config-revision").value);
         const previous = revision > 0 ? await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}?revision=${revision}`) : undefined;
-        const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), mode: $("agent-config-mode").value };
+        const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), workspace_key: text("agent-config-workspace").value.trim() || null, mode: $("agent-config-mode").value };
         const saved = await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ expected_revision: revision, enabled: previous?.enabled ?? true, config }) });
         text("agent-config-revision").value = String(saved.revision);
         await loadAgents();
@@ -1290,6 +1290,7 @@ async function loadAgentConfig() {
         text("agent-config-provider").value = saved.config.provider_key;
         $("agent-config-mode").value = saved.config.mode;
         text("agent-config-revision").value = String(saved.revision);
+        text("agent-config-workspace").value = saved.config.workspace_key || "";
         showNotice("Agent 配置已读取");
     }
     catch (error) {

@@ -26,6 +26,7 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import Decision, Policy, ToolDefinition
+from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WorkspaceBinding
 
 from .permissions import profile_policy
 from .resources import provider_fingerprint
@@ -494,6 +495,8 @@ class AgentManager:
             payload["instructions"] = definition.instructions
         if definition.resource_version:
             payload["resource_version"] = definition.resource_version
+        if definition.workspace is not None:
+            payload["workspace"] = definition.workspace.manifest()
         if definition.session_ttl_seconds is not None:
             payload["session_ttl_seconds"] = definition.session_ttl_seconds
         if definition.mode != "agent" and definition.profile_revision is None:
@@ -549,6 +552,12 @@ class AgentManager:
                 parent = self._handles.get(stored.parent_agent_id)
                 if parent is None or parent.destroyed:
                     raise AgentError("parent_agent_missing", "父 Agent 尚未恢复")
+                self._restrict_workspace(
+                    definition.workspace,
+                    parent.runtime.workspace,
+                    definition.tools,
+                    parent.runtime.tools,
+                )
                 definition = replace(
                     definition,
                     policy=inherited_policy(definition.policy, parent.runtime.tool_policy),
@@ -587,8 +596,15 @@ class AgentManager:
                     if parent_handle.definition.context_config
                     else None,
                     budget_account_ids=await parent_handle.runtime.ensure_usage_budget_binding(),
+                    workspace=parent_handle.runtime.workspace,
                 )
             if parent_context is not None:
+                self._restrict_workspace(
+                    definition.workspace,
+                    parent_context.workspace,
+                    definition.tools,
+                    parent_context.registry,
+                )
                 context_config = definition.context_config
                 if parent_context.context_config is not None:
                     try:
@@ -621,6 +637,22 @@ class AgentManager:
                 definition, parent_context, budget_account_ids=budget_account_ids
             )
 
+    @staticmethod
+    def _restrict_workspace(
+        child: WorkspaceBinding | None,
+        parent: WorkspaceBinding | None,
+        child_tools: ToolRegistry,
+        parent_tools: ToolRegistry,
+    ) -> None:
+        if child is not None and (
+            parent is None or child.fingerprint != parent.fingerprint or not parent.available
+        ):
+            raise AgentError("agent_workspace_forbidden", "子Agent不能扩大父工作区授权")
+        if {item.name for item in child_tools.definitions if item.name in WORKSPACE_TOOL_NAMES} - {
+            item.name for item in parent_tools.definitions if item.name in WORKSPACE_TOOL_NAMES
+        }:
+            raise AgentError("agent_workspace_forbidden", "子Agent不能扩大父文件工具授权")
+
     async def _spawn(
         self,
         definition: AgentDefinition,
@@ -631,6 +663,13 @@ class AgentManager:
     ) -> AgentHandle:
         if self._closed:
             raise AgentError("manager_closed", "AgentManager 已关闭")
+        if definition.workspace is not None:
+            try:
+                definition.workspace.require()
+            except ServiceError as error:
+                raise AgentError(error.code, str(error)) from error
+        elif any(item.name in WORKSPACE_TOOL_NAMES for item in definition.tools.definitions):
+            raise AgentError("workspace_unbound", "Agent文件工具缺少工作区授权")
         if len(self._handles) >= self.max_agents:
             raise AgentError("agent_limit", "Agent 数量超过限制")
         definition = replace(definition.with_id(), tools=copy_tools(definition.tools))
@@ -671,6 +710,7 @@ class AgentManager:
             agent_session_id=definition.agent_id,
             agent_owner_id=self.owner_id,
             task_store=self.tasks,
+            workspace=definition.workspace,
             allow_skill_tool=definition.profile_revision is None
             or any(tool.name == "read_skill" for tool in definition.tools.definitions),
             system_prompt=definition.instructions,
@@ -755,6 +795,8 @@ class AgentManager:
             else None,
             "resources": definition.resource_manifest,
         }
+        if definition.workspace is not None:
+            permissions["workspace"] = definition.workspace.manifest()
         try:
             if stored is not None:
                 value = await self.sessions.attach(

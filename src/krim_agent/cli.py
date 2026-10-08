@@ -15,7 +15,7 @@ from .budgets import BudgetResolveRequest
 from .client import ClientError, KrimClient
 from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
-from .protocol.domain import TERMINAL_STATUSES
+from .protocol.domain import TERMINAL_STATUSES, ServiceError
 from .streams import MultiplexRequest
 from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
@@ -27,10 +27,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve", help="serve（提供服务）：启动 Python HTTP/SSE")
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
+    serve.add_argument("--workspace", help="workspace（工作区）：宿主明确授权的只读根目录")
+    serve.add_argument(
+        "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
+    )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
     from .evaluation.cli import add_parser as add_eval_parser
 
     add_eval_parser(subparsers)
+    workspace = subparsers.add_parser(
+        "workspace", help="workspace（工作区）：查看Agent授权、目录、文件与搜索"
+    )
+    workspace.add_argument("action", choices=["info", "list", "read", "search"])
+    workspace.add_argument("agent_id", help="Agent实例标识")
+    workspace.add_argument("value", nargs="?", help="read（读取）的相对路径或search（搜索）的文本")
+    workspace.add_argument("--path", default=".", help="path（路径）：列出/搜索的相对目录")
+    workspace.add_argument("--limit", type=int, help="limit（上限）：目录项或搜索匹配数")
+    workspace.add_argument("--start-line", type=int, default=1, help="start line（起始行）")
+    workspace.add_argument("--max-lines", type=int, default=200, help="max lines（最大行数）")
+    workspace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
     tasks.add_argument("action", choices=["get", "history", "update"])
     tasks.add_argument("agent_id", help="Agent实例标识")
@@ -248,10 +263,50 @@ def main() -> None:
         settings = Settings.from_env()
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
-        uvicorn.run(create_app(settings), host=args.host, port=args.port, workers=1)
+        try:
+            app = create_app(
+                settings, workspace_root=args.workspace, workspace_version=args.workspace_version
+            )
+        except (ValueError, OSError, ServiceError) as error:
+            parser.error(f"工作区配置无效：{error}")
+        uvicorn.run(app, host=args.host, port=args.port, workers=1)
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "workspace":
+                if args.action == "info":
+                    print(client.agent_workspace(args.agent_id).model_dump_json(indent=2))
+                elif args.action == "list":
+                    print(
+                        client.agent_list_files(
+                            args.agent_id,
+                            args.path,
+                            limit=args.limit if args.limit is not None else 200,
+                        ).model_dump_json(indent=2)
+                    )
+                elif args.action == "read":
+                    if not args.value:
+                        parser.error("workspace read需要相对文件路径")
+                    print(
+                        client.agent_read_file(
+                            args.agent_id,
+                            args.value,
+                            start_line=args.start_line,
+                            max_lines=args.max_lines,
+                        ).model_dump_json(indent=2)
+                    )
+                else:
+                    if not args.value:
+                        parser.error("workspace search需要搜索文本")
+                    print(
+                        client.agent_search_files(
+                            args.agent_id,
+                            args.value,
+                            path=args.path,
+                            limit=args.limit if args.limit is not None else 100,
+                        ).model_dump_json(indent=2)
+                    )
+                return
             if args.command == "tasks":
                 if args.action == "get":
                     print(client.agent_tasks(args.agent_id, args.kind).model_dump_json(indent=2))
