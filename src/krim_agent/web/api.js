@@ -9,18 +9,42 @@ function headers() {
         value.set("Authorization", `Bearer ${apiKey}`);
     return value;
 }
-export async function requestJson(path, init = {}) {
+export class ApiError extends Error {
+    status;
+    code;
+    constructor(message, status, code) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.name = "ApiError";
+    }
+}
+async function readJson(path, init) {
     const merged = headers();
     new Headers(init.headers).forEach((value, key) => merged.set(key, value));
     const response = await fetch(path, { ...init, headers: merged });
-    const value = await response.json().catch(() => null);
+    let value;
+    try {
+        value = await response.json();
+    }
+    catch {
+        throw new ApiError(`HTTP ${response.status} · 服务没有返回有效的数据，请检查连接`, response.status, null);
+    }
     if (!response.ok) {
         const body = value;
-        throw new Error(body?.error?.message || `HTTP ${response.status}`);
+        throw new ApiError(typeof body?.error?.message === "string" ? body.error.message : `HTTP ${response.status}`, response.status, typeof body?.error?.code === "string" ? body.error.code : null);
     }
+    return value;
+}
+export async function requestJson(path, init = {}) {
+    const value = await readJson(path, init);
     if (value === null)
         throw new Error("服务没有返回有效的数据，请检查连接");
     return value;
+}
+/** 只有明确允许 null 的查询使用此入口；空正文或无效 JSON 仍拒绝。 */
+export async function requestJsonNullable(path, init = {}) {
+    return await readJson(path, init);
 }
 export async function consumeEvents(runId, fromSeq, onFrame, signal) {
     const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}/events?from_seq=${fromSeq}`, {

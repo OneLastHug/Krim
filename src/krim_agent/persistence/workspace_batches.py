@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+import re
 import secrets
 import time
 from collections import Counter
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.domain import ServiceError
@@ -19,8 +23,10 @@ from krim_agent.workspace_list import (
     NativeBatchDispatch,
     NativeBatchExecution,
     NativeBatchFence,
+    NativeBatchHistoryPage,
     NativeBatchItemView,
     NativeBatchRequest,
+    NativeBatchSummary,
     NativeBatchView,
 )
 
@@ -38,6 +44,86 @@ if TYPE_CHECKING:
 
 
 INTERNAL_REQUEST_PREFIX = "krim-batch:"
+_MAX_HISTORY = 5000
+_BatchStatus = Literal[
+    "running", "done", "partial", "failed", "uncertain", "cancelled", "interrupted"
+]
+_HistoryPosition = tuple[datetime, str]
+
+
+def _history_cursor(scope_id: str, upper: _HistoryPosition, before: _HistoryPosition) -> str:
+    value = {
+        "v": 1,
+        "scope": scope_id,
+        "upper": [upper[0].replace(tzinfo=UTC).isoformat(), upper[1]],
+        "before": [before[0].replace(tzinfo=UTC).isoformat(), before[1]],
+    }
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _history_cursor_error() -> ServiceError:
+    return ServiceError(
+        "workspace_batch_history_cursor_invalid", "批次历史游标无效或作用域不匹配", 422
+    )
+
+
+def _history_position(value: object) -> _HistoryPosition:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], str)
+        # ID只作为稳定排序键；沿用公开路径标识规则，不额外限制UUID版本。
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,36}", value[1]) is None
+    ):
+        raise _history_cursor_error()
+    try:
+        created = datetime.fromisoformat(value[0])
+    except ValueError:
+        raise _history_cursor_error() from None
+    if created.tzinfo != UTC:
+        raise _history_cursor_error()
+    return created.replace(tzinfo=None), value[1]
+
+
+def _decode_history_cursor(cursor: str, scope_id: str) -> tuple[_HistoryPosition, _HistoryPosition]:
+    if (
+        not isinstance(cursor, str)
+        or not 1 <= len(cursor) <= 1024
+        or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None
+    ):
+        raise _history_cursor_error()
+    try:
+        encoded = cursor.encode()
+        raw = base64.b64decode(encoded + b"=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, binascii.Error):
+        raise _history_cursor_error() from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"v", "scope", "upper", "before"}
+        or type(value["v"]) is not int
+        or value["v"] != 1
+        or value["scope"] != scope_id
+    ):
+        raise _history_cursor_error()
+    upper, before = _history_position(value["upper"]), _history_position(value["before"])
+    if before > upper or cursor != _history_cursor(scope_id, upper, before):
+        raise _history_cursor_error()
+    return upper, before
+
+
+def _batch_status(producer_status: str, total: int, done: int, unresolved: int) -> _BatchStatus:
+    if producer_status == "running":
+        return "running"
+    if unresolved:
+        return "uncertain"
+    if done == total:
+        return "done"
+    if producer_status in {"cancelled", "interrupted"}:
+        return cast(Literal["cancelled", "interrupted"], producer_status)
+    return "partial" if done else "failed"
 
 
 def _assert_live(row: NativeWorkspaceBatchRow, owner_id: str) -> None:
@@ -237,21 +323,12 @@ class NativeBatchStore:
             await self._item(session, child)
             for child in await self._children(session, row.batch_id)
         ]
-        status: Literal[
-            "running", "done", "partial", "failed", "uncertain", "cancelled", "interrupted"
-        ]
-        if row.producer_status == "running":
-            status = "running"
-        elif any(item.status in {"running", "uncertain"} for item in items):
-            status = "uncertain"
-        elif all(item.status == "done" for item in items):
-            status = "done"
-        elif row.producer_status in {"cancelled", "interrupted"}:
-            status = cast(Literal["cancelled", "interrupted"], row.producer_status)
-        elif any(item.status == "done" for item in items):
-            status = "partial"
-        else:
-            status = "failed"
+        status = _batch_status(
+            row.producer_status,
+            len(items),
+            sum(item.status == "done" for item in items),
+            sum(item.status in {"running", "uncertain"} for item in items),
+        )
         return NativeBatchView(
             batch_id=row.batch_id,
             scope_id=row.scope_id,
@@ -416,6 +493,155 @@ class NativeBatchStore:
             row = await self._row(session, scope_id, batch_id)
             await self._expire(session, row)
             return await self._view(session, row)
+
+    async def history(
+        self, scope_id: str, *, cursor: str | None = None, limit: int = 32
+    ) -> NativeBatchHistoryPage:
+        """只读发现原批次；冻结创建上界，状态变化不使 keyset 游标失效。"""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ServiceError(
+                "workspace_batch_history_limit_invalid", "批次历史每页须为1至32项", 422
+            )
+        decoded = _decode_history_cursor(cursor, scope_id) if cursor is not None else None
+        batch, child, attempt = (
+            NativeWorkspaceBatchRow,
+            NativeWorkspaceBatchChildRow,
+            WorkspaceEditAttemptRow,
+        )
+        # SQLite :memory: 常通过单连接共享；与批次续租/settle共用进程锁，
+        # 避免只读会话在事件循环切换时与显式 BEGIN 重入同一连接。
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.edits._scope(session, scope_id, writing=False)
+            # 先限定计数扫描；超过上限明确失败，不返回截断历史。
+            bounded = (
+                select(batch.batch_id)
+                .where(batch.scope_id == scope_id)
+                .limit(_MAX_HISTORY + 1)
+                .subquery()
+            )
+            total = await session.scalar(select(func.count()).select_from(bounded)) or 0
+            if total > _MAX_HISTORY:
+                raise ServiceError(
+                    "workspace_batch_history_too_large", "作用域批次历史超过5000项读取上限", 409
+                )
+            conditions = [batch.scope_id == scope_id]
+            if decoded is not None:
+                upper, before = decoded
+                # 边界必须来自该作用域中的真实行，不能静默接受越界位置。
+                for created, batch_id in (upper, before):
+                    if (
+                        await session.scalar(
+                            select(batch.batch_id).where(
+                                batch.scope_id == scope_id,
+                                batch.created_at == created,
+                                batch.batch_id == batch_id,
+                            )
+                        )
+                        is None
+                    ):
+                        raise _history_cursor_error()
+                conditions.append(
+                    or_(
+                        batch.created_at < upper[0],
+                        and_(batch.created_at == upper[0], batch.batch_id <= upper[1]),
+                    )
+                )
+                total = (
+                    await session.scalar(select(func.count()).select_from(batch).where(*conditions))
+                    or 0
+                )
+                conditions.append(
+                    or_(
+                        batch.created_at < before[0],
+                        and_(batch.created_at == before[0], batch.batch_id < before[1]),
+                    )
+                )
+            rows = (
+                (
+                    await session.execute(
+                        select(
+                            batch.batch_id,
+                            batch.request_key,
+                            batch.action,
+                            batch.producer_status,
+                            batch.snapshot_revision,
+                            batch.stop_reason,
+                            batch.created_at,
+                            batch.updated_at,
+                        )
+                        .where(*conditions)
+                        .order_by(batch.created_at.desc(), batch.batch_id.desc())
+                        .limit(limit + 1)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                if decoded is not None:
+                    raise _history_cursor_error()
+                return NativeBatchHistoryPage(
+                    scope_id=scope_id, total=0, items=[], next_cursor=None
+                )
+            upper = (
+                decoded[0] if decoded is not None else (rows[0]["created_at"], rows[0]["batch_id"])
+            )
+            selected = rows[:limit]
+            effective_status = func.coalesce(attempt.status, child.status)
+            # 仅聚合标量列；不加载 child 对象、文件快照、JSON 回执或恢复材料。
+            counts = {
+                row.batch_id: row
+                for row in await session.execute(
+                    select(
+                        child.batch_id,
+                        func.count().label("item_count"),
+                        func.sum(case((effective_status == "done", 1), else_=0)).label(
+                            "done_count"
+                        ),
+                        func.sum(
+                            case((effective_status.in_(["running", "uncertain"]), 1), else_=0)
+                        ).label("unresolved_count"),
+                        func.max(attempt.updated_at).label("operation_updated_at"),
+                    )
+                    .outerjoin(attempt, attempt.operation_id == child.operation_id)
+                    .where(child.batch_id.in_([row["batch_id"] for row in selected]))
+                    .group_by(child.batch_id)
+                )
+            }
+            items: list[NativeBatchSummary] = []
+            for row in selected:
+                count = counts.get(row["batch_id"])
+                item_count = count.item_count if count is not None else 0
+                done_count = count.done_count if count is not None else 0
+                unresolved = count.unresolved_count if count is not None else 0
+                updated = row["updated_at"]
+                if count is not None and count.operation_updated_at is not None:
+                    updated = max(updated, count.operation_updated_at)
+                items.append(
+                    NativeBatchSummary.model_validate(
+                        {
+                            **dict(row),
+                            "status": _batch_status(
+                                row["producer_status"], item_count, done_count, unresolved
+                            ),
+                            "item_count": item_count,
+                            "done_count": done_count,
+                            "created_at": row["created_at"].replace(tzinfo=UTC),
+                            "updated_at": updated.replace(tzinfo=UTC),
+                        }
+                    )
+                )
+            last = selected[-1]
+            return NativeBatchHistoryPage(
+                scope_id=scope_id,
+                total=total,
+                items=items,
+                next_cursor=(
+                    _history_cursor(scope_id, upper, (last["created_at"], last["batch_id"]))
+                    if len(rows) > limit
+                    else None
+                ),
+            )
 
     async def by_key(self, scope_id: str, request_key: str) -> NativeBatchView | None:
         self.edits._key(request_key)

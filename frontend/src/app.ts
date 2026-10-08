@@ -112,7 +112,11 @@ const promptContextUI = new PromptContextUI(showNotice);
 const skillsUI = new SkillsUI(showNotice);
 const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice, (topicId, file) => attachmentsUI.uploadFile(file, topicId));
-const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000));
+const changeListUI = new ChangeListUI(
+  showNotice,
+  (data) => hostEndpoint.request("changeList/invoke", data, 15_000),
+  (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId),
+);
 const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
@@ -456,6 +460,7 @@ function renderAgents(): void {
   if (state.agents.some((agent) => agent.name === selected)) select.value = selected;
   $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
   agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));
+  changeListUI.setWorkspaceSources(state.handles);
 }
 
 function graphFromEditor(): WorkflowGraph {
@@ -529,6 +534,7 @@ async function loadTopic(topicId: string): Promise<void> {
   const switched = state.topicId !== topicId;
   if (switched) { state.editingMessageId = null; $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); promptContextUI.setText("", true); state.runId = null; state.cursor = 0; state.disconnected = false; state.streaming = false; state.streamText = ""; state.messages = []; state.tree = null; state.interactionRuns.clear(); state.interactions = []; interactionLoadVersion += 1; renderInteractions(); }
   state.topicId = topicId;
+  changeListUI.beginTopic(topicId);
   projectCurrentSession();
   dragDropUI.selectTopic(topicId);
   const topic = state.topics.find((item) => item.id === topicId);

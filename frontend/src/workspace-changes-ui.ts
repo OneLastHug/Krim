@@ -1,7 +1,7 @@
 /** 文件编辑只产生受控提案；Diff、revision和回执均读取后端账本。 */
 import {
   errorText, requestJson, type FileChangeSpec, type WorkspaceAction, type WorkspaceAttemptView,
-  type WorkspaceChangeAction, type WorkspaceChangeView, type WorkspaceFile, type WorkspaceView,
+  type WorkspaceChangeAction, type WorkspaceChangeView, type WorkspaceFile, type WorkspaceView, type WorkspaceOperationProofView,
 } from "./api.js";
 import { currentLocale, localDate, t } from "./i18n.js";
 
@@ -51,6 +51,8 @@ export class WorkspaceChangesUI {
   private history: WorkspaceAttemptView[] = [];
   private operation: WorkspaceAttemptView | undefined;
   private operationSelection: string | undefined;
+  private proof: WorkspaceOperationProofView | undefined;
+  private proofError = "";
   private historyLimit = PAGE_SIZE;
   private stale = false;
   private loaded = false;
@@ -122,6 +124,24 @@ export class WorkspaceChangesUI {
 
   setGrant(grant: WorkspaceView): void { this.grant = grant; this.sync(); }
 
+  /** 清单导航复用当前详情，保留编辑器及其未提交草稿。 */
+  async focusProposal(proposalId: string, operationId?: string): Promise<void> {
+    if (this.busy) throw new Error(t("文件操作处理中，请稍后打开差异"));
+    if (!this.bound) throw new Error(t("工作区资源已停用或关闭"));
+    this.root.open = true;
+    await this.work(async () => {
+      if (this.available) {
+        try { this.grant = await requestJson<WorkspaceView>(this.base); }
+        catch (error) { this.grant = undefined; this.noticeBox.textContent = errorText(error); }
+      }
+      const proposal = await requestJson<WorkspaceChangeView>(`${this.base}/changes/${encodeURIComponent(proposalId)}`);
+      this.selected = proposal; this.operationSelection = operationId;
+      this.operation = undefined; this.history = []; this.historyLimit = PAGE_SIZE;
+      await this.readSelected(); this.loaded = true;
+      this.detail.scrollIntoView({ block: "nearest" });
+    });
+  }
+
   private permitted(tool: string): boolean {
     return this.available && this.grant?.available === true && this.grant.writable === true
       && this.grant.tool_names.includes(tool) && this.sessionMode !== "ask"
@@ -135,13 +155,18 @@ export class WorkspaceChangesUI {
     this.fieldRows.get("原文件SHA-256")!.hidden = mode === "create";
     this.fieldRows.get("完整新内容")!.hidden = mode !== "create" && mode !== "write";
     for (const key of ["待替换原文", "替换为", "预期出现次数"]) this.fieldRows.get(key)!.hidden = mode !== "replace";
-    for (const control of this.buttons) control.button.disabled = this.busy || !this.bound
-      || Boolean(control.tool && !this.permitted(control.tool)) || Boolean(control.allowed && !control.allowed());
+    for (const control of this.buttons) control.button.disabled = this.buttonDisabled(control.tool, control.allowed);
     this.root.setAttribute("aria-busy", String(this.busy));
+  }
+
+  private buttonDisabled(tool?: string, allowed?: () => boolean): boolean {
+    return this.busy || !this.bound || Boolean(tool && !this.permitted(tool)) || Boolean(allowed && !allowed());
   }
 
   private button(key: string, action: () => Promise<void>, tool?: string, allowed?: () => boolean): HTMLButtonElement {
     const button = text("button", key); button.type = "button"; button.className = "secondary";
+    // 读取尚未收束时重建的按钮也立即遵守同一状态，避免看似可点但被work忽略。
+    button.disabled = this.buttonDisabled(tool, allowed);
     button.onclick = () => { if (!button.disabled) void this.work(action); };
     this.buttons.push({ button, tool, allowed }); return button;
   }
@@ -243,7 +268,16 @@ export class WorkspaceChangesUI {
     this.selected = proposal; this.history = history;
     this.operation = history.find(item => item.operation_id === this.operationSelection)
       || history.find(item => item.operation_id === proposal.active_operation_id) || history.at(-1);
+    await this.readProof();
     this.stale = false; this.renderDetail();
+  }
+
+  private async readProof(): Promise<void> {
+    this.proof = undefined; this.proofError = "";
+    const operation = this.operation;
+    if (!operation) return;
+    try { this.proof = await requestJson<WorkspaceOperationProofView>(`${this.base}/operations/${encodeURIComponent(operation.operation_id)}/proof`); }
+    catch (error) { this.proofError = errorText(error); }
   }
 
   private renderDetail(): void {
@@ -267,7 +301,7 @@ export class WorkspaceChangesUI {
       const item = document.createElement("li"); item.textContent = `${statusLabel(operation.action)} · ${statusLabel(operation.status)} · ${localDate(operation.created_at)} · ${operation.operation_id}`;
       item.dataset.operationId = operation.operation_id;
       item.append(this.button("查看操作回执", async () => {
-        this.operation = operation; this.operationSelection = operation.operation_id; this.renderDetail();
+        this.operation = operation; this.operationSelection = operation.operation_id; await this.readProof(); this.renderDetail();
       }));
       history.append(item);
     }
@@ -306,6 +340,18 @@ export class WorkspaceChangesUI {
     const result = document.createElement("p"); result.className = "workspace-operation-result";
     result.textContent = `${statusLabel(operation.status)} · ${operation.operation_id}${operation.receipt?.error_code ? ` · ${operation.receipt.error_code}` : ""}`;
     this.detail.append(result);
+    if (this.proof?.operation_id === operation.operation_id) {
+      const proof = document.createElement("p"); proof.className = "workspace-operation-proof";
+      const labels = { not_applicable: "此操作不适用保留证明", exact_after: "原目标保留证明", successor_chain: "连续后继保留证明" };
+      proof.textContent = `${t(labels[this.proof.kind])} · ${statusLabel(this.proof.status)}`;
+      if (this.proof.kind !== "not_applicable") {
+        proof.textContent += `\n${t("证明链尾操作")} ${this.proof.tip_operation_id || "—"}\n${t("保留时核实的版本")} ${this.proof.tip_after_sha256 || t("删除文件")}\n${t("文件效果顺序")} ${this.proof.effect_sequence ?? "—"} · ${t("后继数量")} ${this.proof.successor_count}`;
+        if (this.proof.status !== "done") proof.textContent += `\n${t("该证明尚未确认保留成功")}`;
+      }
+      this.detail.append(proof);
+    } else if (this.proofError) {
+      const error = document.createElement("p"); error.className = "workspace-operation-proof"; error.textContent = this.proofError; this.detail.append(error);
+    }
     if (operation.status === "running") this.detail.append(text("p", "请等待原操作完成，刷新读取结果"));
     if (operation.status === "uncertain") this.detail.append(this.button("核实文件结果", () => this.operationAction("reconcile"), "workspace_reconcile"));
     if (operation.cleanup_pending && ["done", "rejected"].includes(operation.status)) this.detail.append(this.button("清理恢复材料", () => this.operationAction("finalize"), "workspace_finalize"));

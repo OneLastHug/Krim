@@ -17,6 +17,7 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import FakeProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools.builtins import builtin_registry
+from krim_agent.tools.core import ToolContext, ToolDefinition
 from krim_agent.workspace import WORKSPACE_TOOL_NAMES
 
 with TemporaryDirectory(prefix="krim-browser-") as directory:
@@ -36,6 +37,18 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         builtin_registry(),
         settings,
     )
+    batch_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+
+    async def pause_native_batch(definition: ToolDefinition, context: ToolContext) -> None:
+        gate = batch_gates.get(context.agent_id or "")
+        if definition.name == "workspace_change" and context.workspace_batch is not None and gate:
+            entered, released = gate
+            entered.set()
+            # 可信测试暂停沿原Registry等待，取消仍由生产代码传播，不伪造文件回执。
+            async with context.human_wait():
+                await released.wait()
+
+    runtime.tools.add_global_pre(pause_native_batch)
     app = create_app(runtime=runtime)
     workspace_root = Path(directory) / "workspace"
     (workspace_root / "src").mkdir(parents=True)
@@ -69,6 +82,28 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         return await original_settle(*args, **kwargs)
 
     app.state.agents.workspace_edits.settle = controlled_settle
+
+    class TestNativeBatchControl(StrictModel):
+        agent_id: str = Field(min_length=36, max_length=36, pattern=r"^[a-f0-9-]{36}$")
+        action: Literal["block", "release", "status"]
+
+    @app.post("/_test/native-batch")
+    async def configure_native_batch(payload: TestNativeBatchControl) -> dict[str, bool]:
+        # 此路由只在Playwright装配存在，不进入产品API或wheel。
+        await app.state.agents.session(payload.agent_id)
+        previous = batch_gates.get(payload.agent_id)
+        if payload.action == "block":
+            if previous is not None and not previous[1].is_set():
+                raise ServiceError("test_batch_already_blocked", "测试批次已暂停", 409)
+            batch_gates[payload.agent_id] = (asyncio.Event(), asyncio.Event())
+        elif payload.action == "release" and previous is not None:
+            previous[1].set()
+            batch_gates.pop(payload.agent_id, None)
+        current = batch_gates.get(payload.agent_id)
+        return {
+            "blocked": current is not None and not current[1].is_set(),
+            "entered": current is not None and current[0].is_set(),
+        }
 
     @app.post("/_test/workspace")
     async def configure_workspace(payload: TestWorkspaceControl) -> dict[str, str]:

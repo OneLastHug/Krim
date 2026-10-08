@@ -84,6 +84,30 @@ class NativeBatchView(StrictModel):
     updated_at: datetime
 
 
+class NativeBatchSummary(StrictModel):
+    """批次历史的轻量摘要；不包含私有快照、子项或文件内容。"""
+
+    batch_id: str
+    request_key: str
+    action: Literal["keep", "undo"]
+    status: Literal["running", "done", "partial", "failed", "uncertain", "cancelled", "interrupted"]
+    producer_status: Literal["running", "finished", "cancelled", "interrupted"]
+    snapshot_revision: str = Field(pattern=SHA256)
+    item_count: int = Field(ge=0, le=32)
+    done_count: int = Field(ge=0, le=32)
+    stop_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NativeBatchHistoryPage(StrictModel):
+    source: Literal["workspace"] = "workspace"
+    scope_id: str
+    total: int = Field(ge=0, le=5000)
+    items: list[NativeBatchSummary] = Field(max_length=32)
+    next_cursor: str | None
+
+
 @dataclass(frozen=True)
 class NativeBatchFence:
     """可信编排私有凭据；不属于公开请求或工具Schema。"""

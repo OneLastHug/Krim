@@ -31,6 +31,12 @@ export class AgentsUI {
   private cards = new Map<string, Card>();
   constructor(private root: HTMLElement, private actions: Actions) {}
 
+  async focusWorkspaceProposal(agentId: string, proposalId: string, operationId?: string): Promise<void> {
+    const card = this.cards.get(agentId);
+    if (!card) throw new Error(t("Agent 实例不可用"));
+    await card.changes.focusProposal(proposalId, operationId);
+  }
+
   render(agents: AgentView[], sessionFor: (topicId: string) => RunSession | undefined): void {
     const live = new Set(agents.map(agent => agent.agent_id));
     for (const [id, card] of this.cards) if (!live.has(id)) { card.root.remove(); this.cards.delete(id); }

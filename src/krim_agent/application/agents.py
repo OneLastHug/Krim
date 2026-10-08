@@ -67,6 +67,7 @@ from krim_agent.workspace_change import (
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
+    NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
@@ -811,6 +812,14 @@ class AgentService:
     async def workspace_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
         session = await self.session(agent_id)
         return await self.workspace_batch_store.get(f"session:{session.session_id}", batch_id)
+
+    async def workspace_batch_history(
+        self, agent_id: str, *, cursor: str | None = None, limit: int = 32
+    ) -> NativeBatchHistoryPage:
+        session = await self.session(agent_id)
+        return await self.workspace_batch_store.history(
+            f"session:{session.session_id}", cursor=cursor, limit=limit
+        )
 
     async def workspace_batch_by_key(
         self, agent_id: str, request_key: str

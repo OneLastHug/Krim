@@ -68,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
             "start-batch",
             "native-batch",
             "batch-by-key",
+            "batch-history",
             "wait-batch",
             "cancel-batch",
         ],
@@ -314,6 +315,10 @@ def _workspace_command(
             filter=args.filter,
             cursor=args.cursor,
             limit=args.limit if args.limit is not None else 32,
+        )
+    elif args.action == "batch-history":
+        result = client.agent_workspace_native_batch_history(
+            args.agent_id, cursor=args.cursor, limit=args.limit if args.limit is not None else 32
         )
     elif args.action == "start-batch":
         if not args.request:

@@ -23,6 +23,7 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_list import (
+    NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
@@ -198,6 +199,12 @@ class AgentSession:
 
     async def file_change_batch(self, batch_id: str) -> NativeBatchView:
         return await self.service.workspace_batch(self.agent_id, batch_id)
+
+    async def file_change_batch_history(
+        self, *, cursor: str | None = None, limit: int = 32
+    ) -> NativeBatchHistoryPage:
+        """发现原批次；历史翻页不会执行或接管文件操作。"""
+        return await self.service.workspace_batch_history(self.agent_id, cursor=cursor, limit=limit)
 
     async def file_change_batch_by_key(self, request_key: str) -> NativeBatchView | None:
         return await self.service.workspace_batch_by_key(self.agent_id, request_key)

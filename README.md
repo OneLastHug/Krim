@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执与SDK/REST/CLI/浏览器已接通，清单/快照联动、命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单与SDK/REST/CLI/浏览器已接通，Checkpoint恢复、命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
 
 ## 快速开始
 
@@ -67,6 +67,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [浏览器文件修改架构与理由](docs/architecture/workspace-browser-design.md)
 - [连续修改保留与兼容设计](docs/architecture/workspace-effect-chain-design.md)
 - [原生修改清单与批次设计](docs/architecture/native-workspace-list-design.md)
+- [浏览器统一审阅修改](docs/user-guide/native-change-list.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)
