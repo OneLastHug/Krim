@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterator
 from types import TracebackType
@@ -82,6 +83,12 @@ from .workspace_change import (
     WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
+)
+from .workspace_list import (
+    NativeBatchRequest,
+    NativeBatchView,
+    NativeChangePage,
+    NativeListFilter,
 )
 
 
@@ -557,6 +564,82 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceAttemptView.model_validate_json(response.content)
+
+    def agent_workspace_native_changes(
+        self,
+        agent_id: str,
+        *,
+        filter: NativeListFilter = "active",
+        cursor: str | None = None,
+        limit: int = 32,
+    ) -> NativeChangePage:
+        """读取原生修改清单的一页；游标绑定快照，不能与旧 changes offset 混用。"""
+        params: dict[str, str | int] = {"filter": filter, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-changes",
+            params=params,
+        )
+        self._check(response)
+        return NativeChangePage.model_validate_json(response.content)
+
+    def agent_workspace_start_native_batch(
+        self, agent_id: str, request: NativeBatchRequest, *, confirmed: bool = False
+    ) -> NativeBatchView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_native_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches/"
+            f"{_workspace_identifier(batch_id)}"
+        )
+        self._check(response)
+        return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_native_batch_by_key(
+        self, agent_id: str, request_key: str
+    ) -> NativeBatchView | None:
+        if not 1 <= len(request_key) <= 128 or any(ord(char) < 32 for char in request_key):
+            raise ClientError(
+                "原生批次请求键无效", code="workspace_request_key_invalid", status=422
+            )
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches/by-key",
+            params={"request_key": request_key},
+        )
+        self._check(response)
+        return TypeAdapter(NativeBatchView | None).validate_json(response.content)
+
+    def agent_workspace_wait_native_batch(
+        self, agent_id: str, batch_id: str, *, timeout_seconds: float = 30
+    ) -> NativeBatchView:
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+            raise ClientError(
+                "批次等待时间须为0至300秒", code="workspace_batch_timeout", status=422
+            )
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches/"
+            f"{_workspace_identifier(batch_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        self._check(response)
+        return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_cancel_native_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-batches/"
+            f"{_workspace_identifier(batch_id)}/cancel"
+        )
+        self._check(response)
+        return NativeBatchView.model_validate_json(response.content)
 
     def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
         response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")

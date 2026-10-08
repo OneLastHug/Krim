@@ -21,6 +21,7 @@ from .streams import MultiplexRequest
 from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
 from .workspace_change import WorkspaceAttemptView, WorkspaceChangeAction, WorkspacePreviewRequest
+from .workspace_list import NativeBatchRequest, NativeBatchView
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,21 +64,43 @@ def build_parser() -> argparse.ArgumentParser:
             "keep",
             "reconcile",
             "finalize",
+            "native-changes",
+            "start-batch",
+            "native-batch",
+            "batch-by-key",
+            "wait-batch",
+            "cancel-batch",
         ],
     )
     workspace.add_argument("agent_id", help="Agent实例标识")
     workspace.add_argument(
-        "value", nargs="?", help="文件相对路径、搜索文本、proposal/operation标识"
+        "value", nargs="?", help="文件相对路径、搜索文本、proposal/operation/batch标识"
     )
     workspace.add_argument("--path", default=".", help="path（路径）：列出/搜索的相对目录")
     workspace.add_argument("--limit", type=int, help="limit（上限）：目录项或搜索匹配数")
     workspace.add_argument("--start-line", type=int, default=1, help="start line（起始行）")
     workspace.add_argument("--max-lines", type=int, default=200, help="max lines（最大行数）")
-    workspace.add_argument("--request", help="request（请求）：preview的本地JSON文件，包含spec/键")
+    workspace.add_argument("--request", help="request（请求）：preview或start-batch的本地JSON文件")
     workspace.add_argument(
         "--revision", type=int, help="revision（修订号）：apply/undo/keep预期版本"
     )
-    workspace.add_argument("--request-key", help="request key（请求键）：apply/undo/keep固定幂等键")
+    workspace.add_argument(
+        "--request-key", help="request key（请求键）：apply/undo/keep固定幂等键或批次查询键"
+    )
+    workspace.add_argument(
+        "--filter",
+        choices=["active", "history", "all"],
+        default="active",
+        help="filter（筛选）：原生修改清单筛选范围",
+    )
+    workspace.add_argument("--cursor", help="cursor（游标）：原生清单快照游标")
+    workspace.add_argument("--batch-id", help="batch identifier（批次标识）：查询、等待或取消批次")
+    workspace.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=30,
+        help="timeout seconds（等待秒数）：批次查询最长等待时间",
+    )
     workspace.add_argument(
         "--offset", type=int, default=0, help="offset（偏移）：changes列表起始项"
     )
@@ -256,6 +279,10 @@ def _workspace_command(
     client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
     result: BaseModel | Sequence[BaseModel]
+    if args.action in {"native-batch", "wait-batch", "cancel-batch"} and args.batch_id:
+        if args.value and args.value != args.batch_id:
+            parser.error("位置参数与--batch-id的批次标识不一致")
+        args.value = args.batch_id
     if args.action == "info":
         result = client.agent_workspace(args.agent_id)
     elif args.action == "list":
@@ -281,6 +308,49 @@ def _workspace_command(
         result = client.agent_workspace_changes(
             args.agent_id, offset=args.offset, limit=args.limit if args.limit is not None else 50
         )
+    elif args.action == "native-changes":
+        result = client.agent_workspace_native_changes(
+            args.agent_id,
+            filter=args.filter,
+            cursor=args.cursor,
+            limit=args.limit if args.limit is not None else 32,
+        )
+    elif args.action == "start-batch":
+        if not args.request:
+            parser.error("workspace start-batch需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("原生批次请求不能超过64KiB")
+            batch_request = NativeBatchRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("原生批次请求无效；请检查action、snapshot_revision、targets和request_key")
+        result = client.agent_workspace_start_native_batch(
+            args.agent_id, batch_request, confirmed=args.confirm
+        )
+    elif args.action == "native-batch":
+        if not args.value:
+            parser.error("workspace native-batch需要批次标识")
+        result = client.agent_workspace_native_batch(args.agent_id, args.value)
+    elif args.action == "batch-by-key":
+        if not args.request_key:
+            parser.error("workspace batch-by-key需要--request-key")
+        batch = client.agent_workspace_native_batch_by_key(args.agent_id, args.request_key)
+        if batch is None:
+            print("null")
+            return
+        result = batch
+    elif args.action == "wait-batch":
+        if not args.value:
+            parser.error("workspace wait-batch需要批次标识")
+        result = client.agent_workspace_wait_native_batch(
+            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
+        )
+    elif args.action == "cancel-batch":
+        if not args.value:
+            parser.error("workspace cancel-batch需要批次标识")
+        result = client.agent_workspace_cancel_native_batch(args.agent_id, args.value)
     elif args.action == "preview":
         if not args.request:
             parser.error("workspace preview需要--request本地JSON文件")
@@ -334,6 +404,12 @@ def _workspace_command(
         args.action in {"apply", "undo", "keep", "reconcile"}
         and isinstance(result, WorkspaceAttemptView)
         and result.status != "done"
+    ):
+        parser.exit(1)
+    if (
+        isinstance(result, NativeBatchView)
+        and args.action in {"start-batch", "wait-batch"}
+        and result.status not in {"running", "done"}
     ):
         parser.exit(1)
 

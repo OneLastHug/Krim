@@ -150,6 +150,12 @@ from krim_agent.workspace_change import (
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_list import (
+    NativeBatchRequest,
+    NativeBatchView,
+    NativeChangePage,
+    NativeListFilter,
+)
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -842,6 +848,57 @@ def create_app(
         if request.operation_id != operation_id:
             raise ServiceError("workspace_operation_mismatch", "路径与操作标识不一致", 422)
         return await agent_service.workspace_finalize(agent_id, request, confirmed=confirmed)
+
+    # 原生清单与批次接口独立于旧 workspace/changes 路由。清单游标包含快照指纹，
+    # 因此服务端只接受明确的 filter/cursor/limit，不把旧 offset 语义混用。
+    @app.get("/v1/agents/{agent_id}/workspace/native-changes")
+    async def agent_workspace_native_changes(
+        agent_id: WorkspaceIdentifier,
+        filter: Annotated[NativeListFilter, Query()] = "active",
+        cursor: str | None = Query(default=None, max_length=1024),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> NativeChangePage:
+        return await agent_service.workspace_change_list(
+            agent_id, filter=filter, cursor=cursor, limit=limit
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-batches", status_code=202)
+    async def agent_workspace_native_batch_start(
+        agent_id: WorkspaceIdentifier,
+        payload: NativeBatchRequest,
+        confirmed: bool = Query(default=False),
+    ) -> NativeBatchView:
+        return await agent_service.workspace_start_batch(agent_id, payload, confirmed=confirmed)
+
+    # by-key 必须排在通用 batch_id 路由之前，否则 "by-key" 会被当作批次标识。
+    @app.get("/v1/agents/{agent_id}/workspace/native-batches/by-key")
+    async def agent_workspace_native_batch_by_key(
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$"),
+    ) -> NativeBatchView | None:
+        return await agent_service.workspace_batch_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-batches/{batch_id}")
+    async def agent_workspace_native_batch(
+        agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
+    ) -> NativeBatchView:
+        return await agent_service.workspace_batch(agent_id, batch_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-batches/{batch_id}/wait")
+    async def agent_workspace_native_batch_wait(
+        agent_id: WorkspaceIdentifier,
+        batch_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300),
+    ) -> NativeBatchView:
+        return await agent_service.workspace_wait_batch(
+            agent_id, batch_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-batches/{batch_id}/cancel")
+    async def agent_workspace_native_batch_cancel(
+        agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
+    ) -> NativeBatchView:
+        return await agent_service.workspace_cancel_batch(agent_id, batch_id)
 
     @app.post("/v1/agents/{agent_id}/tasks/{kind}")
     async def write_agent_tasks(

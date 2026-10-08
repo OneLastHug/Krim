@@ -30,10 +30,13 @@ from krim_agent.agents import (
 )
 from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
+from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
+from krim_agent.persistence.workspace_batches import NativeBatchStore
+from krim_agent.persistence.workspace_list import NativeChangeListStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
@@ -61,6 +64,13 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
+)
+from krim_agent.workspace_list import (
+    NativeBatchFence,
+    NativeBatchRequest,
+    NativeBatchView,
+    NativeChangePage,
+    NativeListFilter,
 )
 
 AgentViewStatus = Literal[
@@ -146,6 +156,13 @@ class AgentService:
         self.sessions = self.manager.sessions
         self.resources = AgentResourceRegistry(self.providers, runtime.tools)
         self.workspace_edits = self.manager.workspace_changes.store
+        self.workspace_list_store = NativeChangeListStore(self.workspace_edits)
+        self.workspace_batch_store = NativeBatchStore(self.workspace_edits)
+        self.workspace_batches = WorkspaceBatchService(
+            self.workspace_batch_store,
+            self._workspace_batch_authorize,
+            self._workspace_batch_child,
+        )
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
@@ -514,11 +531,18 @@ class AgentService:
         if self._workspace_recovered:
             return 0
         recovered = await self.workspace_edits.recover_interrupted()
+        recovered += await self.workspace_batch_store.recover_interrupted()
         self._workspace_recovered = True
         return recovered
 
     async def _workspace_call(
-        self, agent_id: str, name: str, arguments: dict[str, object], *, confirmed: bool = False
+        self,
+        agent_id: str,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        confirmed: bool = False,
+        batch_fence: NativeBatchFence | None = None,
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -563,6 +587,7 @@ class AgentService:
                     session_id=handle.session_id,
                     workspace=handle.definition.workspace,
                     workspace_changes=self.manager.workspace_changes,
+                    workspace_batch=batch_fence,
                     call_id=call_id,
                     approval_handler=confirm if confirmed else None,
                     policy=handle.runtime.tool_policy,
@@ -612,6 +637,13 @@ class AgentService:
                 "workspace_effect_corrupt": 409,
                 "workspace_keep_witness_corrupt": 409,
                 "workspace_snapshot_corrupt": 409,
+                "workspace_batch_action": 403,
+                "workspace_batch_fence_mismatch": 403,
+                "workspace_batch_request_reserved": 403,
+                "workspace_batch_fenced": 409,
+                "workspace_batch_child_closed": 409,
+                "workspace_batch_operation_conflict": 409,
+                "workspace_batch_dependency": 409,
                 "workspace_proposal_expired": 410,
                 "workspace_receipt_pending": 503,
                 "workspace_busy": 429,
@@ -725,6 +757,77 @@ class AgentService:
         session = await self.session(agent_id)
         return await self.workspace_edits.operation_proof(
             f"session:{session.session_id}", operation_id
+        )
+
+    async def _workspace_batch_authorize(self, agent_id: str) -> tuple[str, str, str]:
+        if self._closed:
+            raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+        handle = self._handle(agent_id)
+        scope, binding = await self.manager.workspace_changes._guard(
+            ToolContext(
+                handle.runtime.tools,
+                topic_id=handle.topic_id,
+                agent_id=agent_id,
+                session_id=handle.session_id,
+                workspace=handle.definition.workspace,
+                origin="host",
+            )
+        )
+        return scope, binding.key, binding.fingerprint
+
+    async def _workspace_batch_child(
+        self,
+        agent_id: str,
+        request: WorkspaceChangeAction,
+        fence: NativeBatchFence,
+        confirmed: bool,
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            "workspace_change",
+            request.model_dump(),
+            confirmed=confirmed,
+            batch_fence=fence,
+        )
+
+    async def workspace_change_list(
+        self,
+        agent_id: str,
+        *,
+        filter: NativeListFilter = "active",
+        cursor: str | None = None,
+        limit: int = 32,
+    ) -> NativeChangePage:
+        session = await self.session(agent_id)
+        return await self.workspace_list_store.page(
+            f"session:{session.session_id}", filter=filter, cursor=cursor, limit=limit
+        )
+
+    async def workspace_start_batch(
+        self, agent_id: str, request: NativeBatchRequest, *, confirmed: bool = False
+    ) -> NativeBatchView:
+        return await self.workspace_batches.start(agent_id, request, confirmed=confirmed)
+
+    async def workspace_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_batch_store.get(f"session:{session.session_id}", batch_id)
+
+    async def workspace_batch_by_key(
+        self, agent_id: str, request_key: str
+    ) -> NativeBatchView | None:
+        session = await self.session(agent_id)
+        return await self.workspace_batch_store.by_key(f"session:{session.session_id}", request_key)
+
+    async def workspace_cancel_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_batches.cancel(f"session:{session.session_id}", batch_id)
+
+    async def workspace_wait_batch(
+        self, agent_id: str, batch_id: str, *, timeout_seconds: float = 30
+    ) -> NativeBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_batches.wait(
+            f"session:{session.session_id}", batch_id, timeout_seconds=timeout_seconds
         )
 
     async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
@@ -1140,9 +1243,11 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.workspace_batches.assert_external_close()
         async with self._start_lock:
             self._closed = True
         try:
+            await self.workspace_batches.close()
             operations = list(self._workspace_operations)
             for operation in operations:
                 if not operation.cancelling():

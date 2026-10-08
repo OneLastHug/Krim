@@ -34,6 +34,7 @@ from krim_agent.workspace_change import (
     WorkspaceFileState,
     WorkspaceOperationProofView,
 )
+from krim_agent.workspace_list import NativeBatchFence
 from krim_agent.workspace_writer import FileRecovery, FileSnapshot, PreparedFileChange
 
 from .agent_sessions import assert_session_open, assert_session_owner
@@ -48,6 +49,7 @@ from .database import (
     WorkspaceFileLockRow,
     WorkspaceLedgerGuardRow,
 )
+from .workspace_batches import assert_batch_execution, assert_batch_request
 
 ChangeStatus = Literal[
     "proposed",
@@ -537,7 +539,12 @@ class WorkspaceEditStore:
             return [self._change(row).view for row in rows]
 
     async def find_action(
-        self, scope_id: str, request: WorkspaceChangeAction, resource_fingerprint: str
+        self,
+        scope_id: str,
+        request: WorkspaceChangeAction,
+        resource_fingerprint: str,
+        *,
+        batch_fence: NativeBatchFence | None = None,
     ) -> StoredWorkspaceAttempt | None:
         value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
@@ -554,6 +561,15 @@ class WorkspaceEditStore:
                 raise ServiceError(
                     "workspace_idempotency_conflict", "动作键已绑定其他请求或资源", 409
                 )
+            await assert_batch_request(
+                session,
+                self.owner_id,
+                scope_id,
+                request,
+                resource_fingerprint,
+                batch_fence,
+                row.operation_id if row is not None else None,
+            )
             if row is not None:
                 proposal = await self._proposal(session, scope_id, row.proposal_id)
                 await self._resource(
@@ -794,6 +810,7 @@ class WorkspaceEditStore:
         *,
         run_id: str | None = None,
         call_id: str | None = None,
+        batch_fence: NativeBatchFence | None = None,
     ) -> tuple[StoredWorkspaceAttempt, bool]:
         self._key(request.request_key)
         digest_value = digest(
@@ -809,6 +826,15 @@ class WorkspaceEditStore:
                     WorkspaceEditAttemptRow.scope_id == scope_id,
                     WorkspaceEditAttemptRow.request_key == request.request_key,
                 )
+            )
+            batch_child = await assert_batch_request(
+                session,
+                self.owner_id,
+                scope_id,
+                request,
+                resource_fingerprint,
+                batch_fence,
+                previous.operation_id if previous is not None else None,
             )
             if previous is not None:
                 if previous.request_hash != digest_value:
@@ -936,6 +962,9 @@ class WorkspaceEditStore:
             )
             session.add(row)
             await session.flush()
+            if batch_child is not None:
+                batch_child.operation_id = operation_id
+                batch_child.admission_open = False
             session.add(WorkspaceFileLockRow(file_key=lock_id, operation_id=operation_id))
             await session.flush()
             return self._attempt(row), True
@@ -964,6 +993,7 @@ class WorkspaceEditStore:
             proposal = await self._proposal(session, scope_id, row.proposal_id)
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
+            await assert_batch_execution(session, self.owner_id, operation_id)
 
     async def history(self, scope_id: str, proposal_id: str) -> builtin_list[WorkspaceAttemptView]:
         async with self.database.write_lock, self.database.sessions() as session:
@@ -1041,6 +1071,7 @@ class WorkspaceEditStore:
                 await self._resource(
                     session, scope_id, proposal.workspace_key, proposal.resource_fingerprint
                 )
+                await assert_batch_execution(session, self.owner_id, operation_id)
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             if len(row.receipt_history) >= 16:

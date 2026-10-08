@@ -22,6 +22,12 @@ from krim_agent.workspace_change import (
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_list import (
+    NativeBatchRequest,
+    NativeBatchView,
+    NativeChangePage,
+    NativeListFilter,
+)
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -173,6 +179,38 @@ class AgentSession:
 
     async def file_change_history(self, proposal_id: str) -> list[WorkspaceAttemptView]:
         return await self.service.workspace_history(self.agent_id, proposal_id)
+
+    async def file_change_list(
+        self,
+        *,
+        filter: NativeListFilter = "active",
+        cursor: str | None = None,
+        limit: int = 32,
+    ) -> NativeChangePage:
+        return await self.service.workspace_change_list(
+            self.agent_id, filter=filter, cursor=cursor, limit=limit
+        )
+
+    async def start_file_change_batch(
+        self, request: NativeBatchRequest, *, confirmed: bool = False
+    ) -> NativeBatchView:
+        return await self.service.workspace_start_batch(self.agent_id, request, confirmed=confirmed)
+
+    async def file_change_batch(self, batch_id: str) -> NativeBatchView:
+        return await self.service.workspace_batch(self.agent_id, batch_id)
+
+    async def file_change_batch_by_key(self, request_key: str) -> NativeBatchView | None:
+        return await self.service.workspace_batch_by_key(self.agent_id, request_key)
+
+    async def cancel_file_change_batch(self, batch_id: str) -> NativeBatchView:
+        return await self.service.workspace_cancel_batch(self.agent_id, batch_id)
+
+    async def wait_file_change_batch(
+        self, batch_id: str, *, timeout_seconds: float = 30
+    ) -> NativeBatchView:
+        return await self.service.workspace_wait_batch(
+            self.agent_id, batch_id, timeout_seconds=timeout_seconds
+        )
 
     async def stream(self, *, run_id: str | None = None) -> StreamTextResult:
         from .text import StreamTextResult
