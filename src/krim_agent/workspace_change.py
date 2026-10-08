@@ -171,3 +171,37 @@ class RecoveryMetadata(StrictModel):
     stage_name: str
     parent_device: int
     parent_inode: int
+
+
+class WorkspaceFileState(StrictModel):
+    """文件锁内实际观察的内容和属性；只存私有元数据，不复制文件正文。"""
+
+    sha256: str | None = Field(pattern=SHA256)
+    mode: int | None = Field(ge=0, le=4095)
+    uid: int | None = Field(ge=0)
+    gid: int | None = Field(ge=0)
+
+    @model_validator(mode="after")
+    def existence(self) -> WorkspaceFileState:
+        attributes = (self.mode, self.uid, self.gid)
+        if self.sha256 is None:
+            if any(value is not None for value in attributes):
+                raise ValueError("不存在的文件不能带属性")
+        elif any(value is None for value in attributes):
+            raise ValueError("存在的文件必须记录完整属性")
+        return self
+
+
+class WorkspaceOperationProofView(StrictModel):
+    """独立查询视图；不加入既有工具输出，以保持持久Agent定义兼容。"""
+
+    operation_id: str
+    proposal_id: str
+    scope_id: str
+    status: Literal["running", "done", "rejected", "uncertain"]
+    kind: Literal["not_applicable", "exact_after", "successor_chain"]
+    tip_proposal_id: str | None
+    tip_operation_id: str | None
+    tip_after_sha256: str | None = Field(pattern=SHA256)
+    effect_sequence: int | None = Field(ge=1, le=9007199254740991)
+    successor_count: int = Field(ge=0)

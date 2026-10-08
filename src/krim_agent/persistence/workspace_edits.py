@@ -12,13 +12,13 @@ from datetime import UTC
 from typing import Literal, cast
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import Field, JsonValue, ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.domain import ServiceError
-from krim_agent.protocol.models import utc_now
+from krim_agent.protocol.models import StrictModel, utc_now
 from krim_agent.workspace import Workspace
 from krim_agent.workspace_change import (
     FileChangePreview,
@@ -31,6 +31,8 @@ from krim_agent.workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceFileState,
+    WorkspaceOperationProofView,
 )
 from krim_agent.workspace_writer import FileRecovery, FileSnapshot, PreparedFileChange
 
@@ -42,6 +44,7 @@ from .database import (
     TopicRow,
     WorkspaceEditAttemptRow,
     WorkspaceEditProposalRow,
+    WorkspaceFileEffectRow,
     WorkspaceFileLockRow,
     WorkspaceLedgerGuardRow,
 )
@@ -163,6 +166,54 @@ class StoredWorkspaceAttempt:
     owner_id: str | None
     lease_expires_at: float | None
     recovery: FileRecovery | None
+
+
+class _KeepNode(StrictModel):
+    proposal_id: str
+    operation_id: str
+    revision: int = Field(ge=0)
+    effect_sequence: int = Field(ge=1, le=9007199254740991)
+    snapshot_hash: str
+    observed_after: WorkspaceFileState
+
+
+class _KeepWitness(StrictModel):
+    version: Literal[1] = 1
+    scope_id: str
+    resource_fingerprint: str
+    file_key: str
+    nodes: list[_KeepNode] = Field(min_length=2, max_length=5000)
+    witness_hash: str
+
+
+@dataclass(frozen=True)
+class _EffectNode:
+    effect: WorkspaceFileEffectRow
+    attempt: WorkspaceEditAttemptRow
+    proposal: WorkspaceEditProposalRow
+    prepared: PreparedFileChange
+    observed: WorkspaceFileState
+
+
+def _before_state(prepared: PreparedFileChange) -> WorkspaceFileState:
+    before = prepared.before
+    return WorkspaceFileState(
+        sha256=prepared.before_sha256,
+        mode=before.mode if before else None,
+        uid=before.uid if before else None,
+        gid=before.gid if before else None,
+    )
+
+
+def _same_binding(left: _EffectNode, right: _EffectNode) -> bool:
+    return (
+        left.proposal.scope_id == right.proposal.scope_id
+        and left.proposal.workspace_key == right.proposal.workspace_key
+        and left.proposal.resource_fingerprint == right.proposal.resource_fingerprint
+        and left.prepared.workspace_fingerprint == right.prepared.workspace_fingerprint
+        and left.prepared.parent_identity == right.prepared.parent_identity
+        and left.prepared.spec.path == right.prepared.spec.path
+    )
 
 
 class WorkspaceEditStore:
@@ -304,6 +355,10 @@ class WorkspaceEditStore:
                 )
             )
             total += int(used or 0)
+        witness_bytes = await session.scalar(
+            select(func.coalesce(func.sum(func.length(WorkspaceEditAttemptRow.keep_witness)), 0))
+        )
+        total += int(witness_bytes or 0)
         if total + added > self.max_snapshot_bytes:
             raise ServiceError("workspace_snapshot_limit", "修改私有快照容量已达上限", 429)
 
@@ -506,6 +561,230 @@ class WorkspaceEditStore:
                 )
             return self._attempt(row) if row is not None else None
 
+    @staticmethod
+    def _effect_node(
+        effect: WorkspaceFileEffectRow,
+        attempt: WorkspaceEditAttemptRow,
+        proposal: WorkspaceEditProposalRow,
+    ) -> _EffectNode | None:
+        prepared = decode_prepared(attempt.prepared, attempt.before_content, attempt.after_content)
+        if (
+            effect.operation_id != attempt.operation_id
+            or effect.proposal_id != attempt.proposal_id
+            or effect.proposal_id != proposal.proposal_id
+            or effect.scope_id != attempt.scope_id
+            or effect.scope_id != proposal.scope_id
+            or effect.resource_fingerprint != proposal.resource_fingerprint
+            or effect.file_key != file_key(prepared)
+            or effect.action != attempt.action
+            or attempt.status != "done"
+            or effect.action not in {"apply", "undo"}
+        ):
+            raise ServiceError("workspace_effect_corrupt", "文件效果引用校验失败", 409)
+        if effect.observed_after is None:
+            # 旧低层调用仍写入顺序断点，但无实测属性时不能作为连续性证明。
+            return None
+        try:
+            observed = WorkspaceFileState.model_validate(effect.observed_after)
+        except ValidationError:
+            raise ServiceError("workspace_effect_corrupt", "文件效果状态校验失败", 409) from None
+        if observed.sha256 != prepared.after_sha256:
+            raise ServiceError("workspace_effect_corrupt", "文件效果版本校验失败", 409)
+        if effect.action == "apply" and prepared != decode_prepared(
+            proposal.prepared, proposal.before_content, proposal.after_content
+        ):
+            raise ServiceError("workspace_effect_corrupt", "文件效果未绑定原提案快照", 409)
+        return _EffectNode(effect, attempt, proposal, prepared, observed)
+
+    async def _freeze_keep(
+        self, session: AsyncSession, proposal: WorkspaceEditProposalRow, lock_id: str
+    ) -> dict[str, JsonValue] | None:
+        rows = await session.execute(
+            select(WorkspaceFileEffectRow, WorkspaceEditAttemptRow, WorkspaceEditProposalRow)
+            .join(
+                WorkspaceEditAttemptRow,
+                WorkspaceEditAttemptRow.operation_id == WorkspaceFileEffectRow.operation_id,
+            )
+            .join(
+                WorkspaceEditProposalRow,
+                WorkspaceEditProposalRow.proposal_id == WorkspaceFileEffectRow.proposal_id,
+            )
+            .where(WorkspaceFileEffectRow.file_key == lock_id)
+            .order_by(WorkspaceFileEffectRow.effect_sequence)
+        )
+        stack: list[_EffectNode] = []
+        for effect, attempt, source in rows:
+            node = self._effect_node(effect, attempt, source)
+            if node is None:
+                stack.clear()
+                continue
+            # 重放历史事件时不按提案当前undone状态过滤，undo事件才负责弹栈。
+            if effect.action == "apply":
+                if stack and (
+                    not _same_binding(stack[-1], node)
+                    or stack[-1].observed != _before_state(node.prepared)
+                ):
+                    stack.clear()
+                stack.append(node)
+            elif (
+                stack
+                and stack[-1].proposal.proposal_id == source.proposal_id
+                and _same_binding(stack[-1], node)
+                and stack[-1].observed == _before_state(node.prepared)
+            ):
+                stack.pop()
+                # 恢复可能剥离特殊权限位；不能把目标内容相同当作属性也相同。
+                if stack and stack[-1].observed != node.observed:
+                    stack.clear()
+            else:
+                stack.clear()
+        start = next(
+            (
+                index
+                for index, node in enumerate(stack)
+                if node.proposal.proposal_id == proposal.proposal_id
+            ),
+            None,
+        )
+        if start is None or start == len(stack) - 1:
+            return None
+        chain = stack[start:]
+        if any(
+            node.proposal.scope_id != proposal.scope_id
+            or node.proposal.resource_fingerprint != proposal.resource_fingerprint
+            or node.proposal.workspace_key != proposal.workspace_key
+            or node.proposal.status not in {"applied", "kept"}
+            or node.proposal.active_operation_id is not None
+            for node in chain
+        ):
+            return None
+        witness = _KeepWitness(
+            scope_id=proposal.scope_id,
+            resource_fingerprint=proposal.resource_fingerprint,
+            file_key=lock_id,
+            nodes=[
+                _KeepNode(
+                    proposal_id=node.proposal.proposal_id,
+                    operation_id=node.attempt.operation_id,
+                    revision=node.proposal.revision,
+                    effect_sequence=node.effect.effect_sequence,
+                    snapshot_hash=str(node.attempt.prepared["snapshot_hash"]),
+                    observed_after=node.observed,
+                )
+                for node in chain
+            ],
+            witness_hash="",
+        )
+        value = witness.model_dump(mode="json")
+        value["witness_hash"] = digest(
+            {key: item for key, item in value.items() if key != "witness_hash"}
+        )
+        return value
+
+    async def _keep_target(
+        self, session: AsyncSession, row: WorkspaceEditAttemptRow
+    ) -> tuple[PreparedFileChange, WorkspaceFileState | None, _KeepWitness | None]:
+        original = self._attempt(row).prepared
+        if row.keep_witness is None:
+            return original, None, None
+        try:
+            witness = _KeepWitness.model_validate(row.keep_witness)
+        except ValidationError:
+            raise ServiceError("workspace_keep_witness_corrupt", "保留见证校验失败", 409) from None
+        proposal = await self._proposal(session, row.scope_id, row.proposal_id)
+        if (
+            row.action != "keep"
+            or witness.witness_hash
+            != digest(
+                {key: item for key, item in row.keep_witness.items() if key != "witness_hash"}
+            )
+            or witness.scope_id != row.scope_id
+            or witness.resource_fingerprint != proposal.resource_fingerprint
+            or witness.file_key != file_key(original)
+            or witness.nodes[0].proposal_id != row.proposal_id
+            or witness.nodes[0].revision != row.expected_revision
+        ):
+            raise ServiceError("workspace_keep_witness_corrupt", "保留见证绑定校验失败", 409)
+        previous: _EffectNode | None = None
+        for frozen in witness.nodes:
+            effect = await session.get(WorkspaceFileEffectRow, frozen.effect_sequence)
+            attempt = await session.get(WorkspaceEditAttemptRow, frozen.operation_id)
+            source = await session.get(WorkspaceEditProposalRow, frozen.proposal_id)
+            if effect is None or attempt is None or source is None:
+                raise ServiceError("workspace_keep_witness_corrupt", "保留见证引用丢失", 409)
+            node = self._effect_node(effect, attempt, source)
+            if (
+                node is None
+                or effect.action != "apply"
+                or effect.scope_id != row.scope_id
+                or effect.file_key != witness.file_key
+                or effect.resource_fingerprint != witness.resource_fingerprint
+                or source.workspace_key != proposal.workspace_key
+                or attempt.prepared["snapshot_hash"] != frozen.snapshot_hash
+                or node.observed != frozen.observed_after
+                or frozen.revision < attempt.expected_revision + 2
+                or (
+                    previous is not None
+                    and (
+                        previous.effect.effect_sequence >= effect.effect_sequence
+                        or not _same_binding(previous, node)
+                        or previous.observed != _before_state(node.prepared)
+                    )
+                )
+            ):
+                raise ServiceError("workspace_keep_witness_corrupt", "保留见证连续性校验失败", 409)
+            previous = node
+        assert previous is not None
+        # 只读冻结引用；不按当前revision/status或新效果重选链尾，历史证明保持原意。
+        return previous.prepared, previous.observed, witness
+
+    async def keep_target(
+        self, scope_id: str, operation_id: str
+    ) -> tuple[PreparedFileChange, WorkspaceFileState | None]:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope_id, writing=False)
+            row = await session.get(WorkspaceEditAttemptRow, operation_id)
+            if row is None or row.scope_id != scope_id:
+                raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
+            if row.action != "keep":
+                raise ServiceError("workspace_change_state", "只有保留动作可查询核实目标", 409)
+            prepared, observed, _ = await self._keep_target(session, row)
+            return prepared, observed
+
+    async def operation_proof(
+        self, scope_id: str, operation_id: str
+    ) -> WorkspaceOperationProofView:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope_id, writing=False)
+            row = await session.get(WorkspaceEditAttemptRow, operation_id)
+            if row is None or row.scope_id != scope_id:
+                raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
+            tip_id = tip_operation = after = None
+            sequence = None
+            count = 0
+            kind: Literal["not_applicable", "exact_after", "successor_chain"] = "not_applicable"
+            if row.action == "keep":
+                prepared, _observed, witness = await self._keep_target(session, row)
+                kind = "exact_after" if witness is None else "successor_chain"
+                tip_id = row.proposal_id
+                after = prepared.after_sha256
+                if witness is not None:
+                    tip = witness.nodes[-1]
+                    tip_id, tip_operation = tip.proposal_id, tip.operation_id
+                    sequence, count = tip.effect_sequence, len(witness.nodes) - 1
+            return WorkspaceOperationProofView(
+                operation_id=row.operation_id,
+                proposal_id=row.proposal_id,
+                scope_id=row.scope_id,
+                status=cast(AttemptStatus, row.status),
+                kind=kind,
+                tip_proposal_id=tip_id,
+                tip_operation_id=tip_operation,
+                tip_after_sha256=after,
+                effect_sequence=sequence,
+                successor_count=count,
+            )
+
     async def reserve(
         self,
         scope_id: str,
@@ -589,9 +868,18 @@ class WorkspaceEditStore:
             count = await session.scalar(select(func.count()).select_from(WorkspaceEditAttemptRow))
             if (count or 0) >= self.max_changes * 8:
                 raise ServiceError("workspace_operation_limit", "修改操作历史已达上限", 429)
+            keep_witness = (
+                await self._freeze_keep(session, proposal, lock_id)
+                if request.action == "keep"
+                else None
+            )
+            # 见证只包含ASCII引用/摘要；按SQLAlchemy默认JSON序列化计算持久字节。
+            witness_bytes = len(json.dumps(keep_witness)) if keep_witness is not None else 0
             await self._bytes_available(
                 session,
-                len(prepared.before.data if prepared.before else b"") + len(prepared.after or b""),
+                len(prepared.before.data if prepared.before else b"")
+                + len(prepared.after or b"")
+                + witness_bytes,
             )
             operation_id = str(uuid4())
             next_status = {"apply": "applying", "undo": "undoing", "keep": "keeping"}[
@@ -632,6 +920,7 @@ class WorkspaceEditStore:
                 prepared=metadata,
                 before_content=prepared.before.data if prepared.before else None,
                 after_content=prepared.after,
+                keep_witness=keep_witness,
                 cleanup_pending=False,
                 recovery=RecoveryMetadata(
                     workspace_fingerprint=prepared.workspace_fingerprint,
@@ -712,6 +1001,7 @@ class WorkspaceEditStore:
         recovery: FileRecovery | None = None,
         *,
         resolve: bool = False,
+        observed_after: WorkspaceFileState | None = None,
     ) -> StoredWorkspaceAttempt:
         value = FileChangeReceipt.model_validate(receipt.model_dump())
         async with self.database.write_lock, self.database.sessions.begin() as session:
@@ -746,10 +1036,36 @@ class WorkspaceEditStore:
             ):
                 raise ServiceError("workspace_receipt_mismatch", "恢复材料未关联原文件操作", 409)
             proposal = await self._proposal(session, scope_id, row.proposal_id)
+            if row.action == "keep" and value.status == "done" and not resolve:
+                await self._scope(session, scope_id, writing=True, run_id=row.run_id)
+                await self._resource(
+                    session, scope_id, proposal.workspace_key, proposal.resource_fingerprint
+                )
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             if len(row.receipt_history) >= 16:
                 raise ServiceError("workspace_receipt_limit", "核实回执历史已达上限", 409)
+            if value.status == "done" and row.action in {"apply", "undo"}:
+                observed = (
+                    WorkspaceFileState.model_validate(observed_after)
+                    if observed_after is not None
+                    else None
+                )
+                if observed is not None and observed.sha256 != prepared.after_sha256:
+                    raise ServiceError(
+                        "workspace_receipt_mismatch", "实测版本未关联原操作结果", 409
+                    )
+                session.add(
+                    WorkspaceFileEffectRow(
+                        operation_id=row.operation_id,
+                        proposal_id=row.proposal_id,
+                        scope_id=row.scope_id,
+                        resource_fingerprint=proposal.resource_fingerprint,
+                        file_key=file_key(prepared),
+                        action=row.action,
+                        observed_after=observed.model_dump(mode="json") if observed else None,
+                    )
+                )
             row.status = value.status
             row.receipt = value.model_dump(mode="json")
             row.receipt_history = [*row.receipt_history, row.receipt]
@@ -816,7 +1132,7 @@ class WorkspaceEditStore:
                     status="uncertain",
                     before_sha256=prepared.before_sha256,
                     after_sha256=prepared.after_sha256,
-                    changed=True,
+                    changed=row.action != "keep",
                     error_code="workspace_process_interrupted",
                     recovery_required=True,
                 ).model_dump(mode="json")

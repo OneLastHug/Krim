@@ -146,6 +146,7 @@ from krim_agent.workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
@@ -811,6 +812,12 @@ def create_app(
         agent_id: WorkspaceIdentifier, operation_id: WorkspaceIdentifier
     ) -> WorkspaceAttemptView:
         return await agent_service.workspace_operation(agent_id, operation_id)
+
+    @app.get("/v1/agents/{agent_id}/workspace/operations/{operation_id}/proof")
+    async def agent_workspace_operation_proof(
+        agent_id: WorkspaceIdentifier, operation_id: WorkspaceIdentifier
+    ) -> WorkspaceOperationProofView:
+        return await agent_service.workspace_operation_proof(agent_id, operation_id)
 
     @app.post("/v1/agents/{agent_id}/workspace/operations/{operation_id}/reconcile")
     async def agent_workspace_reconcile(

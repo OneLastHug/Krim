@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
             "proposal",
             "history",
             "operation",
+            "proof",
             "preview",
             "apply",
             "undo",
@@ -301,6 +302,8 @@ def _workspace_command(
             result = client.agent_workspace_history(args.agent_id, args.value)
         elif args.action == "operation":
             result = client.agent_workspace_operation(args.agent_id, args.value)
+        elif args.action == "proof":
+            result = client.agent_workspace_operation_proof(args.agent_id, args.value)
         elif args.action == "reconcile":
             result = client.agent_workspace_reconcile(
                 args.agent_id, args.value, confirmed=args.confirm

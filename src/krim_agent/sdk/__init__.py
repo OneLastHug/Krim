@@ -10,6 +10,7 @@ from krim_agent.workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceOperationProofView,
     WorkspacePreviewRequest,
 )
 
@@ -46,6 +47,7 @@ __all__ = [
     "WorkspaceAttemptView",
     "WorkspaceChangeAction",
     "WorkspaceChangeView",
+    "WorkspaceOperationProofView",
     "WorkspacePreviewRequest",
     "TaskMutation",
     "TaskSnapshot",

@@ -454,12 +454,39 @@ class WorkspaceEditAttemptRow(Base):
     after_content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     receipt: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
     recovery: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    keep_witness: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     cleanup_pending: Mapped[bool] = mapped_column(Boolean, default=False)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
     call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     receipt_history: Mapped[list[JsonValue]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceFileEffectRow(Base):
+    __tablename__ = "workspace_file_effects"
+    __table_args__ = (
+        CheckConstraint(
+            "effect_sequence >= 1 AND effect_sequence <= 9007199254740991",
+            name="ck_workspace_effect_sequence",
+        ),
+        CheckConstraint("action IN ('apply','undo')", name="ck_workspace_effect_action"),
+        {"sqlite_autoincrement": True},
+    )
+    effect_sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_edit_attempts.operation_id"), unique=True
+    )
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("workspace_edit_proposals.proposal_id"))
+    scope_id: Mapped[str] = mapped_column(String(80))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    file_key: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(16))
+    observed_after: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
 
 
 class WorkspaceFileLockRow(Base):

@@ -189,7 +189,11 @@ class WorkspaceChangeService:
         try:
             return (
                 await self.store.settle(
-                    scope, attempt.view.operation_id, effect.receipt, effect.recovery
+                    scope,
+                    attempt.view.operation_id,
+                    effect.receipt,
+                    effect.recovery,
+                    observed_after=effect.observed_after,
                 )
             ).view
         except Exception:
@@ -199,6 +203,8 @@ class WorkspaceChangeService:
                 if stored.view.status in {"done", "rejected", "uncertain"}:
                     return stored.view
                 unknown = self._effect(attempt.prepared, "uncertain", "workspace_receipt_pending")
+                if attempt.view.action == "keep":
+                    unknown = self._keep_effect(attempt.prepared, unknown)
                 return (
                     await self.store.settle(
                         scope,
@@ -213,6 +219,20 @@ class WorkspaceChangeService:
                     f"文件结果待核实，保留操作 {attempt.view.operation_id} 与恢复材料",
                     503,
                 ) from error
+
+    @staticmethod
+    def _keep_effect(original: PreparedFileChange, verified: FileEffect) -> FileEffect:
+        # 保留不写文件；证明指向链尾，旧回执仍描述被接受的原提案。
+        return FileEffect(
+            verified.receipt.model_copy(
+                update={
+                    "path": original.spec.path,
+                    "before_sha256": original.before_sha256,
+                    "after_sha256": original.after_sha256,
+                    "changed": False,
+                }
+            )
+        )
 
     async def _change(
         self, request: WorkspaceChangeAction, context: ToolContext, abort: Event
@@ -269,14 +289,24 @@ class WorkspaceChangeService:
             elif request.action == "keep":
                 try:
                     await self._guard(context)
-                    effect = await workspace_io(writer.verify, prepared, None, keeping=True)
-                    effect = self._effect(
-                        prepared,
-                        "done" if effect.receipt.status == "done" else "rejected",
-                        None if effect.receipt.status == "done" else "workspace_conflict",
+                    target, expected = await self.store.keep_target(
+                        scope, attempt.view.operation_id
                     )
+                    verified = await workspace_io(
+                        writer.verify,
+                        target,
+                        None,
+                        keeping=True,
+                        expected_after=expected,
+                        authorize=authorize,
+                    )
+                    await self._guard(context)
+                    effect = self._keep_effect(prepared, verified)
                 except Exception:
-                    effect = self._effect(prepared, "rejected", "workspace_conflict")
+                    effect = self._keep_effect(
+                        prepared,
+                        self._effect(prepared, "uncertain", "workspace_reconcile_inconclusive"),
+                    )
             else:
                 try:
                     await self._guard(context)
@@ -334,15 +364,29 @@ class WorkspaceChangeService:
         if abort.is_set():
             return attempt.view
         writer = WorkspaceWriter(binding.workspace)
+        target, expected = attempt.prepared, None
+        if attempt.view.action == "keep":
+            target, expected = await self.store.keep_target(scope, operation_id)
         effect = await workspace_io(
-            writer.verify, attempt.prepared, attempt.recovery, keeping=attempt.view.action == "keep"
+            writer.verify,
+            target,
+            attempt.recovery,
+            keeping=attempt.view.action == "keep",
+            expected_after=expected,
         )
+        if attempt.view.action == "keep":
+            effect = self._keep_effect(attempt.prepared, effect)
         await self._guard(context)
         if effect.receipt.status == "uncertain":
             return attempt.view
         return (
             await self.store.settle(
-                scope, operation_id, effect.receipt, effect.recovery, resolve=True
+                scope,
+                operation_id,
+                effect.receipt,
+                effect.recovery,
+                resolve=True,
+                observed_after=effect.observed_after,
             )
         ).view
 
