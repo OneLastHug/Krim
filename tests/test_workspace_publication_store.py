@@ -424,7 +424,11 @@ async def test_0024_upgrade_replays_old_transitions_without_rewriting_terminal_h
                 .all()
             )
             assert [
-                {key: value for key, value in row.items() if key != "previous_status"}
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"previous_status", "keep_witness"}
+                }
                 for row in attempts_after
             ] == attempts_before
             for proposal_id, (_attempts, _status, sources) in cases.items():
@@ -451,7 +455,7 @@ async def test_0024_upgrade_replays_old_transitions_without_rewriting_terminal_h
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0025_workspace_publication_state"
+            ).scalar_one() == "0026_workspace_effect_chain"
     finally:
         await database.close()
 

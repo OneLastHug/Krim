@@ -79,6 +79,7 @@ from .workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
@@ -522,6 +523,16 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceAttemptView.model_validate_json(response.content)
+
+    def agent_workspace_operation_proof(
+        self, agent_id: str, operation_id: str
+    ) -> WorkspaceOperationProofView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/operations/"
+            f"{_workspace_identifier(operation_id)}/proof"
+        )
+        self._check(response)
+        return WorkspaceOperationProofView.model_validate_json(response.content)
 
     def agent_workspace_reconcile(
         self, agent_id: str, operation_id: str, *, confirmed: bool = False

@@ -58,6 +58,7 @@ from krim_agent.workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
@@ -608,6 +609,9 @@ class AgentService:
                 "workspace_operation_active": 409,
                 "workspace_cleanup_state": 409,
                 "workspace_change_state": 409,
+                "workspace_effect_corrupt": 409,
+                "workspace_keep_witness_corrupt": 409,
+                "workspace_snapshot_corrupt": 409,
                 "workspace_proposal_expired": 410,
                 "workspace_receipt_pending": 503,
                 "workspace_busy": 429,
@@ -714,6 +718,14 @@ class AgentService:
         return (
             await self.workspace_edits.operation(f"session:{session.session_id}", operation_id)
         ).view
+
+    async def workspace_operation_proof(
+        self, agent_id: str, operation_id: str
+    ) -> WorkspaceOperationProofView:
+        session = await self.session(agent_id)
+        return await self.workspace_edits.operation_proof(
+            f"session:{session.session_id}", operation_id
+        )
 
     async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
         """可信组合层显式取得固定版本工具；不由HTTP配置自动安装工具。"""

@@ -18,6 +18,7 @@ from krim_agent.workspace_change import (
     WorkspaceAttemptView,
     WorkspaceChangeAction,
     WorkspaceChangeView,
+    WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
@@ -165,6 +166,10 @@ class AgentSession:
 
     async def file_change_operation(self, operation_id: str) -> WorkspaceAttemptView:
         return await self.service.workspace_operation(self.agent_id, operation_id)
+
+    async def file_change_proof(self, operation_id: str) -> WorkspaceOperationProofView:
+        """读取保留时冻结的版本证明；当前文件内容仍通过read_file读取。"""
+        return await self.service.workspace_operation_proof(self.agent_id, operation_id)
 
     async def file_change_history(self, proposal_id: str) -> list[WorkspaceAttemptView]:
         return await self.service.workspace_history(self.agent_id, proposal_id)

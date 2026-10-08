@@ -24,6 +24,7 @@ from krim_agent.workspace_change import (
     FileChangeReceipt,
     FileChangeSpec,
     RestoreFileSpec,
+    WorkspaceFileState,
 )
 
 
@@ -109,6 +110,17 @@ class FileRecovery:
 class FileEffect:
     receipt: FileChangeReceipt
     recovery: FileRecovery | None = None
+    observed_after: WorkspaceFileState | None = None
+
+
+def observed_state(snapshot: FileSnapshot | None) -> WorkspaceFileState:
+    """显式空状态表示确认不存在；None留给没有实际观察的旧回执。"""
+    return WorkspaceFileState(
+        sha256=snapshot.sha256 if snapshot is not None else None,
+        mode=snapshot.mode if snapshot is not None else None,
+        uid=snapshot.uid if snapshot is not None else None,
+        gid=snapshot.gid if snapshot is not None else None,
+    )
 
 
 def bounded_diff(path: str, before: str, after: str) -> tuple[str, bool]:
@@ -418,6 +430,7 @@ class WorkspaceWriter:
         *,
         recovery: FileRecovery | None = None,
         changed: bool = False,
+        observed_after: WorkspaceFileState | None = None,
     ) -> FileEffect:
         return FileEffect(
             FileChangeReceipt(
@@ -430,6 +443,7 @@ class WorkspaceWriter:
                 recovery_required=status == "uncertain",
             ),
             recovery,
+            observed_after,
         )
 
     def apply(
@@ -460,7 +474,7 @@ class WorkspaceWriter:
             if not self._same_before(current, change.before):
                 return self._receipt(change, "rejected", "workspace_conflict")
             if change.before is not None and change.before.data == change.after:
-                return self._receipt(change, "done")
+                return self._receipt(change, "done", observed_after=observed_state(current))
             stage = f"._krim-tx-{change.token}"
             recovery = FileRecovery(
                 self.workspace.fingerprint, change.spec.path, stage, change.parent_identity
@@ -566,6 +580,7 @@ class WorkspaceWriter:
                     "done",
                     changed=True,
                     recovery=recovery if change.before is not None and retain_before else None,
+                    observed_after=observed_state(final),
                 )
             except FileExistsError:
                 if published:
@@ -733,6 +748,8 @@ class WorkspaceWriter:
         reference: FileRecovery | None,
         *,
         keeping: bool = False,
+        expected_after: WorkspaceFileState | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> FileEffect:
         """只读取目标/暂存并生成回执，不发布第二次文件动作。"""
         if change.workspace_fingerprint != self.workspace.fingerprint:
@@ -741,6 +758,8 @@ class WorkspaceWriter:
             self._check_reference(change, reference)
         try:
             with self._locked_parent(change.spec.path, lambda: False) as (fd, parent, name):
+                if authorize is not None:
+                    authorize()
                 self._check_parent(parent, change.parent_identity)
                 if reference is None:
                     target = self._snapshot(fd, name, missing=True)
@@ -751,13 +770,17 @@ class WorkspaceWriter:
                 before = self._same_before(target, change.before, displaced=True)
                 if keeping:
                     desired = desired or (before and self._content_matches(target, change.after))
+                    if expected_after is not None:
+                        # 连续链采用实际冻结属性，不能被旧的无变化内容分支绕过。
+                        desired = desired and observed_state(target) == expected_after
                     return self._receipt(
                         change,
                         "done" if desired else "rejected",
                         None if desired else "workspace_conflict",
+                        observed_after=observed_state(target) if desired else None,
                     )
                 if before and staged is None and self._content_matches(target, change.after):
-                    return self._receipt(change, "done")
+                    return self._receipt(change, "done", observed_after=observed_state(target))
                 old_stage = change.before is not None and self._same_before(
                     staged, change.before, displaced=True
                 )
@@ -770,7 +793,11 @@ class WorkspaceWriter:
                 if published:
                     os.fsync(fd)
                     return self._receipt(
-                        change, "done", changed=True, recovery=reference if staged else None
+                        change,
+                        "done",
+                        changed=True,
+                        recovery=reference if staged else None,
+                        observed_after=observed_state(target),
                     )
                 new_stage = staged is not None and self._desired(change, staged, staged.identity)
                 if before and (staged is None or new_stage):

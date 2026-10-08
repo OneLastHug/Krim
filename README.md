@@ -65,6 +65,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [工作区API、SDK与CLI使用](docs/api/workspace.md)
 - [工作区浏览器与命令行修改指南](docs/user-guide/workspace-changes.md)
 - [浏览器文件修改架构与理由](docs/architecture/workspace-browser-design.md)
+- [连续修改保留与兼容设计](docs/architecture/workspace-effect-chain-design.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)
