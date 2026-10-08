@@ -2,6 +2,7 @@
 import { AgentView, AgentTurnView, MessageView, requestJson } from "./api.js";
 import { RunSession } from "./background-streams.js";
 import { t } from "./i18n.js";
+import { TasksUI } from "./tasks-ui.js";
 
 type Actions = {
   start: (agent: AgentView, prompt: string) => Promise<void>;
@@ -19,6 +20,7 @@ type Card = {
   input: HTMLTextAreaElement; execute: HTMLButtonElement; stop: HTMLButtonElement;
   control: HTMLButtonElement; history: HTMLDetailsElement; turns: HTMLSelectElement;
   transcript: HTMLElement; historyTurn: number; historyVersion: number;
+  tasks: TasksUI;
 };
 
 export class AgentsUI {
@@ -32,6 +34,7 @@ export class AgentsUI {
       let card = this.cards.get(agent.agent_id);
       if (!card) { card = this.create(agent); this.cards.set(agent.agent_id, card); this.root.append(card.root); }
       card.view = agent;
+      card.tasks.update();
       card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
       const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
       card.meta.textContent = `${t(sessionLabels[agent.session.status])} · ${t("轮次")} ${agent.turn}/${Number(agent.session.permissions.max_turns || 0)} · ${t("配置版本")} ${agent.session.profile_revision ?? "—"}`;
@@ -69,8 +72,9 @@ export class AgentsUI {
     const controls = document.createElement("div"); controls.className = "actions"; controls.append(execute, stop, control, open, destroy);
     const history = document.createElement("details"), historyTitle = document.createElement("summary"), turns = document.createElement("select"), transcript = document.createElement("pre");
     historyTitle.textContent = t("轮次历史"); turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`); transcript.className = "agent-history"; history.append(historyTitle, turns, transcript);
-    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0 };
+    const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
+    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root);
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks };
     execute.onclick = () => {
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }

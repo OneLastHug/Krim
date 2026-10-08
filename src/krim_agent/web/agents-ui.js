@@ -1,6 +1,7 @@
 /** Agent 卡片只投影服务端事实；控件保持身份，后台刷新保留用户输入。 */
 import { requestJson } from "./api.js";
 import { t } from "./i18n.js";
+import { TasksUI } from "./tasks-ui.js";
 export class AgentsUI {
     root;
     actions;
@@ -24,6 +25,7 @@ export class AgentsUI {
                 this.root.append(card.root);
             }
             card.view = agent;
+            card.tasks.update();
             card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
             const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
             card.meta.textContent = `${t(sessionLabels[agent.session.status])} · ${t("轮次")} ${agent.turn}/${Number(agent.session.permissions.max_turns || 0)} · ${t("配置版本")} ${agent.session.profile_revision ?? "—"}`;
@@ -88,8 +90,9 @@ export class AgentsUI {
         turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`);
         transcript.className = "agent-history";
         history.append(historyTitle, turns, transcript);
-        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history);
-        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0 };
+        const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
+        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root);
+        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks };
         execute.onclick = () => {
             const prompt = input.value.trim() || this.actions.prompt();
             if (!prompt) {

@@ -19,6 +19,7 @@ from krim_agent.observability import Tracer
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.agent_sessions import AgentSessionStore
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
+from krim_agent.persistence.tasks import AgentTaskStore
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
@@ -450,6 +451,7 @@ class AgentManager:
         self.owner_id = str(uuid4())
         self.store = AgentHandleStore(repository.database)
         self.sessions = AgentSessionStore(repository.database)
+        self.tasks = AgentTaskStore(repository.database, owner_id=self.owner_id)
 
     @staticmethod
     def definition_hash(definition: AgentDefinition) -> str:
@@ -668,6 +670,7 @@ class AgentManager:
             agent_id=definition.agent_id,
             agent_session_id=definition.agent_id,
             agent_owner_id=self.owner_id,
+            task_store=self.tasks,
             allow_skill_tool=definition.profile_revision is None
             or any(tool.name == "read_skill" for tool in definition.tools.definitions),
             system_prompt=definition.instructions,

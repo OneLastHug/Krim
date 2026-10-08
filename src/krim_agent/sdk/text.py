@@ -337,6 +337,7 @@ class PythonAI:
             await database.initialize()
             repository = KrimRepository(database)
             from krim_agent.persistence.agents import AgentHandleStore
+            from krim_agent.persistence.tasks import AgentTaskStore
 
             if any(
                 item.owner_id is not None and (item.lease_expires_at or 0) > time.time()
@@ -352,6 +353,7 @@ class PythonAI:
                 selected_provider,
                 tools or builtin_registry(config.tool_timeout_seconds),
                 config,
+                task_store=AgentTaskStore(database),
             )
             return cls(runtime, owned_database=database, owned_provider=owned_provider)
         except BaseException:

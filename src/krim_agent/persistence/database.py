@@ -376,6 +376,40 @@ class AgentSessionTurnRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AgentTaskHeadRow(Base):
+    __tablename__ = "agent_task_heads"
+    scope_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class AgentTaskItemRow(Base):
+    __tablename__ = "agent_task_items"
+    scope_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(String(200))
+    completed: Mapped[bool] = mapped_column(Boolean)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class AgentTaskOperationRow(Base):
+    __tablename__ = "agent_task_operations"
+    scope_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    request_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer)
+    operation: Mapped[str] = mapped_column(String(16))
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class UsageBudgetAccountRow(Base):
     __tablename__ = "usage_budget_accounts"
     __table_args__ = (UniqueConstraint("owner_kind", "owner_id"),)

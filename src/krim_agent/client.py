@@ -69,6 +69,7 @@ from .protocol.domain import (
 from .protocol.models import StreamFrame
 from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from .streams import ActiveRunView, MultiplexRequest, RunStreamFrame
+from .task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
 from .usage import RunUsageView
 from .workflow import WorkflowEvent, WorkflowGraph, WorkflowRunView
 
@@ -410,6 +411,25 @@ class KrimClient:
         response = self._http.get("/v1/agents/resources")
         self._check(response)
         return TypeAdapter(list[AgentResourceView]).validate_json(response.content)
+
+    def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
+        response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")
+        self._check(response)
+        return TaskSnapshot.model_validate_json(response.content)
+
+    def agent_tasks_write(
+        self, agent_id: str, kind: TaskKind, request: TaskWriteRequest
+    ) -> TaskSnapshot:
+        response = self._http.post(
+            f"/v1/agents/{agent_id}/tasks/{kind}", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return TaskSnapshot.model_validate_json(response.content)
+
+    def agent_tasks_history(self, agent_id: str, kind: TaskKind) -> list[TaskOperationView]:
+        response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}/history")
+        self._check(response)
+        return TypeAdapter(list[TaskOperationView]).validate_json(response.content)
 
     def agent_restore(self, agent_id: str) -> AgentView:
         response = self._http.post(f"/v1/agents/{agent_id}/restore")

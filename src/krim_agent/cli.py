@@ -17,6 +17,7 @@ from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
 from .protocol.domain import TERMINAL_STATUSES
 from .streams import MultiplexRequest
+from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
 
 
@@ -30,6 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
     from .evaluation.cli import add_parser as add_eval_parser
 
     add_eval_parser(subparsers)
+    tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
+    tasks.add_argument("action", choices=["get", "history", "update"])
+    tasks.add_argument("agent_id", help="Agent实例标识")
+    tasks.add_argument(
+        "--kind", choices=["plan", "todo"], default="todo", help="plan（计划）或todo（待办）"
+    )
+    tasks.add_argument("--request", help="update（更新）的本地JSON文件，包含版本和幂等键")
+    tasks.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     trace = subparsers.add_parser("trace", help="trace（追踪）：读取脱敏 span 与观测状态")
     trace.add_argument("action", choices=["run", "workflow", "get", "status"])
     trace.add_argument("value", nargs="?")
@@ -243,6 +252,33 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "tasks":
+                if args.action == "get":
+                    print(client.agent_tasks(args.agent_id, args.kind).model_dump_json(indent=2))
+                elif args.action == "history":
+                    print(
+                        json.dumps(
+                            [
+                                item.model_dump(mode="json")
+                                for item in client.agent_tasks_history(args.agent_id, args.kind)
+                            ],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    if not args.request:
+                        parser.error("tasks update需要--request本地JSON文件")
+                    raw = Path(args.request).read_bytes()
+                    if len(raw) > 65536:
+                        parser.error("任务请求不能超过64KiB")
+                    task_request = TaskWriteRequest.model_validate_json(raw)
+                    print(
+                        client.agent_tasks_write(
+                            args.agent_id, args.kind, task_request
+                        ).model_dump_json(indent=2)
+                    )
+                return
             if args.command == "budget":
                 if args.action == "accounts":
                     print(

@@ -65,6 +65,8 @@ def builtin_pack(
 
     async def plan(args: BaseModel, _context: ToolContext) -> object:
         payload = PlanInput.model_validate(args)
+        if _context.task_store is not None:
+            return await _context.task_store.tool_operation("plan", payload.model_dump(), _context)
         async with state.lock:
             if payload.operation == "replace":
                 state.plan = list(payload.items)
@@ -76,6 +78,8 @@ def builtin_pack(
 
     async def todo(args: BaseModel, _context: ToolContext) -> object:
         payload = TodoInput.model_validate(args)
+        if _context.task_store is not None:
+            return await _context.task_store.tool_operation("todo", payload.model_dump(), _context)
         async with state.lock:
             if payload.operation == "add":
                 if not payload.item:

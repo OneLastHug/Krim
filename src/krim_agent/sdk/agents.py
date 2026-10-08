@@ -10,6 +10,7 @@ from krim_agent.agents import AgentSessionView, AgentTurnView, ExecResult
 from krim_agent.application.agents import AgentPromptRequest, AgentService, AgentView
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
+from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -78,6 +79,17 @@ class AgentSession:
 
     async def turns(self) -> list[AgentTurnView]:
         return await self.service.session_turns(self.agent_id)
+
+    async def tasks(self, kind: TaskKind = "todo") -> TaskSnapshot:
+        return await self.service.task_snapshot(self.agent_id, kind)
+
+    async def update_tasks(self, kind: TaskKind, mutation: TaskMutation) -> TaskSnapshot:
+        if mutation.expected_revision is None:
+            raise ValueError("SDK任务写需要expected_revision")
+        return await self.service.task_mutate(self.agent_id, kind, mutation)
+
+    async def task_history(self, kind: TaskKind = "todo") -> list[TaskOperationView]:
+        return await self.service.task_history(self.agent_id, kind)
 
     async def stream(self, *, run_id: str | None = None) -> StreamTextResult:
         from .text import StreamTextResult

@@ -34,6 +34,7 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
+from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 from krim_agent.tools import ToolError
 from krim_agent.tools.core import ToolDefinition
 
@@ -560,6 +561,25 @@ class AgentService:
 
     async def session_turns(self, agent_id: str) -> list[AgentTurnView]:
         return await self.sessions.turns((await self.session(agent_id)).session_id)
+
+    async def task_snapshot(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
+        value = await self.session(agent_id)
+        return await self.manager.tasks.snapshot(f"session:{value.session_id}", kind)
+
+    async def task_mutate(
+        self, agent_id: str, kind: TaskKind, request: TaskMutation
+    ) -> TaskSnapshot:
+        self._handle(agent_id)
+        value = await self.session(agent_id)
+        return await self.manager.tasks.mutate(f"session:{value.session_id}", kind, request)
+
+    async def task_history(
+        self, agent_id: str, kind: TaskKind, *, offset: int = 0, limit: int = 100
+    ) -> list[TaskOperationView]:
+        value = await self.session(agent_id)
+        return await self.manager.tasks.history(
+            f"session:{value.session_id}", kind, offset=offset, limit=limit
+        )
 
     async def close_session(self, agent_id: str, expected_revision: int) -> AgentSessionView:
         try:
