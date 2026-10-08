@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator
@@ -33,6 +33,12 @@ Executor = Callable[[BaseModel, "ToolContext"], Awaitable[Any]]
 ApprovalHandler = Callable[["ToolDefinition", "ToolContext"], Awaitable[bool]]
 QuestionHandler = Callable[[str, list[str], "ToolContext"], Awaitable[str]]
 InteractionPublisher = Callable[[dict[str, JsonValue]], Awaitable[None]]
+
+
+class TaskBackend(Protocol):
+    async def tool_operation(
+        self, kind: Literal["plan", "todo"], payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
 
 
 class ToolError(Exception):
@@ -85,6 +91,7 @@ class ToolContext:
     arguments: dict[str, Any] = field(default_factory=dict)
     agent_id: str | None = None
     session_id: str | None = None
+    task_store: TaskBackend | None = None
     approval_handler: ApprovalHandler | None = None
     question_handler: QuestionHandler | None = None
     interaction_publisher: InteractionPublisher | None = None
@@ -110,6 +117,7 @@ class ToolContext:
             call_id=self.call_id if self.depth == 0 else str(uuid4()),
             agent_id=self.agent_id,
             session_id=self.session_id,
+            task_store=self.task_store,
             approval_handler=self.approval_handler,
             question_handler=self.question_handler,
             interaction_publisher=self.interaction_publisher,

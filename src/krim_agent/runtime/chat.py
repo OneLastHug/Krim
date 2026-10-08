@@ -63,6 +63,7 @@ from krim_agent.tools.core import (
     InteractionPublisher,
     Policy,
     QuestionHandler,
+    TaskBackend,
     ToolDefinition,
     ToolExecutionBudget,
 )
@@ -132,6 +133,7 @@ class ChatRuntime:
         agent_session_id: str | None = None,
         agent_owner_id: str | None = None,
         allow_skill_tool: bool = True,
+        task_store: TaskBackend | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -168,6 +170,11 @@ class ChatRuntime:
         self.agent_definition_hash = agent_definition_hash
         self.agent_session_id = agent_session_id
         self.agent_owner_id = agent_owner_id
+        if task_store is None:
+            from krim_agent.persistence.tasks import AgentTaskStore
+
+            task_store = AgentTaskStore(repository.database, owner_id=agent_owner_id)
+        self.task_store = task_store
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
         )
@@ -1017,6 +1024,7 @@ class ChatRuntime:
                         policy=self.tool_policy,
                         agent_id=self.agent_id,
                         session_id=self.agent_session_id,
+                        task_store=self.task_store,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,

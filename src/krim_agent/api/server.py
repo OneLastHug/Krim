@@ -124,6 +124,7 @@ from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from krim_agent.streams import ActiveRunView, MultiplexRequest
+from krim_agent.task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolAudit, ToolError, ToolInfo
 from krim_agent.ui_locale import LocaleResources, locale_resources
@@ -710,6 +711,25 @@ def create_app(
     @app.get("/v1/agents/{agent_id}/turns")
     async def agent_turns(agent_id: str) -> list[AgentTurnView]:
         return await agent_service.session_turns(agent_id)
+
+    @app.get("/v1/agents/{agent_id}/tasks/{kind}")
+    async def read_agent_tasks(agent_id: str, kind: TaskKind) -> TaskSnapshot:
+        return await agent_service.task_snapshot(agent_id, kind)
+
+    @app.post("/v1/agents/{agent_id}/tasks/{kind}")
+    async def write_agent_tasks(
+        agent_id: str, kind: TaskKind, payload: TaskWriteRequest
+    ) -> TaskSnapshot:
+        return await agent_service.task_mutate(agent_id, kind, payload)
+
+    @app.get("/v1/agents/{agent_id}/tasks/{kind}/history")
+    async def read_agent_task_history(
+        agent_id: str,
+        kind: TaskKind,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=100),
+    ) -> list[TaskOperationView]:
+        return await agent_service.task_history(agent_id, kind, offset=offset, limit=limit)
 
     @app.post("/v1/agents/{agent_id}/session/close")
     async def close_agent_session(agent_id: str, payload: AgentSessionControl) -> AgentSessionView:

@@ -3,6 +3,7 @@
 from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
 from krim_agent.evaluation.remote import AsyncEvalClient, SyncEvalClient
 from krim_agent.evaluation.service import EvalRunHandle
+from krim_agent.task_state import TaskMutation, TaskSnapshot, TaskWriteRequest
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -32,6 +33,9 @@ from .types import (
 )
 
 __all__ = [
+    "TaskMutation",
+    "TaskSnapshot",
+    "TaskWriteRequest",
     "AgentSession",
     "EvalRunHandle",
     "AsyncEvalClient",

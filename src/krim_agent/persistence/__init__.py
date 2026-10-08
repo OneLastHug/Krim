@@ -2,6 +2,8 @@
 
 from typing import TYPE_CHECKING
 
+from krim_agent.task_state import TaskItemView, TaskMutation, TaskSnapshot
+
 from .attachments import AttachmentRepository
 from .change_lists import ChangeListRepository
 from .checkpoints import CheckpointRepository
@@ -15,6 +17,7 @@ from .database import (
     WorkflowRequestRow,
 )
 from .eval_models import EvalEventRow, EvalItemRow, EvalJobRow
+from .tasks import AgentTaskStore
 from .traces import TraceStore
 from .workflow import WorkflowCheckpointError, WorkflowCheckpointStore
 
@@ -36,6 +39,10 @@ __all__ = [
     "WorkflowCheckpointError",
     "WorkflowCheckpointStore",
     "TraceStore",
+    "AgentTaskStore",
+    "TaskItemView",
+    "TaskMutation",
+    "TaskSnapshot",
 ]
 
 if TYPE_CHECKING:
