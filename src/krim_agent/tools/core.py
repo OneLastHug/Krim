@@ -42,6 +42,12 @@ class TaskBackend(Protocol):
     ) -> dict[str, JsonValue]: ...
 
 
+class WorkspaceChangeBackend(Protocol):
+    async def tool_operation(
+        self, operation: str, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+
+
 class ToolError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -108,6 +114,7 @@ class ToolContext:
     trace_owner_id: str | None = None
     # 由可信宿主绑定；模型参数和HTTP请求不能设置此字段。
     workspace: WorkspaceBinding | None = None
+    workspace_changes: WorkspaceChangeBackend | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -134,6 +141,7 @@ class ToolContext:
             trace_owner_kind=self.trace_owner_kind,
             trace_owner_id=self.trace_owner_id,
             workspace=self.workspace,
+            workspace_changes=self.workspace_changes,
             arguments=arguments,
         )
 

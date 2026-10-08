@@ -4,6 +4,14 @@ from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
 from krim_agent.evaluation.remote import AsyncEvalClient, SyncEvalClient
 from krim_agent.evaluation.service import EvalRunHandle
 from krim_agent.task_state import TaskMutation, TaskSnapshot, TaskWriteRequest
+from krim_agent.workspace_change import (
+    FileChangeSpec,
+    TextReplacement,
+    WorkspaceAttemptView,
+    WorkspaceChangeAction,
+    WorkspaceChangeView,
+    WorkspacePreviewRequest,
+)
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -33,6 +41,12 @@ from .types import (
 )
 
 __all__ = [
+    "FileChangeSpec",
+    "TextReplacement",
+    "WorkspaceAttemptView",
+    "WorkspaceChangeAction",
+    "WorkspaceChangeView",
+    "WorkspacePreviewRequest",
     "TaskMutation",
     "TaskSnapshot",
     "TaskWriteRequest",

@@ -26,6 +26,7 @@ from krim_agent.workspace_change import (
     FileChangeSpec,
     PreparedChangeMetadata,
     RecoveryMetadata,
+    RestoreFileSpec,
     SnapshotMetadata,
     WorkspaceAttemptView,
     WorkspaceChangeAction,
@@ -268,6 +269,10 @@ class WorkspaceEditStore:
                 except UnicodeDecodeError:
                     raise ServiceError("workspace_encoding", "私有快照须为UTF-8", 422) from None
         if original_intent:
+            if not isinstance(spec, FileChangeSpec):
+                raise ServiceError(
+                    "workspace_snapshot_invalid", "内部恢复规格不可作为公开提案", 422
+                )
             desired: bytes | None = None
             if spec.operation == "write":
                 assert spec.content is not None
@@ -552,6 +557,15 @@ class WorkspaceEditStore:
                 raise ServiceError(
                     "workspace_proposal_changed", "撤销须绑定应用后版本与旧内容", 409
                 )
+            if request.action == "undo" and isinstance(prepared.spec, RestoreFileSpec):
+                restore = prepared.spec
+                old = original.before
+                if (restore.mode, restore.uid, restore.gid) != (
+                    (old.mode, old.uid, old.gid) if old is not None else (None, None, None)
+                ):
+                    raise ServiceError(
+                        "workspace_proposal_changed", "撤销属性未绑定原私有快照", 409
+                    )
             if request.action == "keep" and prepared != original:
                 raise ServiceError("workspace_proposal_changed", "保留动作必须绑定原提案", 409)
             allowed = {"apply": {"proposed"}, "undo": {"applied", "kept"}, "keep": {"applied"}}
@@ -729,7 +743,7 @@ class WorkspaceEditStore:
                 ).model_dump(mode="json")
             elif value.status in {"done", "rejected"}:
                 row.recovery = None
-            row.cleanup_pending = value.status == "done" and row.recovery is not None
+            row.cleanup_pending = value.status in {"done", "rejected"} and row.recovery is not None
             row.owner_id, row.lease_expires_at = None, None
             row.updated_at = utc_now()
             if value.status == "done":
@@ -759,7 +773,7 @@ class WorkspaceEditStore:
             if row is None or row.scope_id != scope_id:
                 raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
             await self._scope(session, scope_id, writing=True)
-            if row.status != "done":
+            if row.status not in {"done", "rejected"}:
                 raise ServiceError("workspace_cleanup_state", "只有已确认操作允许清理标记", 409)
             row.cleanup_pending = False
             row.updated_at = utc_now()

@@ -17,7 +17,11 @@ from pydantic import Field, JsonValue
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 
-WORKSPACE_TOOL_NAMES = frozenset({"workspace_read", "workspace_list", "workspace_search"})
+WORKSPACE_READ_TOOL_NAMES = frozenset({"workspace_read", "workspace_list", "workspace_search"})
+WORKSPACE_CHANGE_TOOL_NAMES = frozenset(
+    {"workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize"}
+)
+WORKSPACE_TOOL_NAMES = WORKSPACE_READ_TOOL_NAMES | WORKSPACE_CHANGE_TOOL_NAMES
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000
 MAX_DIRECTORY_ENTRIES = 5000

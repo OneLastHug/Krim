@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -18,7 +19,12 @@ from uuid import uuid4
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import Workspace
-from krim_agent.workspace_change import FileChangePreview, FileChangeReceipt, FileChangeSpec
+from krim_agent.workspace_change import (
+    FileChangePreview,
+    FileChangeReceipt,
+    FileChangeSpec,
+    RestoreFileSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -51,8 +57,10 @@ class PreparedFileChange:
     token: str
 
     @property
-    def spec(self) -> FileChangeSpec:
+    def spec(self) -> FileChangeSpec | RestoreFileSpec:
         # 外部拿到的模型副本不能改写已冻结的预览意图。
+        if json.loads(self.spec_json).get("operation") == "restore":
+            return RestoreFileSpec.model_validate_json(self.spec_json)
         return FileChangeSpec.model_validate_json(self.spec_json)
 
     @property
@@ -69,7 +77,9 @@ class PreparedFileChange:
         diff, truncated = bounded_diff(self.spec.path, before, after)
         result = FileChangePreview(
             path=self.spec.path,
-            operation=self.spec.operation,
+            operation=("delete" if self.after is None else "write")
+            if self.spec.operation == "restore"
+            else self.spec.operation,
             before_sha256=self.before_sha256,
             after_sha256=self.after_sha256,
             before_bytes=len(self.before.data) if self.before is not None else 0,
@@ -302,6 +312,37 @@ class WorkspaceWriter:
         finally:
             os.close(fd)
 
+    def prepare_restore(self, original: PreparedFileChange) -> PreparedFileChange:
+        """从冻结快照恢复完整旧内容，仍核验当前应用后版本与原父目录。"""
+        if original.workspace_fingerprint != self.workspace.fingerprint:
+            raise ServiceError("workspace_binding_changed", "撤销不属于当前工作区", 409)
+        fd, parent, name = self._parent(original.spec.path)
+        try:
+            self._check_parent(parent, original.parent_identity)
+            before = self._snapshot(fd, name, missing=True)
+            if (before.data if before is not None else None) != original.after:
+                raise ServiceError("workspace_conflict", "撤销目标已偏离原应用后版本", 409)
+            after = original.before.data if original.before is not None else None
+            if after is not None:
+                self._text(after)
+            spec = RestoreFileSpec(
+                path=original.spec.path,
+                expected_sha256=before.sha256 if before is not None else None,
+                mode=original.before.mode if original.before is not None else None,
+                uid=original.before.uid if original.before is not None else None,
+                gid=original.before.gid if original.before is not None else None,
+            )
+            return PreparedFileChange(
+                spec.model_dump_json(),
+                self.workspace.fingerprint,
+                original.parent_identity,
+                before,
+                after,
+                uuid4().hex,
+            )
+        finally:
+            os.close(fd)
+
     @staticmethod
     def _same_before(
         actual: FileSnapshot | None, wanted: FileSnapshot | None, *, displaced: bool = False
@@ -436,11 +477,11 @@ class WorkspaceWriter:
                             if count <= 0:
                                 raise OSError(errno.EIO, "临时文件写入未完成")
                             remaining = remaining[count:]
-                        mode = change.before.mode & 0o777 if change.before is not None else 0o644
-                        if change.before is not None:
+                        mode, uid, gid = self._attributes(change)
+                        if uid is not None and gid is not None:
                             info = os.fstat(stage_fd)
-                            if (info.st_uid, info.st_gid) != (change.before.uid, change.before.gid):
-                                os.fchown(stage_fd, change.before.uid, change.before.gid)
+                            if (info.st_uid, info.st_gid) != (uid, gid):
+                                os.fchown(stage_fd, uid, gid)
                         os.fchmod(stage_fd, mode)
                         os.fsync(stage_fd)
                     finally:
@@ -571,20 +612,27 @@ class WorkspaceWriter:
         os.unlink(stage, dir_fd=fd)
 
     @staticmethod
+    def _attributes(change: PreparedFileChange) -> tuple[int, int | None, int | None]:
+        spec = change.spec
+        if isinstance(spec, RestoreFileSpec) and spec.mode is not None:
+            return spec.mode & 0o777, spec.uid, spec.gid
+        if change.before is not None:
+            return change.before.mode & 0o777, change.before.uid, change.before.gid
+        return 0o644, None, None
+
+    @staticmethod
     def _desired(
         change: PreparedFileChange, actual: FileSnapshot | None, identity: tuple[int, int] | None
     ) -> bool:
         if change.after is None:
             return actual is None
+        mode, uid, gid = WorkspaceWriter._attributes(change)
         return (
             actual is not None
             and actual.data == change.after
             and actual.identity == identity
-            and actual.mode == (change.before.mode & 0o777 if change.before is not None else 0o644)
-            and (
-                change.before is None
-                or (actual.uid, actual.gid) == (change.before.uid, change.before.gid)
-            )
+            and actual.mode == mode
+            and (uid is None or (actual.uid, actual.gid) == (uid, gid))
         )
 
     def _restore_conflict(
@@ -666,20 +714,149 @@ class WorkspaceWriter:
         finally:
             os.close(fd)
 
-    def finalize(self, change: PreparedFileChange, reference: FileRecovery) -> None:
-        """调用方保存旧快照/结果后显式清理；检查全部旧内容与身份，不重放修改。"""
+    @staticmethod
+    def _content_matches(snapshot: FileSnapshot | None, data: bytes | None) -> bool:
+        return snapshot is None if data is None else snapshot is not None and snapshot.data == data
+
+    def verify(
+        self,
+        change: PreparedFileChange,
+        reference: FileRecovery | None,
+        *,
+        keeping: bool = False,
+    ) -> FileEffect:
+        """只读取目标/暂存并生成回执，不发布第二次文件动作。"""
+        if change.workspace_fingerprint != self.workspace.fingerprint:
+            raise ServiceError("workspace_binding_changed", "核实不属于当前工作区", 409)
+        if reference is not None:
+            self._check_reference(change, reference)
+        try:
+            with self._locked_parent(change.spec.path, lambda: False) as (fd, parent, name):
+                self._check_parent(parent, change.parent_identity)
+                if reference is None:
+                    target = self._snapshot(fd, name, missing=True)
+                    staged, linked = None, False
+                else:
+                    target, staged, linked = self._recovery_snapshots(change, fd, name, reference)
+                desired = self._desired(change, target, target.identity if target else None)
+                before = self._same_before(target, change.before, displaced=True)
+                if keeping:
+                    desired = desired or (before and self._content_matches(target, change.after))
+                    return self._receipt(
+                        change,
+                        "done" if desired else "rejected",
+                        None if desired else "workspace_conflict",
+                    )
+                if before and staged is None and self._content_matches(target, change.after):
+                    return self._receipt(change, "done")
+                old_stage = change.before is not None and self._same_before(
+                    staged, change.before, displaced=True
+                )
+                # 删除须保留原旧条目证明；新建只接受自身两条链接或已完成的新版本。
+                published = desired and (
+                    old_stage
+                    or (change.before is None and (staged is None or linked))
+                    or (change.after is not None and staged is None)
+                )
+                if published:
+                    os.fsync(fd)
+                    return self._receipt(
+                        change, "done", changed=True, recovery=reference if staged else None
+                    )
+                new_stage = staged is not None and self._desired(change, staged, staged.identity)
+                if before and (staged is None or new_stage):
+                    return self._receipt(
+                        change,
+                        "rejected",
+                        "confirmed_no_effect",
+                        recovery=reference if staged else None,
+                    )
+        except (ServiceError, OSError):
+            pass
+        return self._receipt(
+            change,
+            "uncertain",
+            "workspace_reconcile_inconclusive",
+            recovery=reference,
+            changed=True,
+        )
+
+    @staticmethod
+    def _check_reference(change: PreparedFileChange, reference: FileRecovery) -> None:
         if (
-            reference.workspace_fingerprint != self.workspace.fingerprint
+            reference.workspace_fingerprint != change.workspace_fingerprint
             or reference.path != change.spec.path
             or reference.stage_name != f"._krim-tx-{change.token}"
             or reference.parent_identity != change.parent_identity
-            or change.before is None
         ):
             raise ServiceError("workspace_change_invalid", "修改与暂存引用不匹配", 422)
-        with self._locked_parent(reference.path, lambda: False) as (fd, parent, _name):
+
+    def _recovery_snapshots(
+        self, change: PreparedFileChange, fd: int, name: str, reference: FileRecovery
+    ) -> tuple[FileSnapshot | None, FileSnapshot | None, bool]:
+        def info(entry: str) -> os.stat_result | None:
+            try:
+                return os.stat(entry, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+
+        target_info, stage_info = info(name), info(reference.stage_name)
+        linked = (
+            change.before is None
+            and change.after is not None
+            and target_info is not None
+            and stage_info is not None
+            and target_info.st_nlink == stage_info.st_nlink == 2
+            and _identity(target_info) == _identity(stage_info)
+        )
+        target = self._snapshot(fd, name, missing=True, own_links=2 if linked else 1)
+        staged = self._snapshot(
+            fd, reference.stage_name, missing=True, own_links=2 if linked else 1
+        )
+        if linked and (
+            target is None
+            or staged is None
+            or target.identity != staged.identity
+            or not self._desired(change, target, target.identity)
+            or not self._desired(change, staged, staged.identity)
+        ):
+            raise ServiceError("workspace_stage_changed", "新建恢复条目身份或内容不匹配", 409)
+        return target, staged, linked
+
+    def finalize(
+        self, change: PreparedFileChange, reference: FileRecovery, *, rejected: bool = False
+    ) -> None:
+        """调用方保存旧快照/结果后显式清理；检查全部旧内容与身份，不重放修改。"""
+        if reference.workspace_fingerprint != self.workspace.fingerprint:
+            raise ServiceError("workspace_binding_changed", "清理不属于当前工作区", 409)
+        self._check_reference(change, reference)
+        with self._locked_parent(reference.path, lambda: False) as (fd, parent, name):
             self._check_parent(parent, reference.parent_identity)
-            actual = self._snapshot(fd, reference.stage_name)
-            if not self._same_before(actual, change.before, displaced=True):
-                raise ServiceError("workspace_stage_changed", "旧文件恢复材料已变化，保留暂存", 409)
-            self._remove_owned(fd, reference.stage_name, change.before.identity)
+            if change.before is None:
+                target, actual, linked = self._recovery_snapshots(change, fd, name, reference)
+                if actual is not None and not rejected and not linked:
+                    raise ServiceError(
+                        "workspace_stage_changed", "新建恢复条目没有原双链接证明", 409
+                    )
+            else:
+                target = None
+                actual = self._snapshot(fd, reference.stage_name, missing=True)
+            if actual is None:
+                # unlink成功而清理标记提交失败的重试；仍同步原目录。
+                os.fsync(fd)
+                return
+            if rejected:
+                target = self._snapshot(fd, name, missing=True)
+                if not self._same_before(
+                    target, change.before, displaced=True
+                ) or not self._desired(change, actual, actual.identity):
+                    raise ServiceError(
+                        "workspace_stage_changed", "新文件恢复材料已变化，保留暂存", 409
+                    )
+            elif change.before is not None:
+                if not self._same_before(actual, change.before, displaced=True):
+                    raise ServiceError(
+                        "workspace_stage_changed", "旧文件恢复材料已变化，保留暂存", 409
+                    )
+            self._remove_owned(fd, reference.stage_name, actual.identity)
             os.fsync(fd)

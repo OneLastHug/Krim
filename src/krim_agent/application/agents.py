@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -41,7 +43,9 @@ from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, Tas
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
+from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.workspace import (
+    WORKSPACE_CHANGE_TOOL_NAMES,
     WORKSPACE_TOOL_NAMES,
     Workspace,
     WorkspaceBinding,
@@ -49,6 +53,13 @@ from krim_agent.workspace import (
     WorkspaceListing,
     WorkspaceSearch,
     WorkspaceView,
+)
+from krim_agent.workspace_change import (
+    WorkspaceAttemptView,
+    WorkspaceChangeAction,
+    WorkspaceChangeView,
+    WorkspaceOperationRequest,
+    WorkspacePreviewRequest,
 )
 
 AgentViewStatus = Literal[
@@ -133,12 +144,14 @@ class AgentService:
         self.profiles = AgentProfileStore(runtime.repository.database)
         self.sessions = self.manager.sessions
         self.resources = AgentResourceRegistry(self.providers, runtime.tools)
+        self.workspace_edits = self.manager.workspace_changes.store
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
         self._workspace_operations: set[asyncio.Task[ToolResult]] = set()
         self._start_lock = asyncio.Lock()
         self._closed = False
+        self._workspace_recovered = False
         self.catalog.register(
             "default",
             AgentDefinition(
@@ -394,9 +407,12 @@ class AgentService:
                 raise ServiceError("agent_profile_workspace", "文件工具需要已登记工作区", 422)
             return None
         try:
-            return self.resources.workspace(config.workspace_key)
+            binding = self.resources.workspace(config.workspace_key)
         except KeyError:
             raise ServiceError("agent_profile_workspace", "工作区未登记或已停用", 422) from None
+        if set(config.tool_names) & WORKSPACE_CHANGE_TOOL_NAMES and not binding.workspace.writable:
+            raise ServiceError("workspace_read_only", "只读工作区不可登记修改工具", 422)
+        return binding
 
     def register_workspace(
         self,
@@ -408,9 +424,19 @@ class AgentService:
         default: bool = False,
         writable: bool = False,
     ) -> WorkspaceBinding:
+        if writable or isinstance(root, Workspace) and root.writable:
+            existing = {item.name: item for item in self.runtime.tools.definitions}
+            for definition in workspace_change_tools():
+                if definition.name in existing and existing[definition.name] is not definition:
+                    raise ValueError("工作区修改工具名称已由其它定义占用")
         binding = self.resources.register_workspace(
             key, root, version=version, owned=owned, writable=writable
         )
+        if binding.workspace.writable:
+            registered_names = {item.name for item in self.runtime.tools.definitions}
+            for definition in workspace_change_tools():
+                if definition.name not in registered_names:
+                    self.runtime.tools.register(definition)
         if default:
             self.runtime.workspace = binding
         return binding
@@ -438,6 +464,8 @@ class AgentService:
             tool.name
             for tool in definition.tools.definitions
             if tool.name not in WORKSPACE_TOOL_NAMES or workspace is not None
+            if tool.name not in WORKSPACE_CHANGE_TOOL_NAMES
+            or (workspace is not None and workspace.workspace.writable)
         ]
         try:
             manifest = self.resources.manifest(
@@ -480,8 +508,16 @@ class AgentService:
         session = await handle.session()
         return view.model_copy(update={"available": view.available and session.status == "open"})
 
+    async def recover_workspace_edits(self) -> int:
+        """启动恢复只处理过期租约，不接管其它进程的活跃文件动作。"""
+        if self._workspace_recovered:
+            return 0
+        recovered = await self.workspace_edits.recover_interrupted()
+        self._workspace_recovered = True
+        return recovered
+
     async def _workspace_call(
-        self, agent_id: str, name: str, arguments: dict[str, object]
+        self, agent_id: str, name: str, arguments: dict[str, object], *, confirmed: bool = False
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -501,17 +537,33 @@ class AgentService:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
         if len(self._workspace_operations) >= 64:
-            raise ServiceError("workspace_busy", "工作区读取任务已达上限，请稍后重试", 429)
+            raise ServiceError("workspace_busy", "工作区任务已达上限，请稍后重试", 429)
+        call_id = str(uuid4())
+        frozen_arguments = copy.deepcopy(arguments)
+        registry = handle.runtime.tools
+
+        async def confirm(definition: ToolDefinition, context: ToolContext) -> bool:
+            return (
+                confirmed
+                and context.origin == "host"
+                and definition.name == name
+                and context.call_id == call_id
+                and context.arguments == frozen_arguments
+            )
+
         operation = asyncio.create_task(
-            handle.runtime.tools.invoke(
+            registry.invoke(
                 name,
                 arguments,
                 ToolContext(
-                    handle.runtime.tools,
+                    registry,
                     topic_id=handle.topic_id,
                     agent_id=handle.agent_id,
                     session_id=handle.session_id,
                     workspace=handle.definition.workspace,
+                    workspace_changes=self.manager.workspace_changes,
+                    call_id=call_id,
+                    approval_handler=confirm if confirmed else None,
                     policy=handle.runtime.tool_policy,
                     timeout=handle.definition.tool_timeout_seconds,
                     origin="host",
@@ -547,6 +599,34 @@ class AgentService:
                 "workspace_changed": 409,
                 "workspace_closed": 503,
                 "timeout": 504,
+                "workspace_read_only": 403,
+                "workspace_conflict": 409,
+                "workspace_replace_conflict": 409,
+                "workspace_revision_conflict": 409,
+                "workspace_idempotency_conflict": 409,
+                "workspace_file_busy": 409,
+                "workspace_operation_active": 409,
+                "workspace_cleanup_state": 409,
+                "workspace_change_state": 409,
+                "workspace_proposal_expired": 410,
+                "workspace_receipt_pending": 503,
+                "workspace_busy": 429,
+                "workspace_run_closed": 409,
+                "workspace_binding_changed": 403,
+                "workspace_proposal_not_found": 404,
+                "workspace_operation_not_found": 404,
+                "workspace_stage_changed": 409,
+                "workspace_parent_changed": 409,
+                "workspace_write_platform": 503,
+                "workspace_proposal_limit": 429,
+                "workspace_operation_limit": 429,
+                "workspace_snapshot_limit": 429,
+                "agent_session_owner": 409,
+                "agent_lease_lost": 409,
+                "agent_session_closed": 410,
+                "agent_session_expired": 410,
+                "agent_session_destroyed": 410,
+                "agent_parent_session_closed": 409,
             }.get(error.code, 502)
             raise ServiceError(error.code, str(error), status) from error
         finally:
@@ -567,6 +647,74 @@ class AgentService:
             await self._workspace_call(agent_id, "workspace_search", request.model_dump())
         )
 
+    async def workspace_preview(
+        self, agent_id: str, request: WorkspacePreviewRequest, *, confirmed: bool = False
+    ) -> WorkspaceChangeView:
+        return WorkspaceChangeView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "workspace_preview", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def workspace_change(
+        self, agent_id: str, request: WorkspaceChangeAction, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        return WorkspaceAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "workspace_change", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def workspace_reconcile(
+        self, agent_id: str, request: WorkspaceOperationRequest, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        return WorkspaceAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "workspace_reconcile", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def workspace_finalize(
+        self, agent_id: str, request: WorkspaceOperationRequest, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        return WorkspaceAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "workspace_finalize", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def workspace_proposals(
+        self, agent_id: str, *, offset: int = 0, limit: int = 50
+    ) -> list[WorkspaceChangeView]:
+        session = await self.session(agent_id)
+        return await self.workspace_edits.list(
+            f"session:{session.session_id}", offset=offset, limit=limit
+        )
+
+    async def workspace_history(
+        self, agent_id: str, proposal_id: str
+    ) -> list[WorkspaceAttemptView]:
+        session = await self.session(agent_id)
+        return await self.workspace_edits.history(f"session:{session.session_id}", proposal_id)
+
+    async def workspace_proposal(self, agent_id: str, proposal_id: str) -> WorkspaceChangeView:
+        session = await self.session(agent_id)
+        return (await self.workspace_edits.get(f"session:{session.session_id}", proposal_id)).view
+
+    async def workspace_operation(self, agent_id: str, operation_id: str) -> WorkspaceAttemptView:
+        session = await self.session(agent_id)
+        return (
+            await self.workspace_edits.operation(f"session:{session.session_id}", operation_id)
+        ).view
+
     async def as_tool(self, name: str, revision: int | None = None) -> ToolDefinition:
         """可信组合层显式取得固定版本工具；不由HTTP配置自动安装工具。"""
         definition = replace(await self.definition(name, revision), persistent=False, agent_id="")
@@ -577,6 +725,7 @@ class AgentService:
         return directory.as_tool(name)
 
     async def restore_persistent(self) -> int:
+        await self.recover_workspace_edits()
         restored = 0
         pending = {
             item.agent_id: item

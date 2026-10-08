@@ -236,6 +236,7 @@ def create_app(
         try:
             await database.initialize()
             await agent_service.assert_inventory_available()
+            await agent_service.recover_workspace_edits()
             await change_repository.recover_interrupted()
             await checkpoint_repository.recover_interrupted()
             if owns_database:

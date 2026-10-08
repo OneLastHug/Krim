@@ -13,6 +13,14 @@ from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.workspace import WorkspaceFile, WorkspaceListing, WorkspaceSearch, WorkspaceView
+from krim_agent.workspace_change import (
+    FileChangeSpec,
+    WorkspaceAttemptView,
+    WorkspaceChangeAction,
+    WorkspaceChangeView,
+    WorkspaceOperationRequest,
+    WorkspacePreviewRequest,
+)
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -114,6 +122,52 @@ class AgentSession:
         return await self.service.workspace_search(
             self.agent_id, SearchFilesInput(query=query, path=path, limit=limit)
         )
+
+    async def preview_file_change(
+        self,
+        spec: FileChangeSpec,
+        *,
+        request_key: str,
+        ttl_seconds: float = 3600,
+        confirmed: bool = False,
+    ) -> WorkspaceChangeView:
+        return await self.service.workspace_preview(
+            self.agent_id,
+            WorkspacePreviewRequest(spec=spec, request_key=request_key, ttl_seconds=ttl_seconds),
+            confirmed=confirmed,
+        )
+
+    async def change_file(
+        self, request: WorkspaceChangeAction, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        """apply/undo/keep共享幂等/CAS；confirmed只满足宿主ask，不覆盖deny。"""
+        return await self.service.workspace_change(self.agent_id, request, confirmed=confirmed)
+
+    async def reconcile_file_change(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        return await self.service.workspace_reconcile(
+            self.agent_id, WorkspaceOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def finalize_file_change(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> WorkspaceAttemptView:
+        return await self.service.workspace_finalize(
+            self.agent_id, WorkspaceOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def file_changes(self, *, offset: int = 0, limit: int = 50) -> list[WorkspaceChangeView]:
+        return await self.service.workspace_proposals(self.agent_id, offset=offset, limit=limit)
+
+    async def file_change(self, proposal_id: str) -> WorkspaceChangeView:
+        return await self.service.workspace_proposal(self.agent_id, proposal_id)
+
+    async def file_change_operation(self, operation_id: str) -> WorkspaceAttemptView:
+        return await self.service.workspace_operation(self.agent_id, operation_id)
+
+    async def file_change_history(self, proposal_id: str) -> list[WorkspaceAttemptView]:
+        return await self.service.workspace_history(self.agent_id, proposal_id)
 
     async def stream(self, *, run_id: str | None = None) -> StreamTextResult:
         from .text import StreamTextResult

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.observability import Tracer
@@ -20,13 +21,14 @@ from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.agent_sessions import AgentSessionStore
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
 from krim_agent.persistence.tasks import AgentTaskStore
+from krim_agent.persistence.workspace_edits import WorkspaceEditStore
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView, ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import Decision, Policy, ToolDefinition
-from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WorkspaceBinding
+from krim_agent.workspace import WORKSPACE_CHANGE_TOOL_NAMES, WORKSPACE_TOOL_NAMES, WorkspaceBinding
 
 from .permissions import profile_policy
 from .resources import provider_fingerprint
@@ -453,6 +455,9 @@ class AgentManager:
         self.store = AgentHandleStore(repository.database)
         self.sessions = AgentSessionStore(repository.database)
         self.tasks = AgentTaskStore(repository.database, owner_id=self.owner_id)
+        self.workspace_changes = WorkspaceChangeService(
+            WorkspaceEditStore(repository.database, owner_id=self.owner_id)
+        )
 
     @staticmethod
     def definition_hash(definition: AgentDefinition) -> str:
@@ -668,6 +673,10 @@ class AgentManager:
                 definition.workspace.require()
             except ServiceError as error:
                 raise AgentError(error.code, str(error)) from error
+            if not definition.workspace.workspace.writable and any(
+                item.name in WORKSPACE_CHANGE_TOOL_NAMES for item in definition.tools.definitions
+            ):
+                raise AgentError("workspace_read_only", "只读工作区不可登记修改工具")
         elif any(item.name in WORKSPACE_TOOL_NAMES for item in definition.tools.definitions):
             raise AgentError("workspace_unbound", "Agent文件工具缺少工作区授权")
         if len(self._handles) >= self.max_agents:
@@ -710,6 +719,7 @@ class AgentManager:
             agent_session_id=definition.agent_id,
             agent_owner_id=self.owner_id,
             task_store=self.tasks,
+            workspace_changes=self.workspace_changes,
             workspace=definition.workspace,
             allow_skill_tool=definition.profile_revision is None
             or any(tool.name == "read_skill" for tool in definition.tools.definitions),
@@ -862,6 +872,7 @@ class AgentManager:
     async def close(self) -> None:
         async with self._spawn_lock:
             self._closed = True
+        await self.workspace_changes.close()
         for handle in list(self._handles.values()):
             if handle.definition.persistent:
                 await handle.detach()
