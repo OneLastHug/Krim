@@ -1,4 +1,4 @@
-"""真实旧0029安装包创建历史，新0030安装包保留历史并执行新命令。"""
+"""真实旧0029安装包创建历史，当前安装包保留历史并执行新命令。"""
 
 import asyncio
 import json
@@ -58,7 +58,9 @@ async def main():
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar_one()
             assert head == (
-                "0029_workspace_restore_plans" if mode == "old" else "0030_command_executions"
+                "0029_workspace_restore_plans"
+                if mode == "old"
+                else "0031_command_artifact_proposals"
             )
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert "/site-packages/" in krim_agent.__file__

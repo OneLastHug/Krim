@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent工具权限、完整输入与Python SDK已接通，产物发布和专用管理入口继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入及文本产物差异提案/条件发布已接通，专用命令管理入口和更广文件类型继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
 
 ## 快速开始
 
@@ -47,6 +47,9 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 # Agent命令演练：Profile资源、SDK审批、完整只读输入、原产物和冷恢复。
 .venv/bin/python examples/agent_command_trial.py
 
+# 命令成果演练：真实差异、生成提案、独立批准发布、撤销恢复原文件。
+.venv/bin/python examples/command_artifact_trial.py
+
 # 显式离线兼容端点模拟：真实Provider适配/工具循环，不发商业请求。
 .venv/bin/python examples/python_openai_provider.py
 ```
@@ -63,12 +66,12 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 | SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
 | 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
 | 工作区 | 宿主根目录授权、Profile/资源冻结、读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理、原生清单与批次、完整检查点捕获和条件恢复；SDK/REST/CLI/浏览器消费同一事实 |
-| 隔离执行与命令 | 资源/Profile授权、模型与SDK同审批/Hook/审计、完整受控输入、非root/独立网络、输出/资源上限、取消/超时/后代回收；0030原结果/私有成果与零重放恢复；产物发布及专用命令REST/CLI/UI继续 |
+| 隔离执行与命令 | 资源/Profile授权、模型与SDK同审批/Hook/审计、完整受控输入、非root/独立网络、输出/资源上限、取消/超时/后代回收；0030原结果、0031文本产物提案与条件发布/撤销；专用命令REST/CLI/UI和目录/二进制能力继续 |
 | 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
 | Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
 | 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
 
-商业模型质量、真实账单、命令专用管理入口与产物发布、生产多worker/租户、PostgreSQL/Redis与部署演练尚未完成。隔离执行当前仅有Linux本机证据，rlimit不代表cgroup整棵树总配额。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+商业模型质量、真实账单、命令专用管理入口、目录/二进制条件发布、生产多worker/租户、PostgreSQL/Redis与部署演练尚未完成。隔离执行当前仅有Linux本机证据，rlimit不代表cgroup整棵树总配额。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
 
 工作区的目录文件描述符边界与条件发布目前仅Linux实测；Windows不能使用该文件能力，普通Agent/SDK/eval入口仍可用。文件路径约束不等于操作系统进程沙箱。
 
@@ -94,6 +97,8 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [持久命令Python合约](docs/api/durable-commands.md)
 - [Agent命令架构与授权输入](docs/architecture/agent-command-design.md)
 - [Agent命令SDK使用](docs/api/agent-commands.md)
+- [命令产物提案与条件发布架构](docs/architecture/command-artifact-design.md)
+- [命令成果SDK合约](docs/api/command-artifacts.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)

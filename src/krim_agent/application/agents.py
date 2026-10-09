@@ -44,6 +44,12 @@ from krim_agent.execution.agent_models import (
 )
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
 from krim_agent.execution.linux import LinuxSandboxRunner
+from krim_agent.execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandProposalRequest,
+    CommandProposalView,
+)
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.workspace_batches import NativeBatchStore
@@ -465,14 +471,17 @@ class AgentService:
 
     def _profile_workspace(self, config: AgentProfile) -> WorkspaceBinding | None:
         if config.workspace_key is None:
-            if set(config.tool_names) & WORKSPACE_TOOL_NAMES:
+            if set(config.tool_names) & (WORKSPACE_TOOL_NAMES | {"command_propose"}):
                 raise ServiceError("agent_profile_workspace", "文件工具需要已登记工作区", 422)
             return None
         try:
             binding = self.resources.workspace(config.workspace_key)
         except KeyError:
             raise ServiceError("agent_profile_workspace", "工作区未登记或已停用", 422) from None
-        if set(config.tool_names) & WORKSPACE_CHANGE_TOOL_NAMES and not binding.workspace.writable:
+        if (
+            set(config.tool_names) & (WORKSPACE_CHANGE_TOOL_NAMES | {"command_propose"})
+            and not binding.workspace.writable
+        ):
             raise ServiceError("workspace_read_only", "只读工作区不可登记修改工具", 422)
         return binding
 
@@ -624,7 +633,7 @@ class AgentService:
                 )
                 if session_row is None:
                     raise ServiceError("agent_session_topic", "Agent工作区缺少会话绑定", 403)
-                if name not in {"command_get", "command_read"}:
+                if name not in {"command_get", "command_read", "command_changes"}:
                     await assert_session_open(session, session_row)
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -778,6 +787,15 @@ class AgentService:
                 "execution_busy": 429,
                 "execution_command_reentrant": 409,
                 "execution_service_reentrant": 409,
+                "execution_artifacts_incomplete": 409,
+                "execution_source_unbound": 409,
+                "execution_source_corrupt": 409,
+                "execution_failed_artifacts": 409,
+                "execution_destination_exists": 409,
+                "execution_artifact_baseline": 409,
+                "execution_artifact_mode": 422,
+                "execution_proposal_source": 409,
+                "execution_proposal_unavailable": 503,
             }.get(error.code, 502)
             raise ServiceError(error.code, str(error), status) from error
         finally:
@@ -821,6 +839,26 @@ class AgentService:
         return CommandSummary.model_validate(
             await self._workspace_call(
                 agent_id, "command_cancel", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def command_changes(
+        self, agent_id: str, request: CommandChangesRequest, *, confirmed: bool = False
+    ) -> CommandChangesPage:
+        return CommandChangesPage.model_validate(
+            await self._workspace_call(
+                agent_id, "command_changes", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def command_propose(
+        self, agent_id: str, request: CommandProposalRequest, *, confirmed: bool = False
+    ) -> CommandProposalView:
+        return CommandProposalView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "command_propose", request.model_dump(), confirmed=confirmed
+                )
             )
         )
 

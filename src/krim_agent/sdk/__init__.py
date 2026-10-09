@@ -10,6 +10,13 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandDelta,
+    CommandProposalRequest,
+    CommandProposalView,
+)
 from krim_agent.task_state import TaskMutation, TaskSnapshot, TaskWriteRequest
 from krim_agent.workspace_change import (
     FileChangeSpec,
@@ -70,6 +77,11 @@ from .types import (
 )
 
 __all__ = [
+    "CommandChangesPage",
+    "CommandChangesRequest",
+    "CommandDelta",
+    "CommandProposalRequest",
+    "CommandProposalView",
     "AgentCommandRequest",
     "CommandLookup",
     "CommandRead",

@@ -65,6 +65,17 @@ class WorkspacePreviewRequest(StrictModel):
     ttl_seconds: float = Field(default=3600, gt=0, le=86400)
 
 
+class ArtifactFileSpec(StrictModel):
+    """只从已核验命令记录派生；完整字节在提案私有快照中。"""
+
+    operation: Literal["artifact"] = "artifact"
+    path: str = Field(min_length=1, max_length=512)
+    command_id: str = Field(min_length=1, max_length=36)
+    source_hash: str = Field(pattern=SHA256)
+    expected_sha256: str | None = Field(pattern=SHA256)
+    mode: int | None = Field(default=None, ge=0, le=0o777)
+
+
 class WorkspaceOperationRequest(StrictModel):
     operation_id: str = Field(min_length=1, max_length=36)
 

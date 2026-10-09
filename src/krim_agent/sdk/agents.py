@@ -15,6 +15,12 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandProposalRequest,
+    CommandProposalView,
+)
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
@@ -80,6 +86,16 @@ class AgentSession:
         self, request: CommandLookup, *, confirmed: bool = False
     ) -> CommandSummary:
         return await self.service.command_cancel(self.agent_id, request, confirmed=confirmed)
+
+    async def command_changes(
+        self, request: CommandChangesRequest, *, confirmed: bool = False
+    ) -> CommandChangesPage:
+        return await self.service.command_changes(self.agent_id, request, confirmed=confirmed)
+
+    async def propose_command_change(
+        self, request: CommandProposalRequest, *, confirmed: bool = False
+    ) -> CommandProposalView:
+        return await self.service.command_propose(self.agent_id, request, confirmed=confirmed)
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)

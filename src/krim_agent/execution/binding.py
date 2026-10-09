@@ -8,7 +8,16 @@ from krim_agent.protocol.domain import ServiceError
 from .linux import LinuxSandboxRunner
 from .records import CommandResource
 
-COMMAND_TOOL_NAMES = frozenset({"command_execute", "command_get", "command_read", "command_cancel"})
+COMMAND_TOOL_NAMES = frozenset(
+    {
+        "command_execute",
+        "command_get",
+        "command_read",
+        "command_cancel",
+        "command_changes",
+        "command_propose",
+    }
+)
 
 
 @dataclass(frozen=True)

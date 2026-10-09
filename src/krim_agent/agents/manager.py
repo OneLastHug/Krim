@@ -462,7 +462,7 @@ class AgentManager:
             WorkspaceEditStore(repository.database, owner_id=self.owner_id)
         )
         self.commands = AgentCommandService(
-            CommandStore(repository.database, owner_id=self.owner_id)
+            CommandStore(repository.database, owner_id=self.owner_id), self.workspace_changes
         )
 
     @staticmethod
@@ -707,6 +707,10 @@ class AgentManager:
                 raise AgentError("workspace_read_only", "只读工作区不可登记修改工具")
         elif any(item.name in WORKSPACE_TOOL_NAMES for item in definition.tools.definitions):
             raise AgentError("workspace_unbound", "Agent文件工具缺少工作区授权")
+        if any(item.name == "command_propose" for item in definition.tools.definitions) and (
+            definition.workspace is None or not definition.workspace.workspace.writable
+        ):
+            raise AgentError("workspace_read_only", "命令产物提案需要可写工作区授权")
         if len(self._handles) >= self.max_agents:
             raise AgentError("agent_limit", "Agent 数量超过限制")
         definition = replace(definition.with_id(), tools=copy_tools(definition.tools))

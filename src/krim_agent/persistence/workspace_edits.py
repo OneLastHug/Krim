@@ -21,6 +21,7 @@ from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel, utc_now
 from krim_agent.workspace import Workspace
 from krim_agent.workspace_change import (
+    ArtifactFileSpec,
     FileChangePreview,
     FileChangeReceipt,
     FileChangeSpec,
@@ -39,6 +40,7 @@ from krim_agent.workspace_restore import CheckpointRestoreFence
 from krim_agent.workspace_writer import FileRecovery, FileSnapshot, PreparedFileChange
 
 from .agent_sessions import assert_session_open, assert_session_owner
+from .command_proposals import assert_command_proposal
 from .database import (
     AgentSessionRow,
     Database,
@@ -315,6 +317,11 @@ class WorkspaceEditStore:
         old = prepared.before.data if prepared.before is not None else None
         if spec.expected_sha256 != prepared.before_sha256:
             raise ServiceError("workspace_snapshot_corrupt", "原版本与快照不一致", 409)
+        if isinstance(spec, ArtifactFileSpec) and (
+            (spec.mode is None) != (prepared.after is None)
+            or (prepared.before is not None and prepared.before.mode & ~0o777)
+        ):
+            raise ServiceError("execution_artifact_mode", "产物模式与快照不匹配", 409)
         for content in (old, prepared.after):
             if content is not None:
                 if len(content) > 8_388_608 or b"\0" in content:
@@ -858,8 +865,19 @@ class WorkspaceEditStore:
                 restore_fence,
                 previous.operation_id if previous is not None else None,
             )
+            proposal = await self._proposal(session, scope_id, request.proposal_id)
+            original = self._change(proposal).prepared
+            command_source = await assert_command_proposal(
+                session,
+                proposal,
+                original,
+                applying=request.action == "apply" and previous is None,
+            )
             self._validate_prepared(
-                prepared, original_intent=request.action == "apply" and restore_child is None
+                prepared,
+                original_intent=request.action == "apply"
+                and restore_child is None
+                and not command_source,
             )
             if previous is not None:
                 if previous.request_hash != digest_value:
@@ -867,11 +885,9 @@ class WorkspaceEditStore:
                         "workspace_idempotency_conflict", "动作键已绑定其他请求或资源", 409
                     )
                 return self._attempt(previous), False
-            proposal = await self._proposal(session, scope_id, request.proposal_id)
             await self._resource(session, scope_id, proposal.workspace_key, resource_fingerprint)
             if proposal.resource_fingerprint != resource_fingerprint:
                 raise ServiceError("workspace_binding_changed", "修改提案资源版本不匹配", 409)
-            original = self._change(proposal).prepared
             if (
                 prepared.workspace_fingerprint != original.workspace_fingerprint
                 or prepared.spec.path != original.spec.path
@@ -1023,6 +1039,9 @@ class WorkspaceEditStore:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             await assert_batch_execution(session, self.owner_id, operation_id)
             await assert_restore_execution(session, self.owner_id, operation_id)
+            await assert_command_proposal(
+                session, proposal, self._change(proposal).prepared, applying=row.action == "apply"
+            )
 
     async def history(self, scope_id: str, proposal_id: str) -> builtin_list[WorkspaceAttemptView]:
         async with self.database.write_lock, self.database.sessions() as session:
