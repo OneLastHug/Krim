@@ -21,7 +21,29 @@ from .streams import MultiplexRequest
 from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
 from .workspace_change import WorkspaceAttemptView, WorkspaceChangeAction, WorkspacePreviewRequest
+from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
 from .workspace_list import NativeBatchRequest, NativeBatchView
+from .workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
+)
+
+_CHECKPOINT_ACTIONS = (
+    "create-checkpoint",
+    "checkpoints",
+    "checkpoint",
+    "checkpoint-by-key",
+    "wait-checkpoint",
+    "cancel-checkpoint",
+    "preview-restore",
+    "execute-restore",
+    "restores",
+    "restore",
+    "restore-by-key",
+    "wait-restore",
+    "cancel-restore",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,22 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
             "batch-history",
             "wait-batch",
             "cancel-batch",
+            *_CHECKPOINT_ACTIONS,
         ],
     )
     workspace.add_argument("agent_id", help="Agent实例标识")
     workspace.add_argument(
-        "value", nargs="?", help="文件相对路径、搜索文本、proposal/operation/batch标识"
+        "value", nargs="?", help="相对路径、搜索文本、proposal/operation/batch/checkpoint/plan标识"
     )
     workspace.add_argument("--path", default=".", help="path（路径）：列出/搜索的相对目录")
     workspace.add_argument("--limit", type=int, help="limit（上限）：目录项或搜索匹配数")
     workspace.add_argument("--start-line", type=int, default=1, help="start line（起始行）")
     workspace.add_argument("--max-lines", type=int, default=200, help="max lines（最大行数）")
-    workspace.add_argument("--request", help="request（请求）：preview或start-batch的本地JSON文件")
     workspace.add_argument(
-        "--revision", type=int, help="revision（修订号）：apply/undo/keep预期版本"
+        "--request", help="request（请求）：修改/批次/检查点捕获/恢复预览的本地JSON文件"
     )
     workspace.add_argument(
-        "--request-key", help="request key（请求键）：apply/undo/keep固定幂等键或批次查询键"
+        "--revision", type=int, help="revision（修订号）：文件动作或execute-restore的预期版本"
+    )
+    workspace.add_argument(
+        "--request-key", help="request key（请求键）：文件/恢复执行的幂等键或原请求查询键"
     )
     workspace.add_argument(
         "--filter",
@@ -100,10 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout-seconds",
         type=float,
         default=30,
-        help="timeout seconds（等待秒数）：批次查询最长等待时间",
+        help="timeout seconds（等待秒数）：批次/检查点/恢复查询最长等待时间",
     )
     workspace.add_argument(
-        "--offset", type=int, default=0, help="offset（偏移）：changes列表起始项"
+        "--offset", type=int, default=0, help="offset（偏移）：修改/检查点/恢复列表起始项"
     )
     workspace.add_argument(
         "--confirm", action="store_true", help="confirm（确认）：本次原参数的Host确认，不覆盖deny"
@@ -276,6 +301,75 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _workspace_checkpoint_command(
+    client: KrimClient,
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> BaseModel | Sequence[BaseModel] | None:
+    if args.action in {"create-checkpoint", "preview-restore"}:
+        if not args.request:
+            parser.error("检查点捕获/恢复预览需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("检查点请求不能超过64KiB")
+            payload = (
+                WorkspaceCheckpointCreate.model_validate_json(raw)
+                if args.action == "create-checkpoint"
+                else CheckpointRestorePreview.model_validate_json(raw)
+            )
+        except (OSError, ValueError):
+            parser.error("检查点请求无效；请检查捕获paths或恢复checkpoint_id、request_key等字段")
+        if isinstance(payload, WorkspaceCheckpointCreate):
+            return client.agent_workspace_create_checkpoint(
+                args.agent_id, payload, confirmed=args.confirm
+            )
+        return client.agent_workspace_preview_restore(
+            args.agent_id, payload, confirmed=args.confirm
+        )
+    if args.action in {"checkpoints", "restores"}:
+        limit = args.limit if args.limit is not None else 32
+        if args.action == "checkpoints":
+            return client.agent_workspace_checkpoints(
+                args.agent_id, offset=args.offset, limit=limit
+            )
+        return client.agent_workspace_restores(args.agent_id, offset=args.offset, limit=limit)
+    if args.action in {"checkpoint-by-key", "restore-by-key"}:
+        if not args.request_key:
+            parser.error("按键查询检查点或恢复计划需要--request-key")
+        if args.action == "checkpoint-by-key":
+            return client.agent_workspace_checkpoint_by_key(args.agent_id, args.request_key)
+        return client.agent_workspace_restore_by_key(args.agent_id, args.request_key)
+    if not args.value:
+        parser.error("检查点动作需要checkpoint或plan标识")
+    if args.action == "checkpoint":
+        return client.agent_workspace_checkpoint(args.agent_id, args.value)
+    if args.action == "wait-checkpoint":
+        return client.agent_workspace_wait_checkpoint(
+            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
+        )
+    if args.action == "cancel-checkpoint":
+        return client.agent_workspace_cancel_checkpoint(args.agent_id, args.value)
+    if args.action == "restore":
+        return client.agent_workspace_restore(args.agent_id, args.value)
+    if args.action == "wait-restore":
+        return client.agent_workspace_wait_restore(
+            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
+        )
+    if args.action == "cancel-restore":
+        return client.agent_workspace_cancel_restore(args.agent_id, args.value)
+    if args.revision is None or not args.request_key:
+        parser.error("execute-restore需要--revision和--request-key")
+    try:
+        request = CheckpointRestoreExecute(
+            plan_id=args.value, expected_revision=args.revision, request_key=args.request_key
+        )
+    except ValueError:
+        parser.error("恢复执行参数无效；请检查计划标识、revision与request-key")
+    return client.agent_workspace_execute_restore(args.agent_id, request, confirmed=args.confirm)
+
+
 def _workspace_command(
     client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
@@ -284,7 +378,13 @@ def _workspace_command(
         if args.value and args.value != args.batch_id:
             parser.error("位置参数与--batch-id的批次标识不一致")
         args.value = args.batch_id
-    if args.action == "info":
+    if args.action in _CHECKPOINT_ACTIONS:
+        checkpoint_result = _workspace_checkpoint_command(client, args, parser)
+        if checkpoint_result is None:
+            print("null")
+            return
+        result = checkpoint_result
+    elif args.action == "info":
         result = client.agent_workspace(args.agent_id)
     elif args.action == "list":
         result = client.agent_list_files(
@@ -409,6 +509,18 @@ def _workspace_command(
         args.action in {"apply", "undo", "keep", "reconcile"}
         and isinstance(result, WorkspaceAttemptView)
         and result.status != "done"
+    ):
+        parser.exit(1)
+    if (
+        isinstance(result, WorkspaceCheckpointView)
+        and args.action in {"create-checkpoint", "wait-checkpoint"}
+        and result.status not in {"capturing", "available"}
+    ):
+        parser.exit(1)
+    if (
+        isinstance(result, CheckpointRestoreView)
+        and args.action in {"preview-restore", "execute-restore", "wait-restore"}
+        and result.status not in {"preparing", "ready", "running", "done"}
     ):
         parser.exit(1)
     if (

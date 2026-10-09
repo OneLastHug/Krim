@@ -17,15 +17,17 @@ from krim_agent.workspace_change import (
 
 
 class CheckpointRestorePreview(StrictModel):
-    checkpoint_id: str = Field(min_length=1, max_length=36)
-    request_key: str = Field(min_length=1, max_length=128)
-    ttl_seconds: float = Field(default=3600, gt=0, le=86400)
+    checkpoint_id: str = Field(
+        min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"
+    )
+    request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$")
+    ttl_seconds: float = Field(default=3600.0, gt=0, le=86400)
 
 
 class CheckpointRestoreExecute(StrictModel):
-    plan_id: str = Field(min_length=1, max_length=36)
+    plan_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$")
     expected_revision: int = Field(ge=0, le=9007199254740991)
-    request_key: str = Field(min_length=1, max_length=128)
+    request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$")
 
 
 class CheckpointRestoreItem(StrictModel):
