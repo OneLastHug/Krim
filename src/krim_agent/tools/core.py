@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from krim_agent.workspace import WorkspaceBinding
     from krim_agent.workspace_checkpoint import CheckpointCaptureFence
     from krim_agent.workspace_list import NativeBatchFence
+    from krim_agent.workspace_restore import CheckpointRestoreFence
 
 if TYPE_CHECKING:
     from .registry import ToolRegistry
@@ -125,6 +126,7 @@ class ToolContext:
     workspace_changes: WorkspaceChangeBackend | None = None
     workspace_batch: NativeBatchFence | None = None
     checkpoint_capture: CheckpointCaptureFence | None = None
+    checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
@@ -155,6 +157,7 @@ class ToolContext:
             workspace_changes=self.workspace_changes,
             workspace_batch=self.workspace_batch,
             checkpoint_capture=self.checkpoint_capture,
+            checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
             arguments=arguments,
         )

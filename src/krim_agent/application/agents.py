@@ -32,6 +32,7 @@ from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
+from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence.agent_profiles import AgentProfileStore
@@ -39,6 +40,7 @@ from krim_agent.persistence.agent_sessions import assert_session_open, guard_age
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
+from krim_agent.persistence.workspace_restores import WorkspaceRestoreStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
@@ -79,6 +81,12 @@ from krim_agent.workspace_list import (
     NativeBatchView,
     NativeChangePage,
     NativeListFilter,
+)
+from krim_agent.workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestoreFence,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
 )
 
 AgentViewStatus = Literal[
@@ -177,6 +185,13 @@ class AgentService:
             self.manager.workspace_changes,
             self._workspace_checkpoint_authorize,
             self._workspace_checkpoint_read,
+        )
+        self.workspace_restore_store = WorkspaceRestoreStore(self.workspace_edits)
+        self.workspace_restores = WorkspaceRestoreService(
+            self.workspace_restore_store,
+            self.workspace_checkpoints,
+            self._workspace_checkpoint_authorize,
+            self._workspace_restore_child,
         )
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
@@ -547,6 +562,7 @@ class AgentService:
             return 0
         recovered = await self.workspace_edits.recover_interrupted()
         recovered += await self.workspace_batch_store.recover_interrupted()
+        recovered += await self.workspace_restore_store.recover_interrupted()
         self._workspace_recovered = True
         return recovered
 
@@ -559,6 +575,7 @@ class AgentService:
         confirmed: bool = False,
         batch_fence: NativeBatchFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
+        checkpoint_restore: CheckpointRestoreFence | None = None,
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -605,6 +622,7 @@ class AgentService:
                     workspace_changes=self.manager.workspace_changes,
                     workspace_batch=batch_fence,
                     checkpoint_capture=checkpoint_capture,
+                    checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
                     call_id=call_id,
                     approval_handler=confirm if confirmed else None,
@@ -861,6 +879,63 @@ class AgentService:
         return await self.workspace_checkpoints.cancel(
             f"session:{session.session_id}", checkpoint_id
         )
+
+    async def _workspace_restore_child(
+        self,
+        agent_id: str,
+        request: WorkspaceChangeAction,
+        fence: CheckpointRestoreFence,
+        confirmed: bool,
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            "workspace_change",
+            request.model_dump(),
+            confirmed=confirmed,
+            checkpoint_restore=fence,
+        )
+
+    async def workspace_preview_restore(
+        self, agent_id: str, request: CheckpointRestorePreview, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        return await self.workspace_restores.preview(agent_id, request, confirmed=confirmed)
+
+    async def workspace_execute_restore(
+        self, agent_id: str, request: CheckpointRestoreExecute, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        return await self.workspace_restores.start(agent_id, request, confirmed=confirmed)
+
+    async def workspace_restore(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
+        session = await self.session(agent_id)
+        return await self.workspace_restore_store.get(f"session:{session.session_id}", plan_id)
+
+    async def workspace_restore_by_key(
+        self, agent_id: str, request_key: str
+    ) -> CheckpointRestoreView | None:
+        session = await self.session(agent_id)
+        return await self.workspace_restore_store.by_key(
+            f"session:{session.session_id}", request_key
+        )
+
+    async def workspace_restore_list(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[CheckpointRestoreView]:
+        session = await self.session(agent_id)
+        return await self.workspace_restore_store.history(
+            f"session:{session.session_id}", offset=offset, limit=limit
+        )
+
+    async def workspace_restore_wait(
+        self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
+    ) -> CheckpointRestoreView:
+        session = await self.session(agent_id)
+        return await self.workspace_restores.wait(
+            f"session:{session.session_id}", plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def workspace_restore_cancel(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
+        session = await self.session(agent_id)
+        return await self.workspace_restores.cancel(f"session:{session.session_id}", plan_id)
 
     async def _workspace_batch_child(
         self,
@@ -1342,6 +1417,7 @@ class AgentService:
         async with self._start_lock:
             self._closed = True
         try:
+            await self.workspace_restores.close()
             await self.workspace_checkpoints.close()
             await self.workspace_batches.close()
             operations = list(self._workspace_operations)

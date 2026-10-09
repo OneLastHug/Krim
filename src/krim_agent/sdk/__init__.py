@@ -28,6 +28,12 @@ from krim_agent.workspace_list import (
     NativeChangeItem,
     NativeChangePage,
 )
+from krim_agent.workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestoreItem,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
+)
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -57,6 +63,10 @@ from .types import (
 )
 
 __all__ = [
+    "CheckpointRestoreExecute",
+    "CheckpointRestoreItem",
+    "CheckpointRestorePreview",
+    "CheckpointRestoreView",
     "WorkspaceCheckpointCreate",
     "WorkspaceCheckpointFileView",
     "WorkspaceCheckpointView",

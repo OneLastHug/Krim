@@ -35,6 +35,7 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
 )
 from krim_agent.workspace_list import NativeBatchFence
+from krim_agent.workspace_restore import CheckpointRestoreFence
 from krim_agent.workspace_writer import FileRecovery, FileSnapshot, PreparedFileChange
 
 from .agent_sessions import assert_session_open, assert_session_owner
@@ -50,6 +51,7 @@ from .database import (
     WorkspaceLedgerGuardRow,
 )
 from .workspace_batches import assert_batch_execution, assert_batch_request
+from .workspace_restores import assert_restore_execution, assert_restore_request
 
 ChangeStatus = Literal[
     "proposed",
@@ -545,6 +547,7 @@ class WorkspaceEditStore:
         resource_fingerprint: str,
         *,
         batch_fence: NativeBatchFence | None = None,
+        restore_fence: CheckpointRestoreFence | None = None,
     ) -> StoredWorkspaceAttempt | None:
         value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
@@ -568,6 +571,15 @@ class WorkspaceEditStore:
                 request,
                 resource_fingerprint,
                 batch_fence,
+                row.operation_id if row is not None else None,
+            )
+            await assert_restore_request(
+                session,
+                self.owner_id,
+                scope_id,
+                request,
+                resource_fingerprint,
+                restore_fence,
                 row.operation_id if row is not None else None,
             )
             if row is not None:
@@ -811,13 +823,14 @@ class WorkspaceEditStore:
         run_id: str | None = None,
         call_id: str | None = None,
         batch_fence: NativeBatchFence | None = None,
+        restore_fence: CheckpointRestoreFence | None = None,
     ) -> tuple[StoredWorkspaceAttempt, bool]:
         self._key(request.request_key)
         digest_value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
         )
         metadata = encode_prepared(prepared)
-        self._validate_prepared(prepared, original_intent=request.action == "apply")
+        self._validate_prepared(prepared, original_intent=False)
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self._writer(session)
             await self._scope(session, scope_id, writing=True, run_id=run_id)
@@ -835,6 +848,18 @@ class WorkspaceEditStore:
                 resource_fingerprint,
                 batch_fence,
                 previous.operation_id if previous is not None else None,
+            )
+            restore_child = await assert_restore_request(
+                session,
+                self.owner_id,
+                scope_id,
+                request,
+                resource_fingerprint,
+                restore_fence,
+                previous.operation_id if previous is not None else None,
+            )
+            self._validate_prepared(
+                prepared, original_intent=request.action == "apply" and restore_child is None
             )
             if previous is not None:
                 if previous.request_hash != digest_value:
@@ -965,6 +990,9 @@ class WorkspaceEditStore:
             if batch_child is not None:
                 batch_child.operation_id = operation_id
                 batch_child.admission_open = False
+            if restore_child is not None:
+                restore_child.operation_id = operation_id
+                restore_child.admission_open = False
             session.add(WorkspaceFileLockRow(file_key=lock_id, operation_id=operation_id))
             await session.flush()
             return self._attempt(row), True
@@ -994,6 +1022,7 @@ class WorkspaceEditStore:
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             await assert_batch_execution(session, self.owner_id, operation_id)
+            await assert_restore_execution(session, self.owner_id, operation_id)
 
     async def history(self, scope_id: str, proposal_id: str) -> builtin_list[WorkspaceAttemptView]:
         async with self.database.write_lock, self.database.sessions() as session:

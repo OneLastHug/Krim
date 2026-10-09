@@ -30,6 +30,11 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from krim_agent.workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
+)
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -222,6 +227,43 @@ class AgentSession:
 
     async def cancel_file_checkpoint(self, checkpoint_id: str) -> WorkspaceCheckpointView:
         return await self.service.workspace_checkpoint_cancel(self.agent_id, checkpoint_id)
+
+    async def preview_file_checkpoint_restore(
+        self, request: CheckpointRestorePreview, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        return await self.service.workspace_preview_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def execute_file_checkpoint_restore(
+        self, request: CheckpointRestoreExecute, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        return await self.service.workspace_execute_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def file_checkpoint_restore(self, plan_id: str) -> CheckpointRestoreView:
+        return await self.service.workspace_restore(self.agent_id, plan_id)
+
+    async def file_checkpoint_restore_by_key(
+        self, request_key: str
+    ) -> CheckpointRestoreView | None:
+        return await self.service.workspace_restore_by_key(self.agent_id, request_key)
+
+    async def file_checkpoint_restores(
+        self, *, offset: int = 0, limit: int = 32
+    ) -> list[CheckpointRestoreView]:
+        return await self.service.workspace_restore_list(self.agent_id, offset=offset, limit=limit)
+
+    async def wait_file_checkpoint_restore(
+        self, plan_id: str, *, timeout_seconds: float = 30
+    ) -> CheckpointRestoreView:
+        return await self.service.workspace_restore_wait(
+            self.agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_file_checkpoint_restore(self, plan_id: str) -> CheckpointRestoreView:
+        return await self.service.workspace_restore_cancel(self.agent_id, plan_id)
 
     async def start_file_change_batch(
         self, request: NativeBatchRequest, *, confirmed: bool = False
