@@ -150,12 +150,18 @@ from krim_agent.workspace_change import (
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
     NativeListFilter,
+)
+from krim_agent.workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
 )
 
 from .boundary import LocalBoundary
@@ -908,6 +914,113 @@ def create_app(
         agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
     ) -> NativeBatchView:
         return await agent_service.workspace_cancel_batch(agent_id, batch_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-checkpoints", status_code=202)
+    async def agent_workspace_checkpoint_create(
+        agent_id: WorkspaceIdentifier,
+        payload: WorkspaceCheckpointCreate,
+        confirmed: bool = Query(default=False),
+    ) -> WorkspaceCheckpointView:
+        return await agent_service.workspace_create_checkpoint(
+            agent_id, payload, confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-checkpoints")
+    async def agent_workspace_checkpoints(
+        agent_id: WorkspaceIdentifier,
+        offset: int = Query(default=0, ge=0, le=9007199254740991),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> list[WorkspaceCheckpointView]:
+        return await agent_service.workspace_checkpoint_list(agent_id, offset=offset, limit=limit)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-checkpoints/by-key")
+    async def agent_workspace_checkpoint_by_key(
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$"),
+    ) -> WorkspaceCheckpointView | None:
+        return await agent_service.workspace_checkpoint_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-checkpoints/{checkpoint_id}")
+    async def agent_workspace_checkpoint(
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+    ) -> WorkspaceCheckpointView:
+        return await agent_service.workspace_checkpoint(agent_id, checkpoint_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-checkpoints/{checkpoint_id}/wait")
+    async def agent_workspace_checkpoint_wait(
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300),
+    ) -> WorkspaceCheckpointView:
+        return await agent_service.workspace_checkpoint_wait(
+            agent_id, checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-checkpoints/{checkpoint_id}/cancel")
+    async def agent_workspace_checkpoint_cancel(
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+    ) -> WorkspaceCheckpointView:
+        return await agent_service.workspace_checkpoint_cancel(agent_id, checkpoint_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-restores/preview", status_code=202)
+    async def agent_workspace_restore_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: CheckpointRestorePreview,
+        confirmed: bool = Query(default=False),
+    ) -> CheckpointRestoreView:
+        return await agent_service.workspace_preview_restore(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-restores")
+    async def agent_workspace_restores(
+        agent_id: WorkspaceIdentifier,
+        offset: int = Query(default=0, ge=0, le=9007199254740991),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> list[CheckpointRestoreView]:
+        return await agent_service.workspace_restore_list(agent_id, offset=offset, limit=limit)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-restores/by-key")
+    async def agent_workspace_restore_by_key(
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$"),
+    ) -> CheckpointRestoreView | None:
+        return await agent_service.workspace_restore_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/native-restores/{plan_id}")
+    async def agent_workspace_restore(
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+    ) -> CheckpointRestoreView:
+        return await agent_service.workspace_restore(agent_id, plan_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-restores/{plan_id}/execute", status_code=202)
+    async def agent_workspace_restore_execute(
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        payload: CheckpointRestoreExecute,
+        confirmed: bool = Query(default=False),
+    ) -> CheckpointRestoreView:
+        if payload.plan_id != plan_id:
+            raise ServiceError("workspace_restore_mismatch", "路径与恢复计划标识不一致", 422)
+        return await agent_service.workspace_execute_restore(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-restores/{plan_id}/wait")
+    async def agent_workspace_restore_wait(
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300),
+    ) -> CheckpointRestoreView:
+        return await agent_service.workspace_restore_wait(
+            agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/native-restores/{plan_id}/cancel")
+    async def agent_workspace_restore_cancel(
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+    ) -> CheckpointRestoreView:
+        return await agent_service.workspace_restore_cancel(agent_id, plan_id)
 
     @app.post("/v1/agents/{agent_id}/tasks/{kind}")
     async def write_agent_tasks(

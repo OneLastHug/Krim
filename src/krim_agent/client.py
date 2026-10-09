@@ -84,12 +84,18 @@ from .workspace_change import (
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
+from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
 from .workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
     NativeBatchView,
     NativeChangePage,
     NativeListFilter,
+)
+from .workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
 )
 
 
@@ -105,6 +111,18 @@ def _workspace_identifier(value: str) -> str:
             "工作区Agent/提案/操作标识无效", code="workspace_identifier_invalid", status=422
         )
     return value
+
+
+def _checkpoint_key(value: str) -> str:
+    if not 1 <= len(value) <= 128 or any(ord(char) < 32 for char in value):
+        raise ClientError("检查点请求键无效", code="workspace_request_key_invalid", status=422)
+    return value
+
+
+def _checkpoint_wait(seconds: float, code: str) -> float:
+    if not math.isfinite(seconds) or not 0 <= seconds <= 300:
+        raise ClientError("检查点等待时间须为0至300秒", code=code, status=422)
+    return max(60, seconds + 5)
 
 
 class KrimClient:
@@ -654,6 +672,138 @@ class KrimClient:
         )
         self._check(response)
         return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_create_checkpoint(
+        self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
+    ) -> WorkspaceCheckpointView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return WorkspaceCheckpointView.model_validate_json(response.content)
+
+    def agent_workspace_checkpoints(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[WorkspaceCheckpointView]:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints",
+            params={"offset": offset, "limit": limit},
+        )
+        self._check(response)
+        return TypeAdapter(list[WorkspaceCheckpointView]).validate_json(response.content)
+
+    def agent_workspace_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> WorkspaceCheckpointView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints/{_workspace_identifier(checkpoint_id)}"
+        )
+        self._check(response)
+        return WorkspaceCheckpointView.model_validate_json(response.content)
+
+    def agent_workspace_checkpoint_by_key(
+        self, agent_id: str, request_key: str
+    ) -> WorkspaceCheckpointView | None:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints/by-key",
+            params={"request_key": _checkpoint_key(request_key)},
+        )
+        self._check(response)
+        return TypeAdapter(WorkspaceCheckpointView | None).validate_json(response.content)
+
+    def agent_workspace_wait_checkpoint(
+        self, agent_id: str, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> WorkspaceCheckpointView:
+        timeout = _checkpoint_wait(timeout_seconds, "workspace_checkpoint_timeout")
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints/"
+            f"{_workspace_identifier(checkpoint_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=timeout,
+        )
+        self._check(response)
+        return WorkspaceCheckpointView.model_validate_json(response.content)
+
+    def agent_workspace_cancel_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> WorkspaceCheckpointView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-checkpoints/"
+            f"{_workspace_identifier(checkpoint_id)}/cancel"
+        )
+        self._check(response)
+        return WorkspaceCheckpointView.model_validate_json(response.content)
+
+    def agent_workspace_preview_restore(
+        self, agent_id: str, request: CheckpointRestorePreview, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return CheckpointRestoreView.model_validate_json(response.content)
+
+    def agent_workspace_execute_restore(
+        self, agent_id: str, request: CheckpointRestoreExecute, *, confirmed: bool = False
+    ) -> CheckpointRestoreView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/"
+            f"{_workspace_identifier(request.plan_id)}/execute",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return CheckpointRestoreView.model_validate_json(response.content)
+
+    def agent_workspace_restores(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[CheckpointRestoreView]:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores",
+            params={"offset": offset, "limit": limit},
+        )
+        self._check(response)
+        return TypeAdapter(list[CheckpointRestoreView]).validate_json(response.content)
+
+    def agent_workspace_restore(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/{_workspace_identifier(plan_id)}"
+        )
+        self._check(response)
+        return CheckpointRestoreView.model_validate_json(response.content)
+
+    def agent_workspace_restore_by_key(
+        self, agent_id: str, request_key: str
+    ) -> CheckpointRestoreView | None:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/by-key",
+            params={"request_key": _checkpoint_key(request_key)},
+        )
+        self._check(response)
+        return TypeAdapter(CheckpointRestoreView | None).validate_json(response.content)
+
+    def agent_workspace_wait_restore(
+        self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
+    ) -> CheckpointRestoreView:
+        timeout = _checkpoint_wait(timeout_seconds, "workspace_restore_timeout")
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/{_workspace_identifier(plan_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=timeout,
+        )
+        self._check(response)
+        return CheckpointRestoreView.model_validate_json(response.content)
+
+    def agent_workspace_cancel_restore(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/{_workspace_identifier(plan_id)}/cancel"
+        )
+        self._check(response)
+        return CheckpointRestoreView.model_validate_json(response.content)
 
     def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
         response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")
