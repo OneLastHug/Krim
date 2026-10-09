@@ -108,6 +108,23 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .checkpoint-card { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
 .checkpoint-card p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .checkpoint-card button { margin-top: 6px; }
+#checkpoint-panel > label { display: block; margin: 6px 14px; font-size: 0.8rem; }
+#checkpoint-source { margin: 0 14px 10px; width: calc(100% - 28px); min-width: 0; }
+#checkpoint-host, #checkpoint-native { padding: 0 14px 8px; min-width: 0; }
+#checkpoint-panel .actions { flex-wrap: wrap; margin-top: 8px; }
+#checkpoint-panel input, #checkpoint-panel select { padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface); }
+#native-checkpoint-query { display: block; width: 100%; margin: 6px 0; }
+#checkpoint-native > label { display: block; margin-top: 10px; font-size: 0.8rem; }
+#checkpoint-native button { border: 0; border-radius: 7px; padding: 7px 10px; color: var(--accent); background: var(--accent-soft); font-size: 0.78rem; font-weight: 600; }
+#checkpoint-native #native-restore-execute { color: white; background: var(--accent); }
+.checkpoint-histories { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 12px; }
+.checkpoint-histories h3 { font-size: 0.85rem; margin: 12px 0 6px; }
+.checkpoint-detail { margin-top: 12px; min-width: 0; }
+.checkpoint-detail h3 { font-size: 0.9rem; }
+.checkpoint-detail p, .checkpoint-card small { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.78rem; line-height: 1.5; margin: 5px 0; }
+.checkpoint-card small { display: block; }
+.checkpoint-restore-file { margin: 8px 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.checkpoint-restore-file .workspace-diff { max-width: 100%; max-height: 280px; overflow: auto; white-space: pre; font: 0.78rem ui-monospace, SFMono-Regular, Consolas, monospace; }
 .attachment-card { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
 .workflow-grid { display: grid; gap: 8px; padding: 0 14px 14px; }
 .workflow-grid textarea, .workflow-grid input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.76rem; }

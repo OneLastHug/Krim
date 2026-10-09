@@ -38,6 +38,26 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         settings,
     )
     batch_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+    checkpoint_gates: dict[str, tuple[str, asyncio.Event, asyncio.Event]] = {}
+
+    async def pause_native_checkpoint(definition: ToolDefinition, context: ToolContext) -> None:
+        gate = checkpoint_gates.get(context.agent_id or "")
+        if gate is None:
+            return
+        phase, entered, released = gate
+        matches = (
+            phase == "capture"
+            and definition.name == "workspace_read"
+            and context.checkpoint_capture is not None
+        ) or (
+            phase == "restore"
+            and definition.name == "workspace_change"
+            and context.checkpoint_restore is not None
+        )
+        if matches:
+            entered.set()
+            async with context.human_wait():
+                await released.wait()
 
     async def pause_native_batch(definition: ToolDefinition, context: ToolContext) -> None:
         gate = batch_gates.get(context.agent_id or "")
@@ -49,6 +69,7 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
                 await released.wait()
 
     runtime.tools.add_global_pre(pause_native_batch)
+    runtime.tools.add_global_pre(pause_native_checkpoint)
     app = create_app(runtime=runtime)
     workspace_root = Path(directory) / "workspace"
     (workspace_root / "src").mkdir(parents=True)
@@ -103,6 +124,28 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         return {
             "blocked": current is not None and not current[1].is_set(),
             "entered": current is not None and current[0].is_set(),
+        }
+
+    class TestNativeCheckpointControl(StrictModel):
+        agent_id: str = Field(min_length=36, max_length=36, pattern=r"^[a-f0-9-]{36}$")
+        phase: Literal["capture", "restore"] = "restore"
+        action: Literal["block", "release", "status"]
+
+    @app.post("/_test/native-checkpoint")
+    async def configure_native_checkpoint(payload: TestNativeCheckpointControl) -> dict[str, bool]:
+        await app.state.agents.session(payload.agent_id)
+        previous = checkpoint_gates.get(payload.agent_id)
+        if payload.action == "block":
+            if previous is not None and not previous[2].is_set():
+                raise ServiceError("test_checkpoint_already_blocked", "测试检查点已暂停", 409)
+            checkpoint_gates[payload.agent_id] = (payload.phase, asyncio.Event(), asyncio.Event())
+        elif payload.action == "release" and previous is not None:
+            previous[2].set()
+            checkpoint_gates.pop(payload.agent_id, None)
+        current = checkpoint_gates.get(payload.agent_id)
+        return {
+            "blocked": current is not None and not current[2].is_set(),
+            "entered": current is not None and current[1].is_set(),
         }
 
     @app.post("/_test/workspace")

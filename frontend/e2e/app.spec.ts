@@ -13,7 +13,8 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/ui/");
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  // 启动包含真实数据库/目录/历史读取；观察窗口不定义产品10秒启动SLA。
+  await expect(page.locator("#connection")).toContainText("本地服务已连接", { timeout: 30_000 });
 });
 
 test("创建话题并完成真实工具 SSE 对话", async ({ page }) => {
@@ -138,7 +139,7 @@ test("生成中可以停止并等待持久化终态", async ({ page, request }) 
   await page.getByRole("button", { name: "发送", exact: true }).click();
   const run = await (await accepted).json();
   await expect(page.locator(".message.streaming")).toContainText("[fake]");
-  await page.getByRole("button", { name: "停止", exact: true }).first().click();
+  await page.locator("#run-stop").click();
   await expect(page.locator("#notice")).toContainText("已停止");
   expect((await (await request.get(`/v1/runs/${run.id}`)).json()).status).toBe("aborted");
   await expect(page.locator("#prompt")).toBeEnabled();
@@ -403,6 +404,7 @@ test("iframe 来源/版本/大小校验拒绝伪造调用，隐藏后状态仍�
 });
 
 test("引用 chip 与背景标签发送真实 Unicode 位置快照并在刷新后保留目录", async ({ page, request }) => {
+  test.setTimeout(60_000);
   const title = `引用上下文-${Date.now()}`;
   await page.getByPlaceholder("新话题标题").fill(title);
   const created = page.waitForResponse((response) => response.url().endsWith("/v1/topics") && response.request().method() === "POST");
@@ -426,6 +428,7 @@ test("引用 chip 与背景标签发送真实 Unicode 位置快照并在刷新�
   const accepted = page.waitForResponse((response) => response.url().endsWith("/messages") && response.request().method() === "POST");
   await page.getByRole("button", { name: "发送", exact: true }).click();
   const run = await (await accepted).json();
+  await expect.poll(async () => (await (await request.get(`/v1/runs/${run.id}`)).json()).status, { timeout: 30_000 }).toBe("completed");
   await expect(page.locator(".message.assistant").last()).toContainText("引用中的真值");
   await expect(page.locator(".message.assistant").last()).toContainText("背景中的真值");
   const history = (await (await request.get(`/v1/runs/${run.id}/messages`)).json()).messages;
@@ -444,6 +447,7 @@ test("引用 chip 与背景标签发送真实 Unicode 位置快照并在刷新�
 });
 
 test("编辑正文保持引用位置，修改引用 token 后取消绑定", async ({ page, request }) => {
+  test.setTimeout(60_000);
   const title = `引用位置-${Date.now()}`;
   const topic = await (await request.post("/v1/topics", { data: { title } })).json();
   await request.post(`/v1/topics/${topic.id}/mentions`, { data: { label: "doc", content: "value" } });
@@ -457,6 +461,7 @@ test("编辑正文保持引用位置，修改引用 token 后取消绑定", asyn
   const accepted = page.waitForResponse((response) => response.url().endsWith("/messages") && response.request().method() === "POST");
   await page.getByRole("button", { name: "发送", exact: true }).click();
   const run = await (await accepted).json();
+  await expect.poll(async () => (await (await request.get(`/v1/runs/${run.id}`)).json()).status, { timeout: 30_000 }).toBe("completed");
   await expect(page.locator("#prompt")).toBeEnabled();
   const saved = (await (await request.get(`/v1/runs/${run.id}/messages`)).json()).messages;
   expect(saved[0].details.prompt_context.mentions[0]).toMatchObject({ start: 5, end: 9 });

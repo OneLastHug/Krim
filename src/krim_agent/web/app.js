@@ -97,7 +97,7 @@ const skillsUI = new SkillsUI(showNotice);
 const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice, (topicId, file) => attachmentsUI.uploadFile(file, topicId));
 const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000), (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));
-const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
+const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000), (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));
 let localeChangeQueue = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice = "";
@@ -110,7 +110,8 @@ const agentsUI = new AgentsUI($("agents"), {
     stop: async (agent) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/stop`, { method: "POST" }); await loadAgents(); },
     destroy: async (agent) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}`, { method: "DELETE" }); state.handles = state.handles.filter(item => item.agent_id !== agent.agent_id); renderAgents(); },
     control: async (agent, action) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/session/${action}`, { method: "POST", body: JSON.stringify({ expected_revision: agent.session.revision }) }); await loadAgents(); },
-    openTopic: loadTopic, prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
+    openTopic: loadTopic, openCheckpoints: agentId => checkpointUI.selectWorkspace(agentId),
+    prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
 });
 let agentsLoading = false;
 let agentsReloadNeeded = false;
@@ -608,6 +609,7 @@ function renderAgents() {
     $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
     agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));
     changeListUI.setWorkspaceSources(state.handles);
+    checkpointUI.setWorkspaceSources(state.handles);
 }
 function graphFromEditor() {
     const value = JSON.parse(text("workflow-json").value);
@@ -929,6 +931,7 @@ async function loadTopic(topicId) {
     }
     state.topicId = topicId;
     changeListUI.beginTopic(topicId);
+    checkpointUI.beginTopic(topicId);
     projectCurrentSession();
     dragDropUI.selectTopic(topicId);
     const topic = state.topics.find((item) => item.id === topicId);
@@ -1027,6 +1030,9 @@ async function consume(runId, _fromSeq = 0) {
         projectCurrentSession();
         renderTopics();
         renderMessages();
+        // 已消费终帧的会话不会再次发出end；显式续读仍需展示原持久终态。
+        if (session.terminal)
+            showNotice(() => t("生成{status}", { status: localStatus(session.run.status) }));
     }
 }
 async function sendMessage(event) {

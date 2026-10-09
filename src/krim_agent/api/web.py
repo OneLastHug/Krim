@@ -31,6 +31,7 @@ PUBLIC_UI_PATHS = frozenset(
         "/ui/drag-drop.js",
         "/ui/change-list-ui.js",
         "/ui/checkpoint-ui.js",
+        "/ui/native-checkpoint-ui.js",
         "/ui/attachments-ui.js",
     }
 )
@@ -70,6 +71,7 @@ def mount_browser_ui(app: FastAPI) -> None:
         "drag-drop.js": "text/javascript",
         "change-list-ui.js": "text/javascript",
         "checkpoint-ui.js": "text/javascript",
+        "native-checkpoint-ui.js": "text/javascript",
         "attachments-ui.js": "text/javascript",
     }
 

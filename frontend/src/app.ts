@@ -117,7 +117,8 @@ const changeListUI = new ChangeListUI(
   (data) => hostEndpoint.request("changeList/invoke", data, 15_000),
   (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId),
 );
-const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000));
+const checkpointUI: CheckpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000),
+  (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";
@@ -125,12 +126,13 @@ let lastNoticeError = false;
 let lastNoticeLocal = true;
 let workflowRuns: WorkflowRunView[] = [];
 const localStatus = (status: string): string => t(statuses[status] || status);
-const agentsUI = new AgentsUI($("agents"), {
+const agentsUI: AgentsUI = new AgentsUI($("agents"), {
   start: startAgent,
   stop: async agent => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/stop`, { method: "POST" }); await loadAgents(); },
   destroy: async agent => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}`, { method: "DELETE" }); state.handles = state.handles.filter(item => item.agent_id !== agent.agent_id); renderAgents(); },
   control: async (agent, action) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/session/${action}`, { method: "POST", body: JSON.stringify({ expected_revision: agent.session.revision }) }); await loadAgents(); },
-  openTopic: loadTopic, prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
+  openTopic: loadTopic, openCheckpoints: agentId => checkpointUI.selectWorkspace(agentId),
+  prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
 });
 let agentsLoading = false;
 let agentsReloadNeeded = false;
@@ -461,6 +463,7 @@ function renderAgents(): void {
   $("agent-count").textContent = `${state.handles.length}/${state.agents.length}`;
   agentsUI.render(state.handles, topic => backgroundStreams.forTopic(topic));
   changeListUI.setWorkspaceSources(state.handles);
+  checkpointUI.setWorkspaceSources(state.handles);
 }
 
 function graphFromEditor(): WorkflowGraph {
@@ -535,6 +538,7 @@ async function loadTopic(topicId: string): Promise<void> {
   if (switched) { state.editingMessageId = null; $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); promptContextUI.setText("", true); state.runId = null; state.cursor = 0; state.disconnected = false; state.streaming = false; state.streamText = ""; state.messages = []; state.tree = null; state.interactionRuns.clear(); state.interactions = []; interactionLoadVersion += 1; renderInteractions(); }
   state.topicId = topicId;
   changeListUI.beginTopic(topicId);
+  checkpointUI.beginTopic(topicId);
   projectCurrentSession();
   dragDropUI.selectTopic(topicId);
   const topic = state.topics.find((item) => item.id === topicId);
@@ -591,7 +595,11 @@ async function consume(runId: string, _fromSeq = 0): Promise<void> {
   const run = await requestJson<RunView>(`/v1/runs/${encodeURIComponent(runId)}`);
   const session = backgroundStreams.track(run);
   backgroundStreams.retry(runId);
-  if (state.topicId === session.run.topic_id) { projectCurrentSession(); renderTopics(); renderMessages(); }
+  if (state.topicId === session.run.topic_id) {
+    projectCurrentSession(); renderTopics(); renderMessages();
+    // 已消费终帧的会话不会再次发出end；显式续读仍需展示原持久终态。
+    if (session.terminal) showNotice(() => t("生成{status}", { status: localStatus(session.run.status) }));
+  }
 }
 async function sendMessage(event: SubmitEvent): Promise<void> {
   event.preventDefault(); if (!state.topicId || state.busy) return;

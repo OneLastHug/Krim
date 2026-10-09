@@ -12,6 +12,7 @@ type Actions = {
   destroy: (agent: AgentView) => Promise<void>;
   control: (agent: AgentView, action: "close" | "reopen") => Promise<void>;
   openTopic: (topicId: string) => Promise<void>;
+  openCheckpoints: (agentId: string) => Promise<void>;
   prompt: () => string;
   notice: (message: string, error?: boolean) => void;
   status: (status: string) => string;
@@ -25,6 +26,7 @@ type Card = {
   tasks: TasksUI;
   workspace: WorkspaceUI;
   changes: WorkspaceChangesUI;
+  checkpoints: HTMLButtonElement;
 };
 
 export class AgentsUI {
@@ -44,6 +46,8 @@ export class AgentsUI {
       let card = this.cards.get(agent.agent_id);
       if (!card) { card = this.create(agent); this.cards.set(agent.agent_id, card); this.root.append(card.root); }
       card.view = agent;
+      card.checkpoints.hidden = !agent.session.permissions.workspace;
+      card.checkpoints.textContent = t("查看文件检查点");
       card.tasks.update();
       card.workspace.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open");
       card.changes.update(
@@ -84,14 +88,16 @@ export class AgentsUI {
     const execute = document.createElement("button"), stop = document.createElement("button"), control = document.createElement("button"), destroy = document.createElement("button"), open = document.createElement("button");
     for (const button of [execute, stop, control, destroy, open]) { button.type = "button"; button.className = "secondary"; }
     stop.textContent = t("停止"); destroy.textContent = t("销毁"); open.textContent = t("查看会话历史");
-    const controls = document.createElement("div"); controls.className = "actions"; controls.append(execute, stop, control, open, destroy);
+    const checkpoints = document.createElement("button"); checkpoints.type = "button"; checkpoints.className = "secondary";
+    checkpoints.onclick = () => void this.actions.openCheckpoints(agent.agent_id).catch(error => this.actions.notice(String(error), true));
+    const controls = document.createElement("div"); controls.className = "actions"; controls.append(execute, stop, control, open, checkpoints, destroy);
     const history = document.createElement("details"), historyTitle = document.createElement("summary"), turns = document.createElement("select"), transcript = document.createElement("pre");
     historyTitle.textContent = t("轮次历史"); turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`); transcript.className = "agent-history"; history.append(historyTitle, turns, transcript);
     const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
     const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
     const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
     root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes };
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, checkpoints };
     execute.onclick = () => {
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }

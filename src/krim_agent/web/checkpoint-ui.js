@@ -1,6 +1,7 @@
-/** 宿主资源 Checkpoint 面板；创建/回滚都经 Python callback 持久账本。 */
+/** 统一检查点来源入口；Host回程和原生工作区请求分别沿原业务服务。 */
 import { errorText, requestJson } from "./api.js";
 import { t } from "./i18n.js";
+import { NativeCheckpointUI } from "./native-checkpoint-ui.js";
 const node = (id) => document.getElementById(id);
 const statusText = { creating: "快照创建中", available: "可回滚", rolling_back: "回滚中", rolled_back: "已回滚", failed: "快照失败", uncertain: "结果待宿主核实" };
 export class CheckpointUI {
@@ -9,85 +10,160 @@ export class CheckpointUI {
     topicId = null;
     sessionId = null;
     catalog = null;
-    busy = false;
+    pendingTopics = new Set();
     loadVersion = 0;
-    constructor(notice, request) {
+    generation = 0;
+    source = "host";
+    sources = [];
+    sourceSignature = "";
+    native;
+    constructor(notice, request, openProposal) {
         this.notice = notice;
         this.request = request;
-        node("checkpoint-refresh").onclick = () => void this.refresh();
+        this.native = new NativeCheckpointUI(notice, openProposal);
+        node("checkpoint-refresh").onclick = () => void this.load();
         node("checkpoint-create").onclick = () => void this.create();
+        node("checkpoint-source").onchange = () => void this.switchSource(node("checkpoint-source").value);
+        node("checkpoint-panel").ontoggle = () => this.native.toggled();
+        this.renderSources();
         this.render();
     }
     setSession(id) { this.sessionId = id; this.render(); }
-    refreshLocale() { this.render(); }
-    async selectTopic(id) { this.topicId = id; this.catalog = null; this.render(); await this.load(); }
+    refreshLocale() { this.sourceSignature = ""; this.renderSources(); this.render(); this.native.refreshLocale(); }
+    setWorkspaceSources(agents) {
+        this.sources = agents.filter(agent => Boolean(agent.session.permissions.workspace));
+        this.native.setSources(this.sources);
+        if (this.source !== "host" && !this.sources.some(agent => agent.agent_id === this.source))
+            void this.switchSource("host");
+        this.renderSources();
+    }
+    async selectWorkspace(id) {
+        if (!this.sources.some(agent => agent.agent_id === id))
+            throw new Error(t("工作区资源已停用或关闭"));
+        node("checkpoint-panel").open = true;
+        await this.switchSource(id);
+        node("checkpoint-panel").scrollIntoView({ block: "nearest" });
+    }
+    beginTopic(id) {
+        if (this.topicId !== id) {
+            this.catalog = null;
+            if (this.source === "host")
+                this.generation += 1;
+        }
+        this.topicId = id;
+        this.render();
+    }
+    async selectTopic(id) { this.beginTopic(id); if (this.source === "host")
+        await this.load(); }
+    async switchSource(source) {
+        this.generation += 1;
+        this.source = source;
+        this.renderSources();
+        this.render();
+        if (source === "host") {
+            this.native.deactivate();
+            await this.load();
+        }
+        else
+            await this.native.select(source);
+    }
+    renderSources() {
+        const select = node("checkpoint-source");
+        const signature = JSON.stringify(this.sources.map(agent => [agent.agent_id, agent.name]));
+        if (signature !== this.sourceSignature) {
+            this.sourceSignature = signature;
+            select.replaceChildren();
+            const host = document.createElement("option");
+            host.value = "host";
+            host.textContent = t("Host 当前话题");
+            select.append(host);
+            for (const agent of this.sources) {
+                const option = document.createElement("option");
+                option.value = agent.agent_id;
+                option.textContent = `${t("工作区")} · ${agent.name} · ${agent.agent_id}`;
+                select.append(option);
+            }
+        }
+        select.value = this.source;
+    }
+    current(id, generation) { return this.source === "host" && id === this.topicId && generation === this.generation; }
     base(id) { return `/v1/topics/${encodeURIComponent(id)}/checkpoints`; }
     async load() {
         const id = this.topicId;
-        if (!id)
+        if (!id || this.source !== "host")
             return;
-        const version = ++this.loadVersion;
+        const version = ++this.loadVersion, generation = this.generation;
         try {
             const catalog = await requestJson(this.base(id));
-            if (id === this.topicId && version === this.loadVersion) {
+            if (this.current(id, generation) && version === this.loadVersion) {
                 this.catalog = catalog;
                 this.render();
             }
         }
         catch (error) {
-            this.notice(errorText(error), true);
+            if (this.current(id, generation) && version === this.loadVersion)
+                this.notice(errorText(error), true);
         }
     }
-    async refresh() { await this.load(); }
     async create() {
-        if (!this.topicId || !this.catalog || !this.sessionId || this.busy || this.catalog.active_operation_id)
+        if (this.source !== "host" || !this.topicId || !this.catalog || !this.sessionId || this.pendingTopics.has(this.topicId) || this.catalog.active_operation_id)
             return;
-        const topicId = this.topicId, revision = this.catalog.revision;
-        this.busy = true;
+        const topicId = this.topicId, revision = this.catalog.revision, generation = this.generation;
+        this.pendingTopics.add(topicId);
         this.render();
         try {
             const title = node("checkpoint-title").value.trim() || t("资源快照");
             const result = await this.request("checkpoint/create", { topic_id: topicId, revision, title, metadata: { source: "AgentApp" }, idempotency_key: crypto.randomUUID() });
-            if (topicId === this.topicId)
+            if (this.current(topicId, generation))
                 this.notice(result.status === "done" ? "快照已创建" : "快照结果待宿主核实", result.status !== "done");
         }
         catch (error) {
-            this.notice(errorText(error), true);
+            if (this.current(topicId, generation))
+                this.notice(errorText(error), true);
         }
         finally {
-            this.busy = false;
-            await this.load();
+            this.pendingTopics.delete(topicId);
+            this.render();
+            if (this.current(topicId, generation))
+                await this.load();
         }
     }
     async rollback(checkpoint) {
-        if (!this.topicId || !this.catalog || !this.sessionId || this.busy || this.catalog.active_operation_id || !["available", "rolled_back"].includes(checkpoint.status))
+        if (this.source !== "host" || !this.topicId || !this.catalog || !this.sessionId || this.pendingTopics.has(this.topicId) || this.catalog.active_operation_id || !["available", "rolled_back"].includes(checkpoint.status))
             return;
-        const topicId = this.topicId, revision = this.catalog.revision;
-        this.busy = true;
+        const topicId = this.topicId, revision = this.catalog.revision, generation = this.generation;
+        this.pendingTopics.add(topicId);
         this.render();
         try {
             const checked = await this.request("checkpoint/canRollback", { topic_id: topicId, revision, checkpoint_id: checkpoint.id, metadata: { source: "AgentApp" } });
+            // canRollback返回前来源已切换时不再发起原话题回滚。
+            if (!this.current(topicId, generation))
+                return;
             if (!checked.can_rollback) {
-                if (topicId === this.topicId)
-                    this.notice("无法确认当前快照可回滚", true);
+                this.notice("无法确认当前快照可回滚", true);
                 return;
             }
             const result = await this.request("checkpoint/rollback", { topic_id: topicId, revision, checkpoint_id: checkpoint.id, metadata: { source: "AgentApp" }, idempotency_key: crypto.randomUUID() });
-            if (topicId === this.topicId)
+            if (this.current(topicId, generation))
                 this.notice(result.status === "done" ? "资源已回滚" : "回滚结果待宿主核实", result.status !== "done");
         }
         catch (error) {
-            this.notice(errorText(error), true);
+            if (this.current(topicId, generation))
+                this.notice(errorText(error), true);
         }
         finally {
-            this.busy = false;
-            await this.load();
+            this.pendingTopics.delete(topicId);
+            this.render();
+            if (this.current(topicId, generation))
+                await this.load();
         }
     }
     render() {
+        node("checkpoint-host").hidden = this.source !== "host";
+        node("checkpoint-native").hidden = this.source === "host";
         const root = node("checkpoint-items");
         root.replaceChildren();
-        const busy = this.busy || !!this.catalog?.active_operation_id;
+        const busy = this.pendingTopics.has(this.topicId || "") || !!this.catalog?.active_operation_id;
         node("checkpoint-status").textContent = this.catalog?.checkpoints.some((item) => item.status === "uncertain") ? t("结果待宿主核实") : this.catalog?.active_operation_id ? t("Checkpoint 操作处理中") : !this.sessionId ? t("连接宿主后可创建或回滚快照") : !this.catalog?.checkpoints.length ? t("暂无资源快照") : "";
         node("checkpoint-create").disabled = busy || !this.sessionId || !this.catalog;
         node("checkpoint-refresh").disabled = !this.topicId;
