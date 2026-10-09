@@ -23,6 +23,7 @@ from .output import OutputContract, OutputSchema, WireOutputSchema
 if TYPE_CHECKING:
     from krim_agent.skills import SkillSnapshot
     from krim_agent.workspace import WorkspaceBinding
+    from krim_agent.workspace_checkpoint import CheckpointCaptureFence
     from krim_agent.workspace_list import NativeBatchFence
 
 if TYPE_CHECKING:
@@ -47,6 +48,12 @@ class WorkspaceChangeBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]: ...
+
+
+class WorkspaceCheckpointBackend(Protocol):
+    async def capture_read(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]: ...
 
 
 class ToolError(Exception):
@@ -117,6 +124,8 @@ class ToolContext:
     workspace: WorkspaceBinding | None = None
     workspace_changes: WorkspaceChangeBackend | None = None
     workspace_batch: NativeBatchFence | None = None
+    checkpoint_capture: CheckpointCaptureFence | None = None
+    workspace_checkpoints: WorkspaceCheckpointBackend | None = None
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -145,6 +154,8 @@ class ToolContext:
             workspace=self.workspace,
             workspace_changes=self.workspace_changes,
             workspace_batch=self.workspace_batch,
+            checkpoint_capture=self.checkpoint_capture,
+            workspace_checkpoints=self.workspace_checkpoints,
             arguments=arguments,
         )
 

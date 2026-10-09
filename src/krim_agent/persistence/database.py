@@ -551,6 +551,61 @@ class NativeWorkspaceBatchChildRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
+class NativeWorkspaceCheckpointRow(Base):
+    __tablename__ = "native_workspace_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        CheckConstraint(
+            "status IN ('capturing','available','failed','cancelled','interrupted')",
+            name="ck_native_checkpoint_status",
+        ),
+        CheckConstraint(
+            "(status = 'capturing' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status != 'capturing' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_native_checkpoint_owner",
+        ),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_fingerprint: Mapped[str] = mapped_column(String(64))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class NativeWorkspaceCheckpointFileRow(Base):
+    __tablename__ = "native_workspace_checkpoint_files"
+    __table_args__ = (
+        UniqueConstraint("checkpoint_id", "path"),
+        CheckConstraint("position >= 0 AND position < 32", name="ck_native_checkpoint_position"),
+        CheckConstraint(
+            "(captured = 1 AND capture_metadata IS NOT NULL) "
+            "OR (captured = 0 AND capture_metadata IS NULL AND content IS NULL)",
+            name="ck_native_checkpoint_capture",
+        ),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("native_workspace_checkpoints.checkpoint_id"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    path: Mapped[str] = mapped_column(String(512))
+    captured: Mapped[bool] = mapped_column(Boolean, default=False)
+    capture_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
+
 class WorkspaceLedgerGuardRow(Base):
     __tablename__ = "workspace_ledger_guards"
     guard_id: Mapped[str] = mapped_column(String(16), primary_key=True)

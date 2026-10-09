@@ -93,6 +93,10 @@ class WorkspaceChangeService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if context.checkpoint_capture is not None:
+                raise ServiceError(
+                    "workspace_checkpoint_action", "检查点捕获上下文不能执行文件修改动作", 403
+                )
             if context.workspace_batch is not None and operation != "change":
                 raise ServiceError("workspace_batch_action", "批次子项只能执行原冻结修改动作", 403)
             if operation == "preview":

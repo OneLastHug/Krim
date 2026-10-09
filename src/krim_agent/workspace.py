@@ -261,6 +261,13 @@ class Workspace:
         if start_line < 1 or not 1 <= max_lines <= 1000:
             raise ServiceError("workspace_lines", "文件行范围无效", 422)
         raw, decoded = self._text(path)
+        return self.file_view(path, raw, decoded, start_line=start_line, max_lines=max_lines)
+
+    @staticmethod
+    def file_view(
+        path: str, raw: bytes, decoded: str, *, start_line: int = 1, max_lines: int = 200
+    ) -> WorkspaceFile:
+        """可信读取层将同一已核实内容投影为原有有界输出，不再次打开文件。"""
         lines = decoded.splitlines(keepends=True)
         selected = lines[start_line - 1 : start_line - 1 + max_lines]
         result = WorkspaceFile(

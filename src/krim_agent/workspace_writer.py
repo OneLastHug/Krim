@@ -49,6 +49,14 @@ class FileSnapshot:
 
 
 @dataclass(frozen=True)
+class CapturedFile:
+    path: str
+    workspace_fingerprint: str
+    parent_identity: tuple[int, int]
+    snapshot: FileSnapshot | None
+
+
+@dataclass(frozen=True)
 class PreparedFileChange:
     spec_json: str
     workspace_fingerprint: str
@@ -285,6 +293,47 @@ class WorkspaceWriter:
             return raw.decode("utf-8")
         except UnicodeDecodeError:
             raise ServiceError("workspace_encoding", "修改内容须为UTF-8", 422) from None
+
+    def capture_file(
+        self, path: str, *, authorize: Callable[[], None] | None = None
+    ) -> CapturedFile:
+        """捕获完整有界文件或明确缺失；不发布文件修改。"""
+        with self._locked_parent(path, lambda: False) as (fd, parent, name):
+            if authorize is not None:
+                authorize()
+            identity = _identity(os.fstat(fd))
+            snapshot = self._snapshot(fd, name, missing=True)
+            self._check_parent(parent, identity)
+            return CapturedFile(path, self.workspace.fingerprint, identity, snapshot)
+
+    def verify_captured(
+        self,
+        captures: tuple[CapturedFile, ...],
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> None:
+        """全部捕获后在同一协作锁内检查未变化，不把零散读取冒充可用快照。"""
+        if not 1 <= len(captures) <= 32:
+            raise ServiceError("workspace_checkpoint_files", "检查点文件数量无效", 422)
+        with self._locked_parent(captures[0].path, lambda: False):
+            if authorize is not None:
+                authorize()
+            for capture in captures:
+                if capture.workspace_fingerprint != self.workspace.fingerprint:
+                    raise ServiceError("workspace_binding_changed", "检查点不属于当前工作区", 409)
+                fd, parent, name = self._parent(capture.path)
+                try:
+                    self._check_parent(parent, capture.parent_identity)
+                    actual = self._snapshot(fd, name, missing=True)
+                    if not self._same_before(actual, capture.snapshot):
+                        raise ServiceError(
+                            "workspace_checkpoint_changed", "文件在检查点捕获期间变化", 409
+                        )
+                    self._check_parent(parent, capture.parent_identity)
+                finally:
+                    os.close(fd)
+            if authorize is not None:
+                authorize()
 
     def prepare(self, spec: FileChangeSpec) -> PreparedFileChange:
         request = FileChangeSpec.model_validate(spec.model_dump())
