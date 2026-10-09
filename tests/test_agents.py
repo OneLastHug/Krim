@@ -205,43 +205,52 @@ async def test_manager_can_use_persistent_database_after_reopen(tmp_path):
 async def test_persistent_handle_survives_consumer_cancel_and_tool_scope_closes(repository):
     provider = WaitingProvider()
     manager = AgentManager(repository)
-    persistent = await manager.spawn(
-        AgentDefinition(
-            name="persistent",
-            provider=provider,
-            tools=ToolRegistry(),
-            persistent=True,
-            timeout_seconds=10,
+    consumers = []
+    try:
+        persistent = await manager.spawn(
+            AgentDefinition(
+                name="persistent",
+                provider=provider,
+                tools=ToolRegistry(),
+                persistent=True,
+                timeout_seconds=30,
+            )
         )
-    )
-    task = asyncio.create_task(persistent.execute("continue", "persistent"))
-    await asyncio.wait_for(provider.entered.wait(), 2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert (await repository.get_run(persistent.current_run.id)).status == "running"
-    await persistent.stop()
+        task = asyncio.create_task(persistent.execute("continue", "persistent"))
+        consumers.append(task)
+        await asyncio.wait_for(provider.entered.wait(), 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (await repository.get_run(persistent.current_run.id)).status == "running"
+        await persistent.stop()
 
-    scoped_provider = WaitingProvider()
-    scoped = await manager.spawn(
-        AgentDefinition(
-            name="scoped",
-            provider=scoped_provider,
-            tools=ToolRegistry(),
-            parent_tool_call_id="scope-call",
-            timeout_seconds=10,
+        scoped_provider = WaitingProvider()
+        scoped = await manager.spawn(
+            AgentDefinition(
+                name="scoped",
+                provider=scoped_provider,
+                tools=ToolRegistry(),
+                parent_tool_call_id="scope-call",
+                timeout_seconds=30,
+            )
         )
-    )
-    scoped_task = asyncio.create_task(scoped.execute("stop on consumer cancel", "scoped"))
-    await asyncio.wait_for(scoped_provider.entered.wait(), 2)
-    scoped_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await scoped_task
-    assert (await repository.get_run(scoped.current_run.id)).status == "aborted"
-    await manager.close_tool_scope("scope-call")
-    assert scoped.destroyed and not persistent.destroyed
-    await persistent.destroy()
-    await manager.close()
+        scoped_task = asyncio.create_task(scoped.execute("stop on consumer cancel", "scoped"))
+        consumers.append(scoped_task)
+        await asyncio.wait_for(scoped_provider.entered.wait(), 10)
+        scoped_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scoped_task
+        assert (await repository.get_run(scoped.current_run.id)).status == "aborted"
+        await manager.close_tool_scope("scope-call")
+        assert scoped.destroyed and not persistent.destroyed
+        await persistent.destroy()
+    finally:
+        # 观察或断言失败也先正常收束生产者，不能依赖事件循环强制取消全部内部写任务。
+        try:
+            await manager.close()
+        finally:
+            await asyncio.gather(*consumers, return_exceptions=True)
 
 
 async def test_queue_timeout_and_manager_close_are_explicit(repository):

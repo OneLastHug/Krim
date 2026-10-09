@@ -114,11 +114,18 @@ class RunState:
                     self.condition.notify_all()
 
             write = asyncio.create_task(commit())
-            try:
-                await asyncio.shield(write)
-            except asyncio.CancelledError:
-                await write
-                raise
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(write)
+                    break
+                except asyncio.CancelledError:
+                    if write.cancelled():
+                        raise
+                    # 后续取消也不能传入原写任务，否则已提交帧可能未推进内存序号。
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 class ChatRuntime:
