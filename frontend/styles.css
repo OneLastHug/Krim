@@ -166,6 +166,21 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .workspace-change-detail strong { overflow-wrap: anywhere; }
 .agent-card .workspace-diff { max-height: 280px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
 .workspace-operation-history { font-size: 0.75rem; overflow-wrap: anywhere; padding-left: 20px; }
+.agent-commands { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.agent-commands summary { cursor: pointer; font-weight: 700; }
+.command-editor, .command-query { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); min-width: 0; }
+.command-editor label, .command-query label, .agent-commands > div > label { display: grid; gap: 4px; font-size: 0.8rem; }
+.command-editor input, .command-editor textarea, .command-query input, .command-query select, .agent-commands select { width: 100%; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--canvas); font-size: 0.76rem; }
+.command-editor textarea { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.command-list { display: grid; gap: 4px; margin: 8px 0; }
+.command-list button { text-align: left; overflow-wrap: anywhere; }
+.command-detail { padding-top: 8px; border-top: 1px solid var(--line); }
+.command-detail strong, .command-meta, .command-status, .command-pending, .command-change-row p, .command-proposal p { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 0.78rem; }
+.agent-card .command-output pre, .agent-card .command-request { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.76rem; }
+.command-changes, .command-proposal, .command-output { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; min-width: 0; }
+.command-changes h3 { margin: 0 0 5px; font-size: 0.82rem; }
+.command-change-row { padding: 5px 0; border-top: 1px solid var(--line); }
+.agent-commands [hidden] { display: none; }
 .layout { height: calc(100vh - 100px); align-items: start; }
 .sidebar { max-height: calc(100vh - 160px); overflow: auto; }
 .conversation { height: calc(100vh - 160px); min-height: 520px; }

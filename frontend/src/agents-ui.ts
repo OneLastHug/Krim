@@ -5,6 +5,7 @@ import { t } from "./i18n.js";
 import { TasksUI } from "./tasks-ui.js";
 import { WorkspaceUI } from "./workspace-ui.js";
 import { WorkspaceChangesUI } from "./workspace-changes-ui.js";
+import { CommandsUI } from "./commands-ui.js";
 
 type Actions = {
   start: (agent: AgentView, prompt: string) => Promise<void>;
@@ -26,6 +27,7 @@ type Card = {
   tasks: TasksUI;
   workspace: WorkspaceUI;
   changes: WorkspaceChangesUI;
+  commands: CommandsUI;
   checkpoints: HTMLButtonElement;
 };
 
@@ -41,7 +43,7 @@ export class AgentsUI {
 
   render(agents: AgentView[], sessionFor: (topicId: string) => RunSession | undefined): void {
     const live = new Set(agents.map(agent => agent.agent_id));
-    for (const [id, card] of this.cards) if (!live.has(id)) { card.root.remove(); this.cards.delete(id); }
+    for (const [id, card] of this.cards) if (!live.has(id)) { card.commands.dispose(); card.root.remove(); this.cards.delete(id); }
     for (const agent of agents) {
       let card = this.cards.get(agent.agent_id);
       if (!card) { card = this.create(agent); this.cards.set(agent.agent_id, card); this.root.append(card.root); }
@@ -54,6 +56,7 @@ export class AgentsUI {
         Boolean(agent.session.permissions.workspace), agent.session.status === "open",
         agent.session.permissions.mode,
       );
+      card.commands.update(agent);
       card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
       const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
       card.meta.textContent = `${t(sessionLabels[agent.session.status])} · ${t("轮次")} ${agent.turn}/${Number(agent.session.permissions.max_turns || 0)} · ${t("配置版本")} ${agent.session.profile_revision ?? "—"}`;
@@ -96,8 +99,9 @@ export class AgentsUI {
     const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
     const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
     const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
-    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, checkpoints };
+    const commands = new CommandsUI(agent.agent_id, this.actions.notice, proposalId => changes.focusProposal(proposalId));
+    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, commands.root);
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, commands, checkpoints };
     execute.onclick = () => {
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }

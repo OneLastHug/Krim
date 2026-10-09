@@ -11,6 +11,8 @@ from pydantic import Field, SecretStr
 from krim_agent.agents import AgentDefinition
 from krim_agent.api import create_app
 from krim_agent.config import Settings
+from krim_agent.execution import LinuxSandboxRunner
+from krim_agent.execution.binding import COMMAND_TOOL_NAMES
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -85,6 +87,9 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
     write_root.mkdir()
     app.state.agents.register_workspace(
         "edit", write_root, version="browser-write-v1", writable=True
+    )
+    app.state.agents.register_execution(
+        "sandbox", LinuxSandboxRunner(), version="browser-execution-v1", owned=True
     )
 
     class TestWorkspaceControl(StrictModel):
@@ -191,7 +196,7 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
             [
                 tool.name
                 for tool in runtime.tools.definitions
-                if tool.name not in WORKSPACE_TOOL_NAMES
+                if tool.name not in WORKSPACE_TOOL_NAMES | COMMAND_TOOL_NAMES
             ]
         ),
         persistent=True,

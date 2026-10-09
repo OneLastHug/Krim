@@ -117,6 +117,54 @@ export interface AgentView {
   session_id: string;
   session: AgentSessionView;
 }
+export interface CommandAccepted { command_id: string; request_key: string; }
+export interface CommandHistoryEntry {
+  command_id: string; request_key: string; command_preview: string;
+  phase: "preparing" | "dispatched" | "running" | "finished" | "interrupted";
+  outcome: "completed" | "failed" | "timed_out" | "cancelled" | "output_limit" | "setup_failed" | "uncertain" | null;
+  started: boolean; processes_reaped: boolean; error_code: string | null; created_at: string;
+}
+export interface CommandHistoryPage { entries: CommandHistoryEntry[]; next_after: string | null; }
+export interface CommandSpecView { argv: string[]; cwd: string; }
+export interface AgentCommandRequest {
+  request_key: string; command: CommandSpecView; input_paths: string[]; directories: string[];
+}
+export interface CommandState {
+  command_id: string;
+  phase: CommandHistoryEntry["phase"]; revision: number;
+  dispatched: boolean; started: boolean; outcome: CommandHistoryEntry["outcome"];
+  exit_code: number | null; output_truncated: boolean; stdout_bytes: number; stderr_bytes: number;
+  input_files: number; artifact_files: number; artifacts_complete: boolean; processes_reaped: boolean;
+  error_code: string | null;
+}
+export interface CommandView extends CommandState {
+  scope_id: string; topic_id: string; request: { request_key: string; command: CommandSpecView };
+  resource: { key: string; version: string; fingerprint: string };
+  run_id: string | null; call_id: string | null; cancel_requested: boolean;
+  created_at: string; updated_at: string; interrupted_at: string | null;
+}
+export interface CommandSummary extends CommandState {
+  stdout_text: string; stderr_text: string; stdout_base64: string; stderr_base64: string;
+  stdout_bytes: number; stderr_bytes: number; artifacts: Array<{ path: string; sha256: string; byte_size: number; mode: number }>;
+  artifacts_truncated: boolean;
+}
+export interface CommandSlice {
+  command_id: string; source: "stdout" | "stderr" | "artifact"; path: string | null;
+  offset: number; next_offset: number; byte_size: number; data_base64: string; text: string; truncated: boolean;
+}
+export type CommandChangeKind = "added" | "modified" | "deleted" | "unchanged";
+export interface CommandDelta {
+  path: string; kind: CommandChangeKind; before_sha256: string | null; after_sha256: string | null;
+  before_bytes: number | null; after_bytes: number | null; before_mode: number | null; after_mode: number | null;
+}
+export interface CommandChangesPage {
+  command_id: string; source_hash: string; outcome: NonNullable<CommandHistoryEntry["outcome"]>;
+  requires_failed_acceptance: boolean; entries: CommandDelta[]; next_after: string | null;
+}
+export interface CommandProposalView {
+  command_id: string; source_hash: string; accept_failed: boolean; change: CommandDelta;
+  proposal: WorkspaceChangeView;
+}
 export interface WorkspaceView { key: string; version: string; fingerprint: string; available: boolean; tool_names: string[]; max_file_bytes: number; writable: boolean; }
 export interface WorkspaceEntry { path: string; kind: "directory" | "file"; byte_size: number; }
 export interface WorkspaceListing { path: string; entries: WorkspaceEntry[]; truncated: boolean; entries_scanned: number; }
