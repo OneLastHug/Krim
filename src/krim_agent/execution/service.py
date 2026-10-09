@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Literal
 from uuid import uuid4
+
+from pydantic import JsonValue
 
 from krim_agent.persistence.commands import CommandStore, freeze_files
 from krim_agent.protocol.domain import ServiceError
@@ -95,10 +98,12 @@ class DurableCommandService:
         run_id: str | None = None,
         call_id: str | None = None,
         authorize: Authorize | None = None,
+        origin: dict[str, JsonValue] | None = None,
     ) -> DurableCommandHandle:
         request = CommandRequest.model_validate(request.model_dump())
         values = freeze_files(files or {}, self.runner.limits)
         directories = tuple(directories)
+        origin = copy.deepcopy(origin)
 
         async def accept() -> DurableCommandHandle:
             async with self._lock:
@@ -114,6 +119,7 @@ class DurableCommandService:
                     directories=directories,
                     run_id=run_id,
                     call_id=call_id,
+                    origin=origin,
                 )
                 identifier = reservation.view.command_id
                 if reservation.token is not None:
@@ -282,6 +288,19 @@ class DurableCommandService:
                 await self.runner.close()
 
         await _settle(asyncio.create_task(drain()))
+
+    async def stop_and_wait(self, scope: str, identifier: str) -> CommandView:
+        _reject_reentry()
+        await self.store.cancel(scope, identifier)
+        entry = self._active.get(identifier)
+        if entry is not None and entry.task is not None:
+            entry.stop.set()
+            await _settle(asyncio.create_task(self._drain_task(entry.task)))
+        return await self.store.get(scope, identifier)
+
+    @staticmethod
+    async def _drain_task(task: asyncio.Task[None]) -> None:
+        await asyncio.gather(task, return_exceptions=True)
 
     async def __aenter__(self) -> DurableCommandService:
         return self

@@ -27,7 +27,7 @@ from krim_agent.execution.records import (
     CommandView,
 )
 from krim_agent.protocol.domain import ServiceError
-from krim_agent.protocol.models import utc_now
+from krim_agent.protocol.models import check_json, utc_now
 from krim_agent.workspace import Workspace
 
 from .agent_sessions import assert_session_open, assert_session_owner
@@ -220,8 +220,11 @@ class CommandStore:
         directories: tuple[str, ...] = (),
         run_id: str | None = None,
         call_id: str | None = None,
+        origin: dict[str, JsonValue] | None = None,
     ) -> CommandReservation:
         values = freeze_files(files or {}, limits)
+        if origin is not None:
+            check_json(origin, max_bytes=131072)
         if (run_id is None) != (call_id is None):
             raise ServiceError("execution_call_binding", "Run与call须同时绑定", 422)
         if len(directories) > limits.artifact_files or any(
@@ -237,9 +240,12 @@ class CommandStore:
                 inputs=[metadata(path, value) for path, value in values.items()],
                 run_id=run_id,
                 call_id=call_id,
+                origin=origin,
             ).model_dump()
         )
         payload = snapshot.model_dump(mode="json")
+        if origin is None:
+            payload.pop("origin", None)
         checksum = digest(payload)
         reserved = (
             sum(len(value.data) for value in values.values())
@@ -549,6 +555,59 @@ class CommandStore:
             ):
                 raise ServiceError("execution_record_corrupt", "命令输出校验失败", 409)
             return row.stdout, row.stderr
+
+    async def origin(self, scope: str, identifier: str) -> dict[str, JsonValue] | None:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope, writing=False)
+            return self._snapshot(await self._row(session, scope, identifier)).origin
+
+    async def artifact_metadata(self, scope: str, identifier: str) -> list[CommandFile]:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            return [
+                CommandFile.model_validate(value)
+                for value in cast(list[JsonValue], (row.result or {}).get("artifacts", []))
+            ]
+
+    async def result_snapshot(
+        self, scope: str, identifier: str
+    ) -> tuple[CommandView, bytes, bytes, list[CommandFile]]:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            await self._writer(session)
+            await self._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            self._expire(session, row)
+            if row.result and (
+                hashlib.sha256(row.stdout).hexdigest() != row.result["stdout_sha256"]
+                or hashlib.sha256(row.stderr).hexdigest() != row.result["stderr_sha256"]
+            ):
+                raise ServiceError("execution_record_corrupt", "命令输出校验失败", 409)
+            files = [
+                CommandFile.model_validate(value)
+                for value in cast(list[JsonValue], (row.result or {}).get("artifacts", []))
+            ]
+            return self._view(row), row.stdout, row.stderr, files
+
+    async def artifact(self, scope: str, identifier: str, path: str) -> SandboxFile:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            wanted = next(
+                (
+                    CommandFile.model_validate(value)
+                    for value in cast(list[JsonValue], (row.result or {}).get("artifacts", []))
+                    if isinstance(value, dict) and value.get("path") == path
+                ),
+                None,
+            )
+            item = await session.get(CommandFileRow, (identifier, "artifact", path))
+            if wanted is None or item is None:
+                raise ServiceError("execution_file_not_found", "原命令没有该产物", 404)
+            value = SandboxFile(item.content, item.mode)
+            if metadata(path, value) != wanted or item.sha256 != wanted.sha256:
+                raise ServiceError("execution_record_corrupt", "命令产物校验失败", 409)
+            return value
 
     async def files(
         self, scope: str, identifier: str, kind: Literal["input", "artifact"]

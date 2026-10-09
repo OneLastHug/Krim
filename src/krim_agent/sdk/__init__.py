@@ -3,6 +3,13 @@
 from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
 from krim_agent.evaluation.remote import AsyncEvalClient, SyncEvalClient
 from krim_agent.evaluation.service import EvalRunHandle
+from krim_agent.execution.agent_models import (
+    AgentCommandRequest,
+    CommandLookup,
+    CommandRead,
+    CommandSlice,
+    CommandSummary,
+)
 from krim_agent.task_state import TaskMutation, TaskSnapshot, TaskWriteRequest
 from krim_agent.workspace_change import (
     FileChangeSpec,
@@ -63,6 +70,11 @@ from .types import (
 )
 
 __all__ = [
+    "AgentCommandRequest",
+    "CommandLookup",
+    "CommandRead",
+    "CommandSlice",
+    "CommandSummary",
     "CheckpointRestoreExecute",
     "CheckpointRestoreItem",
     "CheckpointRestorePreview",

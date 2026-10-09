@@ -236,6 +236,8 @@ class ToolRegistry:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if definition.output_guard is not None:
+                    await definition.output_guard(result, child)
                 return consume(definition, result)
         except ValidationError as exc:
             code = "invalid_input"

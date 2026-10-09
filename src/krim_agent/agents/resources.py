@@ -12,11 +12,15 @@ from typing import Protocol, cast
 
 from pydantic import JsonValue
 
+from krim_agent.execution.binding import ExecutionBinding
+from krim_agent.execution.linux import LinuxSandboxRunner
+from krim_agent.execution.records import CommandResource
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.tools import ToolRegistry
+from krim_agent.tools.commands import command_tools
 from krim_agent.tools.workspace import workspace_tools
 from krim_agent.workspace import Workspace, WorkspaceBinding
 
@@ -38,6 +42,12 @@ class AgentResourceView(StrictModel):
 @dataclass(frozen=True)
 class WorkspaceResource:
     binding: WorkspaceBinding
+    owned: bool
+
+
+@dataclass(frozen=True)
+class ExecutionResource:
+    binding: ExecutionBinding
     owned: bool
 
 
@@ -63,6 +73,7 @@ class AgentResourceRegistry:
         self._disabled: set[str] = set()
         self._owned: dict[int, ClosableProvider] = {}
         self.workspaces: dict[str, WorkspaceResource] = {}
+        self.executions: dict[str, ExecutionResource] = {}
         self._closed = False
 
     @staticmethod
@@ -181,7 +192,48 @@ class AgentResourceRegistry:
             raise KeyError(key)
         resource.binding.revoked.set()
 
-    def fingerprint(self, key: str, names: list[str], *, workspace_key: str | None = None) -> str:
+    def register_execution(
+        self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
+    ) -> ExecutionBinding:
+        if self._closed:
+            raise ServiceError("agent_resources_closed", "Agent资源登记已关闭", 503)
+        key, version = self._resource_key(key, "Execution key"), self._version(version)
+        if not isinstance(runner, LinuxSandboxRunner) or runner.closed:
+            raise ValueError("执行资源须为未关闭的LinuxSandboxRunner")
+        if key in self.executions:
+            raise ServiceError("execution_key_registered", "执行标识已登记，须重启后更换", 409)
+        if len(self.executions) >= 32:
+            raise ServiceError("agent_resource_limit", "执行资源数量已达上限", 429)
+        existing = {item.name: item for item in self.tools.definitions}
+        for definition in command_tools():
+            if definition.name in existing and existing[definition.name] is not definition:
+                raise ValueError("命令工具名称已被其他宿主工具占用")
+        binding = ExecutionBinding(
+            CommandResource(key=key, version=version, fingerprint=runner.fingerprint), runner
+        )
+        self.executions[key] = ExecutionResource(binding, owned)
+        for definition in command_tools():
+            if definition.name not in existing:
+                self.tools.register(definition)
+        return binding
+
+    def execution(self, key: str) -> ExecutionBinding:
+        value = self.executions.get(key)
+        if self._closed or value is None or not value.binding.available:
+            raise KeyError(key)
+        return value.binding
+
+    def disable_execution(self, key: str) -> None:
+        self.executions[key].binding.revoked.set()
+
+    def fingerprint(
+        self,
+        key: str,
+        names: list[str],
+        *,
+        workspace_key: str | None = None,
+        execution_key: str | None = None,
+    ) -> str:
         provider = self.provider(key)
         # 缺省资源版本保持0021 Profile指纹；工具Schema已由AgentDefinition冻结。
         payload: dict[str, JsonValue] = {
@@ -202,10 +254,17 @@ class AgentResourceRegistry:
             workspace = self.workspace(workspace_key)
             payload["workspace_key"] = workspace.key
             payload["workspace_fingerprint"] = workspace.fingerprint
+        if execution_key is not None:
+            payload["execution"] = self.execution(execution_key).resource.model_dump(mode="json")
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def manifest(
-        self, key: str, names: list[str], *, workspace_key: str | None = None
+        self,
+        key: str,
+        names: list[str],
+        *,
+        workspace_key: str | None = None,
+        execution_key: str | None = None,
     ) -> dict[str, JsonValue]:
         manifest: dict[str, JsonValue] = {
             "provider_key": key,
@@ -218,6 +277,8 @@ class AgentResourceRegistry:
             manifest["workspace_key"] = workspace.key
             manifest["workspace_version"] = workspace.version
             manifest["workspace_fingerprint"] = workspace.fingerprint
+        if execution_key is not None:
+            manifest["execution"] = self.execution(execution_key).resource.model_dump(mode="json")
         return manifest
 
     def provider_signature(self, key: str) -> str:
@@ -278,6 +339,18 @@ class AgentResourceRegistry:
             )
             for resource in sorted(self.workspaces.values(), key=lambda item: item.binding.key)
         )
+        values.extend(
+            AgentResourceView(
+                key=key,
+                kind="execution",
+                name=f"execution:{key}",
+                version=value.binding.resource.version,
+                fingerprint=value.binding.resource.fingerprint,
+                owned=value.owned,
+                available=not self._closed and value.binding.available,
+            )
+            for key, value in sorted(self.executions.items())
+        )
         return values
 
     async def close(self) -> None:
@@ -301,5 +374,16 @@ class AgentResourceRegistry:
                 except Exception:
                     failed = True
         self.workspaces.clear()
+        closed_executors: set[int] = set()
+        for executor in self.executions.values():
+            executor.binding.revoked.set()
+            runner = executor.binding.runner
+            if executor.owned and id(runner) not in closed_executors:
+                closed_executors.add(id(runner))
+                try:
+                    await runner.close()
+                except Exception:
+                    failed = True
+        self.executions.clear()
         if failed:
             raise ServiceError("agent_resource_close_failed", "部分Provider资源关闭失败", 503)

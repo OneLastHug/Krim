@@ -35,6 +35,15 @@ from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointServ
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.execution.agent_models import (
+    AgentCommandRequest,
+    CommandLookup,
+    CommandRead,
+    CommandSlice,
+    CommandSummary,
+)
+from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
+from krim_agent.execution.linux import LinuxSandboxRunner
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.workspace_batches import NativeBatchStore
@@ -316,6 +325,7 @@ class AgentService:
             raise ServiceError("agent_profile_tool", "Agent配置包含未登记工具", 422)
         tools = self.runtime.tools.select(profile.config.tool_names)
         workspace = self._profile_workspace(profile.config)
+        execution = self._profile_execution(profile.config)
         try:
             provider = self.resources.provider(profile.config.provider_key)
         except KeyError:
@@ -324,6 +334,7 @@ class AgentService:
             profile.config.provider_key,
             profile.config.tool_names,
             workspace_key=profile.config.workspace_key,
+            execution_key=profile.config.execution_key,
         )
         base = self.catalog.get("default").definition
         host_context = ContextRunConfig.from_settings(self.runtime.settings)
@@ -357,8 +368,10 @@ class AgentService:
                 profile.config.provider_key,
                 profile.config.tool_names,
                 workspace_key=profile.config.workspace_key,
+                execution_key=profile.config.execution_key,
             ),
             workspace=workspace,
+            execution=execution,
             mode=profile.config.mode,
             session_ttl_seconds=profile.config.session_ttl_seconds,
         )
@@ -416,6 +429,7 @@ class AgentService:
         if set(request.config.tool_names) - available:
             raise ServiceError("agent_profile_tool", "工具未登记", 422)
         self._profile_workspace(request.config)
+        self._profile_execution(request.config)
         if request.config.context_config != ContextRunConfig():
             try:
                 request.config.context_config.restricted_by(
@@ -492,6 +506,24 @@ class AgentService:
     def disable_workspace(self, key: str) -> None:
         self.resources.disable_workspace(key)
 
+    def register_execution(
+        self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
+    ) -> ExecutionBinding:
+        return self.resources.register_execution(key, runner, version=version, owned=owned)
+
+    def disable_execution(self, key: str) -> None:
+        self.resources.disable_execution(key)
+
+    def _profile_execution(self, config: AgentProfile) -> ExecutionBinding | None:
+        if config.execution_key is None:
+            if set(config.tool_names) & COMMAND_TOOL_NAMES:
+                raise ServiceError("agent_profile_execution", "命令工具需要显式执行资源授权", 422)
+            return None
+        try:
+            return self.resources.execution(config.execution_key)
+        except KeyError:
+            raise ServiceError("agent_profile_execution", "执行资源未登记或已停用", 422) from None
+
     def resource_inventory(self) -> list[AgentResourceView]:
         return self.resources.views()
 
@@ -512,6 +544,7 @@ class AgentService:
             tool.name
             for tool in definition.tools.definitions
             if tool.name not in WORKSPACE_TOOL_NAMES or workspace is not None
+            if tool.name not in COMMAND_TOOL_NAMES or definition.execution is not None
             if tool.name not in WORKSPACE_CHANGE_TOOL_NAMES
             or (workspace is not None and workspace.workspace.writable)
         ]
@@ -591,7 +624,8 @@ class AgentService:
                 )
                 if session_row is None:
                     raise ServiceError("agent_session_topic", "Agent工作区缺少会话绑定", 403)
-                await assert_session_open(session, session_row)
+                if name not in {"command_get", "command_read"}:
+                    await assert_session_open(session, session_row)
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
         if len(self._workspace_operations) >= 64:
@@ -601,6 +635,20 @@ class AgentService:
         registry = handle.runtime.tools
 
         async def confirm(definition: ToolDefinition, context: ToolContext) -> bool:
+            command_paths = frozen_arguments.get("input_paths")
+            if (
+                confirmed
+                and name == "command_execute"
+                and definition.name == "workspace_read"
+                and context.origin == "host"
+                and context.command_capture is not None
+                and context.command_capture.parent_call_id == call_id
+                and isinstance(command_paths, list)
+                and context.command_capture.path in command_paths
+                and context.arguments
+                == ReadFileInput(path=context.command_capture.path).model_dump()
+            ):
+                return True
             return (
                 confirmed
                 and context.origin == "host"
@@ -619,6 +667,8 @@ class AgentService:
                     agent_id=handle.agent_id,
                     session_id=handle.session_id,
                     workspace=handle.definition.workspace,
+                    execution=handle.definition.execution,
+                    commands=self.manager.commands,
                     workspace_changes=self.manager.workspace_changes,
                     workspace_batch=batch_fence,
                     checkpoint_capture=checkpoint_capture,
@@ -708,6 +758,26 @@ class AgentService:
                 "agent_session_expired": 410,
                 "agent_session_destroyed": 410,
                 "agent_parent_session_closed": 409,
+                "execution_unbound": 409,
+                "execution_unavailable": 403,
+                "execution_binding_changed": 403,
+                "execution_key_conflict": 409,
+                "execution_input_target": 403,
+                "execution_input_context": 403,
+                "execution_input_not_captured": 403,
+                "execution_input_tool": 403,
+                "execution_input_file": 422,
+                "execution_input_limit": 413,
+                "execution_input_unavailable": 503,
+                "execution_run_mismatch": 403,
+                "execution_run_closed": 409,
+                "execution_not_found": 404,
+                "execution_file_not_found": 404,
+                "execution_receipt_unverified": 409,
+                "execution_storage_limit": 429,
+                "execution_busy": 429,
+                "execution_command_reentrant": 409,
+                "execution_service_reentrant": 409,
             }.get(error.code, 502)
             raise ServiceError(error.code, str(error), status) from error
         finally:
@@ -716,6 +786,42 @@ class AgentService:
     async def workspace_read(self, agent_id: str, request: ReadFileInput) -> WorkspaceFile:
         return WorkspaceFile.model_validate(
             await self._workspace_call(agent_id, "workspace_read", request.model_dump())
+        )
+
+    async def command_execute(
+        self, agent_id: str, request: AgentCommandRequest, *, confirmed: bool = False
+    ) -> CommandSummary:
+        return CommandSummary.model_validate(
+            await self._workspace_call(
+                agent_id, "command_execute", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def command_get(
+        self, agent_id: str, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandSummary:
+        return CommandSummary.model_validate(
+            await self._workspace_call(
+                agent_id, "command_get", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def command_read(
+        self, agent_id: str, request: CommandRead, *, confirmed: bool = False
+    ) -> CommandSlice:
+        return CommandSlice.model_validate(
+            await self._workspace_call(
+                agent_id, "command_read", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def command_cancel(
+        self, agent_id: str, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandSummary:
+        return CommandSummary.model_validate(
+            await self._workspace_call(
+                agent_id, "command_cancel", request.model_dump(), confirmed=confirmed
+            )
         )
 
     async def workspace_list(self, agent_id: str, request: ListFilesInput) -> WorkspaceListing:
@@ -1413,6 +1519,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.manager.commands.assert_external_close()
         self.workspace_batches.assert_external_close()
         async with self._start_lock:
             self._closed = True

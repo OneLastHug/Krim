@@ -258,6 +258,31 @@ test("question 先批准具体工具，再提交真实答案到模型", async ({
   expect(history.map((item: { status: string }) => item.status)).toEqual(["approved", "answered"]);
 });
 
+test("命令输入审批明确显示完整文件读取范围", async ({ page }) => {
+  // 这里只验证审批卡消费新元数据；真实命令审批由Python集成测试覆盖。
+  await page.route(/\/v1\/runs\/[^/]+\/interactions\?pending_only=true$/, async route => {
+    const response = await route.fetch();
+    const items = await response.json();
+    for (const item of items) {
+      if (item.kind === "approval" && item.status === "pending") {
+        item.tool_name = "workspace_read";
+        item.payload.input_capture = { scope: "complete_file", purpose: "command_input", path: "complete.txt" };
+      }
+    }
+    await route.fulfill({ response, json: items });
+  });
+  const title = `完整输入-${Date.now()}`;
+  await page.getByPlaceholder("新话题标题").fill(title);
+  await page.getByRole("button", { name: "新建话题" }).click();
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+  await page.locator("#prompt").fill("/question 审批范围呈现");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.locator(".interaction-card")).toContainText("将读取完整文件作为命令输入：complete.txt");
+  await page.getByRole("button", { name: "拒绝此次调用" }).click();
+  await expect(page.locator("#prompt")).toBeEnabled();
+  await expect(page.locator(".interaction-card")).toHaveCount(0);
+});
+
 test("拒绝审批和停止等待都保存终态并移除待处理卡片", async ({ page, request }) => {
   const title = `拒绝与停止-${Date.now()}`;
   await page.getByPlaceholder("新话题标题").fill(title);

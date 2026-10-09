@@ -28,6 +28,7 @@ from krim_agent.context_engine import (
     ContextResult,
     ContextRunConfig,
 )
+from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
 from krim_agent.observability import JsonlSink, SpanSink, TraceContext, Tracer
 from krim_agent.otel import OtlpJsonSink
 from krim_agent.persistence import KrimRepository
@@ -61,6 +62,7 @@ from krim_agent.tokenizer import TokenizerError, TokenizerSpec
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import (
     ApprovalHandler,
+    CommandBackend,
     Decision,
     InteractionPublisher,
     Policy,
@@ -146,6 +148,8 @@ class ChatRuntime:
         task_store: TaskBackend | None = None,
         workspace_changes: WorkspaceChangeService | None = None,
         workspace: WorkspaceBinding | None = None,
+        execution: ExecutionBinding | None = None,
+        commands: CommandBackend | None = None,
         approval_handler: ApprovalHandler | None = None,
         question_handler: QuestionHandler | None = None,
         interaction_publisher: InteractionPublisher | None = None,
@@ -192,6 +196,7 @@ class ChatRuntime:
             WorkspaceEditStore(repository.database, owner_id=agent_owner_id)
         )
         self.workspace = workspace
+        self.execution, self.commands = execution, commands
         self.interactions = InteractionService(
             repository, seconds=settings.interaction_timeout_seconds
         )
@@ -619,6 +624,7 @@ class ChatRuntime:
                 for definition in self.tools.definitions
                 if definition.name != "read_skill" or state.skill_snapshot.skills
                 if definition.name not in WORKSPACE_TOOL_NAMES or self.workspace is not None
+                if definition.name not in COMMAND_TOOL_NAMES or self.execution is not None
                 if definition.name not in WORKSPACE_CHANGE_TOOL_NAMES
                 or (self.workspace is not None and self.workspace.workspace.writable)
             ]
@@ -1046,6 +1052,8 @@ class ChatRuntime:
                         session_id=self.agent_session_id,
                         task_store=self.task_store,
                         workspace=self.workspace,
+                        execution=self.execution,
+                        commands=self.commands,
                         workspace_changes=self.workspace_changes,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
@@ -1193,6 +1201,8 @@ class ChatRuntime:
                 yield None
 
     async def close(self) -> None:
+        if self.commands is not None:
+            self.commands.assert_external_close()
         self._closed = True
         for state in list(self._runs.values()):
             if state.task is not None and not state.terminal:

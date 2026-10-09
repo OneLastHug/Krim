@@ -295,10 +295,18 @@ class WorkspaceWriter:
             raise ServiceError("workspace_encoding", "修改内容须为UTF-8", 422) from None
 
     def capture_file(
-        self, path: str, *, authorize: Callable[[], None] | None = None
+        self,
+        path: str,
+        *,
+        authorize: Callable[[], None] | None = None,
+        require_writable: bool = True,
     ) -> CapturedFile:
         """捕获完整有界文件或明确缺失；不发布文件修改。"""
-        with self._locked_parent(path, lambda: False) as (fd, parent, name):
+        with self._locked_parent(path, lambda: False, require_writable=require_writable) as (
+            fd,
+            parent,
+            name,
+        ):
             if authorize is not None:
                 authorize()
             identity = _identity(os.fstat(fd))
@@ -311,11 +319,14 @@ class WorkspaceWriter:
         captures: tuple[CapturedFile, ...],
         *,
         authorize: Callable[[], None] | None = None,
+        require_writable: bool = True,
     ) -> None:
         """全部捕获后在同一协作锁内检查未变化，不把零散读取冒充可用快照。"""
         if not 1 <= len(captures) <= 32:
             raise ServiceError("workspace_checkpoint_files", "检查点文件数量无效", 422)
-        with self._locked_parent(captures[0].path, lambda: False):
+        with self._locked_parent(
+            captures[0].path, lambda: False, require_writable=require_writable
+        ):
             if authorize is not None:
                 authorize()
             for capture in captures:
@@ -464,7 +475,7 @@ class WorkspaceWriter:
 
     @contextmanager
     def _locked_parent(
-        self, path: str, abort: Callable[[], bool]
+        self, path: str, abort: Callable[[], bool], *, require_writable: bool = True
     ) -> Iterator[tuple[int, str, str]]:
         import fcntl
 
@@ -475,7 +486,7 @@ class WorkspaceWriter:
             if time.monotonic() >= deadline:
                 raise ServiceError("workspace_write_busy", "文件协作锁等待超时", 429)
         try:
-            if not self.workspace.writable:
+            if require_writable and not self.workspace.writable:
                 raise ServiceError("workspace_read_only", "宿主未授权工作区写能力", 403)
             anchor = self.workspace._open(".", directory=True)
             try:

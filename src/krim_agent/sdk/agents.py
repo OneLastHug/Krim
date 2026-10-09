@@ -8,6 +8,13 @@ from uuid import uuid4
 
 from krim_agent.agents import AgentSessionView, AgentTurnView, ExecResult
 from krim_agent.application.agents import AgentPromptRequest, AgentService, AgentView
+from krim_agent.execution.agent_models import (
+    AgentCommandRequest,
+    CommandLookup,
+    CommandRead,
+    CommandSlice,
+    CommandSummary,
+)
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
@@ -57,6 +64,22 @@ class AgentSession:
 
     async def state(self) -> AgentSessionView:
         return await self.service.session(self.agent_id)
+
+    async def execute_command(
+        self, request: AgentCommandRequest, *, confirmed: bool = False
+    ) -> CommandSummary:
+        return await self.service.command_execute(self.agent_id, request, confirmed=confirmed)
+
+    async def command(self, request: CommandLookup, *, confirmed: bool = False) -> CommandSummary:
+        return await self.service.command_get(self.agent_id, request, confirmed=confirmed)
+
+    async def read_command(self, request: CommandRead, *, confirmed: bool = False) -> CommandSlice:
+        return await self.service.command_read(self.agent_id, request, confirmed=confirmed)
+
+    async def cancel_command(
+        self, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandSummary:
+        return await self.service.command_cancel(self.agent_id, request, confirmed=confirmed)
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)

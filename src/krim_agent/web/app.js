@@ -502,6 +502,10 @@ function renderInteractions() {
         }
         const detail = document.createElement("p");
         detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || t("问题"));
+        const capture = interaction.payload.input_capture;
+        if (interaction.kind === "approval" && capture?.scope === "complete_file" && capture.purpose === "command_input" && typeof capture.path === "string") {
+            detail.textContent = t("将读取完整文件作为命令输入：{path}", { path: capture.path });
+        }
         const actions = document.createElement("div");
         actions.className = "actions";
         card.append(title, detail);

@@ -248,6 +248,10 @@ class LinuxSandboxRunner:
     def max_active(self) -> int:
         return self._max_active
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def _arguments(self, broker_fd: int, status_fd: int, gate_fd: int) -> list[str]:
         args = [
             str(self.binary),
