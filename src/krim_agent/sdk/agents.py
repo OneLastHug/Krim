@@ -15,12 +15,18 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.management import (
+    CommandAccepted,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+)
 from krim_agent.execution.publication import (
     CommandChangesPage,
     CommandChangesRequest,
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.execution.records import CommandView
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
@@ -75,6 +81,30 @@ class AgentSession:
         self, request: AgentCommandRequest, *, confirmed: bool = False
     ) -> CommandSummary:
         return await self.service.command_execute(self.agent_id, request, confirmed=confirmed)
+
+    async def start_command(
+        self, request: AgentCommandRequest, *, confirmed: bool = False
+    ) -> CommandAccepted:
+        return await self.service.command_start(self.agent_id, request, confirmed=confirmed)
+
+    async def wait_command(
+        self, command_id: str, *, timeout_seconds: float = 30, confirmed: bool = False
+    ) -> CommandSummary:
+        return await self.service.command_wait(
+            self.agent_id, command_id, timeout_seconds=timeout_seconds, confirmed=confirmed
+        )
+
+    async def command_history(
+        self, request: CommandHistoryRequest | None = None, *, confirmed: bool = False
+    ) -> CommandHistoryPage:
+        return await self.service.command_history(
+            self.agent_id, request or CommandHistoryRequest(), confirmed=confirmed
+        )
+
+    async def inspect_command(
+        self, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandView:
+        return await self.service.command_inspect(self.agent_id, request, confirmed=confirmed)
 
     async def command(self, request: CommandLookup, *, confirmed: bool = False) -> CommandSummary:
         return await self.service.command_get(self.agent_id, request, confirmed=confirmed)

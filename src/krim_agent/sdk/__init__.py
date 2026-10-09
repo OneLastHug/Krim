@@ -10,6 +10,12 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.management import (
+    CommandAccepted,
+    CommandHistoryEntry,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+)
 from krim_agent.execution.publication import (
     CommandChangesPage,
     CommandChangesRequest,
@@ -77,6 +83,10 @@ from .types import (
 )
 
 __all__ = [
+    "CommandAccepted",
+    "CommandHistoryEntry",
+    "CommandHistoryPage",
+    "CommandHistoryRequest",
     "CommandChangesPage",
     "CommandChangesRequest",
     "CommandDelta",

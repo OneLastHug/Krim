@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -44,12 +46,18 @@ from krim_agent.execution.agent_models import (
 )
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
 from krim_agent.execution.linux import LinuxSandboxRunner
+from krim_agent.execution.management import (
+    CommandAccepted,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+)
 from krim_agent.execution.publication import (
     CommandChangesPage,
     CommandChangesRequest,
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.execution.records import CommandView
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.workspace_batches import NativeBatchStore
@@ -102,6 +110,10 @@ from krim_agent.workspace_restore import (
     CheckpointRestoreFence,
     CheckpointRestorePreview,
     CheckpointRestoreView,
+)
+
+_command_launching: ContextVar[asyncio.Task[object] | None] = ContextVar(
+    "krim_command_launching", default=None
 )
 
 AgentViewStatus = Literal[
@@ -212,6 +224,10 @@ class AgentService:
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
         self._workspace_operations: set[asyncio.Task[ToolResult]] = set()
+        self._command_launch_lock = asyncio.Lock()
+        self._command_launches: dict[
+            tuple[str, str], tuple[str, asyncio.Future[str], asyncio.Task[object]]
+        ] = {}
         self._start_lock = asyncio.Lock()
         self._closed = False
         self._workspace_recovered = False
@@ -618,6 +634,7 @@ class AgentService:
         batch_fence: NativeBatchFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
+        command_admitted: Callable[[str], None] | None = None,
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -633,7 +650,13 @@ class AgentService:
                 )
                 if session_row is None:
                     raise ServiceError("agent_session_topic", "Agent工作区缺少会话绑定", 403)
-                if name not in {"command_get", "command_read", "command_changes"}:
+                if name not in {
+                    "command_get",
+                    "command_read",
+                    "command_changes",
+                    "command_history",
+                    "command_inspect",
+                }:
                     await assert_session_open(session, session_row)
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -678,6 +701,13 @@ class AgentService:
                     workspace=handle.definition.workspace,
                     execution=handle.definition.execution,
                     commands=self.manager.commands,
+                    command_admitted=command_admitted,
+                    _command_expected=json.dumps(
+                        AgentCommandRequest.model_validate(arguments).model_dump(mode="json"),
+                        sort_keys=True,
+                    )
+                    if command_admitted is not None
+                    else None,
                     workspace_changes=self.manager.workspace_changes,
                     workspace_batch=batch_fence,
                     checkpoint_capture=checkpoint_capture,
@@ -823,6 +853,154 @@ class AgentService:
                 agent_id, "command_get", request.model_dump(), confirmed=confirmed
             )
         )
+
+    async def command_start(
+        self, agent_id: str, request: AgentCommandRequest, *, confirmed: bool = False
+    ) -> CommandAccepted:
+        self.assert_external_command_control()
+        request = AgentCommandRequest.model_validate(request.model_dump())
+        key = (agent_id, request.request_key)
+        signature = json.dumps(
+            {"request": request.model_dump(mode="json"), "confirmed": confirmed}, sort_keys=True
+        )
+        async with self._command_launch_lock:
+            if self._closed:
+                raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+            entry = self._command_launches.get(key)
+            if entry is not None and entry[2].done() and not entry[1].done():
+                self._command_launches.pop(key, None)
+                entry = None
+            if entry is not None and entry[0] != signature:
+                raise ServiceError(
+                    "execution_request_conflict", "同一请求键正在处理不同参数或确认", 409
+                )
+            if entry is None:
+                if len(self._command_launches) >= 64:
+                    raise ServiceError("execution_busy", "后台命令准入已达上限", 429)
+                admitted: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+                def accepted(identifier: str) -> None:
+                    if not admitted.done():
+                        admitted.set_result(identifier)
+
+                async def launch() -> object:
+                    marker = _command_launching.set(asyncio.current_task())
+                    try:
+                        return await self._workspace_call(
+                            agent_id,
+                            "command_execute",
+                            request.model_dump(),
+                            confirmed=confirmed,
+                            command_admitted=accepted,
+                        )
+                    finally:
+                        _command_launching.reset(marker)
+
+                task = asyncio.create_task(launch())
+                entry = (signature, admitted, task)
+                self._command_launches[key] = entry
+
+                def finished(result: asyncio.Task[object]) -> None:
+                    current = self._command_launches.get(key)
+                    if current is not None and current[2] is result:
+                        self._command_launches.pop(key, None)
+                    if not result.cancelled():
+                        result.exception()
+
+                task.add_done_callback(finished)
+        _, admitted, task = entry
+        # asyncio.wait不把请求等待者取消传给后台任务或原admitted通知。
+        await asyncio.wait((admitted, task), return_when=asyncio.FIRST_COMPLETED)
+        if admitted.done():
+            identifier = admitted.result()
+            handle = self._handle(agent_id)
+            try:
+                view = await self.manager.commands.store.get(
+                    f"session:{handle.session_id}", identifier
+                )
+            except ServiceError as error:
+                if error.code == "execution_not_found":
+                    raise ServiceError(
+                        "execution_receipt_unverified", "后台通知没有对应持久命令", 409
+                    ) from None
+                raise
+            origin = await self.manager.commands.store.origin(
+                f"session:{handle.session_id}", identifier
+            )
+            if (
+                view.request.request_key != request.request_key
+                or origin is None
+                or origin.get("request") != request.model_dump(mode="json")
+            ):
+                raise ServiceError("execution_receipt_unverified", "后台通知未对应原持久请求", 409)
+            return CommandAccepted(command_id=identifier, request_key=request.request_key)
+        if task.cancelled():
+            raise ServiceError("execution_service_closed", "命令接受前已停止", 503)
+        task.result()
+        raise ServiceError("execution_receipt_unverified", "命令未报告真实持久接受", 409)
+
+    async def command_by_key(
+        self, agent_id: str, key: str, *, confirmed: bool = False
+    ) -> CommandSummary | None:
+        try:
+            return await self.command_get(
+                agent_id, CommandLookup(request_key=key), confirmed=confirmed
+            )
+        except ServiceError as error:
+            if error.code == "execution_not_found":
+                return None
+            raise
+
+    async def command_history(
+        self, agent_id: str, request: CommandHistoryRequest, *, confirmed: bool = False
+    ) -> CommandHistoryPage:
+        return CommandHistoryPage.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "command_history", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def command_inspect(
+        self, agent_id: str, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandView:
+        return CommandView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "command_inspect", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def command_wait(
+        self,
+        agent_id: str,
+        identifier: str,
+        *,
+        timeout_seconds: float = 30,
+        confirmed: bool = False,
+    ) -> CommandSummary:
+        self.assert_external_command_control()
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+            raise ServiceError("execution_wait_timeout", "等待时间须为有限的0–300秒", 422)
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            result = await self.command_get(
+                agent_id, CommandLookup(command_id=identifier), confirmed=confirmed
+            )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if result.phase in {"finished", "interrupted"} or remaining <= 0:
+                return result
+            await asyncio.sleep(min(0.05, remaining))
+
+    @staticmethod
+    def assert_external_command_control() -> None:
+        task = _command_launching.get()
+        if task is not None and not task.done():
+            raise ServiceError(
+                "execution_start_reentrant", "后台命令回调不能等待启动、等待结束或关闭服务", 409
+            )
 
     async def command_read(
         self, agent_id: str, request: CommandRead, *, confirmed: bool = False
@@ -1557,11 +1735,17 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.assert_external_command_control()
         self.manager.commands.assert_external_close()
         self.workspace_batches.assert_external_close()
         async with self._start_lock:
             self._closed = True
         try:
+            launches = list(self._command_launches.values())
+            for _signature, _admitted, task in launches:
+                if not task.cancelling():
+                    task.cancel()
+            await asyncio.gather(*(entry[2] for entry in launches), return_exceptions=True)
             await self.workspace_restores.close()
             await self.workspace_checkpoints.close()
             await self.workspace_batches.close()
