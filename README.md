@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单与SDK/REST/CLI/浏览器已接通，Checkpoint恢复、命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。命令隔离、Skills文件包、完整Host/多模态及生产运行能力继续后续阶段。
 
 ## 快速开始
 
@@ -35,6 +35,9 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 # SDK会话示例：关闭/重开、独立Run与原事件读取。
 .venv/bin/python examples/python_agent_sessions.py
 
+# Linux工作区演练：SDK准备、CLI恢复、服务重启与原操作零重放。
+.venv/bin/python examples/workspace_trial.py
+
 # 显式离线兼容端点模拟：真实Provider适配/工具循环，不发商业请求。
 .venv/bin/python examples/python_openai_provider.py
 ```
@@ -50,12 +53,14 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 | 对话与流 | 消息树/编辑/重生成/分支、持久事件/独立游标、断开重连、后台多话题读取 |
 | SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
 | 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
-| 工作区 | 宿主根目录授权、Profile/资源冻结、文件读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理及SDK/REST/CLI/浏览器；清单与快照联动继续 |
+| 工作区 | 宿主根目录授权、Profile/资源冻结、读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理、原生清单与批次、完整检查点捕获和条件恢复；SDK/REST/CLI/浏览器消费同一事实 |
 | 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
 | Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
 | 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
 
 商业模型质量、真实账单、文件/命令沙箱、生产多worker/租户、PostgreSQL/Redis与部署演练尚未完成。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+
+工作区的目录文件描述符边界与条件发布目前仅Linux实测；Windows不能使用该文件能力，普通Agent/SDK/eval入口仍可用。文件路径约束不等于操作系统进程沙箱。
 
 ## 设计、进度与验证
 
@@ -68,7 +73,11 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [连续修改保留与兼容设计](docs/architecture/workspace-effect-chain-design.md)
 - [原生修改清单与批次设计](docs/architecture/native-workspace-list-design.md)
 - [浏览器统一审阅修改](docs/user-guide/native-change-list.md)
-- [原生文件检查点捕获（恢复执行接续）](docs/api/workspace-checkpoint-capture.md)
+- [原生检查点浏览器与命令行指南](docs/user-guide/native-checkpoints.md)
+- [原生检查点REST与客户端合约](docs/api/native-checkpoints.md)
+- [检查点条件恢复架构](docs/architecture/workspace-checkpoint-restore-design.md)
+- [工作区整体演练与证据组织](docs/architecture/workspace-trial-design.md)
+- [P03完整证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)
