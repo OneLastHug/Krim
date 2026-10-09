@@ -12,6 +12,7 @@ from pydantic import Field, JsonValue
 
 from krim_agent.budgets import UsageBudgetConfig
 from krim_agent.context_engine.types import ContextRunConfig
+from krim_agent.execution.binding import ExecutionBinding
 from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.providers import ModelProvider
 from krim_agent.tools import ToolRegistry
@@ -68,8 +69,11 @@ class AgentDefinition:
     session_ttl_seconds: float | None = None
     resource_manifest: dict[str, JsonValue] | None = None
     workspace: WorkspaceBinding | None = None
+    execution: ExecutionBinding | None = None
 
     def __post_init__(self) -> None:
+        if self.execution is not None and not isinstance(self.execution, ExecutionBinding):
+            raise ValueError("execution必须是可信宿主ExecutionBinding")
         if self.workspace is not None and not isinstance(self.workspace, WorkspaceBinding):
             raise ValueError("workspace必须是可信宿主WorkspaceBinding")
         if self.resource_manifest is not None:

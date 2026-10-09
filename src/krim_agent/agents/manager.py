@@ -13,13 +13,16 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from krim_agent.application.commands import AgentCommandService
 from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
 from krim_agent.observability import Tracer
 from krim_agent.persistence import KrimRepository
 from krim_agent.persistence.agent_sessions import AgentSessionStore
 from krim_agent.persistence.agents import AgentHandleStore, StoredAgentHandle
+from krim_agent.persistence.commands import CommandStore
 from krim_agent.persistence.tasks import AgentTaskStore
 from krim_agent.persistence.workspace_edits import WorkspaceEditStore
 from krim_agent.protocol.domain import TERMINAL_STATUSES, ChatRequest, RunView, ServiceError
@@ -458,6 +461,9 @@ class AgentManager:
         self.workspace_changes = WorkspaceChangeService(
             WorkspaceEditStore(repository.database, owner_id=self.owner_id)
         )
+        self.commands = AgentCommandService(
+            CommandStore(repository.database, owner_id=self.owner_id)
+        )
 
     @staticmethod
     def definition_hash(definition: AgentDefinition) -> str:
@@ -502,6 +508,8 @@ class AgentManager:
             payload["resource_version"] = definition.resource_version
         if definition.workspace is not None:
             payload["workspace"] = definition.workspace.manifest()
+        if definition.execution is not None:
+            payload["execution"] = definition.execution.resource.model_dump(mode="json")
         if definition.session_ttl_seconds is not None:
             payload["session_ttl_seconds"] = definition.session_ttl_seconds
         if definition.mode != "agent" and definition.profile_revision is None:
@@ -563,6 +571,12 @@ class AgentManager:
                     definition.tools,
                     parent.runtime.tools,
                 )
+                self._restrict_execution(
+                    definition.execution,
+                    parent.runtime.execution,
+                    definition.tools,
+                    parent.runtime.tools,
+                )
                 definition = replace(
                     definition,
                     policy=inherited_policy(definition.policy, parent.runtime.tool_policy),
@@ -602,11 +616,18 @@ class AgentManager:
                     else None,
                     budget_account_ids=await parent_handle.runtime.ensure_usage_budget_binding(),
                     workspace=parent_handle.runtime.workspace,
+                    execution=parent_handle.runtime.execution,
                 )
             if parent_context is not None:
                 self._restrict_workspace(
                     definition.workspace,
                     parent_context.workspace,
+                    definition.tools,
+                    parent_context.registry,
+                )
+                self._restrict_execution(
+                    definition.execution,
+                    parent_context.execution,
                     definition.tools,
                     parent_context.registry,
                 )
@@ -668,6 +689,13 @@ class AgentManager:
     ) -> AgentHandle:
         if self._closed:
             raise AgentError("manager_closed", "AgentManager 已关闭")
+        if definition.execution is not None:
+            try:
+                definition.execution.require()
+            except ServiceError as error:
+                raise AgentError(error.code, str(error)) from error
+        elif any(item.name in COMMAND_TOOL_NAMES for item in definition.tools.definitions):
+            raise AgentError("execution_unbound", "Agent命令工具缺少执行资源授权")
         if definition.workspace is not None:
             try:
                 definition.workspace.require()
@@ -721,6 +749,8 @@ class AgentManager:
             task_store=self.tasks,
             workspace_changes=self.workspace_changes,
             workspace=definition.workspace,
+            execution=definition.execution,
+            commands=self.commands,
             allow_skill_tool=definition.profile_revision is None
             or any(tool.name == "read_skill" for tool in definition.tools.definitions),
             system_prompt=definition.instructions,
@@ -807,6 +837,8 @@ class AgentManager:
         }
         if definition.workspace is not None:
             permissions["workspace"] = definition.workspace.manifest()
+        if definition.execution is not None:
+            permissions["execution"] = definition.execution.resource.model_dump(mode="json")
         try:
             if stored is not None:
                 value = await self.sessions.attach(
@@ -870,11 +902,29 @@ class AgentManager:
                 await handle.destroy()
 
     async def close(self) -> None:
+        self.commands.assert_external_close()
         async with self._spawn_lock:
             self._closed = True
+        await self.commands.close()
         await self.workspace_changes.close()
         for handle in list(self._handles.values()):
             if handle.definition.persistent:
                 await handle.detach()
             else:
                 await handle.destroy()
+
+    @staticmethod
+    def _restrict_execution(
+        child: ExecutionBinding | None,
+        parent: ExecutionBinding | None,
+        child_tools: ToolRegistry,
+        parent_tools: ToolRegistry,
+    ) -> None:
+        if child is not None and (
+            parent is None or child.resource != parent.resource or not parent.available
+        ):
+            raise AgentError("agent_execution_forbidden", "子Agent不能扩大父执行资源授权")
+        if {item.name for item in child_tools.definitions if item.name in COMMAND_TOOL_NAMES} - {
+            item.name for item in parent_tools.definitions if item.name in COMMAND_TOOL_NAMES
+        }:
+            raise AgentError("agent_execution_forbidden", "子Agent不能扩大父命令工具权限")

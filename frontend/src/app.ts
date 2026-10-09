@@ -416,6 +416,10 @@ function renderInteractions(): void {
     const owner = state.handles.find(agent => agent.current_run_id === interaction.run_id || backgroundStreams.forTopic(agent.topic_id)?.interactionRuns.has(interaction.run_id));
     if (owner) { card.dataset.agentId = owner.agent_id; title.textContent = `${owner.name} · ${title.textContent}`; }
     const detail = document.createElement("p"); detail.textContent = interaction.kind === "approval" ? JSON.stringify(interaction.payload.arguments, null, 2) : String(interaction.payload.question || t("问题"));
+    const capture = interaction.payload.input_capture as { scope?: string; purpose?: string; path?: string } | undefined;
+    if (interaction.kind === "approval" && capture?.scope === "complete_file" && capture.purpose === "command_input" && typeof capture.path === "string") {
+      detail.textContent = t("将读取完整文件作为命令输入：{path}", { path: capture.path });
+    }
     const actions = document.createElement("div"); actions.className = "actions"; card.append(title, detail);
     if (interaction.kind === "approval") {
       for (const [action, label] of [["approve", "批准此次调用"], ["deny", "拒绝此次调用"]] as const) {

@@ -423,6 +423,7 @@ TRANSLATIONS: dict[str, str] = {
     "尚未保存": "Not saved yet",
     "没有需要压缩的历史": "No history needs compaction",
     "工具执行需要批准：{tool}": "Tool execution requires approval: {tool}",
+    "将读取完整文件作为命令输入：{path}": "Read the complete file as command input: {path}",
     "请回答问题": "Please answer the question",
     "问题": "Question",
     "批准此次调用": "Approve this call",

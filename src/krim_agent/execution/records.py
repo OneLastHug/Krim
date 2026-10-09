@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, JsonValue
 
 from krim_agent.protocol.models import StrictModel
 
@@ -38,6 +38,7 @@ class CommandSnapshot(StrictModel):
     inputs: list[CommandFile]
     run_id: str | None = Field(default=None, max_length=36)
     call_id: str | None = Field(default=None, min_length=1, max_length=128)
+    origin: dict[str, JsonValue] | None = None
 
 
 CommandPhase = Literal["preparing", "dispatched", "running", "finished", "interrupted"]

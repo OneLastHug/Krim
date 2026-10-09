@@ -21,6 +21,7 @@ from krim_agent.protocol.models import StrictModel
 from .output import OutputContract, OutputSchema, WireOutputSchema
 
 if TYPE_CHECKING:
+    from krim_agent.execution.binding import CommandCapture, ExecutionBinding
     from krim_agent.skills import SkillSnapshot
     from krim_agent.workspace import WorkspaceBinding
     from krim_agent.workspace_checkpoint import CheckpointCaptureFence
@@ -55,6 +56,17 @@ class WorkspaceCheckpointBackend(Protocol):
     async def capture_read(
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, object]: ...
+
+
+class CommandBackend(Protocol):
+    async def tool_operation(
+        self, operation: str, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def capture_read(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]: ...
+    def assert_external_close(self) -> None: ...
+    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
 
 
 class ToolError(Exception):
@@ -128,6 +140,10 @@ class ToolContext:
     checkpoint_capture: CheckpointCaptureFence | None = None
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
+    execution: ExecutionBinding | None = None
+    commands: CommandBackend | None = None
+    command_capture: CommandCapture | None = None
+    _command_response: tuple[str, str] | None = field(default=None, repr=False)
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -159,6 +175,9 @@ class ToolContext:
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
+            execution=self.execution,
+            commands=self.commands,
+            command_capture=self.command_capture,
             arguments=arguments,
         )
 
@@ -178,6 +197,7 @@ class ToolContext:
 
 PreHook = Callable[[ToolContext], Awaitable[ShortCircuit | None]]
 PostHook = Callable[[Any, ToolContext], Awaitable[Any]]
+OutputGuard = Callable[[Any, ToolContext], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -192,6 +212,7 @@ class ToolDefinition:
     output_schema: OutputSchema | None = None
     should_defer: bool = False
     always_load: bool = False
+    output_guard: OutputGuard | None = None
     _output_contract: OutputContract | None = field(
         default=None, init=False, repr=False, compare=False
     )

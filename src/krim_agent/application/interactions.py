@@ -89,12 +89,19 @@ class InteractionService:
         arguments = TypeAdapter(dict[str, JsonValue]).validate_python(
             parsed.model_dump(mode="json", by_alias=True)
         )
-        value = await self._request(
-            "approval",
-            definition.name,
-            {"tool_name": definition.name, "risk": definition.risk, "arguments": arguments},
-            context,
-        )
+        payload: dict[str, JsonValue] = {
+            "tool_name": definition.name,
+            "risk": definition.risk,
+            "arguments": arguments,
+        }
+        if definition.name == "workspace_read" and context.command_capture is not None:
+            payload["input_capture"] = {
+                "scope": "complete_file",
+                "purpose": "command_input",
+                "path": context.command_capture.path,
+                "parent_call_id": context.command_capture.parent_call_id,
+            }
+        value = await self._request("approval", definition.name, payload, context)
         if value.status == "approved":
             return True
         if value.status == "denied":
