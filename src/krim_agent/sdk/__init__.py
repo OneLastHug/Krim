@@ -13,6 +13,11 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_checkpoint import (
+    WorkspaceCheckpointCreate,
+    WorkspaceCheckpointFileView,
+    WorkspaceCheckpointView,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchItemView,
@@ -52,6 +57,9 @@ from .types import (
 )
 
 __all__ = [
+    "WorkspaceCheckpointCreate",
+    "WorkspaceCheckpointFileView",
+    "WorkspaceCheckpointView",
     "NativeBatchHistoryPage",
     "NativeBatchSummary",
     "NativeBatchItemView",

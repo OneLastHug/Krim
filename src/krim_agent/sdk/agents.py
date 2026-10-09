@@ -22,6 +22,7 @@ from krim_agent.workspace_change import (
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
 )
+from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -191,6 +192,36 @@ class AgentSession:
         return await self.service.workspace_change_list(
             self.agent_id, filter=filter, cursor=cursor, limit=limit
         )
+
+    async def create_file_checkpoint(
+        self, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
+    ) -> WorkspaceCheckpointView:
+        return await self.service.workspace_create_checkpoint(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def file_checkpoint(self, checkpoint_id: str) -> WorkspaceCheckpointView:
+        return await self.service.workspace_checkpoint(self.agent_id, checkpoint_id)
+
+    async def file_checkpoint_by_key(self, request_key: str) -> WorkspaceCheckpointView | None:
+        return await self.service.workspace_checkpoint_by_key(self.agent_id, request_key)
+
+    async def file_checkpoints(
+        self, *, offset: int = 0, limit: int = 32
+    ) -> list[WorkspaceCheckpointView]:
+        return await self.service.workspace_checkpoint_list(
+            self.agent_id, offset=offset, limit=limit
+        )
+
+    async def wait_file_checkpoint(
+        self, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> WorkspaceCheckpointView:
+        return await self.service.workspace_checkpoint_wait(
+            self.agent_id, checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_file_checkpoint(self, checkpoint_id: str) -> WorkspaceCheckpointView:
+        return await self.service.workspace_checkpoint_cancel(self.agent_id, checkpoint_id)
 
     async def start_file_change_batch(
         self, request: NativeBatchRequest, *, confirmed: bool = False

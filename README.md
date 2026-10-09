@@ -68,6 +68,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 - [连续修改保留与兼容设计](docs/architecture/workspace-effect-chain-design.md)
 - [原生修改清单与批次设计](docs/architecture/native-workspace-list-design.md)
 - [浏览器统一审阅修改](docs/user-guide/native-change-list.md)
+- [原生文件检查点捕获（恢复执行接续）](docs/api/workspace-checkpoint-capture.md)
 - [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
 - [完整项目计划](docs/plan/2026-10-08-project-completion.md)
 - [需求追踪](docs/requirements/requirements-traceability.md)

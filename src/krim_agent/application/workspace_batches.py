@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from krim_agent.protocol.domain import ServiceError
@@ -17,6 +16,11 @@ from krim_agent.workspace_list import (
 )
 
 from .workspace_changes import _wait
+from .workspace_execution import (
+    enter_workspace_execution,
+    inside_workspace_execution,
+    leave_workspace_execution,
+)
 
 if TYPE_CHECKING:
     from krim_agent.persistence.workspace_batches import NativeBatchStore
@@ -25,7 +29,6 @@ AuthorizeBatch = Callable[[str], Awaitable[tuple[str, str, str]]]
 ExecuteBatchChild = Callable[
     [str, WorkspaceChangeAction, NativeBatchFence, bool], Awaitable[object]
 ]
-_current_batch: ContextVar[tuple[int, str] | None] = ContextVar("krim_native_batch", default=None)
 
 
 class WorkspaceBatchService:
@@ -69,12 +72,13 @@ class WorkspaceBatchService:
             view, created = await self.store.reserve(scope, request, fingerprint, key)
             if not created:
                 return view
-            execution = await self.store.execution(scope, view.batch_id)
+            identifier = view.batch_id
+            execution = await self.store.execution(scope, identifier)
             task = asyncio.create_task(self._run(agent_id, scope, execution, confirmed))
-            self._tasks[view.batch_id] = (scope, task)
+            self._tasks[identifier] = (scope, task)
 
             def done(result: asyncio.Task[None]) -> None:
-                self._tasks.pop(view.batch_id, None)
+                self._tasks.pop(identifier, None)
                 if not result.cancelled():
                     result.exception()
 
@@ -98,7 +102,7 @@ class WorkspaceBatchService:
         worker = asyncio.current_task()
         assert worker is not None
         heartbeat = asyncio.create_task(self._renew(execution, worker))
-        marker = _current_batch.set((id(self), execution.view.batch_id))
+        marker = enter_workspace_execution(self._tasks, execution.view.batch_id)
         blocked: set[str] = set()
         try:
             for child in execution.children:
@@ -145,7 +149,7 @@ class WorkspaceBatchService:
                     lambda: None,
                 )
             finally:
-                _current_batch.reset(marker)
+                leave_workspace_execution(marker)
 
     async def cancel(self, scope: str, batch_id: str) -> NativeBatchView:
         internal = self._inside_active_batch()
@@ -181,12 +185,7 @@ class WorkspaceBatchService:
             await asyncio.sleep(min(0.05, remaining))
 
     def _inside_active_batch(self) -> bool:
-        current = _current_batch.get()
-        if current is None or current[0] != id(self):
-            return False
-        entry = self._tasks.get(current[1])
-        # Hook后台Task可能保留旧ContextVar；结束后的标记不影响后续外部操作。
-        return entry is not None and not entry[1].done()
+        return inside_workspace_execution()
 
     def assert_external_close(self) -> None:
         if self._inside_active_batch():

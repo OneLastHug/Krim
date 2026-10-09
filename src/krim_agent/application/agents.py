@@ -31,11 +31,13 @@ from krim_agent.agents import (
 from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.application.workspace_batches import WorkspaceBatchService
+from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.workspace_batches import NativeBatchStore
+from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -64,6 +66,11 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
     WorkspaceOperationRequest,
     WorkspacePreviewRequest,
+)
+from krim_agent.workspace_checkpoint import (
+    CheckpointCaptureFence,
+    WorkspaceCheckpointCreate,
+    WorkspaceCheckpointView,
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
@@ -163,6 +170,13 @@ class AgentService:
             self.workspace_batch_store,
             self._workspace_batch_authorize,
             self._workspace_batch_child,
+        )
+        self.workspace_checkpoint_store = WorkspaceCheckpointStore(self.workspace_edits)
+        self.workspace_checkpoints = WorkspaceCheckpointService(
+            self.workspace_checkpoint_store,
+            self.manager.workspace_changes,
+            self._workspace_checkpoint_authorize,
+            self._workspace_checkpoint_read,
         )
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
@@ -544,6 +558,7 @@ class AgentService:
         *,
         confirmed: bool = False,
         batch_fence: NativeBatchFence | None = None,
+        checkpoint_capture: CheckpointCaptureFence | None = None,
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
@@ -589,6 +604,8 @@ class AgentService:
                     workspace=handle.definition.workspace,
                     workspace_changes=self.manager.workspace_changes,
                     workspace_batch=batch_fence,
+                    checkpoint_capture=checkpoint_capture,
+                    workspace_checkpoints=self.workspace_checkpoints,
                     call_id=call_id,
                     approval_handler=confirm if confirmed else None,
                     policy=handle.runtime.tool_policy,
@@ -645,6 +662,15 @@ class AgentService:
                 "workspace_batch_child_closed": 409,
                 "workspace_batch_operation_conflict": 409,
                 "workspace_batch_dependency": 409,
+                "workspace_checkpoint_fenced": 409,
+                "workspace_checkpoint_target": 403,
+                "workspace_checkpoint_action": 403,
+                "workspace_checkpoint_not_captured": 409,
+                "workspace_checkpoint_changed": 409,
+                "workspace_checkpoint_content": 422,
+                "workspace_checkpoint_unavailable": 503,
+                "workspace_checkpoint_closed": 503,
+                "workspace_checkpoint_bytes": 429,
                 "workspace_proposal_expired": 410,
                 "workspace_receipt_pending": 503,
                 "workspace_busy": 429,
@@ -761,6 +787,10 @@ class AgentService:
         )
 
     async def _workspace_batch_authorize(self, agent_id: str) -> tuple[str, str, str]:
+        scope, binding = await self._workspace_checkpoint_authorize(agent_id)
+        return scope, binding.key, binding.fingerprint
+
+    async def _workspace_checkpoint_authorize(self, agent_id: str) -> tuple[str, WorkspaceBinding]:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
         handle = self._handle(agent_id)
@@ -774,7 +804,63 @@ class AgentService:
                 origin="host",
             )
         )
-        return scope, binding.key, binding.fingerprint
+        return scope, binding
+
+    async def _workspace_checkpoint_read(
+        self, agent_id: str, path: str, fence: CheckpointCaptureFence, confirmed: bool
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            "workspace_read",
+            ReadFileInput(path=path).model_dump(),
+            confirmed=confirmed,
+            checkpoint_capture=fence,
+        )
+
+    async def workspace_create_checkpoint(
+        self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
+    ) -> WorkspaceCheckpointView:
+        return await self.workspace_checkpoints.create(agent_id, request, confirmed=confirmed)
+
+    async def workspace_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> WorkspaceCheckpointView:
+        session = await self.session(agent_id)
+        return await self.workspace_checkpoint_store.get(
+            f"session:{session.session_id}", checkpoint_id
+        )
+
+    async def workspace_checkpoint_by_key(
+        self, agent_id: str, request_key: str
+    ) -> WorkspaceCheckpointView | None:
+        session = await self.session(agent_id)
+        return await self.workspace_checkpoint_store.by_key(
+            f"session:{session.session_id}", request_key
+        )
+
+    async def workspace_checkpoint_list(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[WorkspaceCheckpointView]:
+        session = await self.session(agent_id)
+        return await self.workspace_checkpoint_store.list(
+            f"session:{session.session_id}", offset=offset, limit=limit
+        )
+
+    async def workspace_checkpoint_wait(
+        self, agent_id: str, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> WorkspaceCheckpointView:
+        session = await self.session(agent_id)
+        return await self.workspace_checkpoints.wait(
+            f"session:{session.session_id}", checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    async def workspace_checkpoint_cancel(
+        self, agent_id: str, checkpoint_id: str
+    ) -> WorkspaceCheckpointView:
+        session = await self.session(agent_id)
+        return await self.workspace_checkpoints.cancel(
+            f"session:{session.session_id}", checkpoint_id
+        )
 
     async def _workspace_batch_child(
         self,
@@ -1256,6 +1342,7 @@ class AgentService:
         async with self._start_lock:
             self._closed = True
         try:
+            await self.workspace_checkpoints.close()
             await self.workspace_batches.close()
             operations = list(self._workspace_operations)
             for operation in operations:

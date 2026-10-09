@@ -68,6 +68,10 @@ def _workspace(context: ToolContext) -> Workspace:
 def workspace_tools() -> tuple[ToolDefinition, ...]:
     async def read(arguments: BaseModel, context: ToolContext) -> dict[str, object]:
         request = ReadFileInput.model_validate(arguments.model_dump())
+        if context.checkpoint_capture is not None:
+            if context.workspace_checkpoints is None:
+                raise ToolError("workspace_checkpoint_backend", "当前上下文缺少检查点捕获服务")
+            return await context.workspace_checkpoints.capture_read(request.model_dump(), context)
         try:
             result = await workspace_io(
                 _workspace(context).read,
