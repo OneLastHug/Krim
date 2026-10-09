@@ -4,6 +4,112 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "命令执行与回执": "Commands and receipts",
+    "命令准备中": "Preparing command",
+    "命令已派发": "Command dispatched",
+    "命令运行中": "Command running",
+    "命令已结束": "Command finished",
+    "命令已中断": "Command interrupted",
+    "命令已完成": "Command completed",
+    "命令失败": "Command failed",
+    "命令超时": "Command timed out",
+    "命令已取消": "Command cancelled",
+    "命令输出达到上限": "Command output limit reached",
+    "命令准备失败": "Command setup failed",
+    "命令结果待核实": "Command result uncertain",
+    "新增文件": "File added",
+    "修改文件": "File modified",
+    "文件未变化": "File unchanged",
+    "请输入最多32个不重复的相对路径": "Enter up to 32 unique relative paths",
+    "文件和目录须使用工作区相对路径": "Files and directories require workspace-relative paths",
+    "准备受控命令": "Prepare a controlled command",
+    "命令参数（JSON字符串数组）": "Command arguments (JSON string array)",
+    "工作区相对工作目录": "Workspace-relative working directory",
+    "完整输入文件（每行一个）": "Complete input files (one per line)",
+    "副本目录（每行一个）": "Copy directories (one per line)",
+    "命令请求键（可留空自动生成）": "Command request key (leave blank to generate)",
+    "命令修改隔离副本，文件产物须另行审阅和批准。": (
+        "Commands modify an isolated copy; review and approve file artifacts separately."
+    ),
+    "执行受控命令": "Execute controlled command",
+    "命令标识": "Command ID",
+    "命令查询类型": "Command lookup type",
+    "命令标识或原请求键": "Command ID or original request key",
+    "查询原命令": "Find original command",
+    "查询未确认命令": "Find unconfirmed command",
+    "刷新命令历史": "Refresh command history",
+    "上一页命令": "Previous command page",
+    "下一页命令": "Next command page",
+    "本页全部命令": "All commands on this page",
+    "本页运行中": "Active commands on this page",
+    "本页已结束": "Finished commands on this page",
+    "本页待核实": "Uncertain commands on this page",
+    "命令当前页筛选": "Command filter for current page",
+    "命令参数须为1至128个字符串的JSON数组": (
+        "Command arguments require a JSON array of 1 to 128 strings"
+    ),
+    "命令参数超过大小限制": "Command arguments exceed the size limit",
+    "命令请求结果尚未确认，请查询原请求键：{key}": (
+        "Command result is unconfirmed; query the original request key: {key}"
+    ),
+    "未确认命令只能使用原参数与原请求键重试": (
+        "Retry an unconfirmed command with its original arguments and request key"
+    ),
+    "确认执行以下命令及完整输入？": "Execute this command with the complete listed inputs?",
+    "命令已接受，继续查询原命令结果": "Command accepted; read the original command result",
+    "命令请求键格式无效": "Invalid command request key",
+    "尚未找到原命令；可以明确使用原键重试，不能推断命令从未执行": (
+        "Original command not found yet; an explicit retry must use the original key. "
+        "This does not prove the command never ran."
+    ),
+    "命令标识格式无效": "Invalid command ID",
+    "已读取原命令，未重新执行": "Original command read without re-execution",
+    "当前页没有匹配的命令": "No matching commands on the current page",
+    "查看原命令": "View original command",
+    "命令阶段": "Command phase",
+    "命令退出码": "Command exit code",
+    "命令已启动": "Command started",
+    "命令进程已回收": "Command processes reaped",
+    "完整输入数量": "Complete input count",
+    "产物数量": "Artifact count",
+    "是": "Yes",
+    "否": "No",
+    "保留原命令事实；禁止自动重跑或使用不完整产物。": (
+        "Keep the original command facts; do not automatically rerun or use incomplete artifacts."
+    ),
+    "刷新原命令": "Refresh original command",
+    "等待原命令": "Wait for original command",
+    "取消原命令": "Cancel original command",
+    "读取标准输出": "Read stdout",
+    "读取错误输出": "Read stderr",
+    "查看命令文件变化": "View command file changes",
+    "命令输出已截断": "Command output is truncated",
+    "产物摘要已截断，请使用文件变化分页读取": (
+        "Artifact summaries are truncated; use paginated file changes"
+    ),
+    "产物提案已保存，请独立审阅文件差异后批准": (
+        "Artifact proposal saved; review the file diff and approve separately"
+    ),
+    "审阅产物文件提案": "Review artifact file proposal",
+    "确认取消原命令：{id}？": "Cancel the original command: {id}?",
+    "原始字节（Base64）": "Original bytes (Base64)",
+    "较早输出片段": "Earlier output slice",
+    "较晚输出片段": "Later output slice",
+    "命令文件变化": "Command file changes",
+    "失败命令的完整产物需要另行明确接受": (
+        "Complete artifacts from failed commands require explicit acceptance"
+    ),
+    "没有文件变化": "No file changes",
+    "读取原产物": "Read original artifact",
+    "生成产物文件提案": "Create artifact file proposal",
+    "较早文件变化": "Earlier file changes",
+    "较晚文件变化": "Later file changes",
+    "明确接受失败命令的完整产物并生成提案：{path}？": (
+        "Explicitly accept the complete failed-command artifact and create a proposal: {path}?"
+    ),
+    "生成原命令产物的文件提案：{path}？": (
+        "Create a file proposal from the original command artifact: {path}?"
+    ),
     "检查点来源": "Checkpoint source",
     "文件检查点": "File checkpoint",
     "检查点文件路径（每行一个，最多32个）": "Checkpoint file paths (one per line, up to 32)",
