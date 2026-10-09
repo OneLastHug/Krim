@@ -405,6 +405,6 @@ async def test_reopen_snapshot_and_nonempty_migration_downgrade_protection(tmp_p
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0029_workspace_restore_plans"
+            ).scalar() == "0030_command_executions"
     finally:
         await reopened.close()

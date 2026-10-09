@@ -334,6 +334,7 @@ class LinuxSandboxRunner:
         *,
         directories: tuple[str, ...] = (),
         authorize: Authorize | None = None,
+        before_dispatch: Authorize | None = None,
     ) -> ExecutionHandle:
         request = CommandSpec.model_validate(request.model_dump())
         frozen = []
@@ -382,7 +383,9 @@ class LinuxSandboxRunner:
                 raise ServiceError("execution_busy", "命令并发已达上限", 429)
             handle = ExecutionHandle()
             self._active[handle.execution_id] = handle
-            handle._task = asyncio.create_task(self._run(handle, payload, authorize))
+            handle._task = asyncio.create_task(
+                self._run(handle, payload, authorize, before_dispatch)
+            )
             handle._task.add_done_callback(lambda task: self._finished(handle.execution_id, task))
             return handle
 
@@ -392,18 +395,24 @@ class LinuxSandboxRunner:
             task.exception()
 
     async def _run(
-        self, handle: ExecutionHandle, payload: bytes, authorize: Authorize | None
+        self,
+        handle: ExecutionHandle,
+        payload: bytes,
+        authorize: Authorize | None,
+        before_dispatch: Authorize | None,
     ) -> ExecutionResult:
         marker = _current.set(handle)
         loop = asyncio.get_running_loop()
 
-        def guard(deadline: float) -> None:
-            if authorize is None:
+        def guard(deadline: float, dispatch: bool) -> None:
+            if authorize is None and (not dispatch or before_dispatch is None):
                 return
 
             async def check() -> None:
-                assert authorize is not None
-                await authorize()
+                if authorize is not None:
+                    await authorize()
+                if dispatch and before_dispatch is not None:
+                    await before_dispatch()
 
             future = asyncio.run_coroutine_threadsafe(check(), loop)
             try:
@@ -446,7 +455,7 @@ class LinuxSandboxRunner:
         self,
         handle: ExecutionHandle,
         payload: bytes,
-        guard: Callable[[float], None],
+        guard: Callable[[float, bool], None],
         mark_started: Callable[[], None],
     ) -> ExecutionResult:
         start = time.monotonic()
@@ -470,7 +479,7 @@ class LinuxSandboxRunner:
             if handle._cancel.is_set():
                 reason = "cancelled"
                 raise InterruptedError
-            guard(deadline)
+            guard(deadline, False)
             if handle._cancel.is_set():
                 reason = "cancelled"
                 raise InterruptedError
@@ -578,7 +587,7 @@ class LinuxSandboxRunner:
                             if ready or value.get("uid") != self.uid or pending:
                                 raise ValueError("ready")
                             ready = True
-                            guard(deadline)
+                            guard(deadline, True)
                             if reason or handle._cancel.is_set():
                                 reason = reason or "cancelled"
                                 _kill(child_fd)
