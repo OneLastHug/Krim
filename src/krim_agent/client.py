@@ -46,6 +46,20 @@ from .context_engine import (
 )
 from .drag import DragPreview, DragState
 from .evaluation.remote import SyncEvalClient
+from .execution.agent_models import (
+    AgentCommandRequest,
+    CommandRead,
+    CommandSlice,
+    CommandSummary,
+)
+from .execution.management import CommandAccepted, CommandHistoryPage, CommandHistoryRequest
+from .execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandProposalRequest,
+    CommandProposalView,
+)
+from .execution.records import CommandView
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
 from .observability import ObservationStatus, SpanRecord, TraceView
@@ -125,6 +139,15 @@ def _checkpoint_wait(seconds: float, code: str) -> float:
     return max(60, seconds + 5)
 
 
+def _command_path(agent_id: str, command_id: str | None = None) -> str:
+    for value in (agent_id, command_id):
+        if value is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", value) is None:
+            raise ClientError(
+                "命令或Agent标识无效", code="execution_identifier_invalid", status=422
+            )
+    return f"/v1/agents/{agent_id}/commands" + (f"/{command_id}" if command_id is not None else "")
+
+
 class KrimClient:
     def __init__(
         self,
@@ -145,6 +168,158 @@ class KrimClient:
 
     def __enter__(self) -> KrimClient:
         return self
+
+    def agent_command_start(
+        self, agent_id: str, request: AgentCommandRequest, *, confirmed: bool = False
+    ) -> CommandAccepted:
+        request = AgentCommandRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            _command_path(agent_id),
+            json=request.model_dump(mode="json"),
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandAccepted.model_validate_json(response.content)
+
+    def agent_command_history(
+        self, agent_id: str, *, after: str | None = None, limit: int = 32, confirmed: bool = False
+    ) -> CommandHistoryPage:
+        request = CommandHistoryRequest(after=after, limit=limit)
+        response = self._http.get(
+            _command_path(agent_id),
+            params={**request.model_dump(exclude_none=True), "confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandHistoryPage.model_validate_json(response.content)
+
+    def agent_command(
+        self, agent_id: str, command_id: str, *, confirmed: bool = False
+    ) -> CommandSummary:
+        response = self._http.get(
+            _command_path(agent_id, command_id), params={"confirmed": str(confirmed).lower()}
+        )
+        self._check(response)
+        return CommandSummary.model_validate_json(response.content)
+
+    def agent_command_by_key(
+        self, agent_id: str, request_key: str, *, confirmed: bool = False
+    ) -> CommandSummary | None:
+        if (
+            not 1 <= len(request_key) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", request_key) is None
+        ):
+            raise ClientError("命令请求键无效", code="execution_request_key_invalid", status=422)
+        response = self._http.get(
+            _command_path(agent_id) + "/by-key",
+            params={"request_key": request_key, "confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return TypeAdapter(CommandSummary | None).validate_json(response.content)
+
+    def agent_command_inspect(
+        self, agent_id: str, command_id: str, *, confirmed: bool = False
+    ) -> CommandView:
+        response = self._http.get(
+            _command_path(agent_id, command_id) + "/inspect",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandView.model_validate_json(response.content)
+
+    def agent_command_wait(
+        self,
+        agent_id: str,
+        command_id: str,
+        *,
+        timeout_seconds: float = 30,
+        confirmed: bool = False,
+    ) -> CommandSummary:
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+            raise ClientError(
+                "命令等待时间须为有限的0–300秒", code="execution_wait_timeout", status=422
+            )
+        response = self._http.post(
+            _command_path(agent_id, command_id) + "/wait",
+            params={"timeout_seconds": timeout_seconds, "confirmed": str(confirmed).lower()},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        self._check(response)
+        return CommandSummary.model_validate_json(response.content)
+
+    def agent_command_cancel(
+        self, agent_id: str, command_id: str, *, confirmed: bool = False
+    ) -> CommandSummary:
+        response = self._http.post(
+            _command_path(agent_id, command_id) + "/cancel",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandSummary.model_validate_json(response.content)
+
+    def agent_command_read(
+        self,
+        agent_id: str,
+        command_id: str,
+        *,
+        source: str = "stdout",
+        path: str | None = None,
+        offset: int = 0,
+        limit: int = 2048,
+        confirmed: bool = False,
+    ) -> CommandSlice:
+        request = CommandRead.model_validate(
+            {
+                "command_id": command_id,
+                "source": source,
+                "path": path,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+        response = self._http.get(
+            _command_path(agent_id, command_id) + "/read",
+            params={
+                **request.model_dump(exclude={"command_id", "request_key"}, exclude_none=True),
+                "confirmed": str(confirmed).lower(),
+            },
+        )
+        self._check(response)
+        return CommandSlice.model_validate_json(response.content)
+
+    def agent_command_changes(
+        self,
+        agent_id: str,
+        command_id: str,
+        *,
+        after: str | None = None,
+        limit: int = 32,
+        include_unchanged: bool = False,
+        confirmed: bool = False,
+    ) -> CommandChangesPage:
+        request = CommandChangesRequest(
+            command_id=command_id, after=after, limit=limit, include_unchanged=include_unchanged
+        )
+        response = self._http.get(
+            _command_path(agent_id, command_id) + "/changes",
+            params={
+                **request.model_dump(exclude={"command_id", "request_key"}, exclude_none=True),
+                "confirmed": str(confirmed).lower(),
+            },
+        )
+        self._check(response)
+        return CommandChangesPage.model_validate_json(response.content)
+
+    def agent_command_propose(
+        self, agent_id: str, request: CommandProposalRequest, *, confirmed: bool = False
+    ) -> CommandProposalView:
+        request = CommandProposalRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            _command_path(agent_id, request.command_id) + "/proposals",
+            json=request.model_dump(mode="json"),
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandProposalView.model_validate_json(response.content)
 
     def __exit__(
         self,

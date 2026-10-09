@@ -16,6 +16,8 @@ COMMAND_TOOL_NAMES = frozenset(
         "command_cancel",
         "command_changes",
         "command_propose",
+        "command_history",
+        "command_inspect",
     }
 )
 

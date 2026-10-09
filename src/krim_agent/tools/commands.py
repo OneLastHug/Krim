@@ -13,12 +13,14 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.management import CommandHistoryPage, CommandHistoryRequest
 from krim_agent.execution.publication import (
     CommandChangesPage,
     CommandChangesRequest,
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.execution.records import CommandView
 
 from .core import ToolContext, ToolDefinition, ToolError
 
@@ -97,5 +99,23 @@ def command_tools() -> tuple[ToolDefinition, ...]:
             "read",
             output_schema=CommandProposalView,
             output_guard=guard("propose"),
+        ),
+        ToolDefinition(
+            "command_history",
+            "分页读取当前会话的原命令元数据和请求键，不启动命令",
+            CommandHistoryRequest,
+            execute("history"),
+            "read",
+            output_schema=CommandHistoryPage,
+            output_guard=guard("history"),
+        ),
+        ToolDefinition(
+            "command_inspect",
+            "读取原命令请求、资源版本与持久状态，不包含私有文件字节或生产者令牌",
+            CommandLookup,
+            execute("inspect"),
+            "read",
+            output_schema=CommandView,
+            output_guard=guard("inspect"),
         ),
     )

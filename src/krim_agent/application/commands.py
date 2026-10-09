@@ -22,6 +22,11 @@ from krim_agent.execution.agent_models import (
 )
 from krim_agent.execution.binding import CommandCapture, ExecutionBinding
 from krim_agent.execution.linux import _settle
+from krim_agent.execution.management import (
+    CommandHistoryEntry,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+)
 from krim_agent.execution.models import SandboxFile
 from krim_agent.execution.publication import CommandChangesRequest, CommandProposalRequest
 from krim_agent.execution.records import CommandRequest, CommandView
@@ -151,9 +156,35 @@ class AgentCommandService:
                         context,
                         lambda: self._guard(context),
                     )
+                elif operation == "history":
+                    scope, _, _ = await self._guard(context, history=True)
+                    history_request = CommandHistoryRequest.model_validate(payload)
+                    rows = await self.store.list_commands(
+                        scope, after=history_request.after, limit=history_request.limit + 1
+                    )
+                    entries = []
+                    for row in rows[: history_request.limit]:
+                        preview = json.dumps(row.request.command.argv, ensure_ascii=False)
+                        entries.append(
+                            CommandHistoryEntry(
+                                command_id=row.command_id,
+                                request_key=row.request.request_key,
+                                command_preview=preview[:256],
+                                phase=row.phase,
+                                outcome=row.outcome,
+                                started=row.started,
+                                processes_reaped=row.processes_reaped,
+                                error_code=row.error_code,
+                                created_at=row.created_at,
+                            )
+                        )
+                    result = CommandHistoryPage(
+                        entries=entries,
+                        next_after=entries[-1].command_id if len(rows) > len(entries) else None,
+                    )
                 else:
                     scope, binding, _ = await self._guard(
-                        context, history=operation in {"get", "read", "changes"}
+                        context, history=operation in {"get", "read", "changes", "inspect"}
                     )
                     request = (
                         CommandRead.model_validate(payload)
@@ -171,7 +202,9 @@ class AgentCommandService:
                         data = result_slice.model_dump(mode="json")
                         context._command_response = (operation, json.dumps(data, sort_keys=True))
                         return data
-                    if operation == "changes":
+                    if operation == "inspect":
+                        result = view
+                    elif operation == "changes":
                         assert isinstance(request, CommandChangesRequest)
                         result = await self.publication.changes_page(
                             scope, view.command_id, request
@@ -298,6 +331,10 @@ class AgentCommandService:
         return view
 
     async def _execute(self, request: AgentCommandRequest, context: ToolContext) -> CommandSummary:
+        if context._command_expected is not None and context._command_expected != json.dumps(
+            request.model_dump(mode="json"), sort_keys=True
+        ):
+            raise ServiceError("execution_request_conflict", "后台命令的原请求参数已被改变", 409)
         scope, binding, workspace = await self._guard(context)
         service = self._service(binding)
         original = await self._existing(scope, request, context, binding, workspace)
@@ -400,6 +437,8 @@ class AgentCommandService:
                     if original is None:
                         raise
                     handle = service.handle(scope, original.command_id)
+            if context.command_admitted is not None:
+                context.command_admitted(handle.command_id)
             while True:
                 await check()
                 view = await handle.view()

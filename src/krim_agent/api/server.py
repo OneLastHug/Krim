@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, Query, Request
 from fastapi import Path as PathParameter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException
 
 from krim_agent import __version__
@@ -96,6 +96,26 @@ from krim_agent.evaluation.runner import EvalTarget
 from krim_agent.evaluation.scorers import EvalScorer
 from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.types import EvalReport
+from krim_agent.execution.agent_models import (
+    AgentCommandRequest,
+    CommandLookup,
+    CommandRead,
+    CommandSlice,
+    CommandSummary,
+)
+from krim_agent.execution.linux import LinuxSandboxRunner
+from krim_agent.execution.management import (
+    CommandAccepted,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+)
+from krim_agent.execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandProposalRequest,
+    CommandProposalView,
+)
+from krim_agent.execution.records import CommandView
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
@@ -210,6 +230,9 @@ def create_app(
     workspace_root: str | Path | None = None,
     workspace_version: str = "local-v1",
     workspace_writable: bool = False,
+    execution_runner: LinuxSandboxRunner | None = None,
+    execution_version: str = "local-v1",
+    execution_owned: bool = False,
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -245,6 +268,10 @@ def create_app(
             version=workspace_version,
             default=True,
             writable=workspace_writable,
+        )
+    if execution_runner is not None:
+        agent_service.register_execution(
+            "local", execution_runner, version=execution_version, owned=execution_owned
         )
     evaluation_service = EvaluationService(
         database, scope="api", max_concurrency=config.max_active_runs
@@ -756,6 +783,122 @@ def create_app(
     @app.get("/v1/agents/{agent_id}/tasks/{kind}")
     async def read_agent_tasks(agent_id: str, kind: TaskKind) -> TaskSnapshot:
         return await agent_service.task_snapshot(agent_id, kind)
+
+    @app.post("/v1/agents/{agent_id}/commands", status_code=202)
+    async def agent_command_start(
+        agent_id: WorkspaceIdentifier,
+        payload: AgentCommandRequest,
+        confirmed: bool = Query(default=False),
+    ) -> CommandAccepted:
+        return await agent_service.command_start(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/commands")
+    async def agent_command_history(
+        agent_id: WorkspaceIdentifier,
+        after: str | None = Query(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> CommandHistoryPage:
+        return await agent_service.command_history(
+            agent_id, CommandHistoryRequest(after=after, limit=limit), confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/commands/by-key")
+    async def agent_command_by_key(
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$"),
+        confirmed: bool = Query(default=False),
+    ) -> CommandSummary | None:
+        return await agent_service.command_by_key(agent_id, request_key, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}")
+    async def agent_command_get(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        confirmed: bool = Query(default=False),
+    ) -> CommandSummary:
+        return await agent_service.command_get(
+            agent_id, CommandLookup(command_id=command_id), confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}/inspect")
+    async def agent_command_inspect(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        confirmed: bool = Query(default=False),
+    ) -> CommandView:
+        return await agent_service.command_inspect(
+            agent_id, CommandLookup(command_id=command_id), confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}/read")
+    async def agent_command_read(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        source: Literal["stdout", "stderr", "artifact"] = Query(default="stdout"),
+        path: str | None = Query(default=None, min_length=1, max_length=512),
+        offset: int = Query(default=0, ge=0, le=8388608),
+        limit: int = Query(default=2048, ge=1, le=4096),
+        confirmed: bool = Query(default=False),
+    ) -> CommandSlice:
+        try:
+            payload = CommandRead(
+                command_id=command_id, source=source, path=path, offset=offset, limit=limit
+            )
+        except ValidationError:
+            raise ServiceError(
+                "execution_read_invalid", "命令输出来源、路径或分页无效", 422
+            ) from None
+        return await agent_service.command_read(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/commands/{command_id}/wait")
+    async def agent_command_wait(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300, allow_inf_nan=False),
+        confirmed: bool = Query(default=False),
+    ) -> CommandSummary:
+        return await agent_service.command_wait(
+            agent_id, command_id, timeout_seconds=timeout_seconds, confirmed=confirmed
+        )
+
+    @app.post("/v1/agents/{agent_id}/commands/{command_id}/cancel")
+    async def agent_command_cancel(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        confirmed: bool = Query(default=False),
+    ) -> CommandSummary:
+        return await agent_service.command_cancel(
+            agent_id, CommandLookup(command_id=command_id), confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}/changes")
+    async def agent_command_changes(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        after: str | None = Query(default=None, max_length=512),
+        limit: int = Query(default=32, ge=1, le=32),
+        include_unchanged: bool = Query(default=False),
+        confirmed: bool = Query(default=False),
+    ) -> CommandChangesPage:
+        return await agent_service.command_changes(
+            agent_id,
+            CommandChangesRequest(
+                command_id=command_id, after=after, limit=limit, include_unchanged=include_unchanged
+            ),
+            confirmed=confirmed,
+        )
+
+    @app.post("/v1/agents/{agent_id}/commands/{command_id}/proposals")
+    async def agent_command_propose(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        payload: CommandProposalRequest,
+        confirmed: bool = Query(default=False),
+    ) -> CommandProposalView:
+        if payload.command_id != command_id:
+            raise ServiceError("execution_command_mismatch", "路径与原命令标识不一致", 422)
+        return await agent_service.command_propose(agent_id, payload, confirmed=confirmed)
 
     @app.get("/v1/agents/{agent_id}/workspace")
     async def agent_workspace(agent_id: str) -> WorkspaceView:

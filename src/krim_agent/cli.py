@@ -61,6 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="workspace write（工作区写入）：启用受权限控制的文件修改工具",
     )
+    serve.add_argument(
+        "--execution",
+        action="store_true",
+        help="execution（命令执行）：登记本机Linux隔离命令资源，默认关闭",
+    )
+    serve.add_argument(
+        "--execution-version",
+        default="local-v1",
+        help="execution version（执行资源版本）：持久Agent恢复校验",
+    )
+    serve.add_argument(
+        "--execution-limits", help="execution limits（执行限额）：本地SandboxLimits JSON文件"
+    )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
     from .evaluation.cli import add_parser as add_eval_parser
 
@@ -142,6 +155,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tasks.add_argument("--request", help="update（更新）的本地JSON文件，包含版本和幂等键")
     tasks.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    commands = subparsers.add_parser(
+        "commands", help="commands（命令）：查询、读取、取消和审阅Agent命令"
+    )
+    commands.add_argument(
+        "action",
+        choices=[
+            "start",
+            "history",
+            "get",
+            "by-key",
+            "inspect",
+            "read",
+            "wait",
+            "cancel",
+            "changes",
+            "propose",
+        ],
+    )
+    commands.add_argument("agent_id")
+    commands.add_argument("value", nargs="?", help="command_id或request_key")
+    commands.add_argument("--request", help="start/propose动作的本地JSON请求文件")
+    commands.add_argument("--source", choices=["stdout", "stderr", "artifact"], default="stdout")
+    commands.add_argument("--path", help="artifact（产物）相对路径")
+    commands.add_argument("--after", help="分页游标或产物路径")
+    commands.add_argument(
+        "--offset", type=int, default=0, help="offset（字节偏移）：读取输出/产物的起点"
+    )
+    commands.add_argument("--limit", type=int, help="limit（上限）：列表默认32项，字节读取默认2048")
+    commands.add_argument(
+        "--timeout-seconds", type=float, default=30, help="timeout seconds（等待秒数）：0–300"
+    )
+    commands.add_argument(
+        "--wait", action="store_true", help="wait（等待）：start后等待原任务，不重新执行"
+    )
+    commands.add_argument(
+        "--include-unchanged", action="store_true", help="include unchanged（包含未修改文件）"
+    )
+    commands.add_argument(
+        "--confirm", action="store_true", help="confirm（确认）：原参数的Host确认，不覆盖deny"
+    )
+    commands.add_argument("--url", default="http://127.0.0.1:8765")
     trace = subparsers.add_parser("trace", help="trace（追踪）：读取脱敏 span 与观测状态")
     trace.add_argument("action", choices=["run", "workflow", "get", "status"])
     trace.add_argument("value", nargs="?")
@@ -582,14 +636,32 @@ def main() -> None:
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
         try:
+            execution_runner = None
+            if args.execution:
+                from .execution.linux import LinuxSandboxRunner
+                from .execution.models import SandboxLimits
+
+                limits = None
+                if args.execution_limits:
+                    with Path(args.execution_limits).open("rb") as stream:
+                        raw_limits = stream.read(65537)
+                    if len(raw_limits) > 65536:
+                        raise ValueError("执行限额配置不能超过64KiB")
+                    limits = SandboxLimits.model_validate_json(raw_limits)
+                execution_runner = LinuxSandboxRunner(limits=limits)
+            elif args.execution_limits:
+                parser.error("--execution-limits须同时启用--execution")
             app = create_app(
                 settings,
                 workspace_root=args.workspace,
                 workspace_version=args.workspace_version,
                 workspace_writable=args.workspace_write,
+                execution_runner=execution_runner,
+                execution_version=args.execution_version,
+                execution_owned=execution_runner is not None,
             )
         except (ValueError, OSError, ServiceError) as error:
-            parser.error(f"工作区配置无效：{error}")
+            parser.error(f"工作区或执行资源配置无效：{error}")
         uvicorn.run(app, host=args.host, port=args.port, workers=1)
         return
     try:
@@ -624,6 +696,20 @@ def main() -> None:
                         ).model_dump_json(indent=2)
                     )
                 return
+            if args.command == "commands":
+                from .execution.cli import execute as execute_commands
+
+                try:
+                    status = execute_commands(client, args, parser)
+                except OSError:
+                    parser.exit(1, "本地命令请求或配置无法读取。\n")
+                except (ValidationError, ValueError):
+                    parser.exit(2, "命令参数或JSON结构无效。\n")
+                except ClientError as error:
+                    if error.status == 422:
+                        parser.exit(2, f"命令参数无效：{error}\n")
+                    raise
+                parser.exit(status)
             if args.command == "budget":
                 if args.action == "accounts":
                     print(

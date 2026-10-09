@@ -144,6 +144,8 @@ class ToolContext:
     commands: CommandBackend | None = None
     command_capture: CommandCapture | None = None
     _command_response: tuple[str, str] | None = field(default=None, repr=False)
+    command_admitted: Callable[[str], None] | None = field(default=None, repr=False)
+    _command_expected: str | None = field(default=None, repr=False)
 
     def child(self, arguments: dict[str, Any]) -> ToolContext:
         return ToolContext(
@@ -178,6 +180,8 @@ class ToolContext:
             execution=self.execution,
             commands=self.commands,
             command_capture=self.command_capture,
+            command_admitted=self.command_admitted,
+            _command_expected=self._command_expected,
             arguments=arguments,
         )
 

@@ -245,6 +245,14 @@ class DurableCommandService:
                 if result is not None:
                     if supervision_error is not None:
                         result = replace(result, error_code=supervision_error)
+                    if (
+                        result.status == "setup_failed"
+                        and not result.started
+                        and not result.dispatched
+                        and result.error_code == "execution_cancelled"
+                    ):
+                        # 已接受但尚未派发的取消，与环境设置失败分开表示。
+                        result = replace(result, status="cancelled")
 
                     # 保存回执可幂等重试；只重复SQL，不重复命令或产物发布。
                     async def save() -> None:
