@@ -8,6 +8,34 @@ const test = base.extend({
     await use(context); await context.dispose();
   },
 });
+
+test("宿主可回滚检查尚未返回时切换话题，不继续回滚旧话题", async ({ page, request, baseURL }) => {
+  const original = await (await request.post("/v1/topics", { data: { title: `Checkpoint-old-${Date.now()}` } })).json();
+  const next = await (await request.post("/v1/topics", { data: { title: `Checkpoint-next-${Date.now()}` } })).json();
+  await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click();
+  await expect(page.locator("#host-status")).toContainText("iframe 已连接");
+  await expect(page.locator("#host-session")).not.toBeEmpty();
+  const frame = page.frameLocator("#agent-frame");
+  await frame.locator(".topic-button").filter({ hasText: original.title }).click();
+  const host = pythonHost(baseURL!, (await page.locator("#host-session").textContent())!, original.id, "check-paused");
+  try {
+    const ready = await host.ready;
+    await frame.getByText("资源快照", { exact: true }).click(); await frame.locator("#checkpoint-create").click();
+    await expect(frame.locator('[data-checkpoint-status="available"]')).toHaveCount(1);
+    await writeFile(`${ready.directory}/resource.txt`, "新值");
+    await frame.locator(".checkpoint-card").getByRole("button", { name: "回滚到此快照", exact: true }).click();
+    await expect.poll(async () => readFile(`${ready.directory}/checking`, "utf8").then(() => true).catch(() => false)).toBe(true);
+    await frame.locator(".topic-button").filter({ hasText: next.title }).click();
+    await expect(frame.locator("#topic-heading")).toHaveText(next.title);
+    await writeFile(`${ready.directory}/release`, "go");
+    await expect.poll(async () => readFile(`${ready.directory}/checked`, "utf8").then(() => true).catch(() => false)).toBe(true);
+    // 后续查询保持新话题；原检查只读返回不应触发第二个文件动作。
+    await frame.locator("#checkpoint-refresh").click();
+    await expect(frame.locator("#checkpoint-items .checkpoint-card")).toHaveCount(0);
+    expect((await (await request.get(`/v1/topics/${original.id}/checkpoints/operations`)).json())).toHaveLength(1);
+    expect(await readFile(`${ready.directory}/resource.txt`, "utf8")).toBe("新值");
+  } finally { await host.close(); }
+});
 function pythonHost(baseURL: string, sessionId: string, topicId: string, mode = "success") {
   if (!sessionId) throw new Error("Checkpoint Host 需要已就绪的控制会话");
   const process = spawn("../.venv/bin/python", ["../tests/fixtures/browser_checkpoint_host.py", baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });

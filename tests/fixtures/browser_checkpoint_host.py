@@ -5,11 +5,21 @@ import json
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from krim_agent.app_sdk import RemoteHostHandle
 from krim_agent.checkpoint import CheckpointCheckResult, CheckpointExecution, CheckpointReceipt
+
+
+def wait_release(path: Path) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    raise TimeoutError("浏览器没有释放检查握手")
 
 
 async def main() -> None:
@@ -49,6 +59,10 @@ async def main() -> None:
                 )
 
             async def can(check) -> CheckpointCheckResult:
+                if mode == "check-paused":
+                    (root / "checking").touch()
+                    await asyncio.to_thread(wait_release, root / "release")
+                    (root / "checked").touch()
                 return CheckpointCheckResult(
                     topic_id=check.topic_id,
                     checkpoint_id=check.checkpoint_id,

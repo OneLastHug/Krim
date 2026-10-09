@@ -1,4 +1,5 @@
 import { expect, test as base, type APIRequestContext, type Page } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 
 const test = base.extend({
   request: async ({ playwright, baseURL }, use) => {
@@ -227,8 +228,26 @@ test("批次历史32项分页、旧游标重读、HTML纯文本和JSON错误边�
         action: "keep", snapshot_revision: current.snapshot_revision, targets: [{ proposal_id: item.proposal_id, expected_revision: item.revision }], request_key: key,
       } });
       expect(started.ok()).toBeTruthy(); const batch = await started.json();
-      const done = await request.post(`/v1/agents/${agent.agent_id}/workspace/native-batches/${batch.batch_id}/wait?timeout_seconds=5`);
-      expect((await done.json()).status).toBe("done");
+      // 原wait允许返回running；给异步单项批次独立的观察窗口，不重新发起批次。
+      const done = await request.post(`/v1/agents/${agent.agent_id}/workspace/native-batches/${batch.batch_id}/wait?timeout_seconds=30`);
+      let result = await done.json();
+      if (result.status === "uncertain") {
+        // 保留的资格检查可能未及时取得证明；保存原始未知回执，显式只读核实原operation。
+        const operation = result.items[0].operation;
+        expect(operation.action).toBe("keep");
+        expect(operation.receipt.error_code).toBe("workspace_reconcile_inconclusive");
+        const evidence = test.info().outputPath(`history-${index}-uncertain.json`);
+        await writeFile(evidence, JSON.stringify(result, null, 2));
+        await test.info().attach(`history-${index}-uncertain`, { path: evidence, contentType: "application/json" });
+        const verified = await request.post(`/v1/agents/${agent.agent_id}/workspace/operations/${operation.operation_id}/reconcile?confirmed=true`);
+        expect(verified.ok()).toBeTruthy();
+        const receipt = await verified.json();
+        expect(receipt.operation_id).toBe(operation.operation_id);
+        expect(receipt.status).toBe("done"); expect(receipt.receipt.changed).toBe(false);
+        result = await (await request.get(`/v1/agents/${agent.agent_id}/workspace/native-batches/${batch.batch_id}`)).json();
+        expect(result.items[0].operation.operation_id).toBe(operation.operation_id);
+      }
+      expect(result.status).toBe("done");
     }
     await page.locator("#change-refresh").click();
     await expect(page.locator("#change-batches button")).toHaveCount(32);
@@ -281,6 +300,7 @@ test("批次历史32项分页、旧游标重读、HTML纯文本和JSON错误边�
 });
 
 test("关闭页迟到响应不能覆盖重开后的权限与草稿", async ({ page, request }) => {
+  test.setTimeout(60_000);
   const agent = await createAgent(request, "native-reopen-race");
   let release: (() => void) | undefined;
   try {

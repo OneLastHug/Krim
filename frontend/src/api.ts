@@ -185,6 +185,25 @@ export interface NativeBatchSummary {
 export interface NativeBatchHistoryPage {
   source: "workspace"; scope_id: string; total: number; items: NativeBatchSummary[]; next_cursor: string | null;
 }
+export interface NativeCheckpointCreate { title: string; paths: string[]; request_key: string; }
+export interface NativeCheckpointView {
+  source: "workspace"; checkpoint_id: string; scope_id: string; title: string; request_key: string;
+  workspace_key: string; resource_fingerprint: string;
+  status: "capturing" | "available" | "failed" | "cancelled" | "interrupted";
+  files: Array<{ path: string; captured: boolean; exists: boolean | null; sha256: string | null; byte_size: number | null; mode: number | null }>;
+  error_code: string | null; created_at: string; updated_at: string;
+}
+export interface NativeRestorePreview { checkpoint_id: string; request_key: string; ttl_seconds?: number; }
+export interface NativeRestoreExecute { plan_id: string; expected_revision: number; request_key: string; }
+export interface NativeRestoreView {
+  source: "workspace"; plan_id: string; scope_id: string; checkpoint_id: string; baseline_checkpoint_id: string | null;
+  request_key: string; execute_key: string | null; revision: number;
+  phase: "preparing" | "ready" | "executing" | "finished" | "failed" | "cancelled" | "interrupted" | "expired";
+  status: "preparing" | "ready" | "running" | "done" | "partial" | "failed" | "cancelled" | "interrupted" | "expired" | "uncertain";
+  items: Array<{ position: number; path: string; proposal: WorkspaceChangeView | null; operation: WorkspaceAttemptView | null;
+    status: "pending" | "running" | "done" | "rejected" | "uncertain" | "skipped"; current_mode: number | null; target_mode: number | null; error_code: string | null }>;
+  expires_at: number; error_code: string | null; created_at: string; updated_at: string;
+}
 export interface WorkflowRunView {
   run_id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";

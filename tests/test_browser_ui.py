@@ -64,6 +64,14 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert (await client.get("/ui/i18n.js")).status_code == 200
         assert (await client.get("/ui/change-list-ui.js")).status_code == 200
         assert (await client.get("/ui/workspace-ui.js")).status_code == 200
+        checkpoint_script = await client.get("/ui/native-checkpoint-ui.js")
+        assert checkpoint_script.status_code == 200
+        assert (
+            "native-restores" in checkpoint_script.text and "textContent" in checkpoint_script.text
+        )
+        assert (
+            await client.get("/v1/agents/example/workspace/native-checkpoints")
+        ).status_code == 401
         change_script = await client.get("/ui/workspace-changes-ui.js")
         assert change_script.status_code == 200 and "WorkspaceChangesUI" in change_script.text
         authorized = await client.get(

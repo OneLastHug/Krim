@@ -33,6 +33,8 @@ export class AgentsUI {
                 this.root.append(card.root);
             }
             card.view = agent;
+            card.checkpoints.hidden = !agent.session.permissions.workspace;
+            card.checkpoints.textContent = t("查看文件检查点");
             card.tasks.update();
             card.workspace.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open");
             card.changes.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
@@ -92,9 +94,13 @@ export class AgentsUI {
         stop.textContent = t("停止");
         destroy.textContent = t("销毁");
         open.textContent = t("查看会话历史");
+        const checkpoints = document.createElement("button");
+        checkpoints.type = "button";
+        checkpoints.className = "secondary";
+        checkpoints.onclick = () => void this.actions.openCheckpoints(agent.agent_id).catch(error => this.actions.notice(String(error), true));
         const controls = document.createElement("div");
         controls.className = "actions";
-        controls.append(execute, stop, control, open, destroy);
+        controls.append(execute, stop, control, open, checkpoints, destroy);
         const history = document.createElement("details"), historyTitle = document.createElement("summary"), turns = document.createElement("select"), transcript = document.createElement("pre");
         historyTitle.textContent = t("轮次历史");
         turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`);
@@ -104,7 +110,7 @@ export class AgentsUI {
         const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
         const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
         root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root);
-        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes };
+        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, checkpoints };
         execute.onclick = () => {
             const prompt = input.value.trim() || this.actions.prompt();
             if (!prompt) {
