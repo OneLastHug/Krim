@@ -20,6 +20,7 @@ from uuid import uuid4
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import Workspace
 from krim_agent.workspace_change import (
+    ArtifactFileSpec,
     FileChangePreview,
     FileChangeReceipt,
     FileChangeSpec,
@@ -66,10 +67,12 @@ class PreparedFileChange:
     token: str
 
     @property
-    def spec(self) -> FileChangeSpec | RestoreFileSpec:
+    def spec(self) -> FileChangeSpec | RestoreFileSpec | ArtifactFileSpec:
         # 外部拿到的模型副本不能改写已冻结的预览意图。
         if json.loads(self.spec_json).get("operation") == "restore":
             return RestoreFileSpec.model_validate_json(self.spec_json)
+        if json.loads(self.spec_json).get("operation") == "artifact":
+            return ArtifactFileSpec.model_validate_json(self.spec_json)
         return FileChangeSpec.model_validate_json(self.spec_json)
 
     @property
@@ -84,11 +87,12 @@ class PreparedFileChange:
         before = self.before.data.decode("utf-8") if self.before is not None else ""
         after = self.after.decode("utf-8") if self.after is not None else ""
         diff, truncated = bounded_diff(self.spec.path, before, after)
+        spec = self.spec
         result = FileChangePreview(
             path=self.spec.path,
-            operation=("delete" if self.after is None else "write")
-            if self.spec.operation == "restore"
-            else self.spec.operation,
+            operation=spec.operation
+            if isinstance(spec, FileChangeSpec)
+            else ("delete" if self.after is None else "write"),
             before_sha256=self.before_sha256,
             after_sha256=self.after_sha256,
             before_bytes=len(self.before.data) if self.before is not None else 0,
@@ -415,6 +419,62 @@ class WorkspaceWriter:
         finally:
             os.close(fd)
 
+    def prepare_artifact(
+        self,
+        spec: ArtifactFileSpec,
+        baseline: CapturedFile | None,
+        after: bytes | None,
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> PreparedFileChange:
+        """只准备提案：输入须保持原完整身份，新路径只验证不存在，不读取未知文件。"""
+        if (after is None) != (spec.mode is None):
+            raise ServiceError("execution_artifact_mode", "产物内容与模式不一致", 422)
+        if after is not None:
+            self._text(after)
+        with self._locked_parent(spec.path, lambda: False) as (fd, parent, name):
+            if authorize is not None:
+                authorize()
+            identity = _identity(os.fstat(fd))
+            if baseline is None:
+                if spec.expected_sha256 is not None or after is None:
+                    raise ServiceError("execution_artifact_baseline", "新产物缺少有效创建意图", 409)
+                try:
+                    os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ServiceError(
+                        "execution_destination_exists", "新产物不能覆盖未输入的现有目标", 409
+                    )
+                before = None
+            else:
+                if (
+                    baseline.path != spec.path
+                    or baseline.workspace_fingerprint != self.workspace.fingerprint
+                    or baseline.parent_identity != identity
+                    or baseline.snapshot is None
+                    or baseline.snapshot.sha256 != spec.expected_sha256
+                ):
+                    raise ServiceError("execution_artifact_baseline", "命令输入的原身份不匹配", 409)
+                before = self._snapshot(fd, name, missing=True)
+                if not self._same_before(before, baseline.snapshot):
+                    raise ServiceError("workspace_conflict", "当前文件已偏离命令原输入", 409)
+                assert before is not None
+                if before.mode & ~0o777:
+                    raise ServiceError("execution_artifact_mode", "产物发布不接受特殊权限位", 422)
+            self._check_parent(parent, identity)
+            if authorize is not None:
+                authorize()
+            return PreparedFileChange(
+                spec.model_dump_json(),
+                self.workspace.fingerprint,
+                identity,
+                before,
+                after,
+                uuid4().hex,
+            )
+
     def prepare_checkpoint_restore(
         self, current: CapturedFile, target: CapturedFile
     ) -> PreparedFileChange:
@@ -734,6 +794,12 @@ class WorkspaceWriter:
         spec = change.spec
         if isinstance(spec, RestoreFileSpec) and spec.mode is not None:
             return spec.mode & 0o777, spec.uid, spec.gid
+        if isinstance(spec, ArtifactFileSpec) and spec.mode is not None:
+            return (
+                spec.mode,
+                change.before.uid if change.before else None,
+                change.before.gid if change.before else None,
+            )
         if change.before is not None:
             return change.before.mode & 0o777, change.before.uid, change.before.gid
         return 0o644, None, None
@@ -839,7 +905,7 @@ class WorkspaceWriter:
     @classmethod
     def _no_op(cls, change: PreparedFileChange, current: FileSnapshot | None) -> bool:
         return cls._content_matches(current, change.after) and (
-            not isinstance(change.spec, RestoreFileSpec)
+            not isinstance(change.spec, (RestoreFileSpec, ArtifactFileSpec))
             or change.after is None
             or current is not None
             and (current.mode, current.uid, current.gid) == cls._attributes(change)

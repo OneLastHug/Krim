@@ -23,6 +23,7 @@ from krim_agent.execution.agent_models import (
 from krim_agent.execution.binding import CommandCapture, ExecutionBinding
 from krim_agent.execution.linux import _settle
 from krim_agent.execution.models import SandboxFile
+from krim_agent.execution.publication import CommandChangesRequest, CommandProposalRequest
 from krim_agent.execution.records import CommandRequest, CommandView
 from krim_agent.execution.service import DurableCommandHandle, DurableCommandService
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
@@ -34,6 +35,9 @@ from krim_agent.tools.core import ToolContext, ToolError
 from krim_agent.tools.workspace import ReadFileInput, workspace_io, workspace_tools
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_writer import CapturedFile, WorkspaceWriter
+
+from .command_publication import CommandPublicationService
+from .workspace_changes import WorkspaceChangeService
 
 _current: ContextVar[asyncio.Task[Any] | None] = ContextVar("krim_agent_command", default=None)
 
@@ -59,8 +63,9 @@ class _Capture:
 
 
 class AgentCommandService:
-    def __init__(self, store: CommandStore) -> None:
+    def __init__(self, store: CommandStore, changes: WorkspaceChangeService) -> None:
         self.store = store
+        self.publication = CommandPublicationService(changes)
         self._services: dict[int, DurableCommandService] = {}
         self._operations: set[asyncio.Task[dict[str, JsonValue]]] = set()
         self._captures: dict[str, _Capture] = {}
@@ -135,17 +140,26 @@ class AgentCommandService:
         async def work() -> dict[str, JsonValue]:
             marker = _current.set(asyncio.current_task())
             try:
+                result: BaseModel
                 if operation == "execute":
                     result = await self._execute(
                         AgentCommandRequest.model_validate(payload), context
                     )
+                elif operation == "propose":
+                    result = await self.publication.propose(
+                        CommandProposalRequest.model_validate(payload),
+                        context,
+                        lambda: self._guard(context),
+                    )
                 else:
                     scope, binding, _ = await self._guard(
-                        context, history=operation in {"get", "read"}
+                        context, history=operation in {"get", "read", "changes"}
                     )
                     request = (
                         CommandRead.model_validate(payload)
                         if operation == "read"
+                        else CommandChangesRequest.model_validate(payload)
+                        if operation == "changes"
                         else CommandLookup.model_validate(payload)
                     )
                     view = await self._lookup(scope, request)
@@ -157,7 +171,13 @@ class AgentCommandService:
                         data = result_slice.model_dump(mode="json")
                         context._command_response = (operation, json.dumps(data, sort_keys=True))
                         return data
-                    result = await self._summary(scope, view)
+                    if operation == "changes":
+                        assert isinstance(request, CommandChangesRequest)
+                        result = await self.publication.changes_page(
+                            scope, view.command_id, request
+                        )
+                    else:
+                        result = await self._summary(scope, view)
                 data = result.model_dump(mode="json")
                 context._command_response = (operation, json.dumps(data, sort_keys=True))
                 return data

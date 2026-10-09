@@ -13,6 +13,12 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.publication import (
+    CommandChangesPage,
+    CommandChangesRequest,
+    CommandProposalRequest,
+    CommandProposalView,
+)
 
 from .core import ToolContext, ToolDefinition, ToolError
 
@@ -73,5 +79,23 @@ def command_tools() -> tuple[ToolDefinition, ...]:
             "write",
             output_schema=CommandSummary,
             output_guard=guard("cancel"),
+        ),
+        ToolDefinition(
+            "command_changes",
+            "按原完整输入与产物列出新增、修改和删除，只读，不重新运行命令",
+            CommandChangesRequest,
+            execute("changes"),
+            "read",
+            output_schema=CommandChangesPage,
+            output_guard=guard("changes"),
+        ),
+        ToolDefinition(
+            "command_propose",
+            "把原命令的单个文本产物或删除生成带版本条件的文件提案；不发布，应用仍需workspace_change批准",
+            CommandProposalRequest,
+            execute("propose"),
+            "read",
+            output_schema=CommandProposalView,
+            output_guard=guard("propose"),
         ),
     )
