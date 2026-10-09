@@ -155,7 +155,7 @@ async def test_checkpoint_migration_roundtrip_preserves_old_workspaces_and_refus
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0028_native_workspace_checkpoints"
+            ).scalar_one() == "0029_workspace_restore_plans"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
 
             def compare(sync):

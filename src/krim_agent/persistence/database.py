@@ -606,6 +606,85 @@ class NativeWorkspaceCheckpointFileRow(Base):
     content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
 
+class WorkspaceRestorePlanRow(Base):
+    __tablename__ = "workspace_restore_plans"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        UniqueConstraint("scope_id", "execute_key"),
+        CheckConstraint(
+            "phase IN ('preparing','ready','executing','finished','failed',"
+            "'cancelled','interrupted','expired')",
+            name="ck_restore_phase",
+        ),
+        CheckConstraint(
+            "(phase IN ('preparing','executing') AND owner_id IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL) OR (phase NOT IN ('preparing','executing') "
+            "AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_restore_owner",
+        ),
+        CheckConstraint(
+            "revision >= 0 AND revision <= 9007199254740991", name="ck_restore_revision"
+        ),
+    )
+    plan_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_fingerprint: Mapped[str] = mapped_column(String(64))
+    checkpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("native_workspace_checkpoints.checkpoint_id")
+    )
+    baseline_checkpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("native_workspace_checkpoints.checkpoint_id"), nullable=True
+    )
+    baseline_key: Mapped[str] = mapped_column(String(128), unique=True)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    execute_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execute_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phase: Mapped[str] = mapped_column(String(16))
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[float] = mapped_column(Float)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceRestoreItemRow(Base):
+    __tablename__ = "workspace_restore_items"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "path"),
+        CheckConstraint("position >= 0 AND position < 32", name="ck_restore_position"),
+        CheckConstraint(
+            "status IN ('pending','rejected','skipped')", name="ck_restore_item_status"
+        ),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_restore_plans.plan_id"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    path: Mapped[str] = mapped_column(String(512))
+    proposal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_proposals.proposal_id"), unique=True, nullable=True
+    )
+    operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_attempts.operation_id"), unique=True, nullable=True
+    )
+    expected_revision: Mapped[int] = mapped_column(Integer, default=0)
+    file_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    effect_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_key: Mapped[str] = mapped_column(String(128), unique=True)
+    admission_open: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    current_mode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_mode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
 class WorkspaceLedgerGuardRow(Base):
     __tablename__ = "workspace_ledger_guards"
     guard_id: Mapped[str] = mapped_column(String(16), primary_key=True)

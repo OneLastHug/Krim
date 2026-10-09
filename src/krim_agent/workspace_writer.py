@@ -404,6 +404,40 @@ class WorkspaceWriter:
         finally:
             os.close(fd)
 
+    def prepare_checkpoint_restore(
+        self, current: CapturedFile, target: CapturedFile
+    ) -> PreparedFileChange:
+        """从两份可信完整快照冻结恢复意图；此方法不读取或修改文件。"""
+        if (
+            current.path != target.path
+            or current.workspace_fingerprint != self.workspace.fingerprint
+            or target.workspace_fingerprint != self.workspace.fingerprint
+            or current.parent_identity != target.parent_identity
+        ):
+            raise ServiceError(
+                "workspace_checkpoint_binding", "恢复目标路径、目录或工作区已改变", 409
+            )
+        if any(
+            item.snapshot is not None and item.snapshot.mode & ~0o777 for item in (current, target)
+        ):
+            raise ServiceError("workspace_checkpoint_mode", "当前恢复不支持设置特殊权限位", 409)
+        old, desired = current.snapshot, target.snapshot
+        spec = RestoreFileSpec(
+            path=current.path,
+            expected_sha256=old.sha256 if old is not None else None,
+            mode=desired.mode if desired is not None else None,
+            uid=desired.uid if desired is not None else None,
+            gid=desired.gid if desired is not None else None,
+        )
+        return PreparedFileChange(
+            spec.model_dump_json(),
+            self.workspace.fingerprint,
+            current.parent_identity,
+            old,
+            desired.data if desired is not None else None,
+            uuid4().hex,
+        )
+
     @staticmethod
     def _same_before(
         actual: FileSnapshot | None, wanted: FileSnapshot | None, *, displaced: bool = False
@@ -522,7 +556,7 @@ class WorkspaceWriter:
             current = self._snapshot(fd, name, missing=True)
             if not self._same_before(current, change.before):
                 return self._receipt(change, "rejected", "workspace_conflict")
-            if change.before is not None and change.before.data == change.after:
+            if self._no_op(change, current):
                 return self._receipt(change, "done", observed_after=observed_state(current))
             stage = f"._krim-tx-{change.token}"
             recovery = FileRecovery(
@@ -791,6 +825,15 @@ class WorkspaceWriter:
     def _content_matches(snapshot: FileSnapshot | None, data: bytes | None) -> bool:
         return snapshot is None if data is None else snapshot is not None and snapshot.data == data
 
+    @classmethod
+    def _no_op(cls, change: PreparedFileChange, current: FileSnapshot | None) -> bool:
+        return cls._content_matches(current, change.after) and (
+            not isinstance(change.spec, RestoreFileSpec)
+            or change.after is None
+            or current is not None
+            and (current.mode, current.uid, current.gid) == cls._attributes(change)
+        )
+
     def verify(
         self,
         change: PreparedFileChange,
@@ -818,7 +861,7 @@ class WorkspaceWriter:
                 desired = self._desired(change, target, target.identity if target else None)
                 before = self._same_before(target, change.before, displaced=True)
                 if keeping:
-                    desired = desired or (before and self._content_matches(target, change.after))
+                    desired = desired or (before and self._no_op(change, target))
                     if expected_after is not None:
                         # 连续链采用实际冻结属性，不能被旧的无变化内容分支绕过。
                         desired = desired and observed_state(target) == expected_after
@@ -828,7 +871,7 @@ class WorkspaceWriter:
                         None if desired else "workspace_conflict",
                         observed_after=observed_state(target) if desired else None,
                     )
-                if before and staged is None and self._content_matches(target, change.after):
+                if before and staged is None and self._no_op(change, target):
                     return self._receipt(change, "done", observed_after=observed_state(target))
                 old_stage = change.before is not None and self._same_before(
                     staged, change.before, displaced=True

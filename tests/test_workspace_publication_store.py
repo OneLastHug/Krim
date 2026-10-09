@@ -455,7 +455,7 @@ async def test_0024_upgrade_replays_old_transitions_without_rewriting_terminal_h
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0028_native_workspace_checkpoints"
+            ).scalar_one() == "0029_workspace_restore_plans"
     finally:
         await database.close()
 

@@ -99,6 +99,10 @@ class WorkspaceChangeService:
                 )
             if context.workspace_batch is not None and operation != "change":
                 raise ServiceError("workspace_batch_action", "批次子项只能执行原冻结修改动作", 403)
+            if context.checkpoint_restore is not None and operation != "change":
+                raise ServiceError(
+                    "workspace_restore_action", "恢复子项只能执行原冻结修改动作", 403
+                )
             if operation == "preview":
                 value = await self._preview(
                     WorkspacePreviewRequest.model_validate(payload), context
@@ -245,7 +249,11 @@ class WorkspaceChangeService:
     ) -> WorkspaceAttemptView:
         scope, binding = await self._guard(context)
         previous = await self.store.find_action(
-            scope, request, binding.fingerprint, batch_fence=context.workspace_batch
+            scope,
+            request,
+            binding.fingerprint,
+            batch_fence=context.workspace_batch,
+            restore_fence=context.checkpoint_restore,
         )
         if previous is not None:
             return previous.view
@@ -263,6 +271,7 @@ class WorkspaceChangeService:
             run_id=context.run_id if context.run_id != "local" else None,
             call_id=context.call_id,
             batch_fence=context.workspace_batch,
+            restore_fence=context.checkpoint_restore,
         )
         if not created:
             return attempt.view
@@ -326,8 +335,8 @@ class WorkspaceChangeService:
                         authorize=authorize,
                     )
                 except ServiceError as error:
-                    if error.code == "workspace_write_cancelled":
-                        # Writer只在发布前的协作锁阶段抛出该错误；发布后返回明确回执。
+                    if error.code in {"workspace_write_cancelled", "workspace_parent_changed"}:
+                        # 这两种未捕获异常只来自发布前；发布后的错误由Writer返回真实回执。
                         effect = self._effect(prepared, "rejected", error.code)
                     else:
                         effect = self._effect(
