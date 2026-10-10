@@ -166,6 +166,30 @@ class OAuthTokenRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class OAuthStateRow(Base):
+    __tablename__ = "oauth_states"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','consumed','cancelled','expired','invalidated')",
+            name="ck_oauth_state_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND ciphertext IS NOT NULL AND ended_at IS NULL) OR "
+            "(status != 'pending' AND ciphertext IS NULL AND ended_at IS NOT NULL)",
+            name="ck_oauth_state_payload",
+        ),
+        CheckConstraint("expires_at > created_at", name="ck_oauth_state_time"),
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(256), index=True)
+    scope_hash: Mapped[str] = mapped_column(String(64))
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
+    ended_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class WorkflowCheckpointRow(Base):
     __tablename__ = "workflow_checkpoints"
     __table_args__ = (

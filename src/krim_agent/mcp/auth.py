@@ -17,6 +17,7 @@ from krim_agent.protocol.models import StrictModel
 
 from .discovery import OAuthDiscoveryClient, RegisteredClient
 from .oauth import (
+    OAuthAuthorizationStateStore,
     OAuthClient,
     OAuthConfig,
     OAuthError,
@@ -67,6 +68,7 @@ class MCPOAuthAuth(httpx.Auth):
         scopes: list[str] | None = None,
         issuer: str | None = None,
         registered_client: RegisteredClient | None = None,
+        states: OAuthStateStore | OAuthAuthorizationStateStore | None = None,
         allow_dynamic_registration: bool = False,
         client_name: str = "Krim Agent",
         timeout_seconds: float = 60,
@@ -107,7 +109,8 @@ class MCPOAuthAuth(httpx.Auth):
         self.timeout_seconds = timeout_seconds
         self.request_timeout_seconds = request_timeout_seconds
         self.max_request_bytes = max_request_bytes
-        self.states = OAuthStateStore()
+        # 默认保留旧的单进程状态；宿主需要跨进程回调时显式注入持久状态后端。
+        self.states = states or OAuthStateStore()
         self.client = OAuthClient(self.states, tokens)
         self._lock = asyncio.Lock()
         self.last_error_code: str | None = None
@@ -291,7 +294,7 @@ class MCPOAuthAuth(httpx.Auth):
             await self._discover(header)
         if self._config is None:
             raise MCPAuthError("oauth_client_required", "OAuth 未形成客户端配置")
-        attempt = self.states.begin(self._config)
+        attempt = await self.client.begin_authorization(self._config, self.subject)
         try:
             try:
                 await self.redirect_handler(attempt.authorization_url)
@@ -307,9 +310,15 @@ class MCPOAuthAuth(httpx.Auth):
                 raise MCPAuthError("oauth_state_mismatch", "OAuth state 不匹配")
             if not isinstance(code, str) or not code or len(code) > 8192:
                 raise MCPAuthError("invalid_authorization_response", "OAuth callback 缺少有效 code")
-            return await self.client.exchange(attempt.state, code, self.subject, self.requester)
+            return await self.client.exchange(
+                attempt.state,
+                code,
+                self.subject,
+                self.requester,
+                expected_config=self._config,
+            )
         finally:
-            self.states.discard(attempt.state)
+            await self.client.discard_authorization(attempt.state, self.subject)
 
     async def async_auth_flow(
         self, request: httpx.Request

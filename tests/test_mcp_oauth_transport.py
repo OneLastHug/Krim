@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy import text
 
 from krim_agent.mcp import (
     EncryptedTokenStore,
@@ -13,13 +15,17 @@ from krim_agent.mcp import (
     MCPOAuthAuth,
     MCPServerConfig,
     OAuthHTTPRequester,
+    PersistentEncryptedStateStore,
+    PersistentEncryptedTokenStore,
 )
+from krim_agent.persistence import Database
 from krim_agent.tools import ToolContext, ToolRegistry
 
 SERVER = Path(__file__).parent / "fixtures/mcp_oauth_http_server.py"
 
 
-async def test_real_mcp_streamable_http_oauth_transport_and_tool_call():
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_real_mcp_streamable_http_oauth_transport_and_tool_call(tmp_path, persistent):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
@@ -34,7 +40,11 @@ async def test_real_mcp_streamable_http_oauth_transport_and_tool_call():
     )
     registry = ToolRegistry()
     bridge = MCPBridge(registry)
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'transport.sqlite'}")
+    key = Fernet.generate_key()
     try:
+        if persistent:
+            await database.initialize()
         async with httpx.AsyncClient(trust_env=False) as client:
             async with asyncio.timeout(10):
                 while True:
@@ -66,7 +76,12 @@ async def test_real_mcp_streamable_http_oauth_transport_and_tool_call():
             auth = MCPOAuthAuth(
                 base + "/mcp",
                 requester=requester,
-                tokens=EncryptedTokenStore(Fernet.generate_key()),
+                tokens=(
+                    PersistentEncryptedTokenStore(database, key)
+                    if persistent
+                    else EncryptedTokenStore(key)
+                ),
+                states=PersistentEncryptedStateStore(database, key) if persistent else None,
                 subject="subject",
                 server="oauth",
                 redirect_uri="http://127.0.0.1:9000/callback",
@@ -92,9 +107,17 @@ async def test_real_mcp_streamable_http_oauth_transport_and_tool_call():
             )
             assert not result.is_error and result.data == {"result": "authenticated"}
             assert auth.last_error_code is None
+            if persistent:
+                async with database.engine.connect() as connection:
+                    assert (
+                        await connection.execute(
+                            text("SELECT status, ciphertext FROM oauth_states")
+                        )
+                    ).one() == ("consumed", None)
     finally:
         await bridge.close()
         await registry.close()
         if process.returncode is None:
             process.terminate()
         await asyncio.wait_for(process.wait(), 10)
+        await database.close()

@@ -6,6 +6,7 @@ from .client import MCPConnection, MCPConnectionError, validate_server_url
 from .discovery import OAuthDiscoveryClient, OAuthMetadata, RegisteredClient
 from .oauth import (
     EncryptedTokenStore,
+    OAuthAuthorizationStateStore,
     OAuthClient,
     OAuthConfig,
     OAuthError,
@@ -13,9 +14,11 @@ from .oauth import (
     OAuthStateStore,
     OAuthToken,
     OAuthTokenStore,
+    PKCERequest,
     TokenSnapshot,
     validate_oauth_endpoint,
 )
+from .state_store import PersistentEncryptedStateStore
 from .token_store import PersistentEncryptedTokenStore
 from .types import MCPServerConfig, MCPServerStatus, MCPToolInfo
 
@@ -29,6 +32,7 @@ __all__ = [
     "validate_server_url",
     "EncryptedTokenStore",
     "OAuthClient",
+    "OAuthAuthorizationStateStore",
     "OAuthConfig",
     "OAuthError",
     "OAuthHTTPRequester",
@@ -36,7 +40,9 @@ __all__ = [
     "OAuthToken",
     "OAuthTokenStore",
     "TokenSnapshot",
+    "PKCERequest",
     "PersistentEncryptedTokenStore",
+    "PersistentEncryptedStateStore",
     "OAuthDiscoveryClient",
     "OAuthMetadata",
     "RegisteredClient",
