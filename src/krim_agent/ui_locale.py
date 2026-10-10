@@ -4,6 +4,12 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "执行资源（留空不授权）": "Execution resource (leave blank for no grant)",
+    "打开配置时读取已登记的执行资源": "Open configuration to read registered execution resources",
+    "已登记的执行资源：{keys}": "Registered execution resources: {keys}",
+    "宿主尚未登记执行资源，请先启用命令执行后端": (
+        "No execution resource is registered; enable the command execution backend first"
+    ),
     "命令执行与回执": "Commands and receipts",
     "命令准备中": "Preparing command",
     "命令已派发": "Command dispatched",

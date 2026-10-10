@@ -22,6 +22,8 @@ let interactionLoadVersion = 0;
 let proposalLoadVersion = 0;
 let topicLoadVersion = 0;
 const pendingSends = new Set();
+let executionResources = [];
+let executionResourcesLoaded = false;
 let creatingTopic = false;
 const text = (id) => $(id);
 const labels = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
@@ -148,6 +150,7 @@ function redrawLocale() {
     changeListUI.refreshLocale();
     checkpointUI.refreshLocale();
     attachmentsUI.refreshLocale();
+    renderExecutionResources();
     $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
     $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
     $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -1283,7 +1286,7 @@ async function saveAgentConfig() {
     try {
         const revision = Number(text("agent-config-revision").value);
         const previous = revision > 0 ? await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}?revision=${revision}`) : undefined;
-        const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), workspace_key: text("agent-config-workspace").value.trim() || null, mode: $("agent-config-mode").value };
+        const config = { ...previous?.config, name, description: text("agent-config-description").value.trim(), instructions: text("agent-config-instructions").value, tool_names: text("agent-config-tools").value.split(",").map(v => v.trim()).filter(Boolean), provider_key: text("agent-config-provider").value.trim(), workspace_key: text("agent-config-workspace").value.trim() || null, execution_key: text("agent-config-execution").value.trim() || null, mode: $("agent-config-mode").value };
         const saved = await requestJson(`/v1/agents/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ expected_revision: revision, enabled: previous?.enabled ?? true, config }) });
         text("agent-config-revision").value = String(saved.revision);
         await loadAgents();
@@ -1303,6 +1306,7 @@ async function loadAgentConfig() {
         $("agent-config-mode").value = saved.config.mode;
         text("agent-config-revision").value = String(saved.revision);
         text("agent-config-workspace").value = saved.config.workspace_key || "";
+        text("agent-config-execution").value = saved.config.execution_key || "";
         showNotice("Agent 配置已读取");
     }
     catch (error) {
@@ -1311,6 +1315,30 @@ async function loadAgentConfig() {
 }
 $("agent-config-save").addEventListener("click", () => void saveAgentConfig());
 $("agent-config-load").addEventListener("click", () => void loadAgentConfig());
+function renderExecutionResources() {
+    const root = $("agent-execution-options");
+    root.replaceChildren();
+    for (const resource of executionResources) {
+        const option = document.createElement("option");
+        option.value = resource.key;
+        option.label = `${resource.key} · ${resource.version || "—"}`;
+        root.append(option);
+    }
+    $("agent-execution-resources").textContent = !executionResourcesLoaded
+        ? t("打开配置时读取已登记的执行资源") : executionResources.length
+        ? t("已登记的执行资源：{keys}", { keys: executionResources.map(item => item.key).join(", ") })
+        : t("宿主尚未登记执行资源，请先启用命令执行后端");
+}
+$("agent-config-panel").addEventListener("toggle", () => {
+    if (!$("agent-config-panel").open)
+        return;
+    // 页面仅列出公开标识；宿主登记、执行授权和版本冻结仍由Python服务裁决。
+    void requestJson("/v1/agents/resources").then(resources => {
+        executionResources = resources.filter(item => item.kind === "execution" && item.available);
+        executionResourcesLoaded = true;
+        renderExecutionResources();
+    }).catch(error => { $("agent-execution-resources").textContent = errorText(error); });
+});
 async function renderAgentInventory() {
     const root = $("agent-unavailable");
     if (!root)
