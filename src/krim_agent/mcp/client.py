@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal, Protocol, cast
@@ -25,6 +26,24 @@ class MCPConnectionError(RuntimeError):
     def __init__(self, message: str, code: str = "mcp_connection_failed") -> None:
         super().__init__(message)
         self.code = code
+
+
+_owned_connection: ContextVar[object | None] = ContextVar("krim-mcp-owner", default=None)
+
+
+async def _finish_cleanup[Result](task: asyncio.Task[Result]) -> Result:
+    """重复取消只能取消等待方，原 owner 清理必须完成。"""
+
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 class MCPSession(Protocol):
@@ -71,7 +90,12 @@ class MCPConnection:
         session_factory: SessionFactory | None = None,
         auth: httpx.Auth | None = None,
     ) -> None:
-        self.config, self.session_factory, self.auth = config, session_factory, auth
+        config = MCPServerConfig.model_validate(config.model_dump())
+        self.config, self.session_factory, self.auth = (
+            config.model_copy(deep=True),
+            session_factory,
+            auth,
+        )
         if auth is not None and (
             config.transport != "streamable_http" or session_factory is not None
         ):
@@ -89,6 +113,7 @@ class MCPConnection:
         self._failure_code = "mcp_connection_failed"
         self._closed = False
         self._requests: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[None] | None = None
         self.connected = False
 
     async def connect(self) -> MCPConnection:
@@ -107,16 +132,14 @@ class MCPConnection:
             )
         except (asyncio.CancelledError, TimeoutError):
             cleanup = asyncio.create_task(self.close())
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
+            await _finish_cleanup(cleanup)
             raise
         if self._failure is not None or not self.connected:
             raise MCPConnectionError(self._failure or "MCP 初始化失败", self._failure_code)
         return self
 
     async def _serve(self) -> None:
+        ownership = _owned_connection.set(self)
         try:
             async with AsyncExitStack() as stack:
                 session: MCPSession
@@ -184,6 +207,9 @@ class MCPConnection:
                             break
                         if request.future.cancelled():
                             continue
+                        if self._closed:
+                            request.future.set_exception(MCPConnectionError("MCP server 正在关闭"))
+                            continue
                         task = asyncio.create_task(self._dispatch(session, request))
                         self._requests.add(task)
                         task.add_done_callback(self._requests.discard)
@@ -210,9 +236,12 @@ class MCPConnection:
                 request = self._queue.get_nowait()
                 if request is not None and not request.future.done():
                     request.future.set_exception(MCPConnectionError("MCP 连接已结束"))
+            _owned_connection.reset(ownership)
 
     async def _dispatch(self, session: MCPSession, request: _Request) -> None:
         try:
+            if self._closed:
+                raise MCPConnectionError("MCP server 正在关闭")
             async with asyncio.timeout(self.config.request_timeout_seconds):
                 result: Response
                 if request.kind == "list":
@@ -233,7 +262,7 @@ class MCPConnection:
                 request.future.set_exception(MCPConnectionError("MCP 请求失败或超时"))
 
     async def _request(self, request: _Request) -> Response:
-        if not self.connected or self._owner is None or self._owner.done():
+        if self._closed or not self.connected or self._owner is None or self._owner.done():
             raise MCPConnectionError("MCP server 未连接")
         async with asyncio.timeout(self.config.request_timeout_seconds):
             await self._queue.put(request)
@@ -253,15 +282,25 @@ class MCPConnection:
             raise MCPConnectionError("MCP tools/call 响应类型错误")
         return response
 
-    async def close(self) -> None:
-        if self._closed:
-            return
+    def assert_close_allowed(self) -> None:
+        if _owned_connection.get() is self:
+            raise MCPConnectionError("不能从 MCP owner/请求回调等待自身关闭", "mcp_self_close")
+
+    def revoke(self) -> None:
+        self.assert_close_allowed()
         self._closed = True
+
+    async def close(self) -> None:
+        self.revoke()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_impl())
+        await _finish_cleanup(self._close_task)
+
+    async def _close_impl(self) -> None:
         if self._owner is not None and not self._owner.done():
             if not self.connected:
                 self._owner.cancel()
-                await asyncio.gather(self._owner, return_exceptions=True)
             else:
                 await self._queue.put(None)
-                await asyncio.shield(self._owner)
+            await asyncio.gather(self._owner, return_exceptions=True)
         self.connected = False

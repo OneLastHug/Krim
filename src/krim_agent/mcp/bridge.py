@@ -13,7 +13,13 @@ from krim_agent.protocol.models import check_json
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import ToolDefinition, ToolError
 
-from .client import MCPConnection, MCPConnectionError, SessionFactory, validate_server_url
+from .client import (
+    MCPConnection,
+    MCPConnectionError,
+    SessionFactory,
+    _finish_cleanup,
+    validate_server_url,
+)
 from .schema import arguments_model
 from .types import MCPServerConfig, MCPServerStatus, MCPToolInfo
 
@@ -36,7 +42,12 @@ class MCPBridge:
         self.registry = registry
         self._connections: dict[str, MCPConnection] = {}
         self._infos: dict[str, MCPToolInfo] = {}
+        self._connection_tools: dict[str, dict[str, ToolDefinition]] = {}
         self._statuses: dict[str, MCPServerStatus] = {}
+        self._retiring: set[str] = set()
+        self._removals: dict[str, asyncio.Task[MCPServerStatus]] = {}
+        self._close_task: asyncio.Task[None] | None = None
+        self._closed = False
 
     async def add_server(
         self,
@@ -45,8 +56,15 @@ class MCPBridge:
         session_factory: SessionFactory | None = None,
         auth: httpx.Auth | None = None,
     ) -> MCPServerStatus:
+        if self._closed:
+            raise MCPConnectionError("MCP bridge 已关闭")
+        config = MCPServerConfig.model_validate(config.model_dump()).model_copy(deep=True)
         namespace = config.namespace or config.name
-        if config.name in self._connections:
+        if (
+            config.name in self._connections
+            or config.name in self._retiring
+            or config.name in self._removals
+        ):
             raise MCPConnectionError("MCP server 名称已存在")
         if config.transport == "streamable_http":
             validate_server_url(config)
@@ -56,6 +74,9 @@ class MCPBridge:
             raise MCPConnectionError("OAuth Auth 只支持 Streamable HTTP MCP")
         connection = MCPConnection(config, session_factory, auth)
         self._connections[config.name] = connection
+        self._statuses[config.name] = MCPServerStatus(
+            name=config.name, namespace=namespace, status="connecting"
+        )
         if not config.enabled:
             status = MCPServerStatus(name=config.name, namespace=namespace, status="disabled")
             self._statuses[config.name] = status
@@ -116,9 +137,24 @@ class MCPBridge:
                         ),
                     )
                 )
-            for definition, info in prepared:
-                self.registry.register(definition)
-                self._infos[definition.name] = info
+            if (
+                self._closed
+                or self._connections.get(config.name) is not connection
+                or config.name in self._retiring
+            ):
+                raise MCPConnectionError("MCP server 在发现期间已移除", "mcp_server_retiring")
+            registered: dict[str, ToolDefinition] = {}
+            try:
+                for definition, info in prepared:
+                    registered[definition.name] = definition
+                    self.registry.register(definition)
+                    self._infos[definition.name] = info
+            except Exception:
+                for name, definition in registered.items():
+                    self.registry.unregister(name, expected=definition)
+                    self._infos.pop(name, None)
+                raise
+            self._connection_tools[config.name] = registered
             status = MCPServerStatus(
                 name=config.name,
                 namespace=namespace,
@@ -126,17 +162,26 @@ class MCPBridge:
                 tools=[info.local_name for _definition, info in prepared],
             )
         except asyncio.CancelledError:
-            await asyncio.shield(connection.close())
-            self._statuses[config.name] = MCPServerStatus(
+            await connection.close()
+            status = MCPServerStatus(
                 name=config.name,
                 namespace=namespace,
                 status="closed",
                 error="MCP 初始化已取消",
                 error_code="cancelled",
             )
-            raise
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                if (
+                    self._connections.get(config.name) is connection
+                    and config.name not in self._retiring
+                ):
+                    self._statuses[config.name] = status
+                raise
         except Exception as error:
             await connection.close()
+            if self._connections.get(config.name) is connection:
+                self._withdraw(config.name)
             status = MCPServerStatus(
                 name=config.name,
                 namespace=namespace,
@@ -146,6 +191,8 @@ class MCPBridge:
                 if isinstance(error, MCPConnectionError)
                 else "mcp_connection_failed",
             )
+        if self._connections.get(config.name) is not connection or config.name in self._retiring:
+            return MCPServerStatus(name=config.name, namespace=namespace, status="closed")
         self._statuses[config.name] = status
         return status
 
@@ -192,8 +239,58 @@ class MCPBridge:
     def tools(self) -> list[MCPToolInfo]:
         return [info.model_copy(deep=True) for info in self._infos.values()]
 
-    async def close(self) -> None:
-        for name, connection in list(self._connections.items()):
+    def _withdraw(self, name: str) -> None:
+        for local, definition in self._connection_tools.pop(name, {}).items():
+            self.registry.unregister(local, expected=definition)
+            self._infos.pop(local, None)
+
+    async def remove_server(self, name: str) -> MCPServerStatus:
+        """收束一个 MCP owner 并撤销其原定义；同名服务可随后明确重建。"""
+
+        existing = self._removals.get(name)
+        if existing is None:
+            connection = self._connections.get(name)
+            if connection is None:
+                status = self._statuses.get(name)
+                if status is None:
+                    raise MCPConnectionError("MCP server 不存在", "mcp_server_not_found")
+                return status.model_copy(deep=True)
+            connection.revoke()
+            self._retiring.add(name)
+            self._withdraw(name)
+            self._statuses[name] = self._statuses[name].model_copy(update={"status": "closing"})
+            existing = asyncio.create_task(self._remove_server(name, connection))
+            self._removals[name] = existing
+        else:
+            connection = self._connections.get(name)
+            if connection is not None:
+                connection.assert_close_allowed()
+        try:
+            return (await _finish_cleanup(existing)).model_copy(deep=True)
+        finally:
+            if existing.done() and self._removals.get(name) is existing:
+                self._removals.pop(name, None)
+
+    async def _remove_server(self, name: str, connection: MCPConnection) -> MCPServerStatus:
+        try:
             await connection.close()
-            if name in self._statuses:
-                self._statuses[name] = self._statuses[name].model_copy(update={"status": "closed"})
+            self._connections.pop(name, None)
+            status = self._statuses[name].model_copy(update={"status": "closed"})
+            self._statuses[name] = status
+            return status
+        finally:
+            self._retiring.discard(name)
+
+    async def close(self) -> None:
+        for connection in self._connections.values():
+            connection.assert_close_allowed()
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close_impl())
+        await _finish_cleanup(self._close_task)
+
+    async def _close_impl(self) -> None:
+        await asyncio.gather(
+            *(self.remove_server(name) for name in list(self._connections)),
+            return_exceptions=False,
+        )

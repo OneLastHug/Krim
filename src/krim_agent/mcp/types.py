@@ -45,7 +45,7 @@ class MCPServerConfig(StrictModel):
 class MCPServerStatus(StrictModel):
     name: str
     namespace: str
-    status: Literal["disabled", "connecting", "ready", "failed", "closed"]
+    status: Literal["disabled", "connecting", "ready", "failed", "closing", "closed"]
     tools: list[str] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None

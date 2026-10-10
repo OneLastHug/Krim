@@ -91,6 +91,17 @@ class ToolRegistry:
         self._definitions[definition.name] = definition
         return definition
 
+    def unregister(self, name: str, *, expected: ToolDefinition | None = None) -> bool:
+        """按原定义身份撤销动态工具，防止迟到连接清理新定义。"""
+
+        current = self._definitions.get(name)
+        if current is None:
+            return False
+        if expected is not None and current is not expected:
+            return False
+        del self._definitions[name]
+        return True
+
     def select(self, names: list[str]) -> ToolRegistry:
         if len(names) != len(set(names)):
             raise ValueError("工具子集不能重复")
