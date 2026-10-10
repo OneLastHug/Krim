@@ -133,7 +133,19 @@ test("真实运行取消、等待读取与关闭会话后历史保持，plan拒�
   try {
     await draft(panel, "import time;print('waiting',flush=True);time.sleep(30)");
     await confirm(page, panel, "执行受控命令");
-    await expect(panel.locator(".command-meta")).toContainText("命令已启动 是", { timeout: 25_000 });
+    await expect(panel.locator(".command-detail")).toHaveAttribute("data-command-id", /.+/, { timeout: 10_000 });
+    const commandId = await panel.locator(".command-detail").getAttribute("data-command-id");
+    expect(commandId).toBeTruthy();
+    let phase = "";
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const inspected = await (await page.request.get(`/v1/agents/${id}/commands/${commandId}/inspect`, { headers })).json();
+      phase = inspected.phase;
+      if (phase === "running") break;
+      if (["finished", "interrupted"].includes(phase)) break;
+      await page.waitForTimeout(100);
+    }
+    expect(phase).toBe("running");
+    await expect(panel.locator(".command-meta")).toContainText("命令已启动 是", { timeout: 10_000 });
     await panel.getByRole("button", { name: "等待原命令", exact: true }).click();
     await confirm(page, panel, "取消原命令");
     await expect(panel.locator(".command-detail > strong")).toContainText("命令已取消", { timeout: 25_000 });
@@ -263,5 +275,83 @@ test("运行终态同步命令列表、真实历史游标与销毁后的迟到�
   } finally {
     release?.();
     if (!deleted) await page.request.delete(`/v1/agents/${id}`, { headers });
+  }
+});
+
+test("配置界面显示已登记执行资源并冻结execution_key到新Agent", async ({ page }) => {
+  await page.goto("/ui/");
+  await page.getByLabel("服务访问密钥", { exact: true }).fill("browser-test-key");
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await page.locator("#agent-config-panel summary").click();
+  await expect(page.locator("#agent-execution-resources")).toContainText("sandbox");
+  const name = `browser-execution-${Date.now()}`;
+  await page.getByLabel("配置名称", { exact: true }).fill(name);
+  await page.getByLabel("任务说明", { exact: true }).fill("浏览器明确授权命令资源");
+  await page.getByLabel("允许工具（逗号分隔）", { exact: true }).fill("workspace_read,command_execute,command_get,command_read,command_history,command_inspect");
+  await page.getByLabel("工作区资源（留空不授权）", { exact: true }).fill("edit");
+  await page.getByLabel("执行资源（留空不授权）", { exact: true }).fill("sandbox");
+  await page.getByRole("button", { name: "保存 Agent 配置", exact: true }).click();
+  await expect(page.locator("#agent-config-revision")).toHaveValue("1");
+  const saved = await (await page.request.get(`/v1/agents/profiles/${name}`, { headers })).json();
+  expect(saved.config.execution_key).toBe("sandbox");
+  await page.getByLabel("执行资源（留空不授权）", { exact: true }).fill("");
+  await page.getByRole("button", { name: "读取 Agent 配置", exact: true }).click();
+  await expect(page.getByLabel("执行资源（留空不授权）", { exact: true })).toHaveValue("sandbox");
+  await page.locator("#agent-kind").selectOption(name);
+  await page.getByLabel("Agent 任务", { exact: true }).fill("/echo configured");
+  await page.getByRole("button", { name: "创建 Agent", exact: true }).click();
+  const card = page.locator(".agent-card", { hasText: name }).last();
+  await expect(card.locator(".agent-commands")).toBeVisible();
+  const agentId = await card.getAttribute("data-agent-id");
+  expect(agentId).toBeTruthy();
+  let secondId: string | undefined;
+  try {
+    const bound = page.locator(`article.agent-card[data-agent-id="${agentId}"]`), panel = bound.locator(".agent-commands");
+    await panel.getByText("命令执行与回执", { exact: true }).click();
+    await draft(panel, "print('configured in browser')");
+    await confirm(page, panel, "执行受控命令");
+    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
+    const frozen = await (await page.request.get(`/v1/agents/${agentId}`, { headers })).json();
+    expect(frozen.session.permissions.execution.key).toBe("sandbox");
+    // 未展示字段与enabled由原版本合并保留，显示的执行资源可明确移除。
+    const enriched = await page.request.put(`/v1/agents/profiles/${name}`, { headers, data: {
+      expected_revision: 1, enabled: false, config: { ...saved.config, max_turns: 4, timeout_seconds: 21 },
+    } });
+    expect(enriched.ok()).toBeTruthy();
+    await page.getByRole("button", { name: "读取 Agent 配置", exact: true }).click();
+    await expect(page.locator("#agent-config-revision")).toHaveValue("2");
+    await page.getByLabel("执行资源（留空不授权）", { exact: true }).fill("missing-executor");
+    await page.getByRole("button", { name: "保存 Agent 配置", exact: true }).click();
+    await expect(page.locator("#notice")).toContainText("执行资源未登记或已停用");
+    await expect(page.locator("#agent-config-revision")).toHaveValue("2");
+    await page.getByLabel("执行资源（留空不授权）", { exact: true }).fill("");
+    await page.getByRole("button", { name: "保存 Agent 配置", exact: true }).click();
+    await expect(page.locator("#notice")).toContainText("命令工具需要显式执行资源授权");
+    await expect(page.locator("#agent-config-revision")).toHaveValue("2");
+    await page.getByLabel("允许工具（逗号分隔）", { exact: true }).fill("echo");
+    await page.getByRole("button", { name: "保存 Agent 配置", exact: true }).click();
+    await expect(page.locator("#agent-config-revision")).toHaveValue("3");
+    const revised = await (await page.request.get(`/v1/agents/profiles/${name}`, { headers })).json();
+    expect(revised.config.execution_key).toBeUndefined(); expect(revised.enabled).toBe(false);
+    expect(revised.config.max_turns).toBe(4); expect(revised.config.timeout_seconds).toBe(21);
+    expect((await (await page.request.get(`/v1/agents/${agentId}`, { headers })).json()).session.permissions.execution.key).toBe("sandbox");
+    const enabled = await page.request.put(`/v1/agents/profiles/${name}`, { headers, data: {
+      expected_revision: 3, enabled: true, config: revised.config,
+    } });
+    expect(enabled.ok()).toBeTruthy();
+    const second = await page.request.post("/v1/agents", { headers, data: { name } });
+    expect(second.status()).toBe(201); secondId = (await second.json()).agent_id;
+    const secondView = await (await page.request.get(`/v1/agents/${secondId}`, { headers })).json();
+    expect(secondView.session.permissions.execution).toBeUndefined();
+    await page.getByRole("button", { name: "读取 Agent 配置", exact: true }).click();
+    await expect(page.getByLabel("执行资源（留空不授权）", { exact: true })).toHaveValue("");
+    await page.getByLabel("执行资源（留空不授权）", { exact: true }).fill("draft-resource");
+    await page.locator("#locale-select").selectOption("en-US");
+    await expect(page.getByLabel("Execution resource (leave blank for no grant)", { exact: true })).toHaveValue("draft-resource");
+    await page.locator("#locale-select").selectOption("zh-CN");
+  } finally {
+    await page.request.delete(`/v1/agents/${agentId}`, { headers });
+    if (secondId) await page.request.delete(`/v1/agents/${secondId}`, { headers });
   }
 });

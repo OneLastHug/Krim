@@ -100,6 +100,7 @@ export interface AgentDescriptor {
   available: boolean;
   error_code: string | null;
 }
+export interface AgentResourceView { key: string; kind: string; name: string; version: string | null; fingerprint: string; owned: boolean; available: boolean; }
 export interface AgentSessionView {
   session_id: string; status: "open" | "closed" | "expired" | "destroyed";
   revision: number; turn: number; profile_revision: number | null;

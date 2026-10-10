@@ -39,6 +39,9 @@ async def main() -> None:
                 transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
             ) as api,
         ):
+            html = (await api.get("/ui/")).text
+            assert 'id="agent-config-execution"' in html
+            assert 'id="agent-execution-options"' in html
             pending = ["app.js"]
             assets: set[str] = set()
             while pending:
@@ -57,6 +60,9 @@ async def main() -> None:
             assert "textContent" in script and "innerHTML" not in script
             locale = (await api.get("/v1/locales?locale=en-US", headers=headers)).json()
             assert locale["strings"]["执行受控命令"] == "Execute controlled command"
+            assert locale["strings"]["执行资源（留空不授权）"] == (
+                "Execution resource (leave blank for no grant)"
+            )
             assert (await api.post("/_test/workspace", headers=headers, json={})).status_code == 404
             tools = [
                 "command_execute",
