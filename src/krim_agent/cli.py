@@ -17,6 +17,7 @@ from .budgets import BudgetResolveRequest
 from .client import ClientError, KrimClient
 from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
+from .mcp.management import MCPBootstrap, MCPControlRequest, MCPSelectionRequest
 from .protocol.domain import TERMINAL_STATUSES, ServiceError
 from .skill_packages import SkillPackageRequest
 from .streams import MultiplexRequest
@@ -76,7 +77,23 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--execution-limits", help="execution limits（执行限额）：本地SandboxLimits JSON文件"
     )
+    serve.add_argument(
+        "--mcp-config", help="MCP config（MCP启动配置）：可信宿主本地JSON，最多64KiB"
+    )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
+    mcp = subparsers.add_parser(
+        "mcp", help="MCP（Model Context Protocol，模型上下文协议）：服务引用管理"
+    )
+    mcp.add_argument(
+        "action", choices=["list", "get", "enable", "disable", "connect", "disconnect", "wait"]
+    )
+    mcp.add_argument("name", nargs="?", help="宿主已登记MCP名称")
+    mcp.add_argument("--revision", type=int, help="revision（修订号）：原引用选择版本")
+    mcp.add_argument("--resource-hash", help="resource hash（资源指纹）：审阅时的公开SHA-256")
+    mcp.add_argument(
+        "--timeout-seconds", type=float, default=30, help="timeout seconds（等待秒数）：0–300"
+    )
+    mcp.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     from .evaluation.cli import add_parser as add_eval_parser
 
     add_eval_parser(subparsers)
@@ -644,6 +661,16 @@ def main() -> None:
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
         try:
+            mcp_servers = None
+            if args.mcp_config:
+                with Path(args.mcp_config).open("rb") as stream:
+                    raw_mcp = stream.read(65537)
+                if len(raw_mcp) > 65536:
+                    raise ValueError("MCP启动配置超过64KiB")
+                try:
+                    mcp_servers = MCPBootstrap.model_validate_json(raw_mcp).registrations()
+                except ValidationError:
+                    raise ValueError("MCP启动配置字段或格式无效") from None
             execution_runner = None
             if args.execution:
                 from .execution.linux import LinuxSandboxRunner
@@ -667,6 +694,7 @@ def main() -> None:
                 execution_runner=execution_runner,
                 execution_version=args.execution_version,
                 execution_owned=execution_runner is not None,
+                mcp_servers=mcp_servers,
             )
         except (ValueError, OSError, ServiceError) as error:
             parser.error(f"工作区或执行资源配置无效：{error}")
@@ -674,6 +702,50 @@ def main() -> None:
         return
     try:
         with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
+            if args.command == "mcp":
+                if args.action == "list":
+                    print(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in client.mcp_servers()],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    return
+                if not args.name:
+                    parser.error("MCP动作需要已登记名称")
+                if args.action == "get":
+                    mcp_result = client.mcp_server(args.name)
+                elif args.action == "wait":
+                    mcp_result = client.mcp_wait(args.name, args.timeout_seconds)
+                else:
+                    if args.revision is None or not args.resource_hash:
+                        parser.error("MCP控制需要原revision和resource-hash，不自动替换版本")
+                    if args.action in {"enable", "disable"}:
+                        mcp_result = client.mcp_configure(
+                            args.name,
+                            MCPSelectionRequest(
+                                expected_revision=args.revision,
+                                resource_hash=args.resource_hash,
+                                enabled=args.action == "enable",
+                            ),
+                        )
+                    elif args.action == "connect":
+                        mcp_result = client.mcp_connect(
+                            args.name,
+                            MCPControlRequest(
+                                expected_revision=args.revision, resource_hash=args.resource_hash
+                            ),
+                        )
+                    else:
+                        mcp_result = client.mcp_disconnect(
+                            args.name,
+                            MCPControlRequest(
+                                expected_revision=args.revision, resource_hash=args.resource_hash
+                            ),
+                        )
+                print(mcp_result.model_dump_json(indent=2))
+                return
             if args.command == "workspace":
                 _workspace_command(client, args, parser)
                 return

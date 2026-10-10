@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -121,6 +121,7 @@ from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
+from krim_agent.mcp.management import MCPManager, TrustedMCPServer
 from krim_agent.observability import ObservationStatus, SpanRecord, TraceView
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.attachments import AttachmentRepository
@@ -235,6 +236,7 @@ def create_app(
     execution_runner: LinuxSandboxRunner | None = None,
     execution_version: str = "local-v1",
     execution_owned: bool = False,
+    mcp_servers: Sequence[TrustedMCPServer] | None = None,
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -263,6 +265,14 @@ def create_app(
         max_active_runs=config.max_active_runs,
     )
     agent_service = AgentService(service, config, providers=agent_providers)
+
+    def mcp_ready(names: list[str], resource_hash: str) -> None:
+        for name in names:
+            agent_service.register_tool_version(name, "mcp-" + resource_hash)
+
+    mcp_service = MCPManager(database, service.tools, on_ready=mcp_ready)
+    for registered in mcp_servers or ():
+        mcp_service.register(registered)
     if workspace_root is not None:
         agent_service.register_workspace(
             "local",
@@ -299,6 +309,7 @@ def create_app(
                 await agent_service.sessions.recover_transient()
                 await service.tracer.store.recover()
             await service.budget_store.recover()
+            await mcp_service.initialize()
             await agent_service.restore_persistent()
             yield
         finally:
@@ -313,14 +324,17 @@ def create_app(
                     await agent_service.close()
                 finally:
                     try:
-                        await service.close()
+                        await mcp_service.close()
                     finally:
-                        if owns_database:
-                            try:
-                                await database.close()
-                            finally:
-                                if owned_provider is not None:
-                                    await owned_provider.close()
+                        try:
+                            await service.close()
+                        finally:
+                            if owns_database:
+                                try:
+                                    await database.close()
+                                finally:
+                                    if owned_provider is not None:
+                                        await owned_provider.close()
 
     app = FastAPI(
         title="Krim Agent",
@@ -342,7 +356,11 @@ def create_app(
     app.state.checkpoints = checkpoint_service
     app.state.attachments = attachment_repository
     app.state.evaluation = evaluation_service
+    app.state.mcp = mcp_service
     mount_browser_ui(app)
+    from .mcp import mount_mcp_management
+
+    mount_mcp_management(app, mcp_service)
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:

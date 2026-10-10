@@ -89,6 +89,7 @@ class MCPConnection:
         config: MCPServerConfig,
         session_factory: SessionFactory | None = None,
         auth: httpx.Auth | None = None,
+        request_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         config = MCPServerConfig.model_validate(config.model_dump())
         self.config, self.session_factory, self.auth = (
@@ -96,6 +97,7 @@ class MCPConnection:
             session_factory,
             auth,
         )
+        self.request_guard = request_guard
         if auth is not None and (
             config.transport != "streamable_http" or session_factory is not None
         ):
@@ -251,12 +253,19 @@ class MCPConnection:
                         else None
                     )
                 else:
+                    if self.request_guard is not None:
+                        await self.request_guard()
+                    if self._closed:
+                        raise MCPConnectionError("MCP server 正在关闭")
                     result = await session.call_tool(request.name, request.arguments or {})
             if not request.future.done():
                 request.future.set_result(result)
         except asyncio.CancelledError:
             if not request.future.done():
                 request.future.cancel()
+        except MCPConnectionError as error:
+            if not request.future.done():
+                request.future.set_exception(error)
         except Exception:
             if not request.future.done():
                 request.future.set_exception(MCPConnectionError("MCP 请求失败或超时"))

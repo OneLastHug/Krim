@@ -62,6 +62,7 @@ from .execution.publication import (
 from .execution.records import CommandView
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
+from .mcp.management import MCPControlRequest, MCPResourceView, MCPSelectionRequest
 from .observability import ObservationStatus, SpanRecord, TraceView
 from .prompt_context import (
     ContextTagInput,
@@ -169,6 +170,52 @@ class KrimClient:
 
     def __enter__(self) -> KrimClient:
         return self
+
+    @staticmethod
+    def _mcp_path(name: str | None = None) -> str:
+        if name is not None and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) is None:
+            raise ClientError("MCP名称无效", code="mcp_name_invalid", status=422)
+        return "/v1/mcp/servers" + ("/" + name if name is not None else "")
+
+    def mcp_servers(self) -> list[MCPResourceView]:
+        response = self._http.get(self._mcp_path())
+        self._check(response)
+        return TypeAdapter(list[MCPResourceView]).validate_json(response.content)
+
+    def mcp_server(self, name: str) -> MCPResourceView:
+        response = self._http.get(self._mcp_path(name))
+        self._check(response)
+        return MCPResourceView.model_validate_json(response.content)
+
+    def mcp_configure(self, name: str, request: MCPSelectionRequest) -> MCPResourceView:
+        response = self._http.put(self._mcp_path(name), json=request.model_dump(mode="json"))
+        self._check(response)
+        return MCPResourceView.model_validate_json(response.content)
+
+    def mcp_connect(self, name: str, request: MCPControlRequest) -> MCPResourceView:
+        response = self._http.post(
+            self._mcp_path(name) + "/connect", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return MCPResourceView.model_validate_json(response.content)
+
+    def mcp_disconnect(self, name: str, request: MCPControlRequest) -> MCPResourceView:
+        response = self._http.post(
+            self._mcp_path(name) + "/disconnect", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return MCPResourceView.model_validate_json(response.content)
+
+    def mcp_wait(self, name: str, timeout_seconds: float = 30) -> MCPResourceView:
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+            raise ClientError("MCP等待预算须为0至300秒", code="mcp_wait_budget", status=422)
+        response = self._http.post(
+            self._mcp_path(name) + "/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        self._check(response)
+        return MCPResourceView.model_validate_json(response.content)
 
     def agent_command_start(
         self, agent_id: str, request: AgentCommandRequest, *, confirmed: bool = False

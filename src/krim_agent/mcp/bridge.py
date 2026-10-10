@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 
 import httpx
 from mcp.types import CallToolResult, TextContent, Tool
@@ -55,6 +56,7 @@ class MCPBridge:
         *,
         session_factory: SessionFactory | None = None,
         auth: httpx.Auth | None = None,
+        request_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> MCPServerStatus:
         if self._closed:
             raise MCPConnectionError("MCP bridge 已关闭")
@@ -72,7 +74,7 @@ class MCPBridge:
             raise MCPConnectionError("MCP OAuth Auth 不能与静态 Authorization header 同时使用")
         if auth is not None and config.transport != "streamable_http":
             raise MCPConnectionError("OAuth Auth 只支持 Streamable HTTP MCP")
-        connection = MCPConnection(config, session_factory, auth)
+        connection = MCPConnection(config, session_factory, auth, request_guard)
         self._connections[config.name] = connection
         self._statuses[config.name] = MCPServerStatus(
             name=config.name, namespace=namespace, status="connecting"
@@ -217,7 +219,10 @@ class MCPBridge:
             try:
                 result = await connection.call_tool(remote, payload)
             except MCPConnectionError as error:
-                raise ToolError("mcp_request_failed", "MCP 工具连接不可用或请求失败") from error
+                code = (
+                    error.code if error.code.startswith("mcp_resource_") else "mcp_request_failed"
+                )
+                raise ToolError(code, "MCP 工具连接不可用、资源已停用或请求失败") from error
             if result.isError:
                 raise ToolError("mcp_tool_error", "MCP 服务报告工具执行失败")
             return _tool_result(result)
