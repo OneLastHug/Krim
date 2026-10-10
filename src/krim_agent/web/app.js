@@ -10,6 +10,7 @@ import { AttachmentsUI } from "./attachments-ui.js";
 import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js";
 import { BackgroundStreams } from "./background-streams.js";
 import { AgentsUI } from "./agents-ui.js";
+import { MCPUI } from "./mcp-ui.js";
 const state = {
     topics: [], topicId: null, tree: null, messages: [], runId: null, cursor: 0,
     streaming: false, busy: false, disconnected: false, streamText: "", streamAbort: null, editingMessageId: null,
@@ -115,6 +116,7 @@ const agentsUI = new AgentsUI($("agents"), {
     openTopic: loadTopic, openCheckpoints: agentId => checkpointUI.selectWorkspace(agentId),
     prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
 });
+const mcpUI = new MCPUI($("mcp-resources"), showNotice, loadAgents);
 let agentsLoading = false;
 let agentsReloadNeeded = false;
 const completedAgentRuns = new Set();
@@ -151,6 +153,7 @@ function redrawLocale() {
     checkpointUI.refreshLocale();
     attachmentsUI.refreshLocale();
     renderExecutionResources();
+    mcpUI.refreshLocale();
     $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
     $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
     $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -1204,9 +1207,10 @@ async function createAgent() {
     }
 }
 async function refresh() { if (state.topicId)
-    await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents()]); }
+    await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents(), mcpUI.load()]); }
 function setup() {
     $("locale-select").addEventListener("change", (event) => { void changeLocale(event.target.value).catch((error) => { $("locale-select").value = currentLocale(); showNotice(errorText(error), true); }); });
+    $("mcp-refresh").addEventListener("click", () => void mcpUI.load());
     $("new-topic").addEventListener("click", () => void createTopic());
     $("refresh").addEventListener("click", () => void refresh());
     $("composer").addEventListener("submit", (event) => void sendMessage(event));
@@ -1253,6 +1257,7 @@ async function boot() { clearLinkCache(); try {
     await restoreLocale(currentLocale());
     renderTopics();
     await loadAgents();
+    await mcpUI.load();
     if (!state.topicId && state.topics[0]) {
         const selected = new URLSearchParams(location.search).get("topic");
         await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id);
@@ -1280,7 +1285,7 @@ setInterval(() => {
         void loadProposals().catch(() => undefined);
     }
 }, 500);
-window.addEventListener("pagehide", () => backgroundStreams.close());
+window.addEventListener("pagehide", () => { backgroundStreams.close(); mcpUI.dispose(); });
 async function saveAgentConfig() {
     const name = text("agent-config-name").value.trim();
     try {
