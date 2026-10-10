@@ -37,6 +37,7 @@ from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers import ModelProvider, ModelToolCall, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
+from krim_agent.skill_packages import SkillPackageRequest, decode_archive, package_from_archive
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadResult
 from krim_agent.streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 from krim_agent.tools import ToolRegistry
@@ -643,6 +644,14 @@ class PythonAI:
 
     async def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
         return await self.runtime.repository.inject_skills(topic_id, request)
+
+    async def import_skill_archive(
+        self, topic_id: str, request: SkillPackageRequest
+    ) -> SkillCatalogView:
+        definition = await asyncio.to_thread(package_from_archive, decode_archive(request))
+        return await self.runtime.repository.import_skill_package(
+            topic_id, definition, expected_digest=request.expected_digest
+        )
 
     async def remove_skill(self, topic_id: str, name: str | None = None) -> SkillCatalogView:
         return await self.runtime.repository.remove_skill(topic_id, name)

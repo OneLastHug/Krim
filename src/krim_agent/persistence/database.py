@@ -69,6 +69,7 @@ from krim_agent.skills import (
     SkillBatch,
     SkillCatalog,
     SkillCatalogView,
+    SkillDefinition,
     SkillReadResult,
     SkillSnapshot,
 )
@@ -880,6 +881,51 @@ class KrimRepository:
                 catalog = SkillCatalog(skills=list(current.values()))
             except ValueError as error:
                 raise ServiceError("skill_limit", "技能目录超过容量或大小边界", 422) from error
+            topic.skills = TypeAdapter(dict[str, JsonValue]).validate_python(
+                catalog.model_dump(mode="json")
+            )
+            topic.updated_at = utc_now()
+            return catalog.view()
+
+    async def import_skill_package(
+        self, topic_id: str, definition: SkillDefinition, *, expected_digest: str | None = None
+    ) -> SkillCatalogView:
+        """包导入使用同名内容比较/原digest更新；不影响既有Run快照。"""
+        definition = SkillDefinition.model_validate(definition.model_dump(mode="json"))
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            topic = await session.get(TopicRow, topic_id)
+            if topic is None:
+                raise ServiceError("topic_not_found", "话题不存在", 404)
+            current = {
+                skill.name: skill for skill in SkillCatalog.model_validate(topic.skills).skills
+            }
+            previous = current.get(definition.name)
+
+            def comparable(skill: SkillDefinition) -> dict[str, JsonValue]:
+                value = TypeAdapter(dict[str, JsonValue]).validate_python(
+                    skill.model_dump(mode="json")
+                )
+                value["metadata"] = {
+                    key: item
+                    for key, item in skill.metadata.items()
+                    if key != "krim-package-source"
+                }
+                return value
+
+            if previous is not None:
+                if comparable(previous) == comparable(definition):
+                    return SkillCatalog(skills=list(current.values())).view()
+                if expected_digest != previous.summary().digest:
+                    raise ServiceError(
+                        "skill_package_conflict", "同名技能已存在，须提供原digest明确替换", 409
+                    )
+            elif expected_digest is not None:
+                raise ServiceError("skill_package_conflict", "预期旧技能不存在", 409)
+            current[definition.name] = definition
+            try:
+                catalog = SkillCatalog(skills=list(current.values()))
+            except ValueError:
+                raise ServiceError("skill_limit", "技能目录超过容量或大小边界", 422) from None
             topic.skills = TypeAdapter(dict[str, JsonValue]).validate_python(
                 catalog.model_dump(mode="json")
             )

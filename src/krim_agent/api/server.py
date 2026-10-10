@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -144,6 +145,7 @@ from krim_agent.providers import ModelProvider, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.sdk import PythonAI
+from krim_agent.skill_packages import SkillPackageRequest, decode_archive, package_from_archive
 from krim_agent.skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from krim_agent.streams import ActiveRunView, MultiplexRequest
 from krim_agent.task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
@@ -1503,6 +1505,13 @@ def create_app(
     @app.post("/v1/topics/{topic_id}/skills")
     async def inject_skills(topic_id: str, payload: SkillBatch) -> SkillCatalogView:
         return await repository.inject_skills(topic_id, payload)
+
+    @app.post("/v1/topics/{topic_id}/skills/import-archive")
+    async def import_skill_archive(topic_id: str, payload: SkillPackageRequest) -> SkillCatalogView:
+        definition = await asyncio.to_thread(package_from_archive, decode_archive(payload))
+        return await repository.import_skill_package(
+            topic_id, definition, expected_digest=payload.expected_digest
+        )
 
     @app.get("/v1/topics/{topic_id}/skills/{name}")
     async def read_skill(topic_id: str, name: str, resource: str | None = None) -> SkillReadResult:
