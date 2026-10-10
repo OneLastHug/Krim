@@ -58,9 +58,7 @@ async def main():
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar_one()
             assert head == (
-                "0029_workspace_restore_plans"
-                if mode == "old"
-                else "0031_command_artifact_proposals"
+                "0029_workspace_restore_plans" if mode == "old" else "0032_oauth_states"
             )
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert "/site-packages/" in krim_agent.__file__

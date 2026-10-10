@@ -130,47 +130,88 @@ class PKCERequest:
     created_at: float
 
 
+def _pkce_request(
+    config: OAuthConfig,
+    *,
+    state: str | None = None,
+    verifier: str | None = None,
+    created_at: float | None = None,
+) -> PKCERequest:
+    config.validate_endpoints()
+    verifier = verifier or secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=")
+    state = state or secrets.token_urlsafe(32)
+    parameters = {
+        "response_type": "code",
+        "client_id": config.client_id,
+        "redirect_uri": config.redirect_uri,
+        "scope": " ".join(config.scopes),
+        "state": state,
+        "code_challenge": challenge.decode(),
+        "code_challenge_method": "S256",
+    }
+    if config.resource is not None:
+        parameters["resource"] = config.resource
+    return PKCERequest(
+        state=state,
+        code_verifier=verifier,
+        authorization_url=config.authorization_endpoint + "?" + urlencode(parameters),
+        created_at=time.time() if created_at is None else created_at,
+    )
+
+
+class OAuthAuthorizationStateStore(Protocol):
+    async def begin(self, config: OAuthConfig, *, subject: str) -> PKCERequest: ...
+
+    async def consume(
+        self, state: str, *, subject: str, expected_config: OAuthConfig | None = None
+    ) -> tuple[OAuthConfig, PKCERequest]: ...
+
+    async def discard(self, state: str, *, subject: str) -> None: ...
+
+
 class OAuthStateStore:
     def __init__(self) -> None:
         self._states: dict[str, tuple[OAuthConfig, PKCERequest]] = {}
+        self._subjects: dict[str, str] = {}
 
-    def begin(self, config: OAuthConfig) -> PKCERequest:
-        config.validate_endpoints()
-        verifier = secrets.token_urlsafe(64)
-        digest = hashlib.sha256(verifier.encode()).digest()
-        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-        state = secrets.token_urlsafe(32)
-        parameters = {
-            "response_type": "code",
-            "client_id": config.client_id,
-            "redirect_uri": config.redirect_uri,
-            "scope": " ".join(config.scopes),
-            "state": state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
-        if config.resource is not None:
-            parameters["resource"] = config.resource
-        request = PKCERequest(
-            state=state,
-            code_verifier=verifier,
-            authorization_url=config.authorization_endpoint + "?" + urlencode(parameters),
-            created_at=time.time(),
-        )
-        self._states[state] = (config.model_copy(deep=True), request)
+    def begin(self, config: OAuthConfig, *, subject: str | None = None) -> PKCERequest:
+        config = config.model_copy(deep=True)
+        if subject is not None:
+            token_scope(config, subject)
+        request = _pkce_request(config)
+        self._states[request.state] = (config, request)
+        if subject is not None:
+            self._subjects[request.state] = subject
         return request
 
-    def consume(self, state: str) -> tuple[OAuthConfig, PKCERequest]:
-        value = self._states.pop(state, None)
-        if value is None:
-            raise OAuthError("invalid_state", "OAuth state 不存在或已经使用")
+    def consume(
+        self,
+        state: str,
+        *,
+        subject: str | None = None,
+        expected_config: OAuthConfig | None = None,
+    ) -> tuple[OAuthConfig, PKCERequest]:
+        value = self._states.get(state)
+        bound = self._subjects.get(state)
+        if value is None or (bound is not None and bound != subject):
+            raise OAuthError("invalid_state", "OAuth state 不存在、已经使用或不属于当前主体")
         config, request = value
-        if time.time() - request.created_at > config.state_ttl_seconds:
+        if expected_config is not None and token_scope(config, subject or "legacy") != token_scope(
+            expected_config, subject or "legacy"
+        ):
+            raise OAuthError("invalid_state", "OAuth state 不属于当前客户端配置")
+        self._states.pop(state)
+        self._subjects.pop(state, None)
+        if time.time() >= request.created_at + config.state_ttl_seconds:
             raise OAuthError("expired_state", "OAuth state 已过期")
         return config, request
 
-    def discard(self, state: str) -> None:
+    def discard(self, state: str, *, subject: str | None = None) -> None:
+        if state in self._subjects and self._subjects[state] != subject:
+            return
         self._states.pop(state, None)
+        self._subjects.pop(state, None)
 
 
 @dataclass(frozen=True)
@@ -179,10 +220,14 @@ class TokenSnapshot:
     revision: int
 
 
-def token_scope(config: OAuthConfig, subject: str) -> str:
-    config.validate_endpoints()
+def validate_token_subject(subject: str) -> None:
     if not subject or len(subject) > 256 or any(ord(character) < 32 for character in subject):
         raise OAuthError("invalid_token_subject", "OAuth subject 必须是非空的受控标识")
+
+
+def token_scope(config: OAuthConfig, subject: str) -> str:
+    config.validate_endpoints()
+    validate_token_subject(subject)
     payload = {
         "server": config.server,
         "client_id": config.client_id,
@@ -367,13 +412,52 @@ class OAuthHTTPRequester:
 
 
 class OAuthClient:
-    def __init__(self, states: OAuthStateStore, tokens: OAuthTokenStore) -> None:
+    def __init__(
+        self, states: OAuthStateStore | OAuthAuthorizationStateStore, tokens: OAuthTokenStore
+    ) -> None:
         self.states, self.tokens = states, tokens
 
-    async def exchange(self, state: str, code: str, subject: str, request: Requester) -> OAuthToken:
-        if not code or not subject:
+    async def begin_authorization(self, config: OAuthConfig, subject: str) -> PKCERequest:
+        if isinstance(self.states, OAuthStateStore):
+            return self.states.begin(config, subject=subject)
+        return await self.states.begin(config, subject=subject)
+
+    async def discard_authorization(self, state: str, subject: str) -> None:
+        if isinstance(self.states, OAuthStateStore):
+            self.states.discard(state, subject=subject)
+        else:
+            # 登录 owner 在 finally 中清除秘密；重复取消不能打断同一个清理事务。
+            cleanup = asyncio.create_task(self.states.discard(state, subject=subject))
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def exchange(
+        self,
+        state: str,
+        code: str,
+        subject: str,
+        request: Requester,
+        *,
+        expected_config: OAuthConfig | None = None,
+    ) -> OAuthToken:
+        if not code or len(code) > 8192 or not subject:
             raise OAuthError("invalid_authorization_response", "code 与 subject 必须非空")
-        config, pkce = self.states.consume(state)
+        validate_token_subject(subject)
+        if isinstance(self.states, OAuthStateStore):
+            config, pkce = self.states.consume(
+                state, subject=subject, expected_config=expected_config
+            )
+        else:
+            config, pkce = await self.states.consume(
+                state, subject=subject, expected_config=expected_config
+            )
         form = {
             "grant_type": "authorization_code",
             "code": code,
