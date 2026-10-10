@@ -1,6 +1,7 @@
 """会话关闭、原子轮次、专属话题、TTL、父子边界与真实恢复。"""
 
 import asyncio
+import time
 from dataclasses import replace
 
 import pytest
@@ -137,11 +138,18 @@ async def test_ttl_stops_real_production_and_cannot_be_reopened(repository):
                 name="short",
                 provider=provider,
                 tools=ToolRegistry(),
-                session_ttl_seconds=0.4,
+                session_ttl_seconds=60,
             )
         )
         task = asyncio.create_task(handle.execute("wait"))
         await asyncio.wait_for(provider.entered.wait(), 3)
+        # 生产确实进入后再给同一会话0.4秒TTL，初始化耗时不混入停止断言。
+        await handle._close_expiry()
+        expires_at = time.time() + 0.4
+        async with repository.database.write_lock, repository.database.sessions.begin() as session:
+            row = await session.get(AgentSessionRow, handle.session_id)
+            row.expires_at = expires_at
+        handle._expiry = asyncio.create_task(handle._expire(expires_at))
         result = await asyncio.wait_for(task, 3)
         assert result.status == "aborted" and provider.closed.is_set()
         session = await handle.session()
@@ -150,6 +158,26 @@ async def test_ttl_stops_real_production_and_cannot_be_reopened(repository):
             await handle.reopen_session(session.revision)
         assert expired.value.code == "agent_session_expired"
         assert manager._semaphore._value == 8
+    finally:
+        await manager.close()
+
+
+async def test_session_already_expired_never_enters_provider(repository):
+    provider = WaitingProvider()
+    manager = AgentManager(repository)
+    try:
+        handle = await manager.spawn(
+            AgentDefinition(name="expired", provider=provider, tools=ToolRegistry())
+        )
+        async with repository.database.write_lock, repository.database.sessions.begin() as session:
+            row = await session.get(AgentSessionRow, handle.session_id)
+            row.expires_at = time.time() - 1
+        with pytest.raises(ServiceError) as error:
+            await handle.execute("must not start")
+        assert error.value.code == "agent_session_expired"
+        assert not provider.entered.is_set()
+        assert not await repository.list_messages(handle.topic_id)
+        assert (await handle.session()).turn == 0
     finally:
         await manager.close()
 
