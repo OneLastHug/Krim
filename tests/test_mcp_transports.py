@@ -35,6 +35,25 @@ async def test_real_stdio_initialize_schema_call_and_cross_task_close():
         invalid = await registry.invoke("stdio__add", {"left": "2"}, ToolContext(registry))
         assert invalid.is_error and invalid.code == "invalid_input"
         assert len(registry.audit) == 2
+        frozen = registry.select(["stdio__add"])
+        original = registry.get("stdio__add")
+        assert (await bridge.remove_server("stdio")).status == "closed"
+        assert not bridge.tools() and not registry.definitions
+        reconnected = await bridge.add_server(
+            MCPServerConfig(
+                name="stdio",
+                transport="stdio",
+                command=sys.executable,
+                args=[str(SERVER)],
+                readonly_tools={"add", "echo"},
+            )
+        )
+        assert reconnected.status == "ready" and registry.get("stdio__add") is not original
+        stale = await frozen.invoke("stdio__add", {"left": 3}, ToolContext(frozen))
+        assert stale.is_error and stale.code == "mcp_request_failed"
+        assert (await registry.invoke("stdio__add", {"left": 3}, ToolContext(registry))).data == {
+            "sum": 6
+        }
     finally:
         await asyncio.create_task(bridge.close())
         await registry.close()
@@ -78,6 +97,22 @@ async def test_real_streamable_http_initialize_call_and_origin_boundary():
         assert status.status == "ready"
         result = await registry.invoke("http__echo", {"text": "中文 MCP"}, ToolContext(registry))
         assert not result.is_error and "中文 MCP" in str(result.data)
+        frozen = registry.select(["http__echo"])
+        await bridge.remove_server("http")
+        reconnected = await bridge.add_server(
+            MCPServerConfig(
+                name="http",
+                transport="streamable_http",
+                url=f"http://127.0.0.1:{port}/mcp",
+                allowed_hosts={"127.0.0.1"},
+                readonly_tools={"echo"},
+            )
+        )
+        assert reconnected.status == "ready"
+        stale = await frozen.invoke("http__echo", {"text": "old"}, ToolContext(frozen))
+        assert stale.code == "mcp_request_failed"
+        fresh = await registry.invoke("http__echo", {"text": "new"}, ToolContext(registry))
+        assert not fresh.is_error and "new" in str(fresh.data)
     finally:
         await bridge.close()
         await registry.close()
