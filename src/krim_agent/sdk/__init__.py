@@ -23,6 +23,11 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.skill_packages import (
+    SkillPackageRequest,
+    package_from_archive,
+    package_from_directory,
+)
 from krim_agent.task_state import TaskMutation, TaskSnapshot, TaskWriteRequest
 from krim_agent.workspace_change import (
     FileChangeSpec,
@@ -83,6 +88,9 @@ from .types import (
 )
 
 __all__ = [
+    "SkillPackageRequest",
+    "package_from_archive",
+    "package_from_directory",
     "CommandAccepted",
     "CommandHistoryEntry",
     "CommandHistoryPage",

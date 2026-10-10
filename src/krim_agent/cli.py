@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from .client import ClientError, KrimClient
 from .context_engine import ContextOptions, ContextProposalDecision
 from .interactions import InteractionReply
 from .protocol.domain import TERMINAL_STATUSES, ServiceError
+from .skill_packages import SkillPackageRequest
 from .streams import MultiplexRequest
 from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
@@ -319,6 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--override", help="resume/rerun 输入 JSON")
     workflow.add_argument("--allow-side-effects", action="store_true")
     workflow.add_argument("--completed-outputs", help="恢复时已完成 NodeOutput 的 JSON")
+    skill = subparsers.add_parser("skills", help="skills（技能）：读取目录或导入受限ZIP文件包")
+    skill.add_argument("action", choices=["list", "import-archive"])
+    skill.add_argument("topic_id")
+    skill.add_argument("--archive", help="archive（归档）：本地ZIP文件，不作为服务端路径")
+    skill.add_argument("--expected-digest", help="原同名技能digest，明确替换时使用")
+    skill.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     for command, help_text in (
         ("chat", "chat（对话）：发送消息并订阅输出"),
         ("topics", "topics（话题）：列出历史话题"),
@@ -1053,6 +1061,24 @@ def main() -> None:
             if args.command == "topics":
                 for topic in client.topics():
                     print(f"{topic.id}\t{topic.title}")
+            elif args.command == "skills":
+                if args.action == "list":
+                    result = client.skills(args.topic_id)
+                else:
+                    if not args.archive:
+                        parser.error("skills import-archive需要--archive本地ZIP")
+                    with Path(args.archive).open("rb") as source:
+                        raw = source.read(45001)
+                    if len(raw) > 45000:
+                        parser.error("技能ZIP不能超过45000字节")
+                    result = client.import_skill_archive(
+                        args.topic_id,
+                        SkillPackageRequest(
+                            archive_base64=base64.b64encode(raw).decode(),
+                            expected_digest=args.expected_digest,
+                        ),
+                    )
+                print(result.model_dump_json(indent=2))
             elif args.command == "messages":
                 for message in client.messages(args.topic_id):
                     print(f"[{message.sequence} {message.role}] {message.content}")

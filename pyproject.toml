@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=42,<51",
     "langcodes>=3.5,<4",
     "tiktoken>=0.13,<1",
+    "pyyaml>=6.0.2,<7",
 ]
 
 [project.scripts]
@@ -38,6 +39,7 @@ dev = [
     "ruff>=0.9,<1",
     "mypy>=1.15,<2",
     "types-jsonschema>=4.23",
+    "types-pyyaml>=6.0.12",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -83,6 +83,7 @@ from .protocol.domain import (
     TopicView,
 )
 from .protocol.models import StreamFrame
+from .skill_packages import SkillPackageRequest
 from .skills import SkillBatch, SkillCatalogView, SkillReadInput, SkillReadResult
 from .streams import ActiveRunView, MultiplexRequest, RunStreamFrame
 from .task_state import TaskKind, TaskOperationView, TaskSnapshot, TaskWriteRequest
@@ -515,6 +516,13 @@ class KrimClient:
     def inject_skills(self, topic_id: str, request: SkillBatch) -> SkillCatalogView:
         response = self._http.post(
             f"/v1/topics/{topic_id}/skills", json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        return SkillCatalogView.model_validate_json(response.content)
+
+    def import_skill_archive(self, topic_id: str, request: SkillPackageRequest) -> SkillCatalogView:
+        response = self._http.post(
+            f"/v1/topics/{topic_id}/skills/import-archive", json=request.model_dump(mode="json")
         )
         self._check(response)
         return SkillCatalogView.model_validate_json(response.content)
