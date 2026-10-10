@@ -167,8 +167,8 @@ test("真实运行取消、等待读取与关闭会话后历史保持，plan拒�
   } finally { await page.request.delete(`/v1/agents/${planned.id}`, { headers }); }
 });
 
-test("失败产物明确接受、产物分页、原字节保留，二进制不能伪装文本发布", async ({ page }) => {
-  const { id, panel } = await agent(page, "browser-command-artifacts");
+test("失败产物明确接受、产物分页、原字节保留，二进制沿私有提案发布", async ({ page }) => {
+  const { id, card, panel } = await agent(page, "browser-command-artifacts");
   try {
     await draft(panel, "import sys;[open('artifact-%02d.txt'%i,'w').write('file %d'%i) for i in range(40)];open('binary.dat','wb').write(bytes([0,255,1]));sys.exit(7)");
     await confirm(page, panel, "执行受控命令");
@@ -181,14 +181,18 @@ test("失败产物明确接受、产物分页、原字节保留，二进制不�
     await binary.getByRole("button", { name: "读取原产物", exact: true }).click();
     await panel.locator(".command-output-raw summary").click();
     await expect(panel.locator(".command-output-raw pre")).toHaveText("AP8B");
-    const rejected = page.waitForResponse(response => response.url().endsWith("/proposals?confirmed=true") && response.status() === 422);
     await confirm(page, binary, "生成产物文件提案");
-    expect((await (await rejected).json()).error.code).toBe("workspace_binary");
-    await expect(panel.locator(".command-status")).toContainText("修改不支持二进制内容");
+    await expect(panel.locator(".command-proposal")).toContainText("产物提案已保存");
+    await panel.getByRole("button", { name: "审阅产物文件提案", exact: true }).click();
+    const files = card.locator(".workspace-changes");
+    await expect(files.locator(".workspace-diff")).toContainText("binary bytes=3");
+    await confirm(page, files, "应用修改");
+    await expect(files.locator(".workspace-change-detail strong")).toContainText("文件已应用");
+    expect((await page.request.get(`/v1/agents/${id}/workspace/read?path=binary.dat`, { headers })).status()).toBe(422);
     await panel.getByRole("button", { name: "较早文件变化", exact: true }).click();
     const first = panel.locator('.command-change-row[data-path="artifact-00.txt"]');
     await confirm(page, first, "生成产物文件提案", false);
-    expect((await (await page.request.get(`/v1/agents/${id}/workspace/changes`, { headers })).json())).toHaveLength(0);
+    expect((await (await page.request.get(`/v1/agents/${id}/workspace/changes`, { headers })).json())).toHaveLength(1);
     const bodies: Array<{ accept_failed: boolean }> = [];
     await page.route(`**/v1/agents/${id}/commands/*/proposals?confirmed=true`, async route => {
       bodies.push(route.request().postDataJSON()); await route.continue();

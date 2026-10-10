@@ -28,6 +28,7 @@ from krim_agent.sdk import (
     WorkspaceCheckpointCreate,
 )
 from krim_agent.tools import ShortCircuit
+from krim_agent.workspace import Workspace
 from krim_agent.workspace_list import NativeBatchRequest, NativeBatchTarget
 from krim_agent.workspace_writer import WorkspaceWriter
 
@@ -49,13 +50,22 @@ NAMES = [
 ]
 
 
-async def setup(runtime, root, *, policy=None, names=None):
+async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None):
     async def allow(*_args):
         return "allow"
 
     runtime.tool_policy = policy or allow
     service = AgentService(runtime, runtime.settings)
-    service.register_workspace("files", root, version="1", writable=True)
+    if max_file_bytes is None:
+        service.register_workspace("files", root, version="1", writable=True)
+    else:
+        service.register_workspace(
+            "files",
+            Workspace(root, max_file_bytes=max_file_bytes, writable=True),
+            version="1",
+            writable=True,
+            owned=True,
+        )
     runner = LinuxSandboxRunner()
     service.register_execution("sandbox", runner, version="1", owned=True)
     await service.profile_put(
@@ -276,15 +286,127 @@ async def test_failed_results_require_opt_in_and_incomplete_outputs_never_publis
         await service.close()
 
 
-async def test_binary_artifact_is_readable_but_not_a_text_publication(runtime, tmp_path):
+async def test_binary_artifact_is_readable_and_preserves_private_bytes_on_publish(
+    runtime, tmp_path
+):
     service, agent = await setup(runtime, tmp_path)
     try:
         result = await execute(agent, "open('binary.bin','wb').write(b'\\0\\xff')")
         page = await agent.command_changes(CommandChangesRequest(command_id=result.command_id))
         assert page.entries[0].path == "binary.bin"
-        with pytest.raises(ServiceError) as binary:
-            await propose(agent, result, "binary.bin")
-        assert binary.value.code == "workspace_binary" and not (tmp_path / "binary.bin").exists()
+        proposal = await propose(agent, result, "binary.bin")
+        assert proposal.proposal.preview.truncated
+        assert "binary" in proposal.proposal.preview.diff
+        assert not (tmp_path / "binary.bin").exists()
+        assert (await act(agent, proposal.proposal)).status == "done"
+        assert (tmp_path / "binary.bin").read_bytes() == b"\0\xff"
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("before_exists", [False, True])
+@pytest.mark.parametrize("payload", [b"\0\xff\x01", b"\xff\xfe\x80"])
+async def test_binary_artifact_keep_undo_and_text_entry_remains_strict(
+    runtime, tmp_path, before_exists, payload
+):
+    target = tmp_path / "out.bin"
+    if before_exists:
+        target.write_text("original text")
+    service, agent = await setup(runtime, tmp_path)
+    try:
+        result = await execute(
+            agent,
+            f"open('out.bin','wb').write(bytes.fromhex('{payload.hex()}'))",
+            ["out.bin"] if before_exists else [],
+        )
+        proposal = await propose(agent, result, "out.bin")
+        assert proposal.proposal.preview.after_sha256 == hashlib.sha256(payload).hexdigest()
+        assert proposal.proposal.preview.after_bytes == len(payload)
+        assert proposal.proposal.preview.truncated and "binary" in proposal.proposal.preview.diff
+        operation = await act(agent, proposal.proposal)
+        assert operation.status == "done" and target.read_bytes() == payload
+        assert (await act(agent, proposal.proposal, "keep")).status == "done"
+        with pytest.raises(ServiceError) as text_entry:
+            await agent.preview_file_change(
+                FileChangeSpec(
+                    path="out.bin",
+                    operation="write",
+                    expected_sha256=hashlib.sha256(payload).hexdigest(),
+                    content="unsafe text",
+                ),
+                request_key="text-entry",
+            )
+        assert text_entry.value.code in {"workspace_binary", "workspace_encoding"}
+        assert target.read_bytes() == payload
+        undo = await act(agent, proposal.proposal, "undo")
+        assert undo.status == "done"
+        assert target.read_text() == "original text" if before_exists else not target.exists()
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("kind", ["collision", "capacity"])
+async def test_binary_artifact_new_target_and_capacity_are_not_bypassed(runtime, tmp_path, kind):
+    service, agent = await setup(
+        runtime, tmp_path, max_file_bytes=64 if kind == "capacity" else None
+    )
+    try:
+        result = await execute(agent, "open('out.bin','wb').write(bytes([0,255])*64)")
+        existing = tmp_path / "out.bin"
+        if kind == "collision":
+            existing.write_bytes(b"\0external")
+        with pytest.raises(ServiceError) as rejected:
+            await propose(agent, result, "out.bin")
+        assert rejected.value.code == (
+            "workspace_file_limit" if kind == "capacity" else "execution_destination_exists"
+        )
+        assert (
+            existing.read_bytes() == b"\0external" if kind == "collision" else not existing.exists()
+        )
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+async def test_binary_artifact_receipt_failure_reconciles_original_operation(
+    runtime, tmp_path, monkeypatch, after_commit
+):
+    target = tmp_path / "source.txt"
+    target.write_text("old text")
+    service, agent = await setup(runtime, tmp_path)
+    settle = service.workspace_edits.settle
+    fired = False
+
+    async def fail_once(*args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            if after_commit:
+                await settle(*args, **kwargs)
+            raise OSError("binary receipt lost")
+        return await settle(*args, **kwargs)
+
+    try:
+        result = await execute(
+            agent, "open('source.txt','wb').write(bytes([0,255,2]))", ["source.txt"]
+        )
+        proposal = await propose(agent, result, "source.txt")
+        request = WorkspaceChangeAction(
+            proposal_id=proposal.proposal.proposal_id,
+            action="apply",
+            expected_revision=0,
+            request_key="binary-apply",
+        )
+        monkeypatch.setattr(service.workspace_edits, "settle", fail_once)
+        operation = await agent.change_file(request)
+        assert target.read_bytes() == b"\0\xff\x02"
+        assert operation.status == ("done" if after_commit else "uncertain")
+        assert (await agent.change_file(request)).operation_id == operation.operation_id
+        reconciled = await agent.reconcile_file_change(operation.operation_id)
+        assert reconciled.status == "done"
+        await agent.finalize_file_change(operation.operation_id)
+        assert (await act(agent, proposal.proposal, "undo")).status == "done"
+        assert target.read_text() == "old text"
     finally:
         await service.close()
 

@@ -322,14 +322,18 @@ class WorkspaceEditStore:
             or (prepared.before is not None and prepared.before.mode & ~0o777)
         ):
             raise ServiceError("execution_artifact_mode", "产物模式与快照不匹配", 409)
+        # Artifact由命令来源派生，Restore仅用于原操作撤销/检查点内部路径。
+        # 公开文本提案仍由FileChangeSpec及original_intent校验，不能上传二进制。
+        private_bytes = isinstance(spec, (ArtifactFileSpec, RestoreFileSpec))
         for content in (old, prepared.after):
             if content is not None:
-                if len(content) > 8_388_608 or b"\0" in content:
+                if len(content) > 8_388_608 or (not private_bytes and b"\0" in content):
                     raise ServiceError("workspace_snapshot_invalid", "私有快照类型或大小无效", 422)
-                try:
-                    content.decode("utf-8")
-                except UnicodeDecodeError:
-                    raise ServiceError("workspace_encoding", "私有快照须为UTF-8", 422) from None
+                if not private_bytes:
+                    try:
+                        content.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise ServiceError("workspace_encoding", "私有快照须为UTF-8", 422) from None
         if original_intent:
             if not isinstance(spec, FileChangeSpec):
                 raise ServiceError(

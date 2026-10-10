@@ -84,9 +84,21 @@ class PreparedFileChange:
         return hashlib.sha256(self.after).hexdigest() if self.after is not None else None
 
     def preview(self) -> FileChangePreview:
-        before = self.before.data.decode("utf-8") if self.before is not None else ""
-        after = self.after.decode("utf-8") if self.after is not None else ""
-        diff, truncated = bounded_diff(self.spec.path, before, after)
+        before, before_binary = preview_text(self.before.data if self.before is not None else None)
+        after, after_binary = preview_text(self.after)
+        if before_binary or after_binary:
+            before_size = len(self.before.data) if self.before is not None else 0
+            after_size = len(self.after) if self.after is not None else 0
+            before_kind = (
+                "absent" if self.before is None else "binary" if before_binary else "UTF-8"
+            )
+            after_kind = "absent" if self.after is None else "binary" if after_binary else "UTF-8"
+            old = f"{before_kind} bytes={before_size} sha256={self.before_sha256 or '—'}"
+            new = f"{after_kind} bytes={after_size} sha256={self.after_sha256 or '—'}"
+            diff = f"--- a/{self.spec.path}\n+++ b/{self.spec.path}\n- {old}\n+ {new}\n"
+            truncated = True
+        else:
+            diff, truncated = bounded_diff(self.spec.path, before, after)
         spec = self.spec
         result = FileChangePreview(
             path=self.spec.path,
@@ -175,6 +187,18 @@ def bounded_diff(path: str, before: str, after: str) -> tuple[str, bool]:
         if truncated:
             break
     return "".join(parts), truncated
+
+
+def preview_text(raw: bytes | None) -> tuple[str, bool]:
+    """预览只用于说明；失败时返回有界二进制摘要，不改变私有字节。"""
+    if raw is None:
+        return "", False
+    if b"\0" in raw:
+        return "", True
+    try:
+        return raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return "", True
 
 
 @cache
@@ -272,7 +296,6 @@ class WorkspaceWriter:
                 final.st_mode,
             ) or initial.st_size != size:
                 raise ServiceError("workspace_changed", "文件读取期间变化", 409)
-            self._text(raw)
             return FileSnapshot(
                 raw,
                 stat.S_IMODE(final.st_mode),
@@ -289,14 +312,17 @@ class WorkspaceWriter:
             os.close(fd)
 
     def _text(self, raw: bytes) -> str:
-        if len(raw) > self.workspace.max_file_bytes:
-            raise ServiceError("workspace_file_limit", "修改结果超过工作区容量限制", 413)
+        self._bounded_bytes(raw)
         if b"\0" in raw:
             raise ServiceError("workspace_binary", "修改不支持二进制内容", 422)
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError:
             raise ServiceError("workspace_encoding", "修改内容须为UTF-8", 422) from None
+
+    def _bounded_bytes(self, raw: bytes) -> None:
+        if len(raw) > self.workspace.max_file_bytes:
+            raise ServiceError("workspace_file_limit", "修改结果超过工作区容量限制", 413)
 
     def capture_file(
         self,
@@ -315,6 +341,8 @@ class WorkspaceWriter:
                 authorize()
             identity = _identity(os.fstat(fd))
             snapshot = self._snapshot(fd, name, missing=True)
+            if snapshot is not None:
+                self._text(snapshot.data)
             self._check_parent(parent, identity)
             return CapturedFile(path, self.workspace.fingerprint, identity, snapshot)
 
@@ -340,6 +368,8 @@ class WorkspaceWriter:
                 try:
                     self._check_parent(parent, capture.parent_identity)
                     actual = self._snapshot(fd, name, missing=True)
+                    if actual is not None:
+                        self._text(actual.data)
                     if not self._same_before(actual, capture.snapshot):
                         raise ServiceError(
                             "workspace_checkpoint_changed", "文件在检查点捕获期间变化", 409
@@ -355,6 +385,8 @@ class WorkspaceWriter:
         fd, _parent, name = self._parent(request.path)
         try:
             before = self._snapshot(fd, name, missing=True)
+            if before is not None:
+                self._text(before.data)
             actual = before.sha256 if before is not None else None
             if actual != request.expected_sha256:
                 raise ServiceError("workspace_conflict", "文件原版本与预期SHA-256不符", 409)
@@ -396,6 +428,8 @@ class WorkspaceWriter:
         try:
             self._check_parent(parent, original.parent_identity)
             before = self._snapshot(fd, name, missing=True)
+            if before is not None and not isinstance(original.spec, ArtifactFileSpec):
+                self._text(before.data)
             if (before.data if before is not None else None) != original.after:
                 raise ServiceError("workspace_conflict", "撤销目标已偏离原应用后版本", 409)
             after = original.before.data if original.before is not None else None
@@ -431,7 +465,7 @@ class WorkspaceWriter:
         if (after is None) != (spec.mode is None):
             raise ServiceError("execution_artifact_mode", "产物内容与模式不一致", 422)
         if after is not None:
-            self._text(after)
+            self._bounded_bytes(after)
         with self._locked_parent(spec.path, lambda: False) as (fd, parent, name):
             if authorize is not None:
                 authorize()
@@ -615,7 +649,9 @@ class WorkspaceWriter:
             raise ServiceError("workspace_change_invalid", "修改提案内部标识无效", 422)
         _rename_function()
         if change.after is not None:
-            self._text(change.after)
+            self._bounded_bytes(change.after)
+            if not isinstance(change.spec, ArtifactFileSpec):
+                self._text(change.after)
         with self._locked_parent(change.spec.path, cancelled) as (fd, parent, name):
             # 校验在文件锁内，核实者不能在校验与发布之间抢先认定“没有修改”。
             if authorize is not None:

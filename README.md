@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；目录/二进制及更广文件类型继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；二进制单文件命令成果已接通，见[报告](docs/testing/reports/2026-10-10-binary-command-artifacts.md)；目录及更广输入继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
 
 ## 快速开始
 
