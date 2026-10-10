@@ -34,6 +34,7 @@ PUBLIC_UI_PATHS = frozenset(
         "/ui/checkpoint-ui.js",
         "/ui/native-checkpoint-ui.js",
         "/ui/attachments-ui.js",
+        "/ui/mcp-ui.js",
     }
 )
 _CSP = (
@@ -75,6 +76,7 @@ def mount_browser_ui(app: FastAPI) -> None:
         "checkpoint-ui.js": "text/javascript",
         "native-checkpoint-ui.js": "text/javascript",
         "attachments-ui.js": "text/javascript",
+        "mcp-ui.js": "text/javascript",
     }
 
     @app.get("/", include_in_schema=False)

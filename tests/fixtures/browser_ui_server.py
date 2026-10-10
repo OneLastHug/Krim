@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 import uvicorn
+from mcp.types import CallToolResult, ListToolsResult, Tool
 from pydantic import Field, SecretStr
 
 from krim_agent.agents import AgentDefinition
@@ -13,6 +14,7 @@ from krim_agent.api import create_app
 from krim_agent.config import Settings
 from krim_agent.execution import LinuxSandboxRunner
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES
+from krim_agent.mcp import MCPServerConfig, TrustedMCPServer
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -73,6 +75,68 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
     runtime.tools.add_global_pre(pause_native_batch)
     runtime.tools.add_global_pre(pause_native_checkpoint)
     app = create_app(runtime=runtime)
+    mcp_counts: dict[str, int] = {}
+    mcp_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+
+    class BrowserMCPSession:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def initialize(self):
+            mcp_counts[self.name] = mcp_counts.get(self.name, 0) + 1
+            if self.name == "browser_fail_mcp":
+                raise ValueError("private-browser-secret")
+            gate = mcp_gates.get(self.name)
+            if gate is not None:
+                gate[0].set()
+                await gate[1].wait()
+
+        async def list_tools(self, *, params=None):
+            return ListToolsResult(
+                tools=[Tool(name="echo", inputSchema={"type": "object", "properties": {}})]
+            )
+
+        async def call_tool(self, name, arguments):
+            return CallToolResult(content=[], structuredContent={"ok": True})
+
+    def mcp_factory(name: str):
+        async def factory():
+            return BrowserMCPSession(name)
+
+        return factory
+
+    for name in ("browser_mcp", "browser_slow_mcp", "browser_fail_mcp"):
+        app.state.mcp.register(
+            TrustedMCPServer(
+                MCPServerConfig(
+                    name=name, transport="stdio", command="trusted", readonly_tools={"echo"}
+                ),
+                "browser-mcp-v1",
+                display_name='<img src=x onerror="window.mcpExecuted=1">'
+                if name == "browser_mcp"
+                else name,
+                session_factory=mcp_factory(name),
+            )
+        )
+
+    class TestMCPControl(StrictModel):
+        name: Literal["browser_mcp", "browser_slow_mcp", "browser_fail_mcp"]
+        action: Literal["block", "release", "status"]
+
+    @app.post("/_test/mcp")
+    async def configure_mcp(payload: TestMCPControl) -> dict[str, bool | int]:
+        if payload.action == "block":
+            mcp_gates[payload.name] = (asyncio.Event(), asyncio.Event())
+        elif payload.action == "release":
+            gate = mcp_gates.pop(payload.name, None)
+            if gate is not None:
+                gate[1].set()
+        current = mcp_gates.get(payload.name)
+        return {
+            "entered": current is not None and current[0].is_set(),
+            "starts": mcp_counts.get(payload.name, 0),
+        }
+
     workspace_root = Path(directory) / "workspace"
     (workspace_root / "src").mkdir(parents=True)
     (workspace_root / "src" / "main.py").write_text(
