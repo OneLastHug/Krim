@@ -113,7 +113,7 @@ async def main():
                     head = (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
                     ).scalar()
-                    assert head == "0032_oauth_states"
+                    assert head == "0033_mcp_resource_profiles"
             print(
                 json.dumps(
                     {

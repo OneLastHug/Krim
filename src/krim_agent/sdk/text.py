@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from krim_agent.evaluation import EvalConfig, EvalDataset, EvalReport
     from krim_agent.evaluation.scorers import EvalScorer
     from krim_agent.evaluation.service import EvalRunHandle, EvaluationService
+    from krim_agent.mcp.management import MCPManager, TrustedMCPServer
 
     from .agents import AgentSession
 
@@ -318,6 +319,7 @@ class PythonAI:
         self._closed = False
         self._evaluation_service: EvaluationService | None = None
         self._agent_service: AgentService | None = None
+        self._mcp_service: MCPManager | None = None
 
     @classmethod
     async def create(
@@ -329,6 +331,7 @@ class PythonAI:
         workspace_root: str | Path | None = None,
         workspace_version: str = "local-v1",
         workspace_writable: bool = False,
+        mcp_servers: Sequence[TrustedMCPServer] | None = None,
     ) -> PythonAI:
         config = settings or Settings(database_url="sqlite+aiosqlite:///:memory:")
         database = Database(config.database_url)
@@ -370,6 +373,10 @@ class PythonAI:
                     default=True,
                     writable=workspace_writable,
                 )
+            if mcp_servers:
+                for registered in mcp_servers:
+                    ai.mcp().register(registered)
+                await ai.mcp().initialize()
             return ai
         except BaseException:
             try:
@@ -568,6 +575,23 @@ class PythonAI:
         """读取宿主登记的 Provider/工具公开指纹；不返回 URL、密钥或 callable。"""
         return self.agents().resource_inventory()
 
+    def mcp(self) -> MCPManager:
+        """可信宿主的MCP登记与同一数据库引用管理；不从HTTP导入配置。"""
+        from krim_agent.mcp.management import MCPManager
+
+        if self._closed:
+            raise ServiceError("sdk_closed", "SDK已关闭", 503)
+        if self._mcp_service is None:
+
+            def ready(names: list[str], resource_hash: str) -> None:
+                for name in names:
+                    self.agents().register_tool_version(name, "mcp-" + resource_hash)
+
+            self._mcp_service = MCPManager(
+                self.runtime.repository.database, self.runtime.tools, on_ready=ready
+            )
+        return self._mcp_service
+
     async def agent(
         self,
         name: str = "default",
@@ -713,6 +737,8 @@ class PythonAI:
             self._agent_service.assert_external_command_control()
             self._agent_service.manager.commands.assert_external_close()
             self._agent_service.workspace_batches.assert_external_close()
+        if self._mcp_service is not None:
+            self._mcp_service.assert_external_close()
         self._closed = True
         try:
             if self._evaluation_service is not None:
@@ -722,12 +748,16 @@ class PythonAI:
                 if self._agent_service is not None:
                     await self._agent_service.close()
             finally:
-                if self._owned_database is not None:
-                    try:
-                        await self.runtime.close()
-                    finally:
+                try:
+                    if self._mcp_service is not None:
+                        await self._mcp_service.close()
+                finally:
+                    if self._owned_database is not None:
                         try:
-                            await self._owned_database.close()
+                            await self.runtime.close()
                         finally:
-                            if self._owned_provider is not None:
-                                await self._owned_provider.close()
+                            try:
+                                await self._owned_database.close()
+                            finally:
+                                if self._owned_provider is not None:
+                                    await self._owned_provider.close()

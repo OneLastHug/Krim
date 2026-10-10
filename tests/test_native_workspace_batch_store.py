@@ -742,4 +742,4 @@ async def test_migration_refuses_nonempty_batch_loss(ledger):
     async with ledger.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0032_oauth_states"
+        ).scalar_one() == "0033_mcp_resource_profiles"

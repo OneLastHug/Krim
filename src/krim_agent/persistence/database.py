@@ -190,6 +190,23 @@ class OAuthStateRow(Base):
     ended_at: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class MCPResourceProfileRow(Base):
+    __tablename__ = "mcp_resource_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "revision >= 1 AND revision <= 9007199254740991", name="ck_mcp_profile_revision"
+        ),
+    )
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    resource_version: Mapped[str] = mapped_column(String(128))
+    resource_hash: Mapped[str] = mapped_column(String(64))
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    public_metadata: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class WorkflowCheckpointRow(Base):
     __tablename__ = "workflow_checkpoints"
     __table_args__ = (

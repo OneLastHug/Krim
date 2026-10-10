@@ -518,7 +518,7 @@ async def test_proposal_migration_refuses_loss_and_0017_can_upgrade(repository, 
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0032_oauth_states"
+        ).scalar() == "0033_mcp_resource_profiles"
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'upgrade.sqlite'}")
     await database.initialize()
     async with database.engine.begin() as connection:
