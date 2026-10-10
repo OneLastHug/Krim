@@ -63,8 +63,9 @@ async def assert_session_owner(
 
 async def assert_session_open(session: AsyncSession, row: AgentSessionRow) -> None:
     status = effective_status(row)
-    if status != "open":
+    if status not in {"open", "closed"}:
         raise ServiceError(f"agent_session_{status}", "Agent 会话已关闭、过期或销毁", 410)
+    # 先核验祖先链，父会话关闭时稳定返回父边界错误；不受级联写入时序影响。
     parent = row.parent_session_id
     depth = 0
     while parent is not None:
@@ -73,6 +74,8 @@ async def assert_session_open(session: AsyncSession, row: AgentSessionRow) -> No
         if ancestor is None or effective_status(ancestor) != "open" or depth > 16:
             raise ServiceError("agent_parent_session_closed", "父 Agent 会话不可执行", 409)
         parent = ancestor.parent_session_id
+    if status != "open":
+        raise ServiceError(f"agent_session_{status}", "Agent 会话已关闭、过期或销毁", 410)
 
 
 async def guard_agent_topic(
