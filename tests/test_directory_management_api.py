@@ -17,6 +17,7 @@ from sqlalchemy import func, select, update
 from krim_agent.agents import AgentProfile, AgentProfileUpdate
 from krim_agent.agents.types import AgentError
 from krim_agent.api import create_app
+from krim_agent.application.agents import AgentService
 from krim_agent.client import ClientError, KrimClient
 from krim_agent.config import Settings
 from krim_agent.persistence.database import (
@@ -24,6 +25,7 @@ from krim_agent.persistence.database import (
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryProposalRow,
 )
+from krim_agent.sdk.agents import AgentSession
 from krim_agent.workspace_directory import (
     DirectoryChangeAction,
     DirectoryChangeSpec,
@@ -32,6 +34,7 @@ from krim_agent.workspace_directory import (
 )
 
 NAMES = [
+    "directory_inspect",
     "directory_preview",
     "directory_change",
     "directory_reconcile",
@@ -823,3 +826,173 @@ async def test_lost_http_response_recovers_by_original_key_without_post(director
     await asyncio.to_thread(scenario)
     assert root.joinpath("empty").is_dir()
     assert await counts(app) == (1, 1)
+
+
+async def test_live_inspection_drives_delete_and_preserves_original_identity(directory_server):
+    url, root, _app = directory_server
+    target = root / "existing"
+    target.mkdir(mode=0o750)
+    identity = target.stat().st_ino
+    with KrimClient(url, KEY) as client:
+        agent = await asyncio.to_thread(configure, client)
+        state = await asyncio.to_thread(client.agent_directory_inspect, agent, "existing")
+        assert state.found and state.empty and state.fingerprint and state.mode == 0o750
+        missing = await asyncio.to_thread(client.agent_directory_inspect, agent, "missing")
+        assert not missing.found and missing.fingerprint is None
+        proposal = await asyncio.to_thread(
+            client.agent_directory_preview,
+            agent,
+            DirectoryPreviewRequest(
+                spec=DirectoryChangeSpec(
+                    path="existing", operation="delete", expected_fingerprint=state.fingerprint
+                ),
+                request_key="delete-existing-preview",
+            ),
+        )
+        deleted = await asyncio.to_thread(
+            client.agent_directory_change,
+            agent,
+            DirectoryChangeAction(
+                proposal_id=proposal.proposal_id,
+                action="apply",
+                expected_revision=0,
+                request_key="delete-existing",
+            ),
+            confirmed=True,
+        )
+        assert deleted.status == "done" and not target.exists()
+        current = await asyncio.to_thread(
+            client.agent_directory_query, agent, kind="proposal", identifier=proposal.proposal_id
+        )
+        restored = await asyncio.to_thread(
+            client.agent_directory_change,
+            agent,
+            DirectoryChangeAction(
+                proposal_id=proposal.proposal_id,
+                action="undo",
+                expected_revision=current.proposal.revision,
+                request_key="undo-existing",
+            ),
+            confirmed=True,
+        )
+        assert restored.status == "done" and target.stat().st_ino == identity
+
+
+async def test_live_inspection_rejects_nonempty_and_closed_or_unsafe_access(directory_server):
+    url, root, _app = directory_server
+    target = root / "nonempty"
+    target.mkdir()
+    (target / "child").write_text("x")
+    with KrimClient(url, KEY) as client:
+        agent = await asyncio.to_thread(configure, client)
+        state = await asyncio.to_thread(client.agent_directory_inspect, agent, "nonempty")
+        assert state.found and not state.empty
+        with pytest.raises(ClientError) as rejected:
+            await asyncio.to_thread(
+                client.agent_directory_preview,
+                agent,
+                DirectoryPreviewRequest(
+                    spec=DirectoryChangeSpec(
+                        path="nonempty", operation="delete", expected_fingerprint=state.fingerprint
+                    ),
+                    request_key="delete-nonempty",
+                ),
+            )
+        assert rejected.value.code == "workspace_directory_nonempty"
+        for path in ("/tmp/escape", "../escape", "."):
+            with pytest.raises((ClientError, ValidationError)):
+                await asyncio.to_thread(client.agent_directory_inspect, agent, path)
+        session = await asyncio.to_thread(client.agent_session, agent)
+        await asyncio.to_thread(client.agent_session_close, agent, session.revision)
+        with pytest.raises(ClientError) as closed:
+            await asyncio.to_thread(client.agent_directory_inspect, agent, "nonempty")
+        assert closed.value.code == "agent_session_closed"
+
+
+async def test_inspection_uses_readonly_workspace_and_original_sdk(runtime, tmp_path):
+    service = AgentService(runtime, runtime.settings)
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    target = readonly / "empty"
+    target.mkdir()
+    service.register_workspace("readonly", readonly, version="1", writable=False)
+    await service.profile_put(
+        AgentProfileUpdate(
+            expected_revision=0,
+            config=AgentProfile(
+                name="directory-reader",
+                description="只读目录检查",
+                workspace_key="readonly",
+                tool_names=["directory_inspect"],
+            ),
+        )
+    )
+    view = await service.spawn("directory-reader")
+    try:
+        inspected = await AgentSession(service, view.agent_id).inspect_directory("empty")
+        assert inspected.found and inspected.empty
+    finally:
+        await service.close()
+
+
+async def test_live_inspection_rest_rejects_links_files_sensitive_and_extra_parameters(
+    directory_server,
+):
+    url, root, app = directory_server
+    root.joinpath("ordinary.txt").write_text("x")
+    root.joinpath("target").mkdir()
+    root.joinpath("link").symlink_to(root / "target", target_is_directory=True)
+    with KrimClient(url, KEY) as client:
+        agent = await asyncio.to_thread(configure, client)
+    path = f"/v1/agents/{agent}/workspace/directory-state"
+    async with httpx.AsyncClient(base_url=url, headers={"Authorization": f"Bearer {KEY}"}) as api:
+        for params in (
+            {"path": "/tmp"},
+            {"path": "."},
+            {"path": "../escape"},
+            {"path": "target", "root": str(root)},
+            [("path", "target"), ("path", "link")],
+            {"path": "ordinary.txt"},
+            {"path": "link"},
+            {"path": ".git"},
+        ):
+            result = await api.get(path, params=params)
+            assert result.status_code in {403, 422}, result.text
+            assert str(root) not in result.text
+        result = await api.get(path, params={"path": "target"})
+        assert result.status_code == 200 and result.json()["empty"]
+        assert set(result.json()) == {"path", "found", "fingerprint", "mode", "empty"}
+    assert await counts(app) == (0, 0)
+
+
+async def test_inspection_cli_and_final_hook_keep_original_fingerprint(directory_server):
+    url, root, app = directory_server
+    root.joinpath("existing").mkdir()
+    with KrimClient(url, KEY) as client:
+        agent = await asyncio.to_thread(configure, client)
+    code, stdout, stderr = await run_cli(url, "inspect", agent, "existing")
+    assert code == 0, stderr
+    original = json.loads(stdout)
+    assert original["found"] and original["fingerprint"]
+    code, stdout, stderr = await run_cli(url, "inspect", agent, "missing")
+    assert code == 0 and not json.loads(stdout)["found"], stderr
+
+    async def post(definition, value, _context):
+        if definition.name == "directory_inspect":
+            value["fingerprint"] = "0" * 64
+        return value
+
+    handle = app.state.agents._handle(agent)
+    handle.runtime.tools.add_global_post(post)
+    with KrimClient(url, KEY) as client:
+        with pytest.raises(ClientError) as forged:
+            await asyncio.to_thread(client.agent_directory_inspect, agent, "existing")
+        assert forged.value.code == "workspace_directory_receipt_unverified"
+
+    async def deny(*_args):
+        return "deny"
+
+    handle.runtime.tool_policy = deny
+    code, _stdout, stderr = await run_cli(url, "inspect", agent, "existing", "--confirm")
+    assert code == 1 and "permission_denied" in stderr
+    assert await counts(app) == (0, 0)

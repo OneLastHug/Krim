@@ -23,6 +23,7 @@ from krim_agent.sdk import (
 
 KEY = "wheel-directory-synthetic-key"
 NAMES = [
+    "directory_inspect",
     "directory_preview",
     "directory_change",
     "directory_query",
@@ -122,6 +123,8 @@ def main():
             )
         )
         agent = client.agent_spawn("directory-wheel", persistent=True).agent_id
+        missing = cli(url, env, "inspect", agent, "empty")
+        assert not missing["found"] and missing["fingerprint"] is None
         intent = folder / "intent.json"
         intent.write_text(
             DirectoryPreviewRequest(
@@ -142,6 +145,9 @@ def main():
         )
         result = client.agent_directory_change(agent, action, confirmed=True)
         assert result.status == "done" and root.joinpath("empty").is_dir()
+        inspected = client.agent_directory_inspect(agent, "empty")
+        assert inspected.found and inspected.empty and result.receipt is not None
+        assert inspected.fingerprint == result.receipt.after_fingerprint
         identity = root.joinpath("empty").stat().st_ino
         assert (
             cli(url, env, "operation-by-key", agent, "apply")["operation"]["operation_id"]
@@ -206,6 +212,7 @@ def main():
             {
                 "package": krim_agent.__file__,
                 "rest_client_cli": True,
+                "directory_inspection": True,
                 "service_killed": True,
                 "cold_read_without_replay": True,
                 "undo": True,

@@ -95,6 +95,34 @@ class DirectoryOperationRequest(StrictModel):
     operation_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+class DirectoryInspectRequest(StrictModel):
+    path: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def relative_path(self) -> DirectoryInspectRequest:
+        try:
+            if not Workspace._parts(self.path):
+                raise ValueError("目录检查须指定相对目录路径")
+        except ServiceError as error:
+            raise ValueError(str(error)) from error
+        return self
+
+
+class DirectoryInspectView(StrictModel):
+    path: str = Field(min_length=1, max_length=512)
+    found: bool
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mode: int | None = Field(default=None, ge=0, le=0o777)
+    empty: bool | None = None
+
+    @model_validator(mode="after")
+    def presence(self) -> DirectoryInspectView:
+        present = (self.fingerprint is not None, self.mode is not None, self.empty is not None)
+        if any(present) != self.found or self.found and not all(present):
+            raise ValueError("目录存在状态与指纹/模式/空性不一致")
+        return self
+
+
 DirectoryQueryKind = Literal[
     "proposal", "operation", "history", "proposals", "proposal_by_key", "operation_by_key"
 ]

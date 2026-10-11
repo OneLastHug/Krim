@@ -101,6 +101,8 @@ from krim_agent.workspace_checkpoint import (
 from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -521,19 +523,24 @@ class AgentService:
         default: bool = False,
         writable: bool = False,
     ) -> WorkspaceBinding:
-        if writable or isinstance(root, Workspace) and root.writable:
-            existing = {item.name: item for item in self.runtime.tools.definitions}
-            for definition in (*workspace_change_tools(), *directory_change_tools()):
-                if definition.name in existing and existing[definition.name] is not definition:
-                    raise ValueError("工作区修改工具名称已由其它定义占用")
+        writing = writable or isinstance(root, Workspace) and root.writable
+        selected = (
+            (*workspace_change_tools(), *directory_change_tools())
+            if writing
+            else tuple(
+                item for item in directory_change_tools() if item.name == "directory_inspect"
+            )
+        )
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        for definition in selected:
+            if definition.name in existing and existing[definition.name] is not definition:
+                raise ValueError("工作区目录工具名称已由其它定义占用")
         binding = self.resources.register_workspace(
             key, root, version=version, owned=owned, writable=writable
         )
-        if binding.workspace.writable:
-            registered_names = {item.name for item in self.runtime.tools.definitions}
-            for definition in (*workspace_change_tools(), *directory_change_tools()):
-                if definition.name not in registered_names:
-                    self.runtime.tools.register(definition)
+        for definition in selected:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
         if default:
             self.runtime.workspace = binding
         return binding
@@ -860,6 +867,9 @@ class AgentService:
                 "workspace_directory_operation": 422,
                 "workspace_directory_corrupt": 409,
                 "workspace_directory_self_close": 409,
+                "workspace_directory_changed": 409,
+                "workspace_directory_access": 403,
+                "workspace_directory_exists": 409,
             }.get(error.code, 502)
             raise ServiceError(error.code, str(error), status) from error
         finally:
@@ -868,6 +878,15 @@ class AgentService:
     async def workspace_read(self, agent_id: str, request: ReadFileInput) -> WorkspaceFile:
         return WorkspaceFile.model_validate(
             await self._workspace_call(agent_id, "workspace_read", request.model_dump())
+        )
+
+    async def directory_inspect(
+        self, agent_id: str, request: DirectoryInspectRequest, *, confirmed: bool = False
+    ) -> DirectoryInspectView:
+        return DirectoryInspectView.model_validate(
+            await self._workspace_call(
+                agent_id, "directory_inspect", request.model_dump(), confirmed=confirmed
+            )
         )
 
     async def directory_preview(

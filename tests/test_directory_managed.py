@@ -30,6 +30,7 @@ async def setup(runtime, tmp_path, policy=None):
                 description="directory worker",
                 workspace_key="files",
                 tool_names=[
+                    "directory_inspect",
                     "directory_preview",
                     "directory_change",
                     "directory_reconcile",

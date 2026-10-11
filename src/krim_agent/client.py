@@ -104,6 +104,8 @@ from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpoint
 from .workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -742,6 +744,22 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceChangeView.model_validate_json(response.content)
+
+    def agent_directory_inspect(
+        self, agent_id: str, path: str, *, confirmed: bool = False
+    ) -> DirectoryInspectView:
+        selection = DirectoryInspectRequest(path=path)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-state",
+            params={"path": selection.path, "confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        view = DirectoryInspectView.model_validate_json(response.content)
+        if view.path != selection.path:
+            raise ClientError(
+                "目录检查回程与原路径不一致", code="workspace_directory_response", status=502
+            )
+        return view
 
     def agent_directory_preview(
         self, agent_id: str, request: DirectoryPreviewRequest, *, confirmed: bool = False

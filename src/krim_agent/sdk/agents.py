@@ -46,6 +46,8 @@ from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
     DirectoryChangeSpec,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -139,6 +141,13 @@ class AgentSession:
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)
+
+    async def inspect_directory(
+        self, path: str, *, confirmed: bool = False
+    ) -> DirectoryInspectView:
+        return await self.service.directory_inspect(
+            self.agent_id, DirectoryInspectRequest(path=path), confirmed=confirmed
+        )
 
     async def preview_directory_change(
         self,

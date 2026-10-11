@@ -178,6 +178,8 @@ from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, Workspace
 from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -978,6 +980,20 @@ def create_app(
     @app.post("/v1/agents/{agent_id}/workspace/search")
     async def agent_workspace_search(agent_id: str, payload: SearchFilesInput) -> WorkspaceSearch:
         return await agent_service.workspace_search(agent_id, payload)
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-state")
+    async def agent_directory_inspect(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        path: str = Query(min_length=1, max_length=512),
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryInspectView:
+        _directory_parameters(request, {"path"})
+        try:
+            selection = DirectoryInspectRequest(path=path)
+        except ValidationError:
+            raise ServiceError("invalid_request", "目录相对路径无效", 422) from None
+        return await agent_service.directory_inspect(agent_id, selection, confirmed=confirmed)
 
     @app.post("/v1/agents/{agent_id}/workspace/directory-changes/preview")
     async def agent_directory_preview(
