@@ -1542,7 +1542,9 @@ class AgentService:
 
     async def workspace_cancel_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
         session = await self.session(agent_id)
-        return await self.workspace_mixed_batches.cancel(f"session:{session.session_id}", batch_id)
+        scope = f"session:{session.session_id}"
+        await self.manager.mixed_batch_writer.cancel_if_running(scope, batch_id)
+        return await self.workspace_mixed_batches.cancel(scope, batch_id)
 
     async def workspace_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
         session = await self.session(agent_id)
