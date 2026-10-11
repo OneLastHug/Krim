@@ -1,9 +1,11 @@
 """Playwright 的本机 Python 服务；临时 SQLite、合作式慢 fake 流与测试 Key。"""
 
 import asyncio
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
+from uuid import uuid4
 
 import httpx
 import uvicorn
@@ -31,13 +33,14 @@ from krim_agent.persistence.database import (
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryProposalRow,
 )
-from krim_agent.protocol.domain import ServiceError
+from krim_agent.protocol.domain import ChatRequest, ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import FakeProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolContext, ToolDefinition
 from krim_agent.workspace import WORKSPACE_TOOL_NAMES
+from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 
 with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directory:
     settings = Settings(
@@ -377,6 +380,48 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
             }
         )
         return {"mode": payload.mode}
+
+    class TestModelMixedControl(StrictModel):
+        agent_id: str = Field(min_length=36, max_length=36, pattern=r"^[a-f0-9-]{36}$")
+        request: MixedBatchRequest
+
+    @app.post("/_test/model-mixed")
+    async def create_model_mixed_batch(payload: TestModelMixedControl) -> MixedBatchView:
+        """只在Playwright服务中用可信ToolContext创建模型来源批次。"""
+        agents = app.state.agents
+        handle = agents._handle(payload.agent_id)
+        session = await agents.session(payload.agent_id)
+        run, _ = await runtime.repository.begin_run(
+            handle.topic_id,
+            ChatRequest(text="browser model mixed", idempotency_key=f"browser-model-{uuid4()}"),
+            agent_session_id=session.session_id,
+            agent_id=payload.agent_id,
+            agent_owner_id=agents.manager.owner_id,
+        )
+        await runtime.repository.set_running(run.id)
+        context = ToolContext(
+            handle.runtime.tools,
+            run_id=run.id,
+            topic_id=run.topic_id,
+            call_id="browser-model-call",
+            agent_id=payload.agent_id,
+            session_id=session.session_id,
+            origin="model",
+            workspace=handle.definition.workspace,
+            workspace_changes=agents.manager.workspace_changes,
+            directory_changes=agents.manager.directory_changes,
+            workspace_mixed_batches=agents.manager.mixed_batch_writer,
+            policy=lambda _definition, _context: asyncio.sleep(0, result="allow"),
+        )
+        try:
+            value = await agents.manager.mixed_batch_writer.tool_start(
+                payload.request.model_dump(), context
+            )
+            await runtime.repository.finish(run.id, "completed", None, [])
+            return MixedBatchView.model_validate_json(json.dumps(value))
+        except Exception as error:
+            await runtime.repository.finish(run.id, "failed", str(error), [])
+            raise
 
     class TestAgentInventory(StrictModel):
         action: Literal["create", "register"]

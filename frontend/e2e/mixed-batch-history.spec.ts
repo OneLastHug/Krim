@@ -67,6 +67,32 @@ test("混合历史真实两来源、原操作导航、刷新和重载零新批�
   } finally { await destroy(request, value); }
 });
 
+test("模型创建的混合批次由变更清单刷新和历史读取", async ({ page, request }) => {
+  const value = await agent(request, "mixed-history-model");
+  try {
+    const targets = await preview(request, value);
+    const created = await request.post("/_test/model-mixed", {
+      data: { agent_id: value.agent_id, request: { action: "apply", request_key: "browser-model", targets } },
+    });
+    expect(created.ok()).toBeTruthy();
+    const batch = await created.json();
+    expect(batch.status).toBe("done");
+    expect(created.headers()["content-type"]).toContain("application/json");
+    expect(JSON.stringify(batch)).not.toContain("browser-model-call");
+    let starts = 0;
+    page.on("request", item => { if (item.method() === "POST" && /\/mixed-batches(?:\?|$)/.test(item.url())) starts++; });
+    await connect(page, value);
+    await expect(page.locator(".mixed-batch-result")).toContainText(batch.batch_id);
+    await expect(page.locator("#change-mixed-results [data-mixed-batch-item]")).toHaveCount(2);
+    await page.reload();
+    await connect(page, value);
+    await expect(page.locator(".mixed-batch-result")).toContainText(batch.batch_id);
+    expect(starts).toBe(0);
+    const history = await (await request.get(`/v1/agents/${value.agent_id}/workspace/mixed-batches/history`)).json();
+    expect(history.items[0].batch_id).toBe(batch.batch_id);
+  } finally { await destroy(request, value); }
+});
+
 test("混合原键缺失、UTF8纯文本、Locale草稿与关闭会话历史", async ({ page, request }) => {
   const value = await agent(request, "mixed-history-keys");
   const key = '<img src=x onerror="window.mixedExecuted=1">中文?/#%';
