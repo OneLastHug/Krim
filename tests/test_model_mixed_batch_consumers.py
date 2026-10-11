@@ -125,3 +125,51 @@ async def test_public_sdk_cancel_routes_to_model_producer_before_child_wait(runt
         assert not (tmp_path / "file.txt").exists() and not (tmp_path / "empty").exists()
     finally:
         await service.close()
+
+
+async def test_same_call_read_retry_cannot_detach_original_cancel_producer(
+    runtime, tmp_path, monkeypatch
+):
+    service, agent, provider = await setup(runtime, tmp_path)
+    entered = asyncio.Event()
+    child_closed = asyncio.Event()
+    parent_context = None
+    execution = None
+    writer = service.manager.mixed_batch_writer
+    try:
+
+        async def pause_heartbeat(_state, _worker):
+            # 固定取消路径的观测窗口，不能用稍后的heartbeat掩盖公开取消断口。
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(writer, "_renew", pause_heartbeat)
+
+        async def pause(definition, context):
+            nonlocal parent_context
+            if definition.name == "workspace_mixed_start":
+                parent_context = context
+            if definition.name == "workspace_change":
+                entered.set()
+                try:
+                    async with context.human_wait():
+                        await asyncio.Event().wait()
+                finally:
+                    child_closed.set()
+
+        service._handle(agent.agent_id).runtime.tools.add_global_pre(pause)
+        execution = asyncio.create_task(agent.execute("原调用重读", idempotency_key="retry-read"))
+        await asyncio.wait_for(entered.wait(), 10)
+        assert parent_context is not None
+        repeated = await writer.tool_start(provider.request.model_dump(), parent_context)
+        assert repeated["producer_status"] == "running" and not child_closed.is_set()
+        cancelled = await agent.cancel_mixed_change_batch(repeated["batch_id"])
+        assert cancelled.producer_status == "cancelled"
+        assert child_closed.is_set(), "同键只读重试不能解除原模型任务的公开取消关联"
+        assert not writer._tasks
+        assert all(item.operation is None for item in cancelled.items)
+        assert not (tmp_path / "file.txt").exists() and not (tmp_path / "empty").exists()
+        assert (await asyncio.wait_for(execution, 10)).status in {"failed", "aborted"}
+    finally:
+        await service.close()
+        if execution is not None:
+            await asyncio.gather(execution, return_exceptions=True)

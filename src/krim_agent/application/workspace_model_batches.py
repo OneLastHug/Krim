@@ -208,7 +208,9 @@ class ModelMixedBatchService:
                             )
             finally:
                 if state.batch_id is not None:
-                    self._batches.pop(state.batch_id, None)
+                    entry = self._batches.get(state.batch_id)
+                    if entry is not None and entry[1] is worker:
+                        self._batches.pop(state.batch_id, None)
                 leave_workspace_execution(marker)
 
     async def validate_start(self, value: Any, context: ToolContext) -> None:
