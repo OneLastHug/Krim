@@ -66,7 +66,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "package": krim_agent.__file__,
-                    "migration": "0037_command_directory_sources",
+                    "migration": "0038_directory_move_target_lock",
                     "revision": enabled.profile.revision,
                     "resource_hash": view.resource_hash,
                     "secret_free": True,

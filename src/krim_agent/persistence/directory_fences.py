@@ -34,6 +34,8 @@ async def assert_file_directory_fence(session: AsyncSession, prepared: PreparedF
             or_(
                 WorkspaceDirectoryLockRow.lock_key
                 == entry_key(prepared.parent_identity, prepared.spec.path),
+                WorkspaceDirectoryLockRow.target_lock_key
+                == entry_key(prepared.parent_identity, prepared.spec.path),
                 WorkspaceDirectoryLockRow.directory_key == directory_key(prepared.parent_identity),
             )
         )

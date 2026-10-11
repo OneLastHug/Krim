@@ -117,12 +117,12 @@ async def main() -> None:
                 )
                 assert (
                     await sql.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one() == "0037_command_directory_sources"
+                ).scalar_one() == "0038_directory_move_target_lock"
             print(
                 json.dumps(
                     {
                         "package": krim_agent.__file__,
-                        "schema": "0037_command_directory_sources",
+                        "schema": "0038_directory_move_target_lock",
                         "source_links": 1,
                         "created": True,
                         "undone": True,
