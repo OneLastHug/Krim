@@ -46,6 +46,8 @@ class ModelMixedBatchService:
         self.changes = changes
         self.store = MixedBatchStore(changes.store, directories.store)
         self._tasks: dict[str, tuple[str, asyncio.Task[None]]] = {}
+        # 当前模型生产者的父批次索引，供公开取消入口收束同一原任务。
+        self._batches: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._closed = False
 
     async def _cancel_parent(self, scope: str, state: _Invocation) -> None:
@@ -138,6 +140,7 @@ class ModelMixedBatchService:
             state.batch_id, state.result = view.batch_id, view
             if not created:
                 return
+            self._batches[view.batch_id] = (scope, worker)
             execution = await self.store.execution(scope, view.batch_id)
             state.token = execution.token
             heartbeat = asyncio.create_task(self._renew(state, worker))
@@ -204,6 +207,8 @@ class ModelMixedBatchService:
                                 lambda: None,
                             )
             finally:
+                if state.batch_id is not None:
+                    self._batches.pop(state.batch_id, None)
                 leave_workspace_execution(marker)
 
     async def validate_start(self, value: Any, context: ToolContext) -> None:
@@ -225,6 +230,19 @@ class ModelMixedBatchService:
                 "workspace_mixed_model_reentrant", "模型批次回调不能关闭当前执行服务", 409
             )
 
+    async def cancel_if_running(self, scope: str, batch_id: str) -> bool:
+        """公开取消入口收束模型生产者；host批次返回False交给原Worker服务。"""
+        entry = self._batches.get(batch_id)
+        if entry is None or entry[0] != scope:
+            return False
+        await self.store.cancel(scope, batch_id)
+        task = entry[1]
+        if not task.done() and not task.cancelling():
+            task.cancel()
+        if not inside_workspace_execution():
+            await asyncio.gather(task, return_exceptions=True)
+        return True
+
     async def close(self) -> None:
         self.assert_external_close()
         self._closed = True
@@ -233,3 +251,4 @@ class ModelMixedBatchService:
             if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self._batches.clear()
