@@ -28,6 +28,7 @@ from krim_agent.workspace_directory import (
     DirectorySnapshot,
     PreparedDirectoryChange,
 )
+from krim_agent.workspace_mixed_batch import MixedBatchFence
 
 from .database import (
     Database,
@@ -38,6 +39,7 @@ from .database import (
     WorkspaceFileLockRow,
 )
 from .directory_fences import directory_key, entry_key
+from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request
 from .workspace_edits import WorkspaceEditStore, decode_prepared, digest
 
 
@@ -385,7 +387,12 @@ class WorkspaceDirectoryStore:
             return self._view(row) if row is not None else None
 
     async def find_action(
-        self, scope: str, request: DirectoryChangeAction, fingerprint: str
+        self,
+        scope: str,
+        request: DirectoryChangeAction,
+        fingerprint: str,
+        *,
+        mixed_fence: MixedBatchFence | None = None,
     ) -> StoredDirectoryAttempt | None:
         wanted = digest({"request": request.model_dump(mode="json"), "resource": fingerprint})
         async with self.database.write_lock, self.database.sessions() as session:
@@ -400,6 +407,16 @@ class WorkspaceDirectoryStore:
                 raise ServiceError(
                     "workspace_idempotency_conflict", "目录动作键已绑定其他意图", 409
                 )
+            await assert_mixed_request(
+                session,
+                self.owner_id,
+                scope,
+                fingerprint,
+                "directory",
+                request,
+                mixed_fence,
+                row.operation_id if row is not None else None,
+            )
             return self._attempt(row) if row is not None else None
 
     async def history(self, scope: str, proposal_id: str) -> list[StoredDirectoryAttempt]:
@@ -619,6 +636,7 @@ class WorkspaceDirectoryStore:
         *,
         run_id: str | None = None,
         call_id: str | None = None,
+        mixed_fence: MixedBatchFence | None = None,
     ) -> tuple[StoredDirectoryAttempt, bool]:
         self.files._key(request.request_key)
         validate(prepared)
@@ -631,6 +649,16 @@ class WorkspaceDirectoryStore:
                     WorkspaceDirectoryAttemptRow.scope_id == scope,
                     WorkspaceDirectoryAttemptRow.request_key == request.request_key,
                 )
+            )
+            mixed_child = await assert_mixed_request(
+                session,
+                self.owner_id,
+                scope,
+                fingerprint,
+                "directory",
+                request,
+                mixed_fence,
+                previous.operation_id if previous is not None else None,
             )
             if previous is not None:
                 if previous.request_hash != wanted_hash:
@@ -767,6 +795,9 @@ class WorkspaceDirectoryStore:
             )
             session.add(row)
             await session.flush()
+            if mixed_child is not None:
+                mixed_child.directory_operation_id = identifier
+                mixed_child.admission_open = False
             prepared_spec = prepared.spec
             prepared_target_path = (
                 prepared_spec.target_path
@@ -805,6 +836,7 @@ class WorkspaceDirectoryStore:
             if row is None or row.scope_id != scope:
                 raise ServiceError("workspace_directory_operation_not_found", "目录操作不存在", 404)
             await self.files._scope(session, scope, writing=True, run_id=row.run_id)
+            await assert_mixed_execution(session, self.owner_id, "directory", identifier)
             if (
                 row.status != "running"
                 or row.owner_id != self.owner_id
@@ -944,6 +976,13 @@ class WorkspaceDirectoryStore:
                 return self._attempt(row)
             if not resolving and row.owner_id != self.owner_id:
                 raise ServiceError("workspace_directory_lease_lost", "目录回执不属于原owner", 409)
+            proposal = await self._proposal(session, scope, row.proposal_id)
+            if row.action == "keep" and effect.receipt.status == "done" and not resolving:
+                await self.files._scope(session, scope, writing=True, run_id=row.run_id)
+                await self.files._resource(
+                    session, scope, proposal.workspace_key, proposal.resource_fingerprint
+                )
+                await assert_mixed_execution(session, self.owner_id, "directory", identifier)
             if resolving and row.status != "uncertain":
                 raise ServiceError("workspace_directory_state", "只有unknown可核实", 409)
             row.receipt_history = [*row.receipt_history, raw]
@@ -959,7 +998,6 @@ class WorkspaceDirectoryStore:
             row.cleanup_pending = row.recovery is not None
             row.owner_id, row.lease_expires_at = None, None
             row.updated_at = utc_now()
-            proposal = await self._proposal(session, scope, row.proposal_id)
             proposal.status = (
                 {"apply": "applied", "undo": "undone", "keep": "kept"}[row.action]
                 if row.status == "done"

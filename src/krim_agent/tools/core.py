@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from krim_agent.workspace import WorkspaceBinding
     from krim_agent.workspace_checkpoint import CheckpointCaptureFence
     from krim_agent.workspace_list import NativeBatchFence
+    from krim_agent.workspace_mixed_batch import MixedBatchFence
     from krim_agent.workspace_restore import CheckpointRestoreFence
 
 if TYPE_CHECKING:
@@ -146,6 +147,7 @@ class ToolContext:
     directory_changes: DirectoryChangeBackend | None = None
     _directory_response: tuple[str, str] | None = field(default=None, repr=False)
     workspace_batch: NativeBatchFence | None = None
+    mixed_batch: MixedBatchFence | None = None
     checkpoint_capture: CheckpointCaptureFence | None = None
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
@@ -184,6 +186,7 @@ class ToolContext:
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
             workspace_batch=self.workspace_batch,
+            mixed_batch=self.mixed_batch,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,

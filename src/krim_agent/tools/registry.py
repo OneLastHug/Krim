@@ -167,7 +167,14 @@ class ToolRegistry:
         parent: ToolContext,
         consume: Callable[[ToolDefinition, Any], Result],
     ) -> Result:
+        mixed_fence = parent.mixed_batch
         try:
+            if mixed_fence is not None and name != (
+                "workspace_change" if mixed_fence.source == "file" else "directory_change"
+            ):
+                raise ToolError(
+                    "workspace_mixed_batch_action", "混合子项只能调用原来源的冻结动作工具"
+                )
             if parent.depth == 0 and parent.model_tools is not None:
                 candidate = parent.model_tools.get(name)
                 if candidate is None:
@@ -231,6 +238,12 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if mixed_fence is not None and (
+                    child.mixed_batch != mixed_fence or child.arguments != original_arguments
+                ):
+                    raise ToolError(
+                        "workspace_mixed_batch_fence_mismatch", "中间件不能替换原混合子项绑定"
+                    )
                 if child.arguments != original_arguments and parent.policy is not None:
                     decision = await parent.policy(definition, child)
                     if decision == "ask" and child.approval_handler is not None:

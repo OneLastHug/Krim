@@ -83,6 +83,12 @@ class DirectoryChangeService:
         if self._closed:
             raise ToolError("workspace_directory_closed", "目录事务服务已关闭")
         try:
+            if context.mixed_batch is not None and (
+                context.mixed_batch.source != "directory" or operation != "change"
+            ):
+                raise ServiceError(
+                    "workspace_mixed_batch_action", "混合子项只能执行原来源的冻结动作", 403
+                )
             if operation == "source_query":
                 catalog_request = CommandDirectoryChangesRequest.model_validate(payload)
                 scope, catalog_binding, catalog_execution = await self._source_guard(
@@ -383,7 +389,9 @@ class DirectoryChangeService:
         self, request: DirectoryChangeAction, context: ToolContext, abort: Event
     ) -> DirectoryAttemptView:
         scope, binding = await self.changes._guard(context)
-        previous = await self.store.find_action(scope, request, binding.fingerprint)
+        previous = await self.store.find_action(
+            scope, request, binding.fingerprint, mixed_fence=context.mixed_batch
+        )
         if previous is not None:
             return previous.view
         original = await self.store.get(scope, request.proposal_id)
@@ -415,6 +423,7 @@ class DirectoryChangeService:
             prepared,
             run_id=context.run_id if context.run_id != "local" else None,
             call_id=context.call_id,
+            mixed_fence=context.mixed_batch,
         )
         if not created:
             return attempt.view
