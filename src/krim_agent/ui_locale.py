@@ -751,6 +751,38 @@ TRANSLATIONS: dict[str, str] = {
     "批次已确认": "Batch confirmed",
     "操作已拒绝": "Operation rejected",
     "批次结果待核实": "Batch result needs verification",
+    "混合提案审阅": "Mixed proposal review",
+    "读取文件和目录提案": "Read file and directory proposals",
+    "清空混合选择": "Clear mixed selection",
+    "选择最多32项原提案，确认前重新核对版本": (
+        "Select up to 32 original proposals; versions are checked before confirmation"
+    ),
+    "较新文件提案": "Newer file proposals",
+    "较早文件提案": "Older file proposals",
+    "较新目录提案": "Newer directory proposals",
+    "较早目录提案": "Older directory proposals",
+    "混合响应未确认，请先查询原键": "Mixed response is uncertain; query the original key first",
+    "查询原混合请求": "Read original mixed request",
+    "明确重试原混合请求": "Explicitly retry original mixed request",
+    "本地混合恢复记录无效，请查询历史": "Local mixed recovery record is invalid; read the history",
+    "混合提案版本或状态已变化，请重新审阅": (
+        "Mixed proposal version or state changed; review it again"
+    ),
+    "工作区资源版本已变化，请查询原历史": (
+        "Workspace resource version changed; read original history"
+    ),
+    "确认所选混合提案？": "Confirm the selected mixed proposals?",
+    "各项独立执行，可能部分成功": "Items execute independently and may succeed partially",
+    "最多选择32项混合提案": "Select at most 32 mixed proposals",
+    "已选择{count}项混合提案": "{count} mixed proposals selected",
+    "查看所选文件差异": "View selected file diff",
+    "差异摘要已截断，执行使用原完整提案": (
+        "Diff preview is truncated; execution uses the original complete proposal"
+    ),
+    "清除无效混合恢复记录": "Clear invalid mixed recovery record",
+    "仅清除无效本地记录，不会重发批次？": (
+        "Clear only the invalid local record without replaying the batch?"
+    ),
 }
 
 

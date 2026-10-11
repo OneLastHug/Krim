@@ -280,6 +280,10 @@ export interface MixedBatchItemView {
   path: string; target_path: string | null; status: NativeBatchItemView["status"];
   operation: WorkspaceAttemptView | DirectoryAttemptView | null; error_code: string | null;
 }
+export interface MixedBatchRequest {
+  action: WorkspaceAction; request_key: string;
+  targets: Array<{ source: "file" | "directory"; proposal_id: string; expected_revision: number }>;
+}
 export interface MixedBatchView {
   batch_id: string; scope_id: string; request_key: string; snapshot_revision: string;
   action: WorkspaceAction; status: NativeBatchView["status"]; producer_status: NativeBatchView["producer_status"];
