@@ -4,6 +4,7 @@ import { t } from "./i18n.js";
 import { TasksUI } from "./tasks-ui.js";
 import { WorkspaceUI } from "./workspace-ui.js";
 import { WorkspaceChangesUI } from "./workspace-changes-ui.js";
+import { DirectoryChangesUI } from "./directory-changes-ui.js";
 import { CommandsUI } from "./commands-ui.js";
 export class AgentsUI {
     root;
@@ -24,6 +25,7 @@ export class AgentsUI {
         for (const [id, card] of this.cards)
             if (!live.has(id)) {
                 card.commands.dispose();
+                card.directories.dispose();
                 card.root.remove();
                 this.cards.delete(id);
             }
@@ -40,6 +42,7 @@ export class AgentsUI {
             card.tasks.update();
             card.workspace.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open");
             card.changes.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
+            card.directories.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.commands.update(agent);
             card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
             const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
@@ -112,9 +115,10 @@ export class AgentsUI {
         const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
         const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
         const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
+        const directories = new DirectoryChangesUI(agent.agent_id, this.actions.notice);
         const commands = new CommandsUI(agent.agent_id, this.actions.notice, proposalId => changes.focusProposal(proposalId));
-        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, commands.root);
-        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, commands, checkpoints };
+        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, commands.root);
+        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, commands, checkpoints };
         execute.onclick = () => {
             const prompt = input.value.trim() || this.actions.prompt();
             if (!prompt) {

@@ -279,6 +279,77 @@ TRANSLATIONS: dict[str, str] = {
     ),
     "工作区": "Workspace",
     "文件修改与历史": "File changes and history",
+    "目录事务与历史": "Directory changes and history",
+    "准备目录事务": "Prepare directory change",
+    "目录操作": "Directory operation",
+    "目录相对路径": "Directory relative path",
+    "新建目录": "Create directory",
+    "删除空目录": "Delete empty directory",
+    "新目录权限（十进制）": "New directory mode (decimal)",
+    "原目录指纹": "Original directory fingerprint",
+    "结果目录指纹": "Resulting directory fingerprint",
+    "检查目录状态": "Inspect directory state",
+    "预览目录事务": "Preview directory change",
+    "刷新目录历史": "Refresh directory history",
+    "权限模式": "Permission mode",
+    "空目录": "Empty directory",
+    "非空目录": "Nonempty directory",
+    "目录提案已保存，请审阅后确认": "Directory proposal saved; review before confirming",
+    "当前Agent未授权目录历史查询": "This Agent has no directory history permission",
+    "目录检查回程与原路径不一致": "Directory inspection does not match the requested path",
+    "目录回程与原提案不一致": "Directory response does not match the original proposal",
+    "目录查询回程类型无效": "Invalid directory query response type",
+    "尚未找到原目录请求，请查询或明确重试原参数": (
+        "The original directory request was not found; query or explicitly "
+        "retry its original parameters"
+    ),
+    "只能使用原目录参数重试": "Retry requires the original directory parameters",
+    "确认重试原目录请求（同键同参数）？": (
+        "Retry the original directory request with the same key and parameters?"
+    ),
+    "目录版本已变化，请先查询原历史": (
+        "Directory revision changed; query the original history first"
+    ),
+    "目录版本已变化，请重新审阅": "Directory revision changed; review it again",
+    "已找回原目录请求结果": "Recovered the original directory result",
+    "目录待确认": "Directory change awaiting confirmation",
+    "目录应用中": "Applying directory change",
+    "目录已应用": "Directory change applied",
+    "目录撤销中": "Undoing directory change",
+    "目录已撤销": "Directory change undone",
+    "目录保留中": "Keeping directory change",
+    "目录已保留": "Directory change kept",
+    "目录操作已拒绝": "Directory operation rejected",
+    "目录结果待核实": "Directory result needs verification",
+    "目录操作执行中": "Directory operation running",
+    "目录操作已确认": "Directory operation confirmed",
+    "应用目录事务": "Apply directory change",
+    "保留目录事务": "Keep directory change",
+    "撤销目录事务": "Undo directory change",
+    "确认核实原目录结果？": "Verify the original directory result?",
+    "清理删除目录的恢复材料后无法恢复原目录，是否继续？": (
+        "Cleaning up the deleted directory recovery material prevents restoring "
+        "its original identity. Continue?"
+    ),
+    "确认清理原目录操作的恢复材料？": (
+        "Clean up recovery material for the original directory operation?"
+    ),
+    "目录提案页 {page}": "Directory proposal page {page}",
+    "暂无目录提案": "No directory proposals",
+    "查看目录提案": "View directory proposal",
+    "核实目录结果": "Verify directory result",
+    "清理目录恢复材料": "Clean up directory recovery material",
+    "较早目录操作": "Earlier directory operations",
+    "较晚目录操作": "Later directory operations",
+    "本地恢复记录无效，请查询目录历史": "Invalid local recovery record; query directory history",
+    "目录响应未确认，请查询原请求键": (
+        "Directory response unconfirmed; query the original request key"
+    ),
+    "查询原目录请求": "Query original directory request",
+    "明确重试原目录请求": "Explicitly retry original directory request",
+    "浏览器无法保存目录请求键，尚未发送新请求": (
+        "The browser cannot save the directory request key; no new request was sent"
+    ),
     "准备文件修改": "Prepare file change",
     "新建文件": "Create file",
     "完整写入": "Write full file",

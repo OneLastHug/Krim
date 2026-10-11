@@ -16,7 +16,7 @@ from krim_agent.config import Settings
 
 async def main():
     assert "/site-packages/" in krim_agent.__file__
-    with TemporaryDirectory(prefix="krim-browser-wheel-") as directory:
+    with TemporaryDirectory(prefix="krim-browser-wheel-", dir="/data/tmp/root") as directory:
         root = Path(directory)
         app = create_app(
             Settings(
@@ -46,6 +46,7 @@ async def main():
                 checked.add(name)
                 pending.extend(re.findall(r'from "\./([^"/]+\.js)"', response.text))
             assert "workspace-changes-ui.js" in checked
+            assert "directory-changes-ui.js" in checked
             locale = (await api.get("/v1/locales?locale=en-US", headers=headers)).json()
             assert locale["strings"]["查看操作回执"] == "View operation receipt"
             assert (await api.get("/v1/agents")).status_code == 401
@@ -79,6 +80,56 @@ async def main():
             assert applied.status_code == 200 and applied.json()["status"] == "done"
             file = await api.get(f"{base}/read?path=browser.txt", headers=headers)
             assert file.json()["content"] == "browser\n"
+            directory = root / "existing-empty"
+            directory.mkdir(mode=0o750)
+            state = await api.get(
+                f"{base}/directory-state", headers=headers, params={"path": "existing-empty"}
+            )
+            assert state.status_code == 200 and state.json()["found"] and state.json()["empty"]
+            directory_proposal = await api.post(
+                f"{base}/directory-changes/preview",
+                headers=headers,
+                json={
+                    "spec": {
+                        "path": "existing-empty",
+                        "operation": "delete",
+                        "expected_fingerprint": state.json()["fingerprint"],
+                    },
+                    "request_key": "directory-preview",
+                },
+            )
+            assert directory_proposal.status_code == 200
+            deleted = await api.post(
+                f"{base}/directory-changes?confirmed=true",
+                headers=headers,
+                json={
+                    "proposal_id": directory_proposal.json()["proposal_id"],
+                    "action": "apply",
+                    "expected_revision": 0,
+                    "request_key": "directory-apply",
+                },
+            )
+            assert deleted.status_code == 200 and deleted.json()["status"] == "done"
+            current_directory = await api.get(
+                f"{base}/directory-changes/{directory_proposal.json()['proposal_id']}",
+                headers=headers,
+            )
+            assert current_directory.status_code == 200
+            undone = await api.post(
+                f"{base}/directory-changes?confirmed=true",
+                headers=headers,
+                json={
+                    "proposal_id": directory_proposal.json()["proposal_id"],
+                    "action": "undo",
+                    "expected_revision": current_directory.json()["revision"],
+                    "request_key": "directory-undo",
+                },
+            )
+            assert (
+                undone.status_code == 200
+                and undone.json()["status"] == "done"
+                and directory.is_dir()
+            )
             assert (await api.get(f"{base}/changes", headers=headers)).json()[0][
                 "status"
             ] == "applied"
