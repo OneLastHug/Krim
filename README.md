@@ -2,7 +2,7 @@
 
 Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；二进制单文件命令成果已接通，见[报告](docs/testing/reports/2026-10-10-binary-command-artifacts.md)；普通二进制完整命令输入和原快照精确撤销已接通，见[报告](docs/testing/reports/2026-10-11-binary-command-inputs.md)；目录事务继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
+当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；二进制单文件命令成果已接通，见[报告](docs/testing/reports/2026-10-10-binary-command-artifacts.md)；普通二进制完整命令输入和原快照精确撤销已接通，见[报告](docs/testing/reports/2026-10-11-binary-command-inputs.md)；真实空/嵌套目录来源与可信Python冷读取已接通，见[报告](docs/testing/reports/2026-10-11-command-directory-provenance.md)；目录事务继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
 
 ## 快速开始
 
@@ -69,7 +69,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 | SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
 | 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
 | 工作区 | 宿主根目录授权、Profile/资源冻结、读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理、原生清单与批次、完整检查点捕获和条件恢复；SDK/REST/CLI/浏览器消费同一事实 |
-| 隔离执行与命令 | 资源/Profile授权、模型与SDK同审批/Hook/审计、完整受控输入、非root/独立网络、输出/资源上限、取消/超时/后代回收；0030原结果、0031文本产物提案、REST/client/CLI管理；浏览器命令管理/原键恢复/输出与成果分页/取消及文件审阅已接通；普通二进制完整输入/发布/撤销已接通，目录事务继续 |
+| 隔离执行与命令 | 资源/Profile授权、模型与SDK同审批/Hook/审计、完整受控输入、非root/独立网络、输出/资源上限、取消/超时/后代回收；0030原结果、0031文本产物提案、REST/client/CLI管理；浏览器命令管理/原键恢复/输出与成果分页/取消及文件审阅已接通；普通二进制完整输入/发布/撤销及可信目录来源冷读已接通，目录事务继续 |
 | 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
 | Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
 | 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |

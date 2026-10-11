@@ -165,7 +165,8 @@ async def test_expired_work_never_dispatches_again_and_late_facts_keep_interrupt
 
 async def test_output_prefix_storage_reservation_and_file_integrity(ledger):
     store, scope = ledger
-    store.max_reserved_bytes = 2050
+    # 额外预留1024字节目录清单及256字节格式开销，不能漏记目录元数据。
+    store.max_reserved_bytes = 3330
     first = await store.reserve(scope, request(), RESOURCE, LIMITS, {"a": b"x"})
     with pytest.raises(ServiceError) as full:
         await store.reserve(scope, request("two"), RESOURCE, LIMITS)

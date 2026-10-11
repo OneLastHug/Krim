@@ -30,6 +30,11 @@ class CommandFile(StrictModel):
     mode: int = Field(ge=0, le=0o777)
 
 
+class CommandDirectory(StrictModel):
+    path: str
+    mode: int = Field(ge=0, le=0o777)
+
+
 class CommandSnapshot(StrictModel):
     request: CommandRequest
     resource: CommandResource

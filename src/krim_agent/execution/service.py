@@ -15,6 +15,7 @@ from pydantic import JsonValue
 from krim_agent.persistence.commands import CommandStore, freeze_files
 from krim_agent.protocol.domain import ServiceError
 
+from .directories import CommandDirectoryCatalog
 from .linux import Authorize, ExecutionHandle, LinuxSandboxRunner, _settle
 from .models import ExecutionResult, SandboxFile
 from .records import CommandRequest, CommandResource, CommandView
@@ -57,6 +58,9 @@ class DurableCommandHandle:
         self, kind: Literal["input", "artifact"] = "artifact"
     ) -> dict[str, SandboxFile]:
         return await self._store.files(self._scope, self.command_id, kind)
+
+    async def directory_catalog(self) -> CommandDirectoryCatalog:
+        return await self._store.directory_catalog(self._scope, self.command_id)
 
 
 @dataclass

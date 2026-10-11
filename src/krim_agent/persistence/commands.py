@@ -11,11 +11,17 @@ from datetime import UTC
 from typing import Literal, cast
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from krim_agent.execution.directories import (
+    CommandDirectoryCatalog,
+    directory_metadata_limit,
+    freeze_directory_manifest,
+    read_directory_manifest,
+)
 from krim_agent.execution.models import ExecutionResult, ExecutionStatus, SandboxFile, SandboxLimits
 from krim_agent.execution.records import (
     CommandFile,
@@ -251,6 +257,8 @@ class CommandStore:
             sum(len(value.data) for value in values.values())
             + limits.artifact_bytes
             + limits.output_bytes
+            + directory_metadata_limit(limits)
+            + 256
         )
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self._writer(session)
@@ -429,6 +437,9 @@ class CommandStore:
                 raise ServiceError("execution_artifact_invalid", "命令产物路径重复", 409)
             saved = self._snapshot(row)
             values = freeze_files(values, saved.limits)
+            manifest = freeze_directory_manifest(
+                result.directories, set(values), saved.limits, complete=result.artifacts_complete
+            )
             payload: dict[str, JsonValue] = {
                 "status": result.status,
                 "exit_code": result.exit_code,
@@ -444,6 +455,8 @@ class CommandStore:
                 "elapsed_seconds": result.elapsed_seconds,
                 "descendants_stopped": result.descendants_stopped,
             }
+            if manifest is not None:
+                payload["directory_manifest"] = manifest
             if row.result is not None:
                 if row.result != payload:
                     raise ServiceError("execution_receipt_conflict", "原命令已有不同终态", 409)
@@ -460,6 +473,7 @@ class CommandStore:
                 + len(result.stdout)
                 + len(result.stderr)
                 + sum(len(value.data) for value in values.values())
+                + (len(json.dumps(manifest).encode("utf-8")) if manifest is not None else 0)
             )
             for path, value in values.items():
                 session.add(
@@ -641,6 +655,41 @@ class CommandStore:
             ):
                 raise ServiceError("execution_record_corrupt", "命令私有文件校验失败", 409)
             return actual
+
+    async def directory_catalog(self, scope: str, identifier: str) -> CommandDirectoryCatalog:
+        """可信宿主冷读取原目录事实；旧记录能力缺失不冒充空目录集合。"""
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            snapshot = self._snapshot(row)
+            try:
+                raw_files = (row.result or {}).get("artifacts", [])
+                if not isinstance(raw_files, list):
+                    raise ValueError("artifacts")
+                values = [CommandFile.model_validate(item) for item in raw_files]
+                files = {item.path for item in values}
+                if len(files) != len(values) or len(values) != (row.result or {}).get(
+                    "artifact_files", 0
+                ):
+                    raise ValueError("artifacts")
+            except (ValidationError, ValueError, TypeError):
+                raise ServiceError(
+                    "execution_record_corrupt", "命令文件清单校验失败", 409
+                ) from None
+            manifest = read_directory_manifest(row.result, files, snapshot.limits)
+            return CommandDirectoryCatalog(
+                command_id=identifier,
+                recorded=manifest is not None,
+                complete=manifest is not None
+                and manifest.complete
+                and row.phase == "finished"
+                and row.started
+                and (row.result or {}).get("status") in {"completed", "failed", "output_limit"},
+                entries=manifest.entries if manifest is not None else [],
+                source_hash=digest({"request": row.request_hash, "result": row.result})
+                if row.result is not None
+                else None,
+            )
 
     async def events(
         self, scope: str, identifier: str, *, after: int = 0, limit: int = 100

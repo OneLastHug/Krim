@@ -83,6 +83,7 @@ def capture_artifacts(limits: dict[str, Any]) -> bool:
     total = 0
     count = 0
     entries = 0
+    directory_bytes = 2
     complete = True
     pending = [("", 0)]
     while pending:
@@ -98,6 +99,14 @@ def capture_artifacts(limits: dict[str, Any]) -> bool:
                     parts(relative)
                     info = entry.stat(follow_symlinks=False)
                     if stat.S_ISDIR(info.st_mode):
+                        mode = stat.S_IMODE(info.st_mode)
+                        if mode & ~0o777:
+                            raise ValueError("mode")
+                        directory_bytes += len(json.dumps({"path": relative, "mode": mode})) + 2
+                        if directory_bytes > min(limits["artifact_bytes"], 2_097_152):
+                            emit("artifact_error", code="execution_directory_limit")
+                            return False
+                        emit("directory", path=relative, mode=mode)
                         pending.append((relative, depth + 1))
                         continue
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
