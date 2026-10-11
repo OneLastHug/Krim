@@ -128,6 +128,7 @@ from krim_agent.workspace_list import (
 from krim_agent.workspace_mixed_batch import (
     MixedBatchDispatch,
     MixedBatchFence,
+    MixedBatchHistoryPage,
     MixedBatchRequest,
     MixedBatchView,
 )
@@ -1495,6 +1496,14 @@ class AgentService:
         session = await self.session(agent_id)
         return await self.workspace_mixed_batch_store.by_key(
             f"session:{session.session_id}", request_key
+        )
+
+    async def workspace_mixed_batch_history(
+        self, agent_id: str, *, cursor: str | None = None, limit: int = 32
+    ) -> MixedBatchHistoryPage:
+        session = await self.session(agent_id)
+        return await self.workspace_mixed_batch_store.history(
+            f"session:{session.session_id}", cursor=cursor, limit=limit
         )
 
     async def workspace_wait_mixed_batch(
