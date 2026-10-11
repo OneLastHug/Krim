@@ -7,14 +7,16 @@ import json
 from contextvars import ContextVar
 from dataclasses import replace
 from threading import Event
-from typing import Any
+from typing import Any, cast
 
 from pydantic import JsonValue
 
+from krim_agent.persistence.agent_sessions import guard_agent_topic
 from krim_agent.persistence.workspace_directories import WorkspaceDirectoryStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
 from krim_agent.tools.workspace import workspace_io
+from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
@@ -22,6 +24,8 @@ from krim_agent.workspace_directory import (
     DirectoryEffect,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
     DirectoryRecovery,
     PreparedDirectoryChange,
     WorkspaceDirectoryWriter,
@@ -94,6 +98,84 @@ class DirectoryChangeService:
                 preview_value = original.view.model_dump(mode="json")
                 context._directory_response = (operation, json.dumps(preview_value, sort_keys=True))
                 return preview_value
+            if operation == "query":
+                query_request = DirectoryQueryRequest.model_validate(payload)
+                scope, _binding = await self._query_guard(context)
+                if query_request.kind == "proposal":
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind,
+                        proposal=(
+                            await self.store.get(scope, cast(str, query_request.identifier))
+                        ).view,
+                    )
+                elif query_request.kind == "operation":
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind,
+                        operation=(
+                            await self.store.operation(scope, cast(str, query_request.identifier))
+                        ).view,
+                    )
+                elif query_request.kind == "history":
+                    proposal = await self.store.get(scope, cast(str, query_request.identifier))
+                    history_rows, history_after = await self.store.history_page(
+                        scope,
+                        proposal.view.proposal_id,
+                        after=query_request.after,
+                        limit=query_request.limit,
+                    )
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind,
+                        history=[item.view for item in history_rows],
+                        next_after=history_after,
+                    )
+                elif query_request.kind == "proposals":
+                    rows, after = await self.store.proposals(
+                        scope, after=query_request.after, limit=query_request.limit
+                    )
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind,
+                        proposals=[item.view for item in rows],
+                        next_after=after,
+                    )
+                elif query_request.kind == "proposal_by_key":
+                    found = await self.store.proposal_by_key(
+                        scope, cast(str, query_request.request_key)
+                    )
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind, proposal=found.view if found else None
+                    )
+                else:
+                    found_operation = await self.store.operation_by_key(
+                        scope, cast(str, query_request.request_key)
+                    )
+                    value = DirectoryQueryResult(
+                        kind=query_request.kind,
+                        operation=found_operation.view if found_operation else None,
+                    )
+                proposals = [*value.proposals]
+                if value.proposal is not None:
+                    proposals.append(value.proposal)
+                if query_request.kind == "history":
+                    proposals.append(proposal.view)
+                if value.operation is not None:
+                    proposals.append(
+                        (await self.store.get(scope, value.operation.proposal_id)).view
+                    )
+                if any(
+                    entry.workspace_key != _binding.key
+                    or entry.resource_fingerprint != _binding.fingerprint
+                    for entry in proposals
+                ):
+                    raise ServiceError(
+                        "workspace_binding_changed", "目录查询事实不属于原资源版本", 403
+                    )
+                # 查库期间可能关闭会话或改动绑定；只读回程也要核对原资源。
+                _, current_binding = await self._query_guard(context)
+                if current_binding.manifest() != _binding.manifest():
+                    raise ServiceError("workspace_binding_changed", "目录查询资源版本已变化", 403)
+                query_value = value.model_dump(mode="json")
+                context._directory_response = (operation, json.dumps(query_value, sort_keys=True))
+                return query_value
             if len(self._operations) >= 64:
                 raise ServiceError("workspace_directory_busy", "目录操作并发已达上限", 429)
             abort = Event()
@@ -113,9 +195,12 @@ class DirectoryChangeService:
             self._operations[task] = abort
             try:
                 result = await _wait(task, abort.set)
-                value = result.model_dump(mode="json")
-                context._directory_response = (operation, json.dumps(value, sort_keys=True))
-                return value
+                operation_value = result.model_dump(mode="json")
+                context._directory_response = (
+                    operation,
+                    json.dumps(operation_value, sort_keys=True),
+                )
+                return operation_value
             finally:
                 self._operations.pop(task, None)
         except ServiceError as error:
@@ -126,6 +211,24 @@ class DirectoryChangeService:
             raise ToolError(
                 "workspace_directory_receipt_unverified", "目录回程未保留原后端事实，请查询原操作"
             )
+
+    async def _query_guard(self, context: ToolContext) -> tuple[str, WorkspaceBinding]:
+        if context.origin != "host" or context.run_id != "local":
+            return await self.changes._guard(context)
+        if self._closed or context.workspace is None:
+            raise ServiceError("workspace_unbound", "目录查询没有原工作区绑定", 409)
+        binding = context.workspace
+        async with self.store.database.write_lock, self.store.database.sessions() as session:
+            row = await guard_agent_topic(
+                session, context.topic_id, context.session_id, context.agent_id, self.store.owner_id
+            )
+            if row is None:
+                raise ServiceError("agent_session_topic", "目录查询没有会话绑定", 403)
+            if row.permissions.get("workspace") != binding.manifest():
+                raise ServiceError("workspace_binding_changed", "目录查询资源版本已变化", 403)
+        return (
+            f"session:{context.session_id}" if context.session_id else f"topic:{context.topic_id}"
+        ), binding
 
     @staticmethod
     def _unknown(change: PreparedDirectoryChange, code: str) -> DirectoryEffect:

@@ -32,7 +32,7 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import Decision, Policy, ToolDefinition
-from krim_agent.workspace import WORKSPACE_CHANGE_TOOL_NAMES, WORKSPACE_TOOL_NAMES, WorkspaceBinding
+from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WORKSPACE_WRITE_TOOL_NAMES, WorkspaceBinding
 
 from .permissions import profile_policy
 from .resources import provider_fingerprint
@@ -704,7 +704,7 @@ class AgentManager:
             except ServiceError as error:
                 raise AgentError(error.code, str(error)) from error
             if not definition.workspace.workspace.writable and any(
-                item.name in WORKSPACE_CHANGE_TOOL_NAMES for item in definition.tools.definitions
+                item.name in WORKSPACE_WRITE_TOOL_NAMES for item in definition.tools.definitions
             ):
                 raise AgentError("workspace_read_only", "只读工作区不可登记修改工具")
         elif any(item.name in WORKSPACE_TOOL_NAMES for item in definition.tools.definitions):

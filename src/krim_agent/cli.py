@@ -25,6 +25,12 @@ from .task_state import TaskWriteRequest
 from .workflow import WorkflowGraph
 from .workspace_change import WorkspaceAttemptView, WorkspaceChangeAction, WorkspacePreviewRequest
 from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
+from .workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryPreviewRequest,
+    DirectoryQueryKind,
+)
 from .workspace_list import NativeBatchRequest, NativeBatchView
 from .workspace_restore import (
     CheckpointRestoreExecute,
@@ -166,6 +172,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true", help="confirm（确认）：本次原参数的Host确认，不覆盖deny"
     )
     workspace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    directories = subparsers.add_parser(
+        "directories", help="directories（目录）：受控目录提案、原操作查询与核实"
+    )
+    directories.add_argument(
+        "action",
+        choices=[
+            "preview",
+            "apply",
+            "undo",
+            "keep",
+            "reconcile",
+            "finalize",
+            "get",
+            "operation",
+            "list",
+            "history",
+            "proposal-by-key",
+            "operation-by-key",
+        ],
+    )
+    directories.add_argument("agent_id", help="Agent实例标识")
+    directories.add_argument("value", nargs="?", help="原proposal/operation标识或请求键")
+    directories.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
+    directories.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
+    directories.add_argument("--request-key", help="request key（请求键）：明确幂等键")
+    directories.add_argument("--after", help="after（游标）：上一页末项原标识")
+    directories.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
+    directories.add_argument(
+        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
+    )
+    directories.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
     tasks.add_argument("action", choices=["get", "history", "update"])
     tasks.add_argument("agent_id", help="Agent实例标识")
@@ -590,6 +627,7 @@ def _workspace_command(
         and result.status != "done"
     ):
         parser.exit(1)
+
     if (
         isinstance(result, WorkspaceCheckpointView)
         and args.action in {"create-checkpoint", "wait-checkpoint"}
@@ -607,6 +645,79 @@ def _workspace_command(
         and args.action in {"start-batch", "wait-batch"}
         and result.status not in {"running", "done"}
     ):
+        parser.exit(1)
+
+
+def _directory_command(
+    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    result: BaseModel
+    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
+        parser.error("目录分页参数只适用于list/history")
+    if args.action in {"list", "preview"} and args.value is not None:
+        parser.error("目录list/preview不接受位置标识")
+    if args.action != "preview" and args.request is not None:
+        parser.error("--request仅用于目录preview")
+    if args.action not in {"apply", "undo", "keep"} and (
+        args.revision is not None or args.request_key is not None
+    ):
+        parser.error("--revision/--request-key仅用于目录apply/undo/keep")
+    if args.action == "preview":
+        if not args.request:
+            parser.error("directories preview需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("目录意图不能超过64KiB")
+            request = DirectoryPreviewRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("目录预览请求无效")
+        result = client.agent_directory_preview(args.agent_id, request, confirmed=args.confirm)
+    elif args.action in {"apply", "undo", "keep"}:
+        if not args.value or args.revision is None or not args.request_key:
+            parser.error("目录apply/undo/keep需要原提案ID、--revision和--request-key")
+        result = client.agent_directory_change(
+            args.agent_id,
+            DirectoryChangeAction(
+                proposal_id=args.value,
+                action=args.action,
+                expected_revision=args.revision,
+                request_key=args.request_key,
+            ),
+            confirmed=args.confirm,
+        )
+    elif args.action in {"reconcile", "finalize"}:
+        if not args.value:
+            parser.error("目录reconcile/finalize需要原操作ID")
+        method = (
+            client.agent_directory_reconcile
+            if args.action == "reconcile"
+            else client.agent_directory_finalize
+        )
+        result = method(args.agent_id, args.value, confirmed=args.confirm)
+    else:
+        if args.action != "list" and not args.value:
+            parser.error("目录查询需要原标识或请求键")
+        mapping: dict[str, DirectoryQueryKind] = {
+            "get": "proposal",
+            "operation": "operation",
+            "list": "proposals",
+            "history": "history",
+            "proposal-by-key": "proposal_by_key",
+            "operation-by-key": "operation_by_key",
+        }
+        result = client.agent_directory_query(
+            args.agent_id,
+            kind=mapping[args.action],
+            identifier=args.value if args.action in {"get", "operation", "history"} else None,
+            request_key=args.value if args.action.endswith("by-key") else None,
+            after=args.after,
+            limit=args.limit,
+            confirmed=args.confirm,
+        )
+    print(result.model_dump_json(indent=2))
+    if isinstance(result, DirectoryAttemptView) and result.status != "done":
         parser.exit(1)
 
 
@@ -748,6 +859,9 @@ def main() -> None:
                 return
             if args.command == "workspace":
                 _workspace_command(client, args, parser)
+                return
+            if args.command == "directories":
+                _directory_command(client, args, parser)
                 return
             if args.command == "tasks":
                 if args.action == "get":

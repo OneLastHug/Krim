@@ -49,6 +49,8 @@ from krim_agent.workspace_directory import (
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
 )
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
@@ -172,6 +174,11 @@ class AgentSession:
         return await self.service.directory_finalize(
             self.agent_id, DirectoryOperationRequest(operation_id=operation_id), confirmed=confirmed
         )
+
+    async def query_directory(
+        self, request: DirectoryQueryRequest, *, confirmed: bool = False
+    ) -> DirectoryQueryResult:
+        return await self.service.directory_query(self.agent_id, request, confirmed=confirmed)
 
     async def execute(self, prompt: str, *, idempotency_key: str | None = None) -> ExecResult:
         result = await self.service.execute(

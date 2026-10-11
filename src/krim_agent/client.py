@@ -101,6 +101,16 @@ from .workspace_change import (
     WorkspacePreviewRequest,
 )
 from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
+from .workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryOperationRequest,
+    DirectoryPreviewRequest,
+    DirectoryPreviewView,
+    DirectoryQueryKind,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
+)
 from .workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -732,6 +742,123 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceChangeView.model_validate_json(response.content)
+
+    def agent_directory_preview(
+        self, agent_id: str, request: DirectoryPreviewRequest, *, confirmed: bool = False
+    ) -> DirectoryPreviewView:
+        request = DirectoryPreviewRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-changes/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return DirectoryPreviewView.model_validate_json(response.content)
+
+    def agent_directory_change(
+        self, agent_id: str, request: DirectoryChangeAction, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        request = DirectoryChangeAction.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-changes",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return DirectoryAttemptView.model_validate_json(response.content)
+
+    def agent_directory_query(
+        self,
+        agent_id: str,
+        *,
+        kind: DirectoryQueryKind = "proposals",
+        identifier: str | None = None,
+        request_key: str | None = None,
+        after: str | None = None,
+        limit: int = 32,
+        confirmed: bool = False,
+    ) -> DirectoryQueryResult:
+        request = DirectoryQueryRequest(
+            kind=kind, identifier=identifier, request_key=request_key, after=after, limit=limit
+        )
+        params = {"confirmed": str(confirmed).lower()}
+        if request.kind in {"history", "proposals"}:
+            params["limit"] = str(request.limit)
+            if request.after is not None:
+                params["after"] = request.after
+        if request.request_key is not None:
+            params["request_key"] = request.request_key
+        base = f"/v1/agents/{_workspace_identifier(agent_id)}/workspace"
+        if kind == "proposals":
+            path = base + "/directory-changes"
+        elif kind == "proposal_by_key":
+            path = base + "/directory-changes/by-key"
+        elif kind == "proposal":
+            path = base + "/directory-changes/" + _workspace_identifier(identifier or "")
+        elif kind == "history":
+            path = (
+                base + "/directory-changes/" + _workspace_identifier(identifier or "") + "/history"
+            )
+        elif kind == "operation_by_key":
+            path = base + "/directory-operations/by-key"
+        else:
+            path = base + "/directory-operations/" + _workspace_identifier(identifier or "")
+        response = self._http.get(path, params=params)
+        self._check(response)
+        if kind == "proposal_by_key":
+            return DirectoryQueryResult(
+                kind=kind,
+                proposal=TypeAdapter(DirectoryPreviewView | None).validate_json(response.content),
+            )
+        if kind == "proposal":
+            result = DirectoryQueryResult(
+                kind=kind, proposal=DirectoryPreviewView.model_validate_json(response.content)
+            )
+            assert result.proposal is not None
+            matched = result.proposal.proposal_id == identifier
+        elif kind == "operation_by_key":
+            return DirectoryQueryResult(
+                kind=kind,
+                operation=TypeAdapter(DirectoryAttemptView | None).validate_json(response.content),
+            )
+        elif kind == "operation":
+            result = DirectoryQueryResult(
+                kind=kind, operation=DirectoryAttemptView.model_validate_json(response.content)
+            )
+            assert result.operation is not None
+            matched = result.operation.operation_id == identifier
+        else:
+            result = DirectoryQueryResult.model_validate_json(response.content)
+            matched = result.kind == kind and len(result.history or result.proposals) <= limit
+            if kind == "history":
+                matched = matched and all(item.proposal_id == identifier for item in result.history)
+        if not matched:
+            raise ClientError(
+                "目录查询回程与原选择不一致", code="workspace_directory_response", status=502
+            )
+        return result
+
+    def agent_directory_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-operations/{_workspace_identifier(operation_id)}/reconcile",
+            params={"confirmed": str(confirmed).lower()},
+            json=DirectoryOperationRequest(operation_id=operation_id).model_dump(mode="json"),
+        )
+        self._check(response)
+        return DirectoryAttemptView.model_validate_json(response.content)
+
+    def agent_directory_finalize(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-operations/{_workspace_identifier(operation_id)}/finalize",
+            params={"confirmed": str(confirmed).lower()},
+            json=DirectoryOperationRequest(operation_id=operation_id).model_dump(mode="json"),
+        )
+        self._check(response)
+        return DirectoryAttemptView.model_validate_json(response.content)
 
     def agent_workspace_change(
         self, agent_id: str, request: WorkspaceChangeAction, *, confirmed: bool = False

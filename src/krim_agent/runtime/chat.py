@@ -74,7 +74,7 @@ from krim_agent.tools.core import (
 )
 from krim_agent.tools.discovery import ToolDiscovery
 from krim_agent.usage import TokenUsage
-from krim_agent.workspace import WORKSPACE_CHANGE_TOOL_NAMES, WORKSPACE_TOOL_NAMES, WorkspaceBinding
+from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WORKSPACE_WRITE_TOOL_NAMES, WorkspaceBinding
 
 logger = logging.getLogger(__name__)
 
@@ -628,7 +628,7 @@ class ChatRuntime:
                 if definition.name != "read_skill" or state.skill_snapshot.skills
                 if definition.name not in WORKSPACE_TOOL_NAMES or self.workspace is not None
                 if definition.name not in COMMAND_TOOL_NAMES or self.execution is not None
-                if definition.name not in WORKSPACE_CHANGE_TOOL_NAMES
+                if definition.name not in WORKSPACE_WRITE_TOOL_NAMES
                 or (self.workspace is not None and self.workspace.workspace.writable)
             ]
             state.discovery = ToolDiscovery(definitions)

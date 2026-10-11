@@ -7,7 +7,12 @@ from krim_agent.application.agents import AgentService
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.sdk.agents import AgentSession
 from krim_agent.tools import ShortCircuit
-from krim_agent.workspace_directory import DirectoryChangeAction, DirectoryChangeSpec
+from krim_agent.workspace_directory import (
+    DirectoryChangeAction,
+    DirectoryChangeSpec,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
+)
 
 
 async def setup(runtime, tmp_path, policy=None):
@@ -29,6 +34,7 @@ async def setup(runtime, tmp_path, policy=None):
                     "directory_change",
                     "directory_reconcile",
                     "directory_finalize",
+                    "directory_query",
                 ],
             ),
         )
@@ -53,6 +59,12 @@ async def test_sdk_directory_create_keep_undo_uses_original_registry_and_ledger(
             )
         )
         assert applied.status == "done" and (tmp_path / "empty").is_dir()
+        listed = await agent.query_directory(DirectoryQueryRequest(kind="proposals"))
+        assert listed.proposals and listed.proposals[0].proposal_id == proposal.proposal_id
+        found = await agent.query_directory(
+            DirectoryQueryRequest(kind="proposal_by_key", request_key="preview")
+        )
+        assert found.proposal is not None and found.proposal.proposal_id == proposal.proposal_id
         current = (
             await service.manager.directory_changes.store.get(
                 "session:" + agent.session_id, proposal.proposal_id
@@ -195,5 +207,76 @@ async def test_directory_callback_self_close_rejects_without_deadlock(
             )
         )
         assert result.status == "done" and not service._closed
+    finally:
+        await service.close()
+
+
+async def test_directory_query_hooks_cannot_forge_or_hide_stored_proposal(runtime, tmp_path):
+    service, agent = await setup(runtime, tmp_path)
+    try:
+        await agent.preview_directory_change(
+            DirectoryChangeSpec(path="empty", operation="create", mode=0o750), request_key="p"
+        )
+        registry = service._handle(agent.agent_id).runtime.tools
+
+        async def pre(definition, _context):
+            if definition.name == "directory_query":
+                return ShortCircuit(DirectoryQueryResult(kind="proposals").model_dump(mode="json"))
+
+        registry.add_global_pre(pre)
+        with pytest.raises(ServiceError) as forged:
+            await agent.query_directory(DirectoryQueryRequest(kind="proposals"))
+        assert forged.value.code == "workspace_directory_receipt_unverified"
+        registry._global_pre.clear()
+
+        async def post(definition, value, _context):
+            if definition.name == "directory_query":
+                value["proposals"] = []
+            return value
+
+        registry.add_global_post(post)
+        with pytest.raises(ServiceError) as hidden:
+            await agent.query_directory(DirectoryQueryRequest(kind="proposals"))
+        assert hidden.value.code == "workspace_directory_receipt_unverified"
+    finally:
+        await service.close()
+
+
+async def test_directory_write_profile_rejects_readonly_resource_before_spawn(runtime, tmp_path):
+    service, _agent = await setup(runtime, tmp_path)
+    try:
+        readonly = tmp_path / "readonly"
+        readonly.mkdir()
+        service.register_workspace("readonly", readonly, version="1")
+        for name in (
+            "directory_preview",
+            "directory_change",
+            "directory_reconcile",
+            "directory_finalize",
+        ):
+            with pytest.raises(ServiceError) as denied:
+                await service.profile_put(
+                    AgentProfileUpdate(
+                        expected_revision=0,
+                        config=AgentProfile(
+                            name="invalid",
+                            description="只读资源",
+                            workspace_key="readonly",
+                            tool_names=[name],
+                        ),
+                    )
+                )
+            assert denied.value.code == "workspace_read_only"
+        await service.profile_put(
+            AgentProfileUpdate(
+                expected_revision=0,
+                config=AgentProfile(
+                    name="read-only-query",
+                    description="只读目录账本",
+                    workspace_key="readonly",
+                    tool_names=["directory_query"],
+                ),
+            )
+        )
     finally:
         await service.close()
