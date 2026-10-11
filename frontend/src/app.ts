@@ -121,6 +121,7 @@ const changeListUI = new ChangeListUI(
   showNotice,
   (data) => hostEndpoint.request("changeList/invoke", data, 15_000),
   (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId),
+  (agentId, proposalId) => agentsUI.focusDirectoryProposal(agentId, proposalId),
 );
 const checkpointUI: CheckpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000),
   (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));

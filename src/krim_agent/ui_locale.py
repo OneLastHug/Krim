@@ -728,6 +728,29 @@ TRANSLATIONS: dict[str, str] = {
     "此话题仍在生成，可以继续读取或停止": (
         "This topic is still generating; resume the stream or stop it"
     ),
+    "混合批次历史": "Mixed batch history",
+    "较新混合批次": "Newer mixed batches",
+    "较早混合批次": "Older mixed batches",
+    "混合批次标识或原请求键": "Mixed batch ID or original request key",
+    "按混合批次查询": "Read mixed batch",
+    "按原键找回混合批次": "Read mixed batch by original key",
+    "等待原混合批次": "Wait for original mixed batch",
+    "取消原混合批次": "Cancel original mixed batch",
+    "应用混合批次": "Apply mixed batch",
+    "保留混合批次": "Keep mixed batch",
+    "撤销混合批次": "Undo mixed batch",
+    "文件": "File",
+    "目录": "Directory",
+    "尚无关联原操作": "No associated original operation",
+    "混合批次回程与当前会话不一致": "Mixed batch response does not belong to this session",
+    "确认取消原混合批次？": "Cancel the original mixed batch?",
+    "混合批次回程与原提案不一致": "Mixed batch response does not match the original proposal",
+    "Agent不存在或尚未读取": "Agent does not exist or has not been loaded",
+    "查看原目录提案": "View original directory proposal",
+    "批次执行中": "Batch running",
+    "批次已确认": "Batch confirmed",
+    "操作已拒绝": "Operation rejected",
+    "批次结果待核实": "Batch result needs verification",
 }
 
 

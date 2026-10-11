@@ -3,6 +3,7 @@ import {
   ApiError, errorText, requestJson, requestJsonNullable, type AgentView, type NativeBatchHistoryPage,
   type NativeBatchRequest, type NativeBatchView, type NativeChangeItem, type NativeChangePage,
   type NativeListFilter, type WorkspaceView,
+  type MixedBatchHistoryPage, type MixedBatchView,
 } from "./api.js";
 import type { HostJson } from "./host.js";
 import { localDate, t } from "./i18n.js";
@@ -15,6 +16,8 @@ type WorkspaceState = {
   cursors: Array<string | null>; historyCursors: Array<string | null>; history: NativeBatchHistoryPage | null;
   batch: NativeBatchView | null; pending: NativeBatchRequest | null; query: string; message: string;
   activeBatchId: string | null; busy: boolean; sending: boolean; stale: boolean; queryVersion: number; loadingVersion: number;
+  mixedCursors: Array<string | null>; mixedHistory: MixedBatchHistoryPage | null; mixedBatch: MixedBatchView | null;
+  mixedQuery: string; mixedVersion: number; mixedMessage: string;
 };
 type Source = { kind: "host" } | { kind: "workspace"; id: string };
 type Row = { id: string; title: string; description: string; status: string; undo: boolean; keep: boolean; click: () => Promise<void> };
@@ -28,6 +31,7 @@ const labels: Record<string, string> = {
 };
 const statusText = (value: string): string => t(labels[value] || value);
 const actionText = (action: "keep" | "undo"): string => t(action === "keep" ? "保留变更" : "撤销变更");
+const mixedStatusText = (value: string): string => t(({ running: "批次执行中", done: "批次已确认", rejected: "操作已拒绝", uncertain: "批次结果待核实" } as Record<string, string>)[value] || labels[value] || value);
 
 export class ChangeListUI {
   private topicId: string | null = null;
@@ -45,6 +49,7 @@ export class ChangeListUI {
     private readonly notice: (message: string, error?: boolean) => void,
     private readonly invokeHost: (data: HostJson) => Promise<HostJson>,
     private readonly openWorkspaceProposal: (agentId: string, proposalId: string, operationId?: string) => Promise<void>,
+    private readonly openDirectoryProposal: (agentId: string, proposalId: string) => Promise<void>,
   ) {
     node("change-refresh").onclick = () => void this.refresh(true);
     node("change-clear").onclick = () => void this.clear();
@@ -67,6 +72,16 @@ export class ChangeListUI {
     node("change-query-id").onclick = () => void this.query("id");
     node("change-query-key").onclick = () => void this.query("key");
     node("change-wait").onclick = () => void this.query("wait");
+    node("change-mixed-prev").onclick = () => void this.mixedPage(-1);
+    node("change-mixed-next").onclick = () => void this.mixedPage(1);
+    node("change-mixed-query-id").onclick = () => void this.queryMixed("id");
+    node("change-mixed-query-key").onclick = () => void this.queryMixed("key");
+    node("change-mixed-wait").onclick = () => void this.queryMixed("wait");
+    node("change-mixed-cancel").onclick = () => void this.cancelMixed();
+    (node("change-mixed-query") as HTMLInputElement).oninput = () => {
+      const state = this.workspace(); if (state) state.mixedQuery = (node("change-mixed-query") as HTMLInputElement).value;
+      this.syncQueryButtons();
+    };
     (node("change-batch-query") as HTMLInputElement).oninput = () => {
       const state = this.workspace(); if (state) state.query = (node("change-batch-query") as HTMLInputElement).value;
       this.syncQueryButtons();
@@ -103,9 +118,13 @@ export class ChangeListUI {
             cursors: [null], historyCursors: [null], history: null, stale: true, busy: false, sending: false,
             batch: sameSession ? state.batch : null, pending: null,
             activeBatchId: sameSession ? state.activeBatchId : null, queryVersion: state.queryVersion + 1 });
+          const current = this.workspaces.get(agent.agent_id)!;
+          current.mixedCursors = [null]; current.mixedHistory = null;
+          current.mixedBatch = sameSession ? state.mixedBatch : null; current.mixedVersion += 1;
         } else state.agent = agent;
       } else this.workspaces.set(agent.agent_id, { agent, page: null, filter: "active", cursors: [null], historyCursors: [null], history: null,
-        batch: null, pending: null, query: "", message: "", activeBatchId: null, busy: false, sending: false, stale: true, queryVersion: 0, loadingVersion: 0 });
+        batch: null, pending: null, query: "", message: "", activeBatchId: null, busy: false, sending: false, stale: true, queryVersion: 0, loadingVersion: 0,
+        mixedCursors: [null], mixedHistory: null, mixedBatch: null, mixedQuery: "", mixedVersion: 0, mixedMessage: "" });
     }
     for (const id of this.workspaces.keys()) if (!ids.has(id)) this.workspaces.delete(id);
     if (this.source.kind === "workspace" && !this.workspaces.has(this.source.id)) void this.switchSource({ kind: "host" });
@@ -152,19 +171,25 @@ export class ChangeListUI {
   private async refresh(reset = false): Promise<void> {
     const state = this.workspace(), key = this.key(), generation = this.generation, version = ++this.loadVersion;
     if (state) {
-      if (reset) { state.cursors = [null]; state.historyCursors = [null]; }
+      if (reset) { state.cursors = [null]; state.historyCursors = [null]; state.mixedCursors = [null]; }
       state.busy = true; state.loadingVersion = version; state.stale = true; this.render();
       try {
         const base = this.native(state);
-        const queryVersion = state.queryVersion;
-        const [page, history, grant] = await Promise.all([
-          this.readPage(state), this.readHistory(state),
+        const queryVersion = state.queryVersion, mixedVersion = state.mixedVersion;
+        const [page, history, mixedHistory, grant] = await Promise.all([
+          this.readPage(state), this.readHistory(state), this.readMixedHistory(state),
           state.agent.session.status === "open" ? requestJson<WorkspaceView>(base).catch(() => undefined) : Promise.resolve(undefined),
         ]);
         if (!this.isCurrent(key, generation) || version !== this.loadVersion) return;
         state.page = page.page;
         if (page.reset) { state.cursors = [null]; state.message = t("清单已变化，已返回第一页，请重新审阅"); }
-        state.history = history; state.grant = grant; state.stale = false;
+        state.history = history; state.mixedHistory = mixedHistory; state.grant = grant; state.stale = false;
+        const mixedId = state.mixedBatch?.batch_id || mixedHistory.items.find(item => item.producer_status === "running")?.batch_id || mixedHistory.items[0]?.batch_id;
+        if (mixedId) {
+          const result = await this.readMixedBatch(state, mixedId);
+          if (!this.isCurrent(key, generation) || version !== this.loadVersion) return;
+          if (mixedVersion === state.mixedVersion) state.mixedBatch = result;
+        }
         // 历史始终可发现原生产者；手工选择已结束批次时不强制覆盖审阅对象。
         const latest = history.items.find(item => item.producer_status === "running") || history.items[0];
         if (state.historyCursors.length === 1) state.activeBatchId = history.items.find(item => item.producer_status === "running")?.batch_id || null;
@@ -214,6 +239,40 @@ export class ChangeListUI {
     const params = new URLSearchParams({ limit: "32" });
     const cursor = state.historyCursors.at(-1); if (cursor) params.set("cursor", cursor);
     return requestJson<NativeBatchHistoryPage>(`${this.native(state)}/native-batches/history?${params}`);
+  }
+  private async readMixedHistory(state: WorkspaceState): Promise<MixedBatchHistoryPage> {
+    const params = new URLSearchParams({ limit: "32" });
+    const cursor = state.mixedCursors.at(-1); if (cursor) params.set("cursor", cursor);
+    const value = await requestJson<MixedBatchHistoryPage>(`${this.native(state)}/mixed-batches/history?${params}`);
+    if (value.scope_id !== `session:${state.agent.session_id}`) throw new Error(t("混合批次回程与当前会话不一致"));
+    return value;
+  }
+  private validateMixed(state: WorkspaceState, value: MixedBatchView, id?: string, requestKey?: string): MixedBatchView {
+    if (value.scope_id !== `session:${state.agent.session_id}` || id && value.batch_id !== id || requestKey && value.request_key !== requestKey
+      || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 32
+      || value.items.some((item, index) => item.position !== index || !["file", "directory"].includes(item.source)
+        || item.operation && (item.operation.scope_id !== value.scope_id || item.operation.action !== value.action
+          || item.operation.proposal_id !== item.proposal_id || item.operation.expected_revision !== item.expected_revision || item.operation.status !== item.status)
+        || !item.operation && !["pending", "rejected", "skipped"].includes(item.status))) throw new Error(t("混合批次回程与当前会话不一致"));
+    const done = value.items.filter(item => item.status === "done").length;
+    const expected = value.producer_status === "running" ? "running"
+      : value.items.some(item => item.status === "running" || item.status === "uncertain") ? "uncertain"
+      : done === value.items.length ? "done"
+      : value.producer_status === "cancelled" || value.producer_status === "interrupted" ? value.producer_status
+      : done ? "partial" : "failed";
+    if (value.status !== expected || new Set(value.items.map(item => `${item.source}:${item.proposal_id}`)).size !== value.items.length
+      || value.items.some(item => item.source === "file" && item.target_path != null
+        || item.operation && typeof item.operation.created_at !== (item.source === "file" ? "string" : "number"))) throw new Error(t("混合批次回程与原提案不一致"));
+    return value;
+  }
+  private async readMixedBatch(state: WorkspaceState, id: string): Promise<MixedBatchView> {
+    return this.validateMixed(state, await requestJson<MixedBatchView>(`${this.native(state)}/mixed-batches/${encodeURIComponent(id)}`), id);
+  }
+  private async mixedPage(direction: number): Promise<void> {
+    const state = this.workspace(); if (!state || state.busy) return;
+    if (direction < 0) { if (state.mixedCursors.length <= 1) return; state.mixedCursors.pop(); }
+    else { if (!state.mixedHistory?.next_cursor) return; state.mixedCursors.push(state.mixedHistory.next_cursor); }
+    await this.refresh();
   }
   private async page(direction: number): Promise<void> {
     const state = this.workspace(); if (!state || state.busy || state.sending) return;
@@ -338,11 +397,38 @@ export class ChangeListUI {
     } catch (error) { if (this.isCurrent(key, generation) && version === state.queryVersion) { state.message = errorText(error); this.render(); this.notice(errorText(error), true); } }
   }
   private stopTimer(): void { window.clearTimeout(this.timer); this.timer = undefined; }
+  private async queryMixed(kind: "id" | "key" | "wait", id?: string): Promise<void> {
+    const state = this.workspace(); if (!state) return;
+    const value = id || (kind === "wait" ? state.mixedBatch?.batch_id : state.mixedQuery); if (!value) return;
+    const key = this.key(), generation = this.generation, version = ++state.mixedVersion;
+    try {
+      const base = `${this.native(state)}/mixed-batches`;
+      const result = kind === "key"
+        ? await requestJsonNullable<MixedBatchView>(`${base}/by-key?${new URLSearchParams({ request_key: value })}`)
+        : await requestJson<MixedBatchView>(`${base}/${encodeURIComponent(value)}${kind === "wait" ? "/wait?timeout_seconds=2" : ""}`, kind === "wait" ? { method: "POST" } : undefined);
+      if (!this.isCurrent(key, generation) || version !== state.mixedVersion) return;
+      if (result) { state.mixedBatch = this.validateMixed(state, result, kind === "key" ? undefined : value, kind === "key" ? value : undefined); state.mixedMessage = ""; }
+      else state.mixedMessage = t("未找到原批次，结果尚未确认，请按原键继续查询");
+      this.render(); this.schedule();
+    } catch (error) { if (this.isCurrent(key, generation) && version === state.mixedVersion) { state.mixedMessage = errorText(error); this.render(); this.notice(errorText(error), true); } }
+  }
+  private async cancelMixed(): Promise<void> {
+    const state = this.workspace(), key = this.key(), generation = this.generation;
+    if (!state?.mixedBatch || state.mixedBatch.producer_status !== "running" || !window.confirm(t("确认取消原混合批次？"))) return;
+    const id = state.mixedBatch.batch_id, version = ++state.mixedVersion;
+    try {
+      const result = await requestJson<MixedBatchView>(`${this.native(state)}/mixed-batches/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+      if (!this.isCurrent(key, generation) || version !== state.mixedVersion) return;
+      state.mixedBatch = this.validateMixed(state, result, id); state.mixedMessage = ""; this.render(); await this.refresh();
+    } catch (error) {
+      if (this.isCurrent(key, generation) && version === state.mixedVersion) { state.mixedMessage = errorText(error); this.render(); await this.queryMixed("id", id); }
+    }
+  }
   private schedule(): void {
     this.stopTimer();
     if (!(node("change-panel") as HTMLDetailsElement).open) return;
     const state = this.workspace();
-    const active = state ? Boolean(state.activeBatchId) : Boolean(this.operations.some(item => item.execution.operation_id === this.catalog?.active_operation_id && item.status === "executing") || this.topicId && this.pendingTopics.has(this.topicId));
+    const active = state ? Boolean(state.activeBatchId || state.mixedBatch?.producer_status === "running") : Boolean(this.operations.some(item => item.execution.operation_id === this.catalog?.active_operation_id && item.status === "executing") || this.topicId && this.pendingTopics.has(this.topicId));
     if (!active) return;
     const key = this.key(), generation = this.generation;
     this.timer = window.setTimeout(() => { if (this.isCurrent(key, generation)) void this.refresh(); }, 700);
@@ -367,7 +453,7 @@ export class ChangeListUI {
   private render(): void {
     const state = this.workspace(), native = Boolean(state), key = this.key(), generation = this.generation;
     const root = node("change-items"); root.replaceChildren();
-    node("change-native-pages").hidden = node("change-native-history").hidden = !native;
+    node("change-native-pages").hidden = node("change-native-history").hidden = node("change-mixed-history").hidden = !native;
     node("change-clear").hidden = native;
     for (const [id, label] of [["change-undo-all", native ? "撤销本页" : "全部撤销"], ["change-keep-all", native ? "保留本页" : "全部保留"]]) {
       node(id!).dataset.i18n = label!; node(id!).textContent = t(label!);
@@ -389,6 +475,7 @@ export class ChangeListUI {
       button("change-cancel").disabled = !state.activeBatchId;
       (node("change-batch-query") as HTMLInputElement).value = state.query;
       this.renderNativeResults(state);
+      this.renderMixedResults(state);
     } else {
       busy = Boolean(this.catalog?.active_operation_id || this.topicId && this.pendingTopics.has(this.topicId)) || !this.sessionId;
       rows = (this.catalog?.items || []).map(item => ({ ...item, undo: item.status === "pending", keep: item.status === "pending", click: () => this.hostClick(item) }));
@@ -414,6 +501,8 @@ export class ChangeListUI {
     const state = this.workspace();
     button("change-query-id").disabled = button("change-query-key").disabled = !state?.query;
     button("change-wait").disabled = !state?.batch || state.batch.producer_status !== "running";
+    button("change-mixed-query-id").disabled = button("change-mixed-query-key").disabled = !state?.mixedQuery;
+    button("change-mixed-wait").disabled = button("change-mixed-cancel").disabled = !state?.mixedBatch || state.mixedBatch.producer_status !== "running";
   }
   private renderNativeResults(state: WorkspaceState): void {
     const results = node("change-results"); results.replaceChildren();
@@ -439,5 +528,33 @@ export class ChangeListUI {
     node("change-history-info").textContent = t("批次历史共{total}项", { total: state.history?.total || 0 });
     button("change-history-prev").disabled = state.busy || state.historyCursors.length <= 1;
     button("change-history-next").disabled = state.busy || !state.history?.next_cursor;
+  }
+  private renderMixedResults(state: WorkspaceState): void {
+    const results = node("change-mixed-results"); results.replaceChildren();
+    const history = node("change-mixed-batches"); history.replaceChildren();
+    const key = this.key(), generation = this.generation, batch = state.mixedBatch;
+    (node("change-mixed-query") as HTMLInputElement).value = state.mixedQuery;
+    node("change-mixed-info").textContent = t("批次历史共{total}项", { total: state.mixedHistory?.total || 0 });
+    node("change-mixed-status").textContent = state.mixedMessage;
+    const batchAction = (action: MixedBatchView["action"]): string => t({ apply: "应用混合批次", keep: "保留混合批次", undo: "撤销混合批次" }[action]);
+    for (const summary of state.mixedHistory?.items || []) {
+      const control = document.createElement("button"); control.type = "button"; control.className = "secondary"; control.dataset.mixedBatchId = summary.batch_id;
+      control.textContent = `${batchAction(summary.action)} · ${mixedStatusText(summary.status)} · ${summary.done_count}/${summary.item_count} · ${summary.batch_id} · ${localDate(summary.created_at)}`;
+      control.onclick = () => { if (this.isCurrent(key, generation)) void this.queryMixed("id", summary.batch_id); }; history.append(control);
+    }
+    if (batch) {
+      const heading = document.createElement("p"); heading.className = "mixed-batch-result"; heading.dataset.mixedBatchId = batch.batch_id;
+      heading.textContent = `${batchAction(batch.action)} · ${mixedStatusText(batch.status)} · ${batch.batch_id} · ${batch.request_key}${batch.stop_reason ? ` · ${batch.stop_reason}` : ""}`;
+      results.append(heading);
+      for (const item of batch.items) {
+        const line = document.createElement("p"); line.dataset.mixedBatchItem = item.proposal_id; line.dataset.source = item.source;
+        line.textContent = `${t(item.source === "file" ? "文件" : "目录")} · ${item.path}${item.target_path ? ` → ${item.target_path}` : ""} · ${mixedStatusText(item.status)} · ${item.operation?.operation_id || t("尚无关联原操作")}${item.error_code ? ` · ${item.error_code}` : ""}`;
+        const open = document.createElement("button"); open.type = "button"; open.textContent = t(item.source === "file" ? "查看文件差异与证明" : "查看原目录提案");
+        open.onclick = () => { if (this.isCurrent(key, generation)) void (item.source === "file" ? this.openWorkspaceProposal(state.agent.agent_id, item.proposal_id, item.operation?.operation_id) : this.openDirectoryProposal(state.agent.agent_id, item.proposal_id)).catch(error => { if (this.isCurrent(key, generation)) this.notice(errorText(error), true); }); };
+        line.append(open); results.append(line);
+      }
+    }
+    button("change-mixed-prev").disabled = state.busy || state.mixedCursors.length <= 1;
+    button("change-mixed-next").disabled = state.busy || !state.mixedHistory?.next_cursor;
   }
 }

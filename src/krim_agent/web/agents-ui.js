@@ -20,6 +20,13 @@ export class AgentsUI {
             throw new Error(t("Agent 实例不可用"));
         await card.changes.focusProposal(proposalId, operationId);
     }
+    async focusDirectoryProposal(agentId, proposalId) {
+        const card = this.cards.get(agentId);
+        if (!card)
+            throw new Error(t("Agent不存在或尚未读取"));
+        await card.directories.focusProposal(proposalId);
+        card.root.scrollIntoView({ block: "nearest" });
+    }
     render(agents, sessionFor) {
         const live = new Set(agents.map(agent => agent.agent_id));
         for (const [id, card] of this.cards)

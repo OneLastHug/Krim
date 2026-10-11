@@ -39,7 +39,7 @@ from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import ToolContext, ToolDefinition
 from krim_agent.workspace import WORKSPACE_TOOL_NAMES
 
-with TemporaryDirectory(prefix="krim-browser-") as directory:
+with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directory:
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{Path(directory) / 'browser.sqlite'}",
         api_key=SecretStr("browser-test-key"),
@@ -80,7 +80,14 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
 
     async def pause_native_batch(definition: ToolDefinition, context: ToolContext) -> None:
         gate = batch_gates.get(context.agent_id or "")
-        if definition.name == "workspace_change" and context.workspace_batch is not None and gate:
+        if gate and (
+            definition.name == "workspace_change"
+            and context.workspace_batch is not None
+            or (
+                definition.name in {"workspace_change", "directory_change"}
+                and context.mixed_batch is not None
+            )
+        ):
             entered, released = gate
             entered.set()
             # 可信测试暂停沿原Registry等待，取消仍由生产代码传播，不伪造文件回执。
