@@ -54,7 +54,7 @@ from .database import (
     WorkspaceLedgerGuardRow,
 )
 from .directory_fences import assert_file_directory_fence
-from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request
+from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request, mixed_attempt_call
 from .workspace_batches import assert_batch_execution, assert_batch_request
 from .workspace_restores import assert_restore_execution, assert_restore_request
 
@@ -563,6 +563,7 @@ class WorkspaceEditStore:
         batch_fence: NativeBatchFence | None = None,
         restore_fence: CheckpointRestoreFence | None = None,
         mixed_fence: MixedBatchFence | None = None,
+        run_id: str | None = None,
     ) -> StoredWorkspaceAttempt | None:
         value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
@@ -611,6 +612,7 @@ class WorkspaceEditStore:
                 request,
                 mixed_fence,
                 row.operation_id if row is not None else None,
+                run_id=run_id,
             )
             return self._attempt(row) if row is not None else None
 
@@ -893,6 +895,7 @@ class WorkspaceEditStore:
                 request,
                 mixed_fence,
                 previous.operation_id if previous is not None else None,
+                run_id=run_id,
             )
             proposal = await self._proposal(session, scope_id, request.proposal_id)
             original = self._change(proposal).prepared
@@ -1029,7 +1032,7 @@ class WorkspaceEditStore:
                 if request.action != "keep"
                 else None,
                 run_id=run_id,
-                call_id=call_id,
+                call_id=await mixed_attempt_call(session, mixed_child, call_id),
             )
             session.add(row)
             await session.flush()

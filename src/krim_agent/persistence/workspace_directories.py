@@ -39,7 +39,7 @@ from .database import (
     WorkspaceFileLockRow,
 )
 from .directory_fences import directory_key, entry_key
-from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request
+from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request, mixed_attempt_call
 from .workspace_edits import WorkspaceEditStore, decode_prepared, digest
 
 
@@ -393,6 +393,7 @@ class WorkspaceDirectoryStore:
         fingerprint: str,
         *,
         mixed_fence: MixedBatchFence | None = None,
+        run_id: str | None = None,
     ) -> StoredDirectoryAttempt | None:
         wanted = digest({"request": request.model_dump(mode="json"), "resource": fingerprint})
         async with self.database.write_lock, self.database.sessions() as session:
@@ -416,6 +417,7 @@ class WorkspaceDirectoryStore:
                 request,
                 mixed_fence,
                 row.operation_id if row is not None else None,
+                run_id=run_id,
             )
             return self._attempt(row) if row is not None else None
 
@@ -659,6 +661,7 @@ class WorkspaceDirectoryStore:
                 request,
                 mixed_fence,
                 previous.operation_id if previous is not None else None,
+                run_id=run_id,
             )
             if previous is not None:
                 if previous.request_hash != wanted_hash:
@@ -788,7 +791,7 @@ class WorkspaceDirectoryStore:
                 recovery=None,
                 cleanup_pending=False,
                 run_id=run_id,
-                call_id=call_id,
+                call_id=await mixed_attempt_call(session, mixed_child, call_id),
                 receipt_history=[],
                 created_at=utc_now(),
                 updated_at=utc_now(),

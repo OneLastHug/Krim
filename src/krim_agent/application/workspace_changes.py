@@ -263,6 +263,7 @@ class WorkspaceChangeService:
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
             mixed_fence=context.mixed_batch,
+            run_id=context.run_id if context.run_id != "local" else None,
         )
         if previous is not None:
             return previous.view
@@ -278,7 +279,7 @@ class WorkspaceChangeService:
             binding.fingerprint,
             prepared,
             run_id=context.run_id if context.run_id != "local" else None,
-            call_id=context.call_id,
+            call_id=context.source_call_id or context.call_id,
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
             mixed_fence=context.mixed_batch,

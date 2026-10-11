@@ -133,7 +133,7 @@ async def main():
                 async with cold_db.engine.connect() as sql:
                     assert (
                         await sql.execute(text("SELECT version_num FROM alembic_version"))
-                    ).scalar_one() == "0039_mixed_workspace_batches"
+                    ).scalar_one() == "0040_mixed_batch_model_sources"
                     assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
             finally:
                 await cold_db.close()
@@ -141,7 +141,7 @@ async def main():
                 json.dumps(
                     {
                         "package": krim_agent.__file__,
-                        "schema": "0039_mixed_workspace_batches",
+                        "schema": "0040_mixed_batch_model_sources",
                         "real_apply_keep_undo": True,
                         "keep_zero_write": True,
                         "cold_original_fact": True,

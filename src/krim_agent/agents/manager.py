@@ -17,6 +17,7 @@ from krim_agent.application.commands import AgentCommandService
 from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.application.workspace_directories import DirectoryChangeService
 from krim_agent.application.workspace_mixed_queries import MixedBatchQueryService
+from krim_agent.application.workspace_model_batches import ModelMixedBatchService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
@@ -465,6 +466,9 @@ class AgentManager:
         )
         self.directory_changes = DirectoryChangeService(self.workspace_changes)
         self.mixed_queries = MixedBatchQueryService(self.workspace_changes, self.directory_changes)
+        self.mixed_batch_writer = ModelMixedBatchService(
+            self.workspace_changes, self.directory_changes
+        )
         self.commands = AgentCommandService(
             CommandStore(repository.database, owner_id=self.owner_id), self.workspace_changes
         )
@@ -758,6 +762,7 @@ class AgentManager:
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
             workspace_mixed_queries=self.mixed_queries,
+            workspace_mixed_batches=self.mixed_batch_writer,
             workspace=definition.workspace,
             execution=definition.execution,
             commands=self.commands,
@@ -914,9 +919,11 @@ class AgentManager:
     async def close(self) -> None:
         self.commands.assert_external_close()
         self.directory_changes.assert_external_close()
+        self.mixed_batch_writer.assert_external_close()
         async with self._spawn_lock:
             self._closed = True
         await self.commands.close()
+        await self.mixed_batch_writer.close()
         await self.directory_changes.close()
         await self.workspace_changes.close()
         for handle in list(self._handles.values()):

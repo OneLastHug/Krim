@@ -695,6 +695,19 @@ class MixedWorkspaceBatchRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class MixedWorkspaceBatchModelSourceRow(Base):
+    __tablename__ = "mixed_workspace_batch_model_sources"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_mixed_batch_model_call"),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_mixed_batch_model_call"),
+    )
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("mixed_workspace_batches.batch_id"), primary_key=True
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    call_id: Mapped[str] = mapped_column(String(128))
+
+
 class MixedWorkspaceBatchChildRow(Base):
     __tablename__ = "mixed_workspace_batch_children"
     __table_args__ = (

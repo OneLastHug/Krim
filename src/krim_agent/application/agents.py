@@ -83,6 +83,7 @@ from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.tools.workspace_changes import workspace_change_tools
+from krim_agent.tools.workspace_mixed_batches import mixed_batch_start_tool
 from krim_agent.tools.workspace_mixed_queries import mixed_batch_query_tool
 from krim_agent.workspace import (
     WORKSPACE_TOOL_NAMES,
@@ -580,6 +581,17 @@ class AgentService:
         if existing is None:
             self.runtime.tools.register(definition)
 
+    def register_mixed_batch_writes(self) -> None:
+        """可信宿主显式启用模型混合批次写工具；权限仍由原ToolRegistry裁决。"""
+        definition = mixed_batch_start_tool()
+        existing = next(
+            (item for item in self.runtime.tools.definitions if item.name == definition.name), None
+        )
+        if existing is not None and existing is not definition:
+            raise ValueError("混合批次写工具名称已由其它定义占用")
+        if existing is None:
+            self.runtime.tools.register(definition)
+
     def disable_workspace(self, key: str) -> None:
         self.resources.disable_workspace(key)
 
@@ -767,6 +779,7 @@ class AgentService:
                     workspace_changes=self.manager.workspace_changes,
                     directory_changes=self.manager.directory_changes,
                     workspace_mixed_queries=self.manager.mixed_queries,
+                    workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
                     checkpoint_capture=checkpoint_capture,
