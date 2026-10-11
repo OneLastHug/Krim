@@ -66,7 +66,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "package": krim_agent.__file__,
-                    "migration": "0033_mcp_resource_profiles",
+                    "migration": "0034_oauth_client_registrations",
                     "revision": enabled.profile.revision,
                     "resource_hash": view.resource_hash,
                     "secret_free": True,

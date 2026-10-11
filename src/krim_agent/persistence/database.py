@@ -207,6 +207,26 @@ class MCPResourceProfileRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class OAuthClientRegistrationRow(Base):
+    __tablename__ = "oauth_client_registrations"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_oauth_client_revision"),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_oauth_client_lease",
+        ),
+    )
+    binding_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(256))
+    server: Mapped[str] = mapped_column(String(32))
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class WorkflowCheckpointRow(Base):
     __tablename__ = "workflow_checkpoints"
     __table_args__ = (

@@ -15,6 +15,7 @@ from pydantic import ConfigDict, Field
 
 from krim_agent.protocol.models import StrictModel
 
+from .client_store import OAuthClientBinding, OAuthClientRegistrationStore
 from .discovery import OAuthDiscoveryClient, RegisteredClient
 from .oauth import (
     OAuthAuthorizationStateStore,
@@ -69,6 +70,7 @@ class MCPOAuthAuth(httpx.Auth):
         issuer: str | None = None,
         registered_client: RegisteredClient | None = None,
         states: OAuthStateStore | OAuthAuthorizationStateStore | None = None,
+        clients: OAuthClientRegistrationStore | None = None,
         allow_dynamic_registration: bool = False,
         client_name: str = "Krim Agent",
         timeout_seconds: float = 60,
@@ -115,6 +117,25 @@ class MCPOAuthAuth(httpx.Auth):
         self._lock = asyncio.Lock()
         self.last_error_code: str | None = None
         self._config = config.model_copy(deep=True) if config else None
+        self._declared_config = config.model_copy(deep=True) if config else None
+        self.clients = clients
+        self._client_binding = (
+            OAuthClientBinding(
+                server=server,
+                subject=subject,
+                resource=self.resource_url,
+                issuer=self.issuer,
+                redirect_uri=self.redirect_uri,
+                scopes=self.scopes,
+                allowed_hosts=set(requester.allowed_hosts),
+                client_name=client_name,
+            )
+            if config is None
+            and registered_client is None
+            and allow_dynamic_registration
+            and self.redirect_uri is not None
+            else None
+        )
         if self._config is not None:
             if self._config.server != server:
                 raise ValueError("MCP OAuth 配置 server 不一致")
@@ -122,10 +143,15 @@ class MCPOAuthAuth(httpx.Auth):
             if not self._resource_matches(self._config.resource):
                 raise ValueError("MCP OAuth 配置 resource 不一致")
             self._config.validate_endpoints()
+            self._declared_config = self._config.model_copy(deep=True)
 
     @property
     def config(self) -> OAuthConfig | None:
         return self._config.model_copy(deep=True) if self._config else None
+
+    @property
+    def declared_config(self) -> OAuthConfig | None:
+        return self._declared_config.model_copy(deep=True) if self._declared_config else None
 
     def matches_endpoint(self, url: str) -> bool:
         expected, actual = httpx.URL(self.resource_url), httpx.URL(url)
@@ -216,6 +242,10 @@ class MCPOAuthAuth(httpx.Auth):
         request.headers["Authorization"] = f"Bearer {value}"
 
     async def _usable(self) -> TokenSnapshot:
+        if self._config is None and self.clients is not None and self._client_binding is not None:
+            cached = await self.clients.read(self._client_binding)
+            if cached.config is not None:
+                self._config = cached.config.model_copy(deep=True)
         if self._config is None:
             return TokenSnapshot(None, 0)
         current = await self.tokens.read(self._config, self.subject)
@@ -227,6 +257,26 @@ class MCPOAuthAuth(httpx.Auth):
         return current
 
     async def _discover(self, header: str) -> None:
+        if self.clients is not None and self._client_binding is not None:
+            async with self.clients.lock(self._client_binding):
+                cached = await self.clients.read(self._client_binding)
+                if cached.config is not None:
+                    self._config = cached.config.model_copy(deep=True)
+                    return
+                try:
+                    await self._discover_remote(header)
+                    if self._config is None:
+                        raise MCPAuthError("oauth_client_required", "DCR未形成有效配置")
+                    await self.clients.write(
+                        self._client_binding, self._config, expected_revision=cached.revision
+                    )
+                except BaseException:
+                    self._config = None
+                    raise
+            return
+        await self._discover_remote(header)
+
+    async def _discover_remote(self, header: str) -> None:
         discovery = OAuthDiscoveryClient(self.requester)
         advertised = self._parameter(header, "resource_metadata")
         parsed = urlsplit(self.resource_url)
