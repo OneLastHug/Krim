@@ -10,6 +10,7 @@ import uvicorn
 from cryptography.fernet import Fernet
 from mcp.types import CallToolResult, ListToolsResult, Tool
 from pydantic import Field, SecretStr
+from sqlalchemy import func, select
 
 from krim_agent.agents import AgentDefinition
 from krim_agent.api import create_app
@@ -26,6 +27,10 @@ from krim_agent.mcp import (
     TrustedMCPServer,
 )
 from krim_agent.persistence import Database, KrimRepository
+from krim_agent.persistence.database import (
+    WorkspaceDirectoryAttemptRow,
+    WorkspaceDirectoryProposalRow,
+)
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import FakeProvider
@@ -238,6 +243,56 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
         return await original_settle(*args, **kwargs)
 
     app.state.agents.workspace_edits.settle = controlled_settle
+
+    class TestDirectoryControl(StrictModel):
+        action: Literal["seed", "nonempty", "stat", "fail_save", "counts"]
+        path: str = Field(default="empty", pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        agent_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+
+    directory_fail_save = False
+    original_directory_settle = app.state.agents.manager.directory_changes.store.settle
+
+    async def controlled_directory_settle(*args, **kwargs):
+        global directory_fail_save
+        if directory_fail_save:
+            directory_fail_save = False
+            raise OSError("injected directory receipt save failure")
+        return await original_directory_settle(*args, **kwargs)
+
+    app.state.agents.manager.directory_changes.store.settle = controlled_directory_settle
+
+    @app.post("/_test/directory")
+    async def configure_directory(payload: TestDirectoryControl) -> dict[str, bool | int | None]:
+        # 只在合成Playwright服务存在；不打入产品API或wheel。
+        global directory_fail_save
+        target = write_root / payload.path
+        if payload.action == "fail_save":
+            directory_fail_save = True
+        elif payload.action == "seed":
+            await asyncio.to_thread(target.mkdir, mode=0o750)
+        elif payload.action == "nonempty":
+            await asyncio.to_thread((target / "child.txt").write_text, "child")
+        if payload.action == "counts":
+            scope = "session:" + (payload.agent_id or "")
+            database = runtime.repository.database
+            async with database.write_lock, database.sessions() as session:
+                proposals = await session.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceDirectoryProposalRow)
+                    .where(WorkspaceDirectoryProposalRow.scope_id == scope)
+                )
+                operations = await session.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceDirectoryAttemptRow)
+                    .where(WorkspaceDirectoryAttemptRow.scope_id == scope)
+                )
+            return {"proposals": proposals, "operations": operations}
+        info = await asyncio.to_thread(target.stat) if target.exists() else None
+        return {
+            "found": info is not None,
+            "inode": info.st_ino if info else None,
+            "mode": info.st_mode & 0o777 if info else None,
+        }
 
     class TestNativeBatchControl(StrictModel):
         agent_id: str = Field(min_length=36, max_length=36, pattern=r"^[a-f0-9-]{36}$")

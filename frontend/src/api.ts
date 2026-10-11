@@ -172,6 +172,32 @@ export interface WorkspaceListing { path: string; entries: WorkspaceEntry[]; tru
 export interface WorkspaceFile { path: string; sha256: string; byte_size: number; start_line: number; lines: number; content: string; truncated: boolean; }
 export interface WorkspaceSearch { matches: Array<{ path: string; line: number; text: string }>; files_scanned: number; files_skipped: number; truncated: boolean; }
 export type WorkspaceAction = "apply" | "undo" | "keep";
+export interface DirectorySpec {
+  path: string; operation: "create" | "delete"; expected_fingerprint?: string | null; mode?: number | null;
+}
+export interface DirectoryPreviewRequest { spec: DirectorySpec; request_key: string; }
+export interface DirectoryPreviewView {
+  proposal_id: string; scope_id: string; workspace_key: string; resource_fingerprint: string;
+  path: string; operation: "create" | "delete"; before_fingerprint: string | null; mode: number | null;
+  revision: number; status: WorkspaceChangeView["status"]; expires_at: number;
+}
+export interface DirectoryAction {
+  proposal_id: string; action: WorkspaceAction; expected_revision: number; request_key: string;
+}
+export interface DirectoryAttemptView {
+  operation_id: string; proposal_id: string; scope_id: string; action: WorkspaceAction;
+  expected_revision: number; status: "running" | "done" | "rejected" | "uncertain";
+  receipt: { path: string; status: "done" | "rejected" | "uncertain"; before_fingerprint: string | null;
+    after_fingerprint: string | null; changed: boolean; error_code: string | null; recovery_required: boolean } | null;
+  recovery_required: boolean; cleanup_pending: boolean; created_at: number; updated_at: number;
+}
+export interface DirectoryPage {
+  kind: "proposals" | "history"; proposals: DirectoryPreviewView[]; history: DirectoryAttemptView[];
+  proposal: DirectoryPreviewView | null; operation: DirectoryAttemptView | null; next_after: string | null;
+}
+export interface DirectoryInspectView {
+  path: string; found: boolean; fingerprint: string | null; mode: number | null; empty: boolean | null;
+}
 export interface FileChangeSpec {
   path: string; operation: "write" | "replace" | "delete"; expected_sha256: string | null;
   content?: string | null; replacements?: Array<{ old_text: string; new_text: string; occurrences: number }>;

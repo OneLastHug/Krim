@@ -40,6 +40,12 @@ async def test_static_browser_agent_app_assets_are_same_origin_and_safe(api):
     changes_script = await api.get("/ui/change-list-ui.js")
     assert changes_script.status_code == 200
     assert "textContent" in changes_script.text and "changeList/sync" in changes_script.text
+    directories_script = await api.get("/ui/directory-changes-ui.js")
+    assert directories_script.status_code == 200
+    assert (
+        "DirectoryChangesUI" in directories_script.text
+        and "directory-state" in directories_script.text
+    )
 
 
 async def test_static_assets_are_public_but_business_api_still_requires_bearer_key(tmp_path):
@@ -76,6 +82,11 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert change_script.status_code == 200 and "WorkspaceChangesUI" in change_script.text
         command_script = await client.get("/ui/commands-ui.js")
         assert command_script.status_code == 200 and "CommandsUI" in command_script.text
+        directories_script = await client.get("/ui/directory-changes-ui.js")
+        assert (
+            directories_script.status_code == 200
+            and "DirectoryChangesUI" in directories_script.text
+        )
         assert command_script.headers["x-content-type-options"] == "nosniff"
         assert (await client.get("/v1/agents/example/commands")).status_code == 401
         authorized = await client.get(
@@ -92,3 +103,4 @@ def test_frontend_sources_and_built_assets_exist():
     assert (root / "src/app.ts").exists() and (root / "src/api.ts").exists()
     assert (Path("src/krim_agent/web") / "index.html").exists()
     assert (Path("src/krim_agent/web") / "app.js").exists()
+    assert (Path("src/krim_agent/web") / "directory-changes-ui.js").exists()
