@@ -56,6 +56,22 @@ async def run(agent, request, *, confirmed=False):
     return done
 
 
+def mutation_metadata(path):
+    # keep可以读取正文并推进atime；仍严格保留身份、权限、大小和纳秒修改时间。
+    value = path.stat()
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 async def test_sdk_mixed_worker_apply_keep_undo_and_same_key_never_reruns(runtime, tmp_path):
     service, agent, _binding, request = await setup(runtime, tmp_path)
     try:
@@ -80,7 +96,7 @@ async def test_sdk_mixed_worker_apply_keep_undo_and_same_key_never_reruns(runtim
                     )
                 request = MixedBatchRequest(action=action, request_key=action, targets=targets)
             stamp = (
-                ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+                (mutation_metadata(tmp_path / "file.txt"), mutation_metadata(tmp_path / "empty"))
                 if action == "keep"
                 else None
             )
@@ -93,7 +109,10 @@ async def test_sdk_mixed_worker_apply_keep_undo_and_same_key_never_reruns(runtim
             assert await agent.start_mixed_change_batch(request) == done
             if action == "keep":
                 assert all(not item.operation.receipt.changed for item in done.items)
-                assert stamp == ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+                assert stamp == (
+                    mutation_metadata(tmp_path / "file.txt"),
+                    mutation_metadata(tmp_path / "empty"),
+                )
         assert not (tmp_path / "file.txt").exists() and not (tmp_path / "empty").exists()
         assert await attempt_counts(service.runtime.repository.database) == (3, 3)
     finally:
