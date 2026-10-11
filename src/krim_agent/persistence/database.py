@@ -644,6 +644,7 @@ class WorkspaceDirectoryLockRow(Base):
         ForeignKey("workspace_directory_attempts.operation_id"), unique=True
     )
     directory_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    target_lock_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class CommandDirectoryProposalRow(Base):

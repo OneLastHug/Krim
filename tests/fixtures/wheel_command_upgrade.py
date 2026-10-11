@@ -60,7 +60,7 @@ async def main():
             assert head == (
                 "0029_workspace_restore_plans"
                 if mode == "old"
-                else "0037_command_directory_sources"
+                else "0038_directory_move_target_lock"
             )
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert "/site-packages/" in krim_agent.__file__

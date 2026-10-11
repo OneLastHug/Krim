@@ -155,7 +155,7 @@ async def test_checkpoint_migration_roundtrip_preserves_old_workspaces_and_refus
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0037_command_directory_sources"
+            ).scalar_one() == "0038_directory_move_target_lock"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
 
             def compare(sync):

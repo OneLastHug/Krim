@@ -10,6 +10,7 @@ from krim_agent.tools import ShortCircuit
 from krim_agent.workspace_directory import (
     DirectoryChangeAction,
     DirectoryChangeSpec,
+    DirectoryPreviewRequest,
     DirectoryQueryRequest,
     DirectoryQueryResult,
 )
@@ -279,5 +280,53 @@ async def test_directory_write_profile_rejects_readonly_resource_before_spawn(ru
                 ),
             )
         )
+    finally:
+        await service.close()
+
+
+async def test_sdk_directory_move_uses_two_parent_fence_and_original_inode(runtime, tmp_path):
+    (tmp_path / "source").mkdir()
+    (tmp_path / "target").mkdir()
+    (tmp_path / "source" / "empty").mkdir(mode=0o750)
+    service, agent = await setup(runtime, tmp_path)
+    try:
+        snapshot = await agent.inspect_directory("source/empty")
+        proposal = await agent.service.directory_preview(
+            agent.agent_id,
+            DirectoryPreviewRequest(
+                spec=DirectoryChangeSpec(
+                    path="source/empty",
+                    operation="move",
+                    target_path="target/moved",
+                    expected_fingerprint=snapshot.fingerprint,
+                ),
+                request_key="move-preview",
+            ),
+        )
+        applied = await agent.change_directory(
+            DirectoryChangeAction(
+                proposal_id=proposal.proposal_id,
+                action="apply",
+                expected_revision=0,
+                request_key="move-apply",
+            )
+        )
+        assert applied.status == "done" and not (tmp_path / "source" / "empty").exists()
+        moved_inode = (tmp_path / "target" / "moved").stat().st_ino
+        current = await agent.query_directory(
+            DirectoryQueryRequest(kind="proposal", identifier=proposal.proposal_id)
+        )
+        undone = await agent.change_directory(
+            DirectoryChangeAction(
+                proposal_id=proposal.proposal_id,
+                action="undo",
+                expected_revision=current.proposal.revision,
+                request_key="move-undo",
+            )
+        )
+        assert (
+            undone.status == "done" and (tmp_path / "source" / "empty").stat().st_ino == moved_inode
+        ), undone.receipt.error_code if undone.receipt else "no-receipt"
+        await agent.finalize_directory_change(undone.operation_id)
     finally:
         await service.close()

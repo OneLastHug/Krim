@@ -21,6 +21,7 @@ from krim_agent.workspace_directory import (
     DirectoryChangeReceipt,
     DirectoryChangeSpec,
     DirectoryEffect,
+    DirectoryMoveRestoreSpec,
     DirectoryPreviewView,
     DirectoryRecovery,
     DirectoryRestoreSpec,
@@ -50,6 +51,10 @@ def encode(change: PreparedDirectoryChange) -> dict[str, JsonValue]:
         "restore_from": encode_recovery(change.restore_from)
         if change.restore_from is not None
         else None,
+        "target_parent_identity": list(change.target_parent_identity)
+        if change.target_parent_identity is not None
+        else None,
+        "target_before": asdict(change.target_before) if change.target_before is not None else None,
     }
     value = json.loads(json.dumps(value))
     value["checksum"] = digest(value)
@@ -78,6 +83,26 @@ def validate(change: PreparedDirectoryChange, *, original: bool = False) -> None
             or change.restore_from is not None
         ):
             raise ServiceError("workspace_directory_corrupt", "删除基线无效", 409)
+        if spec.operation == "move" and (
+            change.before is None
+            or not change.before.empty
+            or spec.expected_fingerprint != change.before.fingerprint
+            or spec.target_path is None
+            or change.target_parent_identity is None
+            or change.target_before is not None
+            or change.restore_from is not None
+        ):
+            raise ServiceError("workspace_directory_corrupt", "移动基线无效", 409)
+    elif isinstance(spec, DirectoryMoveRestoreSpec):
+        if (
+            change.before is None
+            or not change.before.empty
+            or spec.expected_fingerprint != change.before.fingerprint
+            or change.target_parent_identity is None
+            or change.target_before is not None
+            or change.restore_from is not None
+        ):
+            raise ServiceError("workspace_directory_corrupt", "移动撤销基线无效", 409)
     elif (
         original
         or change.before is not None
@@ -113,6 +138,16 @@ def decode(value: dict[str, JsonValue]) -> PreparedDirectoryChange:
             before,
             cast(str, raw["token"]),
             recovery,
+            TypeAdapter(tuple[int, int]).validate_json(
+                json.dumps(raw["target_parent_identity"]), strict=True
+            )
+            if raw.get("target_parent_identity") is not None
+            else None,
+            TypeAdapter(DirectorySnapshot).validate_json(
+                json.dumps(raw["target_before"]), strict=True
+            )
+            if raw.get("target_before") is not None
+            else None,
         )
         validate(change)
         return change
@@ -138,6 +173,12 @@ def decode_recovery(value: dict[str, JsonValue]) -> DirectoryRecovery:
         TypeAdapter(tuple[int, int]).validate_json(json.dumps(raw["parent_identity"]), strict=True),
         TypeAdapter(DirectorySnapshot).validate_json(json.dumps(raw["expected"]), strict=True)
         if raw["expected"] is not None
+        else None,
+        cast(str | None, raw.get("target_path")) if raw.get("target_path") is not None else None,
+        TypeAdapter(tuple[int, int]).validate_json(
+            json.dumps(raw["target_parent_identity"]), strict=True
+        )
+        if raw.get("target_parent_identity") is not None
         else None,
     )
 
@@ -521,16 +562,38 @@ class WorkspaceDirectoryStore:
 
     async def _fence(self, session: AsyncSession, change: PreparedDirectoryChange) -> str:
         key = entry_key(change.parent_identity, change.spec.path)
-        if await session.get(WorkspaceDirectoryLockRow, key) or await session.scalar(
-            select(WorkspaceFileLockRow.operation_id).where(WorkspaceFileLockRow.file_key == key)
-        ):
-            raise ServiceError("workspace_directory_busy", "同一条目有执行中或未核实操作", 409)
+        move_spec = change.spec
+        move_target_path = (
+            move_spec.target_path
+            if isinstance(move_spec, DirectoryChangeSpec) and move_spec.operation == "move"
+            else move_spec.target_path
+            if isinstance(move_spec, DirectoryMoveRestoreSpec)
+            else None
+        )
+        target_key = (
+            entry_key(change.target_parent_identity, move_target_path)
+            if move_target_path is not None and change.target_parent_identity is not None
+            else None
+        )
+        keys = [key, target_key] if target_key is not None else [key]
         if await session.scalar(
             select(WorkspaceDirectoryLockRow.operation_id).where(
-                WorkspaceDirectoryLockRow.directory_key == directory_key(change.parent_identity)
+                (WorkspaceDirectoryLockRow.lock_key.in_(keys))
+                | (WorkspaceDirectoryLockRow.target_lock_key.in_(keys))
+            )
+        ) or await session.scalar(
+            select(WorkspaceFileLockRow.operation_id).where(WorkspaceFileLockRow.file_key.in_(keys))
+        ):
+            raise ServiceError("workspace_directory_busy", "目录移动entry有执行中或未核实操作", 409)
+        parent_keys = [directory_key(change.parent_identity)]
+        if change.target_parent_identity is not None:
+            parent_keys.append(directory_key(change.target_parent_identity))
+        if await session.scalar(
+            select(WorkspaceDirectoryLockRow.operation_id).where(
+                WorkspaceDirectoryLockRow.directory_key.in_(parent_keys)
             )
         ):
-            raise ServiceError("workspace_directory_busy", "父目录有执行中或未核实操作", 409)
+            raise ServiceError("workspace_directory_busy", "目录父级有执行中或未核实操作", 409)
         if change.before is not None:
             pending = (
                 await session.scalars(
@@ -580,11 +643,24 @@ class WorkspaceDirectoryStore:
             await assert_directory_source(session, proposal)
             original = decode(proposal.prepared)
             await self.files._resource(session, scope, proposal.workspace_key, fingerprint)
+            expected_path = original.spec.path
+            expected_parent = original.parent_identity
+            if (
+                request.action == "undo"
+                and isinstance(original.spec, DirectoryChangeSpec)
+                and original.spec.operation == "move"
+            ):
+                assert (
+                    original.spec.target_path is not None
+                    and original.target_parent_identity is not None
+                )
+                expected_path = original.spec.target_path
+                expected_parent = original.target_parent_identity
             if (
                 proposal.resource_fingerprint != fingerprint
                 or prepared.workspace_fingerprint != original.workspace_fingerprint
-                or prepared.spec.path != original.spec.path
-                or prepared.parent_identity != original.parent_identity
+                or prepared.spec.path != expected_path
+                or prepared.parent_identity != expected_parent
             ):
                 raise ServiceError("workspace_binding_changed", "目录动作不属于原资源/提案", 409)
             if proposal.revision != request.expected_revision:
@@ -613,7 +689,22 @@ class WorkspaceDirectoryStore:
                 )
                 if source is None:
                     raise ServiceError("workspace_directory_proposal", "撤销缺少原应用事实", 409)
-                if original.spec.operation == "create":
+                if original.spec.operation == "move":
+                    if (
+                        source.observed_after is None
+                        or source.receipt is None
+                        or not isinstance(prepared.spec, DirectoryMoveRestoreSpec)
+                    ):
+                        raise ServiceError(
+                            "workspace_directory_proposal", "原移动缺少完整观察回执", 409
+                        )
+                    if prepared.spec.expected_fingerprint != source.receipt.get(
+                        "after_fingerprint"
+                    ):
+                        raise ServiceError(
+                            "workspace_directory_proposal", "原移动撤销目标不匹配", 409
+                        )
+                elif original.spec.operation == "create":
                     if source.observed_after is None or source.receipt is None:
                         raise ServiceError(
                             "workspace_directory_proposal", "原创建缺少完整观察回执", 409
@@ -675,6 +766,15 @@ class WorkspaceDirectoryStore:
             )
             session.add(row)
             await session.flush()
+            prepared_spec = prepared.spec
+            prepared_target_path = (
+                prepared_spec.target_path
+                if isinstance(prepared_spec, DirectoryChangeSpec)
+                and prepared_spec.operation == "move"
+                else prepared_spec.target_path
+                if isinstance(prepared_spec, DirectoryMoveRestoreSpec)
+                else None
+            )
             session.add(
                 WorkspaceDirectoryLockRow(
                     lock_key=key,
@@ -682,6 +782,12 @@ class WorkspaceDirectoryStore:
                     directory_key=directory_key(prepared.before.identity)
                     if prepared.before
                     else None,
+                    target_lock_key=(
+                        entry_key(prepared.target_parent_identity, prepared_target_path)
+                        if prepared_target_path is not None
+                        and prepared.target_parent_identity is not None
+                        else None
+                    ),
                 )
             )
             proposal.active_operation_id = identifier
@@ -718,8 +824,25 @@ class WorkspaceDirectoryStore:
                     WorkspaceDirectoryLockRow.operation_id == identifier
                 )
             )
-            if lock is None or lock.lock_key != entry_key(
-                decode(row.prepared).parent_identity, proposal.path
+            prepared = decode(row.prepared)
+            expected_lock = entry_key(prepared.parent_identity, prepared.spec.path)
+            prepared_target_path = (
+                prepared.spec.target_path
+                if isinstance(prepared.spec, DirectoryChangeSpec)
+                and prepared.spec.operation == "move"
+                else prepared.spec.target_path
+                if isinstance(prepared.spec, DirectoryMoveRestoreSpec)
+                else None
+            )
+            expected_target = (
+                entry_key(prepared.target_parent_identity, prepared_target_path)
+                if prepared_target_path is not None and prepared.target_parent_identity is not None
+                else None
+            )
+            if (
+                lock is None
+                or lock.lock_key != expected_lock
+                or lock.target_lock_key != expected_target
             ):
                 raise ServiceError("workspace_directory_lease_lost", "目录逻辑锁不匹配", 409)
 

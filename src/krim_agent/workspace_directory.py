@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -24,9 +25,10 @@ class DirectoryChangeSpec(StrictModel):
     """可信内部目录意图；不作为旧文本 workspace_change 公共参数。"""
 
     path: str = Field(min_length=1, max_length=512)
-    operation: Literal["create", "delete"]
+    operation: Literal["create", "delete", "move"]
     expected_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     mode: int | None = Field(default=None, ge=0, le=0o777)
+    target_path: str | None = Field(default=None, min_length=1, max_length=512)
 
     @model_validator(mode="after")
     def shape(self) -> DirectoryChangeSpec:
@@ -36,11 +38,35 @@ class DirectoryChangeSpec(StrictModel):
         except ServiceError as error:
             raise ValueError(str(error)) from error
         if self.operation == "create":
-            if self.expected_fingerprint is not None or self.mode is None:
+            if (
+                self.expected_fingerprint is not None
+                or self.mode is None
+                or self.target_path is not None
+            ):
                 raise ValueError("目录创建须为缺失目标并指定普通mode")
             if self.mode & 0o700 != 0o700:
                 raise ValueError("新目录须保留宿主owner的读取/写入/进入权限")
-        elif self.expected_fingerprint is None or self.mode is not None:
+        elif self.operation == "delete":
+            if (
+                self.expected_fingerprint is None
+                or self.mode is not None
+                or self.target_path is not None
+            ):
+                raise ValueError("目录删除须绑定原fingerprint且不指定新mode")
+        elif (
+            self.expected_fingerprint is None
+            or self.mode is not None
+            or self.target_path is None
+            or self.target_path == self.path
+        ):
+            raise ValueError("目录移动须绑定原fingerprint和不同目标路径")
+        if self.target_path is not None:
+            try:
+                if not Workspace._parts(self.target_path):
+                    raise ValueError("目录目标路径不能为空")
+            except ServiceError as error:
+                raise ValueError(str(error)) from error
+        if self.operation == "delete" and self.expected_fingerprint is None:
             raise ValueError("目录删除须绑定原fingerprint且不指定新mode")
         return self
 
@@ -52,6 +78,18 @@ class DirectoryRestoreSpec(StrictModel):
     path: str = Field(min_length=1, max_length=512)
     mode: int = Field(ge=0, le=0o777)
     original_token: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class DirectoryMoveRestoreSpec(StrictModel):
+    operation: Literal["restore_move"] = "restore_move"
+    source_path: str = Field(min_length=1, max_length=512)
+    target_path: str = Field(min_length=1, max_length=512)
+    expected_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    original_token: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+    @property
+    def path(self) -> str:
+        return self.source_path
 
 
 class ArtifactDirectorySpec(DirectoryChangeSpec):
@@ -73,7 +111,7 @@ class DirectoryPreviewView(StrictModel):
     workspace_key: str
     resource_fingerprint: str
     path: str
-    operation: Literal["create", "delete"]
+    operation: Literal["create", "delete", "move"]
     before_fingerprint: str | None
     mode: int | None
     revision: int = Field(ge=0)
@@ -294,12 +332,16 @@ class PreparedDirectoryChange:
     before: DirectorySnapshot | None
     token: str
     restore_from: DirectoryRecovery | None = None
+    target_parent_identity: tuple[int, int] | None = None
+    target_before: DirectorySnapshot | None = None
 
     @property
-    def spec(self) -> DirectoryChangeSpec | DirectoryRestoreSpec:
+    def spec(self) -> DirectoryChangeSpec | DirectoryRestoreSpec | DirectoryMoveRestoreSpec:
         value = json.loads(self.spec_json)
         if value.get("operation") == "restore_deleted":
             return DirectoryRestoreSpec.model_validate_json(self.spec_json)
+        if value.get("operation") == "restore_move":
+            return DirectoryMoveRestoreSpec.model_validate_json(self.spec_json)
         if "command_id" in value:
             return ArtifactDirectorySpec.model_validate_json(self.spec_json)
         return DirectoryChangeSpec.model_validate_json(self.spec_json)
@@ -341,6 +383,8 @@ class DirectoryRecovery:
     stage_name: str
     parent_identity: tuple[int, int]
     expected: DirectorySnapshot | None
+    target_path: str | None = None
+    target_parent_identity: tuple[int, int] | None = None
 
 
 def _is_plain_mode(mode: int) -> bool:
@@ -439,8 +483,87 @@ class WorkspaceDirectoryWriter:
         with self._files._locked_parent(path, abort, require_writable=require_writable) as value:
             yield value
 
+    @contextmanager
+    def _locked_parents(
+        self, paths: tuple[str, ...], abort: Callable[[], bool], *, require_writable: bool = True
+    ) -> Iterator[dict[str, int]]:
+        """稳定顺序持有根写锁、根mutex和所有相关父目录fd，避免双父死锁。"""
+        import fcntl
+
+        deadline = time.monotonic() + self.lock_timeout
+        if not self.workspace._write_lock.acquire(timeout=self.lock_timeout):
+            raise ServiceError("workspace_write_busy", "目录协作锁等待超时", 429)
+        mutex: int | None = None
+        fds: dict[str, int] = {}
+        try:
+            if require_writable and not self.workspace.writable:
+                raise ServiceError("workspace_read_only", "宿主未授权工作区写能力", 403)
+            anchor = self.workspace._open(".", directory=True)
+            try:
+                mutex = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=anchor)
+            finally:
+                os.close(anchor)
+            while True:
+                if abort():
+                    raise ServiceError("workspace_write_cancelled", "目录移动在发布前取消", 409)
+                try:
+                    fcntl.flock(mutex, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ServiceError(
+                            "workspace_write_busy", "目录协作锁等待超时", 429
+                        ) from None
+                    time.sleep(0.01)
+            parents = sorted({"/".join(self.workspace._parts(path)[:-1]) or "." for path in paths})
+            for parent in parents:
+                fds[parent] = self.workspace._open(parent, directory=True)
+            yield fds
+        finally:
+            for fd in fds.values():
+                os.close(fd)
+            if mutex is not None:
+                try:
+                    fcntl.flock(mutex, fcntl.LOCK_UN)
+                finally:
+                    os.close(mutex)
+            self.workspace._write_lock.release()
+
     def prepare(self, spec: DirectoryChangeSpec) -> PreparedDirectoryChange:
         request = DirectoryChangeSpec.model_validate(spec.model_dump())
+        if request.operation == "move":
+            assert request.target_path is not None
+            source_parent = "/".join(self.workspace._parts(request.path)[:-1]) or "."
+            target_parent = "/".join(self.workspace._parts(request.target_path)[:-1]) or "."
+            with self._locked_parents(
+                (request.path, request.target_path), lambda: False, require_writable=False
+            ) as parents:
+                source_fd, target_fd = parents[source_parent], parents[target_parent]
+                source_identity = _identity(os.fstat(source_fd))
+                target_identity = _identity(os.fstat(target_fd))
+                before = self._snapshot(source_fd, self.workspace._parts(request.path)[-1])
+                target_before = self._snapshot(
+                    target_fd, self.workspace._parts(request.target_path)[-1], missing=True
+                )
+                assert before is not None
+                if not before.empty:
+                    raise ServiceError("workspace_directory_nonempty", "只允许移动空目录", 409)
+                if before.fingerprint != request.expected_fingerprint or target_before is not None:
+                    raise ServiceError(
+                        "workspace_directory_conflict", "目录移动版本或目标条件不匹配", 409
+                    )
+                self._files._check_parent(source_parent, source_identity)
+                self._files._check_parent(target_parent, target_identity)
+                return PreparedDirectoryChange(
+                    request.model_dump_json(),
+                    self.workspace.fingerprint,
+                    source_identity,
+                    before,
+                    uuid4().hex,
+                    None,
+                    target_identity,
+                    target_before,
+                )
         with self._locked_parent(request.path, lambda: False, require_writable=False) as (
             fd,
             parent,
@@ -494,7 +617,9 @@ class WorkspaceDirectoryWriter:
     ) -> DirectoryEffect:
         return DirectoryEffect(
             DirectoryChangeReceipt(
-                change.spec.path,
+                change.spec.path
+                if isinstance(change.spec, (DirectoryChangeSpec, DirectoryRestoreSpec))
+                else change.spec.source_path,
                 status,
                 change.before.fingerprint if change.before else None,
                 after.fingerprint if after else None,
@@ -571,6 +696,10 @@ class WorkspaceDirectoryWriter:
         cancelled = abort or (lambda: False)
         self._validate(change)
         _rename_function()
+        if isinstance(change.spec, DirectoryChangeSpec) and change.spec.operation == "move":
+            return self._move_apply(change, cancelled, authorize, record_intent)
+        if isinstance(change.spec, DirectoryMoveRestoreSpec):
+            return self._move_apply(change, cancelled, authorize, record_intent)
         creating = change.spec.operation in {"create", "restore_deleted"}
         with self._locked_parent(change.spec.path, cancelled) as (fd, parent, name):
             self._files._check_parent(parent, change.parent_identity)
@@ -752,6 +881,86 @@ class WorkspaceDirectoryWriter:
                     recovery=recovery,
                 )
 
+    def _move_apply(
+        self,
+        change: PreparedDirectoryChange,
+        cancelled: Callable[[], bool],
+        authorize: Callable[[], None] | None,
+        record_intent: Callable[[DirectoryRecovery], None] | None,
+    ) -> DirectoryEffect:
+        spec = change.spec
+        if isinstance(spec, DirectoryChangeSpec):
+            source_path, target_path = spec.path, spec.target_path
+        elif isinstance(spec, DirectoryMoveRestoreSpec):
+            source_path, target_path = spec.source_path, spec.target_path
+        else:
+            raise ServiceError("workspace_change_invalid", "目录移动规格类型无效", 422)
+        assert (
+            target_path is not None
+            and change.before is not None
+            and change.target_parent_identity is not None
+        )
+        source_parent = "/".join(self.workspace._parts(source_path)[:-1]) or "."
+        target_parent = "/".join(self.workspace._parts(target_path)[:-1]) or "."
+        source_name, target_name = (
+            self.workspace._parts(source_path)[-1],
+            self.workspace._parts(target_path)[-1],
+        )
+        recovery = DirectoryRecovery(
+            self.workspace.fingerprint,
+            source_path,
+            "",
+            change.parent_identity,
+            change.before,
+            target_path,
+            change.target_parent_identity,
+        )
+        attempted = False
+        try:
+            with self._locked_parents((source_path, target_path), cancelled) as parents:
+                source_fd, target_fd = parents[source_parent], parents[target_parent]
+                self._files._check_parent(source_parent, change.parent_identity)
+                self._files._check_parent(target_parent, change.target_parent_identity)
+                if authorize is not None:
+                    authorize()
+                source = self._snapshot(source_fd, source_name, missing=True)
+                target = self._snapshot(target_fd, target_name, missing=True)
+                if not self._same(source, change.before) or target is not None:
+                    return self._receipt(change, "rejected", "workspace_directory_conflict")
+                if cancelled():
+                    return self._receipt(change, "rejected", "workspace_write_cancelled")
+                if record_intent is not None:
+                    record_intent(recovery)
+                if authorize is not None:
+                    authorize()
+                if cancelled():
+                    return self._receipt(change, "rejected", "workspace_write_cancelled")
+                attempted = True
+                os.rename(source_name, target_name, src_dir_fd=source_fd, dst_dir_fd=target_fd)
+                os.fsync(source_fd)
+                if target_fd != source_fd:
+                    os.fsync(target_fd)
+                after = self._snapshot(target_fd, target_name, missing=True)
+                source_after = self._snapshot(source_fd, source_name, missing=True)
+                if source_after is not None or not self._same(after, change.before, displaced=True):
+                    return self._receipt(
+                        change,
+                        "uncertain",
+                        "workspace_directory_postcheck",
+                        after=after,
+                        changed=True,
+                        recovery=recovery,
+                    )
+                return self._receipt(change, "done", after=after, changed=True)
+        except (OSError, ServiceError) as error:
+            return self._receipt(
+                change,
+                "uncertain" if attempted else "rejected",
+                error.code if isinstance(error, ServiceError) else "workspace_directory_io",
+                changed=attempted,
+                recovery=recovery if attempted else None,
+            )
+
     def prepare_undo(
         self, original: PreparedDirectoryChange, effect: DirectoryEffect
     ) -> PreparedDirectoryChange:
@@ -768,6 +977,28 @@ class WorkspaceDirectoryWriter:
             effect.observed_after.fingerprint if effect.observed_after else None
         ):
             raise ServiceError("workspace_directory_receipt", "目录回执不匹配原快照", 409)
+        if isinstance(original.spec, DirectoryChangeSpec) and original.spec.operation == "move":
+            if (
+                effect.observed_after is None
+                or original.target_parent_identity is None
+                or original.spec.target_path is None
+            ):
+                raise ServiceError("workspace_directory_receipt", "移动回执缺少目标观察", 409)
+            return PreparedDirectoryChange(
+                DirectoryMoveRestoreSpec(
+                    source_path=original.spec.target_path,
+                    target_path=original.spec.path,
+                    expected_fingerprint=effect.observed_after.fingerprint,
+                    original_token=original.token,
+                ).model_dump_json(),
+                self.workspace.fingerprint,
+                original.target_parent_identity,
+                effect.observed_after,
+                uuid4().hex,
+                None,
+                original.parent_identity,
+                None,
+            )
         with self._locked_parent(original.spec.path, lambda: False) as (fd, parent, name):
             self._files._check_parent(parent, original.parent_identity)
             current = self._snapshot(fd, name, missing=True)
@@ -825,6 +1056,16 @@ class WorkspaceDirectoryWriter:
         restoring: bool = False,
     ) -> None:
         self._validate(change)
+        if reference.target_path is not None:
+            if (
+                reference.target_parent_identity is None
+                or reference.workspace_fingerprint != change.workspace_fingerprint
+                or reference.path != change.spec.path
+                or reference.parent_identity != change.parent_identity
+                or reference.target_parent_identity != change.target_parent_identity
+            ):
+                raise ServiceError("workspace_directory_reference", "目录移动双父引用不匹配", 409)
+            return
         if (
             reference.workspace_fingerprint != change.workspace_fingerprint
             or reference.path != change.spec.path
@@ -849,6 +1090,22 @@ class WorkspaceDirectoryWriter:
         if len(change.token) != 32 or any(c not in "0123456789abcdef" for c in change.token):
             raise ServiceError("workspace_change_invalid", "目录提案内部标识无效", 422)
         spec = change.spec
+        if isinstance(spec, DirectoryMoveRestoreSpec):
+            self.workspace._parts(spec.source_path)
+            self.workspace._parts(spec.target_path)
+            if (
+                change.before is None
+                or not change.before.empty
+                or change.before.fingerprint != spec.expected_fingerprint
+            ):
+                raise ServiceError("workspace_change_invalid", "移动撤销规格与原基线不符", 422)
+            if (
+                change.target_parent_identity is None
+                or change.target_before is not None
+                or change.restore_from is not None
+            ):
+                raise ServiceError("workspace_change_invalid", "移动撤销目标基线无效", 422)
+            return
         self.workspace._parts(spec.path)
         if isinstance(spec, DirectoryRestoreSpec):
             if (
@@ -879,6 +1136,32 @@ class WorkspaceDirectoryWriter:
                 change, "uncertain", "workspace_directory_stage_unknown", recovery=reference
             )
         try:
+            if reference.target_path is not None:
+                source_path = change.spec.path
+                source_parent = "/".join(self.workspace._parts(source_path)[:-1]) or "."
+                target_parent = "/".join(self.workspace._parts(reference.target_path)[:-1]) or "."
+                with self._locked_parents(
+                    (source_path, reference.target_path), lambda: False
+                ) as parents:
+                    source = self._snapshot(
+                        parents[source_parent], self.workspace._parts(source_path)[-1], missing=True
+                    )
+                    target = self._snapshot(
+                        parents[target_parent],
+                        self.workspace._parts(reference.target_path)[-1],
+                        missing=True,
+                    )
+                    if source is None and self._same(target, reference.expected, displaced=True):
+                        return self._receipt(change, "done", after=target, changed=True)
+                    if self._same(source, change.before) and target is None:
+                        return self._receipt(change, "rejected", "confirmed_no_effect")
+                return self._receipt(
+                    change,
+                    "uncertain",
+                    "workspace_directory_reconcile",
+                    changed=True,
+                    recovery=reference,
+                )
             with self._locked_parent(change.spec.path, lambda: False) as (fd, parent, name):
                 self._files._check_parent(parent, change.parent_identity)
                 target = self._snapshot(fd, name, missing=True)
@@ -909,6 +1192,8 @@ class WorkspaceDirectoryWriter:
         rejected: bool = False,
     ) -> None:
         self._check_reference(change, reference, restoring=change.restore_from is not None)
+        if reference.target_path is not None:
+            return
         with self._locked_parent(change.spec.path, lambda: False) as (fd, parent, name):
             self._files._check_parent(parent, change.parent_identity)
             target = self._snapshot(fd, name, missing=True)

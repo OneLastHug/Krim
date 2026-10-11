@@ -270,7 +270,7 @@ async def test_prompt_context_reopen_and_nonempty_downgrade_protection(tmp_path)
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0037_command_directory_sources"
+            ).scalar() == "0038_directory_move_target_lock"
         await repository.remove_mention(topic.id)
         async with reopened.engine.begin() as connection:
             await connection.run_sync(
