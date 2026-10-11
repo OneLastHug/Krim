@@ -67,6 +67,7 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -423,6 +424,29 @@ class AgentSession:
         self, request: NativeBatchRequest, *, confirmed: bool = False
     ) -> NativeBatchView:
         return await self.service.workspace_start_batch(self.agent_id, request, confirmed=confirmed)
+
+    async def start_mixed_change_batch(
+        self, request: MixedBatchRequest, *, confirmed: bool = False
+    ) -> MixedBatchView:
+        return await self.service.workspace_start_mixed_batch(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def mixed_change_batch(self, batch_id: str) -> MixedBatchView:
+        return await self.service.workspace_mixed_batch(self.agent_id, batch_id)
+
+    async def mixed_change_batch_by_key(self, request_key: str) -> MixedBatchView | None:
+        return await self.service.workspace_mixed_batch_by_key(self.agent_id, request_key)
+
+    async def wait_mixed_change_batch(
+        self, batch_id: str, *, timeout_seconds: float = 30
+    ) -> MixedBatchView:
+        return await self.service.workspace_wait_mixed_batch(
+            self.agent_id, batch_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_mixed_change_batch(self, batch_id: str) -> MixedBatchView:
+        return await self.service.workspace_cancel_mixed_batch(self.agent_id, batch_id)
 
     async def file_change_batch(self, batch_id: str) -> NativeBatchView:
         return await self.service.workspace_batch(self.agent_id, batch_id)
