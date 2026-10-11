@@ -121,6 +121,7 @@ from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
 from krim_agent.locale import LocaleChange, LocaleView
+from krim_agent.mcp.browser import OAuthBrowserService
 from krim_agent.mcp.management import MCPManager, TrustedMCPServer
 from krim_agent.observability import ObservationStatus, SpanRecord, TraceView
 from krim_agent.persistence import Database, KrimRepository
@@ -237,6 +238,7 @@ def create_app(
     execution_version: str = "local-v1",
     execution_owned: bool = False,
     mcp_servers: Sequence[TrustedMCPServer] | None = None,
+    oauth_browser_key: bytes | str | None = None,
 ) -> FastAPI:
     config = settings or (runtime.settings if runtime else Settings.from_env())
     owns_database = runtime is None
@@ -271,6 +273,11 @@ def create_app(
             agent_service.register_tool_version(name, "mcp-" + resource_hash)
 
     mcp_service = MCPManager(database, service.tools, on_ready=mcp_ready)
+    oauth_service = (
+        OAuthBrowserService(mcp_service, oauth_browser_key)
+        if oauth_browser_key is not None
+        else None
+    )
     for registered in mcp_servers or ():
         mcp_service.register(registered)
     if workspace_root is not None:
@@ -324,7 +331,11 @@ def create_app(
                     await agent_service.close()
                 finally:
                     try:
-                        await mcp_service.close()
+                        try:
+                            if oauth_service is not None:
+                                await oauth_service.close()
+                        finally:
+                            await mcp_service.close()
                     finally:
                         try:
                             await service.close()
@@ -361,6 +372,10 @@ def create_app(
     from .mcp import mount_mcp_management
 
     mount_mcp_management(app, mcp_service)
+    from .oauth import mount_browser_oauth
+
+    mount_browser_oauth(app, oauth_service)
+    app.state.oauth_browser = oauth_service
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError) -> JSONResponse:

@@ -2,6 +2,7 @@
 
 from .auth import MCPAuthError, MCPOAuthAuth
 from .bridge import MCPBridge
+from .browser import PersistentOAuthBrowserCallbackStore
 from .client import MCPConnection, MCPConnectionError, validate_server_url
 from .client_store import (
     OAuthClientBinding,
@@ -63,6 +64,7 @@ __all__ = [
     "OAuthClientRegistrationStore",
     "OAuthClientSnapshot",
     "PersistentOAuthClientRegistrationStore",
+    "PersistentOAuthBrowserCallbackStore",
     "MCPManager",
     "MCPPublicDescription",
     "MCPResourceView",

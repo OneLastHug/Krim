@@ -153,6 +153,18 @@ class MCPOAuthAuth(httpx.Auth):
     def declared_config(self) -> OAuthConfig | None:
         return self._declared_config.model_copy(deep=True) if self._declared_config else None
 
+    async def authorization_config(self) -> OAuthConfig:
+        """可信宿主/浏览器发起授权前，复用声明或已验证DCR配置。"""
+        if self._config is None and self.clients is not None and self._client_binding is not None:
+            cached = await self.clients.read(self._client_binding)
+            if cached.config is not None:
+                self._config = cached.config.model_copy(deep=True)
+        if self._config is None:
+            await self._discover("")
+        if self._config is None:
+            raise MCPAuthError("oauth_client_required", "OAuth未形成授权配置")
+        return self._config.model_copy(deep=True)
+
     def matches_endpoint(self, url: str) -> bool:
         expected, actual = httpx.URL(self.resource_url), httpx.URL(url)
         return (

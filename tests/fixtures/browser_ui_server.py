@@ -5,7 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
+import httpx
 import uvicorn
+from cryptography.fernet import Fernet
 from mcp.types import CallToolResult, ListToolsResult, Tool
 from pydantic import Field, SecretStr
 
@@ -14,7 +16,15 @@ from krim_agent.api import create_app
 from krim_agent.config import Settings
 from krim_agent.execution import LinuxSandboxRunner
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES
-from krim_agent.mcp import MCPServerConfig, TrustedMCPServer
+from krim_agent.mcp import (
+    MCPOAuthAuth,
+    MCPServerConfig,
+    OAuthConfig,
+    OAuthHTTPRequester,
+    PersistentEncryptedStateStore,
+    PersistentEncryptedTokenStore,
+    TrustedMCPServer,
+)
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -74,7 +84,8 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
 
     runtime.tools.add_global_pre(pause_native_batch)
     runtime.tools.add_global_pre(pause_native_checkpoint)
-    app = create_app(runtime=runtime)
+    browser_oauth_key = Fernet.generate_key()
+    app = create_app(runtime=runtime, oauth_browser_key=browser_oauth_key)
     mcp_counts: dict[str, int] = {}
     mcp_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
 
@@ -118,6 +129,61 @@ with TemporaryDirectory(prefix="krim-browser-") as directory:
                 session_factory=mcp_factory(name),
             )
         )
+
+    oauth_tokens = PersistentEncryptedTokenStore(runtime.repository.database, browser_oauth_key)
+    oauth_states = PersistentEncryptedStateStore(runtime.repository.database, browser_oauth_key)
+    oauth_calls = 0
+
+    async def browser_token_request(request):
+        global oauth_calls
+        oauth_calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "browser-oauth-access",
+                "refresh_token": "browser-oauth-refresh",
+                "expires_in": 600,
+            },
+        )
+
+    oauth_requester = OAuthHTTPRequester(
+        {"127.0.0.1", "mcp.example"}, transport=httpx.MockTransport(browser_token_request)
+    )
+    oauth_config = OAuthConfig(
+        server="browser_oauth",
+        client_id="browser-client",
+        resource="https://mcp.example/mcp",
+        authorization_endpoint="http://127.0.0.1:8876/_test/oauth/authorize",
+        token_endpoint="http://127.0.0.1:8876/_test/oauth/token",
+        redirect_uri="http://127.0.0.1:8876/v1/mcp/oauth/callback",
+        scopes=["tools"],
+        allowed_hosts={"127.0.0.1"},
+    )
+    browser_auth = MCPOAuthAuth(
+        oauth_config.resource,
+        requester=oauth_requester,
+        tokens=oauth_tokens,
+        states=oauth_states,
+        subject="browser-subject",
+        server="browser_oauth",
+        config=oauth_config,
+    )
+    app.state.mcp.register(
+        TrustedMCPServer(
+            MCPServerConfig(
+                name="browser_oauth",
+                transport="streamable_http",
+                url=oauth_config.resource,
+                allowed_hosts={"mcp.example"},
+            ),
+            "browser-oauth-v1",
+            auth=browser_auth,
+        )
+    )
+
+    @app.get("/_test/oauth-counts")
+    async def browser_oauth_counts() -> dict[str, int]:
+        return {"tokens": oauth_calls}
 
     class TestMCPControl(StrictModel):
         name: Literal["browser_mcp", "browser_slow_mcp", "browser_fail_mcp"]
