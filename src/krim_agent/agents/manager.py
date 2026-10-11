@@ -15,6 +15,7 @@ from pydantic import JsonValue
 
 from krim_agent.application.commands import AgentCommandService
 from krim_agent.application.workspace_changes import WorkspaceChangeService
+from krim_agent.application.workspace_directories import DirectoryChangeService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
@@ -461,6 +462,7 @@ class AgentManager:
         self.workspace_changes = WorkspaceChangeService(
             WorkspaceEditStore(repository.database, owner_id=self.owner_id)
         )
+        self.directory_changes = DirectoryChangeService(self.workspace_changes)
         self.commands = AgentCommandService(
             CommandStore(repository.database, owner_id=self.owner_id), self.workspace_changes
         )
@@ -752,6 +754,7 @@ class AgentManager:
             agent_owner_id=self.owner_id,
             task_store=self.tasks,
             workspace_changes=self.workspace_changes,
+            directory_changes=self.directory_changes,
             workspace=definition.workspace,
             execution=definition.execution,
             commands=self.commands,
@@ -907,9 +910,11 @@ class AgentManager:
 
     async def close(self) -> None:
         self.commands.assert_external_close()
+        self.directory_changes.assert_external_close()
         async with self._spawn_lock:
             self._closed = True
         await self.commands.close()
+        await self.directory_changes.close()
         await self.workspace_changes.close()
         for handle in list(self._handles.values()):
             if handle.definition.persistent:
