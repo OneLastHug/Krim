@@ -100,7 +100,7 @@ async def main():
             head = (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar()
-        assert head == "0039_mixed_workspace_batches"
+        assert head == "0040_mixed_batch_model_sources"
     cold_provider = Counting()
     async with await PythonAI.create(settings=settings, provider=cold_provider) as cold:
         assert (await cold.evaluation(job_id).report()).summary.passed == 1

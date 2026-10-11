@@ -15,8 +15,11 @@ from krim_agent.workspace_directory import DirectoryChangeAction
 from krim_agent.workspace_mixed_batch import MixedBatchFence
 
 from .database import (
+    AgentSessionRow,
     MixedWorkspaceBatchChildRow,
+    MixedWorkspaceBatchModelSourceRow,
     MixedWorkspaceBatchRow,
+    RunRow,
     WorkspaceDirectoryAttemptRow,
     WorkspaceEditAttemptRow,
     WorkspaceEditProposalRow,
@@ -36,6 +39,40 @@ def assert_live(row: MixedWorkspaceBatchRow, owner_id: str) -> None:
         raise ServiceError("workspace_mixed_batch_fenced", "混合批次执行资格已失效", 409)
 
 
+async def assert_model_run(sql: AsyncSession, parent: MixedWorkspaceBatchRow) -> None:
+    origin = await sql.get(MixedWorkspaceBatchModelSourceRow, parent.batch_id)
+    if origin is None:
+        return
+    run = await sql.get(RunRow, origin.run_id)
+    topic = parent.scope_id.removeprefix("topic:")
+    if parent.scope_id.startswith("session:"):
+        session = await sql.get(AgentSessionRow, parent.scope_id.removeprefix("session:"))
+        topic = session.topic_id if session is not None else ""
+    if run is None or run.topic_id != topic:
+        raise ServiceError(
+            "workspace_mixed_batch_run_mismatch", "原模型Run不属于混合批次作用域", 403
+        )
+    if run.status not in {"queued", "running"} or run.stop_requested:
+        raise ServiceError("workspace_mixed_batch_run_closed", "原模型Run已停止或关闭", 409)
+
+
+async def assert_live_execution(
+    sql: AsyncSession, parent: MixedWorkspaceBatchRow, owner_id: str
+) -> None:
+    assert_live(parent, owner_id)
+    await assert_model_run(sql, parent)
+
+
+async def mixed_attempt_call(
+    sql: AsyncSession, child: MixedWorkspaceBatchChildRow | None, call_id: str | None
+) -> str | None:
+    """原attempt继承冻结父call；嵌套Registry审计仍使用自身调用ID。"""
+    if child is None:
+        return call_id
+    origin = await sql.get(MixedWorkspaceBatchModelSourceRow, child.batch_id)
+    return origin.call_id if origin is not None else call_id
+
+
 async def assert_mixed_request(
     sql: AsyncSession,
     owner_id: str,
@@ -45,6 +82,8 @@ async def assert_mixed_request(
     request: WorkspaceChangeAction | DirectoryChangeAction,
     fence: MixedBatchFence | None,
     existing_operation_id: str | None = None,
+    *,
+    run_id: str | None = None,
 ) -> MixedWorkspaceBatchChildRow | None:
     if fence is None:
         if existing_operation_id is None and request.request_key.startswith(MIXED_REQUEST_PREFIX):
@@ -75,7 +114,10 @@ async def assert_mixed_request(
                 "workspace_mixed_batch_operation_conflict", "子项不能认领其他原操作", 409
             )
         return child
-    assert_live(parent, owner_id)
+    origin = await sql.get(MixedWorkspaceBatchModelSourceRow, parent.batch_id)
+    if origin is not None and run_id != origin.run_id:
+        raise ServiceError("workspace_mixed_batch_run_mismatch", "原操作未携带冻结模型Run", 403)
+    await assert_live_execution(sql, parent, owner_id)
     if (
         not child.admission_open
         or associated is not None
@@ -137,4 +179,7 @@ async def assert_mixed_execution(
         or attempt.request_key != child.request_key
     ):
         raise ServiceError("workspace_mixed_batch_corrupt", "混合执行关联与原操作不符", 409)
-    assert_live(parent, owner_id)
+    origin = await sql.get(MixedWorkspaceBatchModelSourceRow, parent.batch_id)
+    if origin is not None and (attempt.run_id, attempt.call_id) != (origin.run_id, origin.call_id):
+        raise ServiceError("workspace_mixed_batch_corrupt", "混合子项Run/call来源不匹配", 409)
+    await assert_live_execution(sql, parent, owner_id)

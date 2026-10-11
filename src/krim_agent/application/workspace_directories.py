@@ -390,7 +390,11 @@ class DirectoryChangeService:
     ) -> DirectoryAttemptView:
         scope, binding = await self.changes._guard(context)
         previous = await self.store.find_action(
-            scope, request, binding.fingerprint, mixed_fence=context.mixed_batch
+            scope,
+            request,
+            binding.fingerprint,
+            mixed_fence=context.mixed_batch,
+            run_id=context.run_id if context.run_id != "local" else None,
         )
         if previous is not None:
             return previous.view
@@ -422,7 +426,7 @@ class DirectoryChangeService:
             binding.fingerprint,
             prepared,
             run_id=context.run_id if context.run_id != "local" else None,
-            call_id=context.call_id,
+            call_id=context.source_call_id or context.call_id,
             mixed_fence=context.mixed_batch,
         )
         if not created:

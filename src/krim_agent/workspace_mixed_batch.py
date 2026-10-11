@@ -196,7 +196,18 @@ class MixedBatchDispatch:
 
 
 @dataclass(frozen=True)
+class MixedBatchModelSource:
+    """可信模型调用的原来源；不属于公开请求参数。"""
+
+    run_id: str
+    call_id: str
+
+
+@dataclass(frozen=True)
 class MixedBatchExecution:
     view: MixedBatchView
     token: str
     children: tuple[MixedBatchDispatch, ...]
+    run_id: str | None = None
+    call_id: str | None = None
+    model_source: MixedBatchModelSource | None = None

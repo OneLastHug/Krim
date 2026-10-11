@@ -24,6 +24,7 @@ from krim_agent.workspace_mixed_batch import (
     MixedBatchHistoryPage,
     MixedBatchItemStatus,
     MixedBatchItemView,
+    MixedBatchModelSource,
     MixedBatchRequest,
     MixedBatchStatus,
     MixedBatchSummary,
@@ -33,6 +34,7 @@ from krim_agent.workspace_mixed_batch import (
 
 from .database import (
     MixedWorkspaceBatchChildRow,
+    MixedWorkspaceBatchModelSourceRow,
     MixedWorkspaceBatchRow,
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryProposalRow,
@@ -40,7 +42,7 @@ from .database import (
     WorkspaceEditProposalRow,
 )
 from .directory_fences import entry_key
-from .mixed_batch_fences import MIXED_REQUEST_PREFIX, assert_live
+from .mixed_batch_fences import MIXED_REQUEST_PREFIX, assert_live_execution
 from .workspace_batches import (
     _MAX_HISTORY,
     _batch_status,
@@ -177,7 +179,15 @@ class MixedBatchStore:
         workspace_key: str,
         resource: str,
         request: MixedBatchRequest,
+        *,
+        model_source: MixedBatchModelSource | None = None,
     ) -> tuple[MixedBatchView, bool]:
+        if model_source is not None:
+            if not model_source.run_id or model_source.run_id == "local":
+                raise ServiceError(
+                    "workspace_mixed_batch_run_mismatch", "模型批次必须绑定原Run", 403
+                )
+            self.files._key(model_source.call_id)
         request = MixedBatchRequest.model_validate(request.model_dump())
         wanted = digest(
             {"request": request.model_dump(mode="json"), "key": workspace_key, "resource": resource}
@@ -197,8 +207,29 @@ class MixedBatchStore:
                     raise ServiceError(
                         "workspace_mixed_batch_idempotency_conflict", "批次键已绑定其他参数", 409
                     )
+                if model_source is not None:
+                    source = await sql.get(MixedWorkspaceBatchModelSourceRow, previous.batch_id)
+                    if source is None or (source.run_id, source.call_id) != (
+                        model_source.run_id,
+                        model_source.call_id,
+                    ):
+                        raise ServiceError(
+                            "workspace_mixed_batch_run_conflict", "原请求键已绑定其他Run/call", 409
+                        )
                 await self._expire(sql, previous)
                 return await self._view(sql, previous), False
+            if model_source is not None:
+                await self.files._scope(sql, scope, writing=True, run_id=model_source.run_id)
+                previous_call = await sql.scalar(
+                    select(MixedWorkspaceBatchModelSourceRow).where(
+                        MixedWorkspaceBatchModelSourceRow.run_id == model_source.run_id,
+                        MixedWorkspaceBatchModelSourceRow.call_id == model_source.call_id,
+                    )
+                )
+                if previous_call is not None:
+                    raise ServiceError(
+                        "workspace_mixed_batch_call_conflict", "同一模型调用不能换键重新接受", 409
+                    )
             active = await sql.scalar(
                 select(MixedWorkspaceBatchRow)
                 .where(
@@ -259,6 +290,15 @@ class MixedBatchStore:
             )
             sql.add(row)
             await sql.flush()
+            if model_source is not None:
+                sql.add(
+                    MixedWorkspaceBatchModelSourceRow(
+                        batch_id=identifier,
+                        run_id=model_source.run_id,
+                        call_id=model_source.call_id,
+                    )
+                )
+                await sql.flush()
             for position, item in enumerate(frozen):
                 sql.add(
                     MixedWorkspaceBatchChildRow(
@@ -356,8 +396,19 @@ class MixedBatchStore:
                 "workspace_mixed_batch_corrupt", "混合子项与原提案/操作关联不符", 409
             )
         if operation is not None:
+            origin = await sql.get(MixedWorkspaceBatchModelSourceRow, parent.batch_id)
+            if origin is not None and (
+                attempt is None
+                or (attempt.run_id, attempt.call_id) != (origin.run_id, origin.call_id)
+            ):
+                raise ServiceError(
+                    "workspace_mixed_batch_corrupt", "混合原操作缺少原模型Run/call", 409
+                )
             status = operation.status
             error_code = operation.receipt.error_code if operation.receipt else None
+            if origin is not None:
+                # 来源call只用于持久完整性和审计关联；混合模型回程不泄露原Provider调用标识。
+                operation = operation.model_copy(update={"run_id": None, "call_id": None})
         return MixedBatchItemView(
             source=cast(Literal["file", "directory"], child.source),
             position=child.position,
@@ -447,7 +498,7 @@ class MixedBatchStore:
         async with self.database.write_lock, self.database.sessions() as sql:
             await self.files._scope(sql, scope, writing=True)
             row = await self._row(sql, scope, identifier)
-            assert_live(row, self.owner_id)
+            await assert_live_execution(sql, row, self.owner_id)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             children = tuple(
                 MixedBatchDispatch(
@@ -472,7 +523,17 @@ class MixedBatchStore:
                 and child.file_operation_id is None
                 and child.directory_operation_id is None
             )
-            return MixedBatchExecution(await self._view(sql, row), row.token, children)
+            source = await sql.get(MixedWorkspaceBatchModelSourceRow, row.batch_id)
+            return MixedBatchExecution(
+                await self._view(sql, row),
+                row.token,
+                children,
+                source.run_id if source is not None else None,
+                source.call_id if source is not None else None,
+                MixedBatchModelSource(source.run_id, source.call_id)
+                if source is not None
+                else None,
+            )
 
     async def renew(self, identifier: str, token: str) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as sql:
@@ -480,7 +541,7 @@ class MixedBatchStore:
             row = await sql.get(MixedWorkspaceBatchRow, identifier)
             if row is None or not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_mixed_batch_fence_mismatch", "混合执行凭据不符", 403)
-            assert_live(row, self.owner_id)
+            await assert_live_execution(sql, row, self.owner_id)
             await self.files._scope(sql, row.scope_id, writing=True)
             await self.files._resource(
                 sql, row.scope_id, row.workspace_key, row.resource_fingerprint
@@ -507,7 +568,7 @@ class MixedBatchStore:
                 or not secrets.compare_digest(row.token, fence.token)
             ):
                 raise ServiceError("workspace_mixed_batch_fence_mismatch", "混合子项凭据不符", 403)
-            assert_live(row, self.owner_id)
+            await assert_live_execution(sql, row, self.owner_id)
             child.admission_open = False
             if (
                 child.file_operation_id is None
@@ -527,7 +588,7 @@ class MixedBatchStore:
             row = await self._row(sql, scope, identifier)
             if not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_mixed_batch_fence_mismatch", "混合执行凭据不符", 403)
-            assert_live(row, self.owner_id)
+            await assert_live_execution(sql, row, self.owner_id)
             await self._close(sql, row, "finished", None)
             return await self._view(sql, row)
 
@@ -688,6 +749,7 @@ class MixedBatchStore:
             child = MixedWorkspaceBatchChildRow
             file = WorkspaceEditAttemptRow
             directory = WorkspaceDirectoryAttemptRow
+            origin = MixedWorkspaceBatchModelSourceRow
             effective = func.coalesce(file.status, directory.status, child.status)
             invalid = or_(
                 and_(
@@ -699,6 +761,14 @@ class MixedBatchStore:
                         file.action != batch.action,
                         file.expected_revision != child.expected_revision,
                         file.request_key != child.request_key,
+                        and_(
+                            origin.batch_id.is_not(None),
+                            file.run_id.is_distinct_from(origin.run_id),
+                        ),
+                        and_(
+                            origin.batch_id.is_not(None),
+                            file.call_id.is_distinct_from(origin.call_id),
+                        ),
                     ),
                 ),
                 and_(
@@ -710,6 +780,14 @@ class MixedBatchStore:
                         directory.action != batch.action,
                         directory.expected_revision != child.expected_revision,
                         directory.request_key != child.request_key,
+                        and_(
+                            origin.batch_id.is_not(None),
+                            directory.run_id.is_distinct_from(origin.run_id),
+                        ),
+                        and_(
+                            origin.batch_id.is_not(None),
+                            directory.call_id.is_distinct_from(origin.call_id),
+                        ),
                     ),
                 ),
             )
@@ -729,6 +807,7 @@ class MixedBatchStore:
                         ),
                     )
                     .join(batch, batch.batch_id == child.batch_id)
+                    .outerjoin(origin, origin.batch_id == child.batch_id)
                     .outerjoin(file, file.operation_id == child.file_operation_id)
                     .outerjoin(directory, directory.operation_id == child.directory_operation_id)
                     .where(child.batch_id.in_([row["batch_id"] for row in selected]))

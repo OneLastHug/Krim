@@ -21,8 +21,14 @@ WORKSPACE_READ_TOOL_NAMES = frozenset(
     {"workspace_read", "workspace_list", "workspace_search", "workspace_mixed_query"}
 )
 WORKSPACE_CHANGE_TOOL_NAMES = frozenset(
-    {"workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize"}
+    {
+        "workspace_preview",
+        "workspace_change",
+        "workspace_reconcile",
+        "workspace_finalize",
+    }
 )
+WORKSPACE_MIXED_WRITE_TOOL_NAMES = frozenset({"workspace_mixed_start"})
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
     {
         "directory_preview",
@@ -35,12 +41,19 @@ WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
         "directory_inspect",
     }
 )
-WORKSPACE_WRITE_TOOL_NAMES = WORKSPACE_CHANGE_TOOL_NAMES | (
-    WORKSPACE_DIRECTORY_TOOL_NAMES
-    - {"directory_query", "directory_inspect", "directory_source_query"}
+WORKSPACE_WRITE_TOOL_NAMES = (
+    WORKSPACE_CHANGE_TOOL_NAMES
+    | WORKSPACE_MIXED_WRITE_TOOL_NAMES
+    | (
+        WORKSPACE_DIRECTORY_TOOL_NAMES
+        - {"directory_query", "directory_inspect", "directory_source_query"}
+    )
 )
 WORKSPACE_TOOL_NAMES = (
-    WORKSPACE_READ_TOOL_NAMES | WORKSPACE_CHANGE_TOOL_NAMES | WORKSPACE_DIRECTORY_TOOL_NAMES
+    WORKSPACE_READ_TOOL_NAMES
+    | WORKSPACE_CHANGE_TOOL_NAMES
+    | WORKSPACE_DIRECTORY_TOOL_NAMES
+    | WORKSPACE_MIXED_WRITE_TOOL_NAMES
 )
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000

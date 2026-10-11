@@ -73,6 +73,13 @@ class MixedBatchQueryBackend(Protocol):
     async def validate_query(self, value: Any, context: ToolContext) -> None: ...
 
 
+class MixedBatchWriteBackend(Protocol):
+    async def tool_start(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def validate_start(self, value: Any, context: ToolContext) -> None: ...
+
+
 class CommandBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
@@ -154,9 +161,13 @@ class ToolContext:
     directory_changes: DirectoryChangeBackend | None = None
     workspace_mixed_queries: MixedBatchQueryBackend | None = None
     _mixed_query_response: str | None = field(default=None, repr=False)
+    workspace_mixed_batches: MixedBatchWriteBackend | None = None
+    _mixed_write_response: str | None = field(default=None, repr=False)
     _directory_response: tuple[str, str] | None = field(default=None, repr=False)
     workspace_batch: NativeBatchFence | None = None
     mixed_batch: MixedBatchFence | None = None
+    # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
+    source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
@@ -176,6 +187,7 @@ class ToolContext:
             timeout=self.timeout,
             policy=self.policy,
             call_id=self.call_id if self.depth == 0 else str(uuid4()),
+            source_call_id=self.source_call_id,
             agent_id=self.agent_id,
             session_id=self.session_id,
             task_store=self.task_store,
@@ -195,6 +207,7 @@ class ToolContext:
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
             workspace_mixed_queries=self.workspace_mixed_queries,
+            workspace_mixed_batches=self.workspace_mixed_batches,
             workspace_batch=self.workspace_batch,
             mixed_batch=self.mixed_batch,
             checkpoint_capture=self.checkpoint_capture,

@@ -81,14 +81,14 @@ async def main():
             async with database.engine.connect() as sql:
                 assert (
                     await sql.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one() == "0039_mixed_workspace_batches"
+                ).scalar_one() == "0040_mixed_batch_model_sources"
                 assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
         await database.close()
         print(
             json.dumps(
                 {
                     "package": krim_agent.__file__,
-                    "schema": "0039_mixed_workspace_batches",
+                    "schema": "0040_mixed_batch_model_sources",
                     "mixed_pending": True,
                     "same_key_zero_replay": True,
                     "cancel_closes_pending": True,

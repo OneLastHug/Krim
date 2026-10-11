@@ -52,7 +52,7 @@ async def setup(runtime, root, *, enabled=True):
     )
     accepted = await agent.start_mixed_change_batch(request)
     batch = await agent.wait_mixed_change_batch(accepted.batch_id)
-    assert batch.status == "done"
+    assert batch.status == "done", batch.model_dump_json()
     return service, agent, batch
 
 

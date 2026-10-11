@@ -239,7 +239,23 @@ class ToolRegistry:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
                 if mixed_fence is not None and (
-                    child.mixed_batch != mixed_fence or child.arguments != original_arguments
+                    child.mixed_batch != mixed_fence
+                    or child.arguments != original_arguments
+                    or child.source_call_id != parent.source_call_id
+                    or (
+                        child.run_id,
+                        child.topic_id,
+                        child.session_id,
+                        child.agent_id,
+                        child.origin,
+                    )
+                    != (
+                        parent.run_id,
+                        parent.topic_id,
+                        parent.session_id,
+                        parent.agent_id,
+                        parent.origin,
+                    )
                 ):
                     raise ToolError(
                         "workspace_mixed_batch_fence_mismatch", "中间件不能替换原混合子项绑定"
