@@ -279,7 +279,7 @@ class Tracer:
                 self.inflight = False
                 self.queue.task_done()
 
-    async def flush(self, seconds: float = 2) -> bool:
+    async def flush(self, seconds: float = 5) -> bool:
         try:
             async with asyncio.timeout(seconds):
                 await self.queue.join()
