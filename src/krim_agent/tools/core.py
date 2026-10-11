@@ -66,6 +66,13 @@ class WorkspaceCheckpointBackend(Protocol):
     ) -> dict[str, object]: ...
 
 
+class MixedBatchQueryBackend(Protocol):
+    async def tool_query(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def validate_query(self, value: Any, context: ToolContext) -> None: ...
+
+
 class CommandBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
@@ -145,6 +152,8 @@ class ToolContext:
     workspace: WorkspaceBinding | None = None
     workspace_changes: WorkspaceChangeBackend | None = None
     directory_changes: DirectoryChangeBackend | None = None
+    workspace_mixed_queries: MixedBatchQueryBackend | None = None
+    _mixed_query_response: str | None = field(default=None, repr=False)
     _directory_response: tuple[str, str] | None = field(default=None, repr=False)
     workspace_batch: NativeBatchFence | None = None
     mixed_batch: MixedBatchFence | None = None
@@ -185,6 +194,7 @@ class ToolContext:
             workspace=self.workspace,
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
+            workspace_mixed_queries=self.workspace_mixed_queries,
             workspace_batch=self.workspace_batch,
             mixed_batch=self.mixed_batch,
             checkpoint_capture=self.checkpoint_capture,

@@ -16,6 +16,7 @@ from pydantic import JsonValue
 from krim_agent.application.commands import AgentCommandService
 from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.application.workspace_directories import DirectoryChangeService
+from krim_agent.application.workspace_mixed_queries import MixedBatchQueryService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
@@ -463,6 +464,7 @@ class AgentManager:
             WorkspaceEditStore(repository.database, owner_id=self.owner_id)
         )
         self.directory_changes = DirectoryChangeService(self.workspace_changes)
+        self.mixed_queries = MixedBatchQueryService(self.workspace_changes, self.directory_changes)
         self.commands = AgentCommandService(
             CommandStore(repository.database, owner_id=self.owner_id), self.workspace_changes
         )
@@ -755,6 +757,7 @@ class AgentManager:
             task_store=self.tasks,
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
+            workspace_mixed_queries=self.mixed_queries,
             workspace=definition.workspace,
             execution=definition.execution,
             commands=self.commands,

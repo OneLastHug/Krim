@@ -139,6 +139,46 @@ class MixedBatchHistoryPage(StrictModel):
     next_cursor: str | None
 
 
+class MixedBatchQuery(StrictModel):
+    kind: Literal["batch", "by_key", "history"]
+    batch_id: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"
+    )
+    request_key: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
+    cursor: str | None = Field(default=None, max_length=1024)
+    limit: int = Field(default=32, ge=1, le=32)
+
+    @model_validator(mode="after")
+    def selection(self) -> MixedBatchQuery:
+        if self.kind == "batch" and (self.batch_id is None or self.request_key is not None):
+            raise ValueError("批次查询须只提供batch_id")
+        if self.kind == "by_key" and (self.request_key is None or self.batch_id is not None):
+            raise ValueError("原键查询须只提供request_key")
+        if self.kind == "history" and (self.batch_id is not None or self.request_key is not None):
+            raise ValueError("历史查询只接受cursor/limit")
+        if self.kind != "history" and (self.cursor is not None or self.limit != 32):
+            raise ValueError("单项混合查询不接受分页参数")
+        return self
+
+
+class MixedBatchQueryResult(StrictModel):
+    kind: Literal["batch", "by_key", "history"]
+    batch: MixedBatchView | None = None
+    history: MixedBatchHistoryPage | None = None
+
+    @model_validator(mode="after")
+    def one_result(self) -> MixedBatchQueryResult:
+        if self.kind == "history" and (self.history is None or self.batch is not None):
+            raise ValueError("历史回程须只提供原history")
+        if self.kind != "history" and self.history is not None:
+            raise ValueError("单批次回程不能携带history")
+        if self.kind == "batch" and self.batch is None:
+            raise ValueError("按ID批次回程缺少原batch")
+        return self
+
+
 @dataclass(frozen=True)
 class MixedBatchFence:
     """可信宿主内部凭据；不属于HTTP、SDK请求或模型工具参数。"""
