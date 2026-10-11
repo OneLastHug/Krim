@@ -4,6 +4,7 @@ import {
   type NativeBatchRequest, type NativeBatchView, type NativeChangeItem, type NativeChangePage,
   type NativeListFilter, type WorkspaceView,
   type MixedBatchHistoryPage, type MixedBatchView,
+  type MixedBatchRequest, type WorkspaceChangeView, type DirectoryPage, type DirectoryPreviewView,
 } from "./api.js";
 import type { HostJson } from "./host.js";
 import { localDate, t } from "./i18n.js";
@@ -18,7 +19,14 @@ type WorkspaceState = {
   activeBatchId: string | null; busy: boolean; sending: boolean; stale: boolean; queryVersion: number; loadingVersion: number;
   mixedCursors: Array<string | null>; mixedHistory: MixedBatchHistoryPage | null; mixedBatch: MixedBatchView | null;
   mixedQuery: string; mixedVersion: number; mixedMessage: string;
+  mixedFiles: WorkspaceChangeView[]; mixedDirectories: DirectoryPreviewView[]; mixedFileOffset: number;
+  mixedDirectoryAfter: Array<string | null>; mixedDirectoryNext: string | null; mixedCandidatesLoaded: boolean;
+  mixedSelected: Map<string, MixedCandidate>; mixedPending: MixedBatchRequest | null;
+  mixedMissing: boolean; mixedSending: boolean; mixedFingerprint: string | null; mixedCacheInvalid: boolean;
 };
+type MixedCandidate = { source: "file" | "directory"; proposal_id: string; revision: number; path: string;
+  target_path?: string | null; status: WorkspaceChangeView["status"]; expires_at: number;
+  workspace_key: string; resource_fingerprint: string; description: string; diff?: string; truncated?: boolean };
 type Source = { kind: "host" } | { kind: "workspace"; id: string };
 type Row = { id: string; title: string; description: string; status: string; undo: boolean; keep: boolean; click: () => Promise<void> };
 const node = (id: string): HTMLElement => document.getElementById(id)!;
@@ -32,6 +40,8 @@ const labels: Record<string, string> = {
 const statusText = (value: string): string => t(labels[value] || value);
 const actionText = (action: "keep" | "undo"): string => t(action === "keep" ? "保留变更" : "撤销变更");
 const mixedStatusText = (value: string): string => t(({ running: "批次执行中", done: "批次已确认", rejected: "操作已拒绝", uncertain: "批次结果待核实" } as Record<string, string>)[value] || labels[value] || value);
+const candidateKey = (item: Pick<MixedCandidate, "source" | "proposal_id">): string => `${item.source}:${item.proposal_id}`;
+const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(value);
 
 export class ChangeListUI {
   private topicId: string | null = null;
@@ -78,6 +88,21 @@ export class ChangeListUI {
     node("change-mixed-query-key").onclick = () => void this.queryMixed("key");
     node("change-mixed-wait").onclick = () => void this.queryMixed("wait");
     node("change-mixed-cancel").onclick = () => void this.cancelMixed();
+    node("change-mixed-options-refresh").onclick = () => void this.readMixedCandidates();
+    node("change-mixed-files-prev").onclick = () => void this.candidatePage("file", -1);
+    node("change-mixed-files-next").onclick = () => void this.candidatePage("file", 1);
+    node("change-mixed-directories-prev").onclick = () => void this.candidatePage("directory", -1);
+    node("change-mixed-directories-next").onclick = () => void this.candidatePage("directory", 1);
+    node("change-mixed-apply").onclick = () => void this.startMixed("apply");
+    node("change-mixed-keep").onclick = () => void this.startMixed("keep");
+    node("change-mixed-undo").onclick = () => void this.startMixed("undo");
+    node("change-mixed-clear-selection").onclick = () => { const state = this.workspace(); if (state && !state.mixedPending && !state.mixedSending) { state.mixedSelected.clear(); this.render(); } };
+    node("change-mixed-recover").onclick = () => void this.recoverMixedPending();
+    node("change-mixed-retry").onclick = () => void this.startMixed("apply", true);
+    node("change-mixed-clear-cache").onclick = () => {
+      const state = this.workspace(); if (!state?.mixedCacheInvalid || !window.confirm(t("仅清除无效本地记录，不会重发批次？"))) return;
+      state.mixedCacheInvalid = false; state.mixedPending = null; state.mixedMessage = ""; this.persistMixed(state); this.render();
+    };
     (node("change-mixed-query") as HTMLInputElement).oninput = () => {
       const state = this.workspace(); if (state) state.mixedQuery = (node("change-mixed-query") as HTMLInputElement).value;
       this.syncQueryButtons();
@@ -121,10 +146,20 @@ export class ChangeListUI {
           const current = this.workspaces.get(agent.agent_id)!;
           current.mixedCursors = [null]; current.mixedHistory = null;
           current.mixedBatch = sameSession ? state.mixedBatch : null; current.mixedVersion += 1;
+          current.mixedFiles = []; current.mixedDirectories = []; current.mixedCandidatesLoaded = false;
+          current.mixedSending = false;
+          if (!sameSession || JSON.stringify(oldWorkspace) !== JSON.stringify(nextWorkspace)) {
+            current.mixedSelected = new Map(); current.mixedPending = null; current.mixedFingerprint = null;
+          }
         } else state.agent = agent;
       } else this.workspaces.set(agent.agent_id, { agent, page: null, filter: "active", cursors: [null], historyCursors: [null], history: null,
         batch: null, pending: null, query: "", message: "", activeBatchId: null, busy: false, sending: false, stale: true, queryVersion: 0, loadingVersion: 0,
-        mixedCursors: [null], mixedHistory: null, mixedBatch: null, mixedQuery: "", mixedVersion: 0, mixedMessage: "" });
+        mixedCursors: [null], mixedHistory: null, mixedBatch: null, mixedQuery: "", mixedVersion: 0, mixedMessage: "",
+        mixedFiles: [], mixedDirectories: [], mixedFileOffset: 0, mixedDirectoryAfter: [null], mixedDirectoryNext: null,
+        mixedCandidatesLoaded: false, mixedSelected: new Map(), mixedPending: null, mixedMissing: false, mixedSending: false,
+        mixedFingerprint: null, mixedCacheInvalid: false });
+      const current = this.workspaces.get(agent.agent_id)!;
+      if (!state) this.loadMixedPending(current);
     }
     for (const id of this.workspaces.keys()) if (!ids.has(id)) this.workspaces.delete(id);
     if (this.source.kind === "workspace" && !this.workspaces.has(this.source.id)) void this.switchSource({ kind: "host" });
@@ -184,6 +219,12 @@ export class ChangeListUI {
         state.page = page.page;
         if (page.reset) { state.cursors = [null]; state.message = t("清单已变化，已返回第一页，请重新审阅"); }
         state.history = history; state.mixedHistory = mixedHistory; state.grant = grant; state.stale = false;
+        if (state.mixedPending) {
+          const original = await requestJsonNullable<MixedBatchView>(`${base}/mixed-batches/by-key?${new URLSearchParams({ request_key: state.mixedPending.request_key })}`);
+          if (!this.isCurrent(key, generation) || version !== this.loadVersion) return;
+          if (original) this.acceptMixed(state, original, state.mixedPending);
+          else state.mixedMissing = true;
+        }
         const mixedId = state.mixedBatch?.batch_id || mixedHistory.items.find(item => item.producer_status === "running")?.batch_id || mixedHistory.items[0]?.batch_id;
         if (mixedId) {
           const result = await this.readMixedBatch(state, mixedId);
@@ -267,6 +308,129 @@ export class ChangeListUI {
   }
   private async readMixedBatch(state: WorkspaceState, id: string): Promise<MixedBatchView> {
     return this.validateMixed(state, await requestJson<MixedBatchView>(`${this.native(state)}/mixed-batches/${encodeURIComponent(id)}`), id);
+  }
+  private storageKey(state: WorkspaceState): string { return `krim:mixed-pending:${state.agent.session_id}`; }
+  private persistMixed(state: WorkspaceState): void {
+    if (this.workspaces.get(state.agent.agent_id) !== state) return;
+    if (state.mixedPending) sessionStorage.setItem(this.storageKey(state), JSON.stringify({ version: 1,
+      request: state.mixedPending, fingerprint: state.mixedFingerprint }));
+    else sessionStorage.removeItem(this.storageKey(state));
+  }
+  private loadMixedPending(state: WorkspaceState): void {
+    try {
+      const raw = sessionStorage.getItem(this.storageKey(state)); if (!raw) return;
+      if (new TextEncoder().encode(raw).length > 17000) throw new Error();
+      const value = JSON.parse(raw);
+      const request = value?.request;
+      if (Object.keys(value).sort().join() !== "fingerprint,request,version" || value.version !== 1
+        || typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+        || !request || Object.keys(request).sort().join() !== "action,request_key,targets"
+        || !["apply", "keep", "undo"].includes(request.action)
+        || typeof request.request_key !== "string" || !request.request_key || request.request_key.length > 128 || /[\x00-\x1f\x7f]/.test(request.request_key)
+        || !Array.isArray(request.targets) || !request.targets.length || request.targets.length > 32
+        || request.targets.some((item: MixedBatchRequest["targets"][number]) => Object.keys(item).sort().join() !== "expected_revision,proposal_id,source"
+          || !["file", "directory"].includes(item.source) || !identifier(item.proposal_id) || !Number.isSafeInteger(item.expected_revision) || item.expected_revision < 0)
+        || new Set(request.targets.map(candidateKey)).size !== request.targets.length) throw new Error();
+      state.mixedPending = request; state.mixedFingerprint = value.fingerprint; state.mixedQuery = request.request_key;
+    } catch { state.mixedCacheInvalid = true; state.mixedMessage = t("本地混合恢复记录无效，请查询历史"); }
+  }
+  private acceptMixed(state: WorkspaceState, value: MixedBatchView, request: MixedBatchRequest): void {
+    if (this.workspaces.get(state.agent.agent_id) !== state) return;
+    this.validateMixed(state, value, undefined, request.request_key);
+    if (value.action !== request.action || value.items.length !== request.targets.length
+      || value.items.some((item, index) => item.source !== request.targets[index]!.source || item.proposal_id !== request.targets[index]!.proposal_id || item.expected_revision !== request.targets[index]!.expected_revision)) throw new Error(t("混合批次回程与原提案不一致"));
+    state.mixedBatch = value; state.mixedPending = null; state.mixedMissing = false; state.mixedSelected.clear();
+    state.mixedMessage = ""; state.mixedCandidatesLoaded = false; this.persistMixed(state);
+  }
+  private asCandidate(source: "file" | "directory", value: WorkspaceChangeView | DirectoryPreviewView, state: WorkspaceState): MixedCandidate {
+    if (value.scope_id !== `session:${state.agent.session_id}` || !identifier(value.proposal_id) || !Number.isSafeInteger(value.revision)
+      || value.revision < 0 || value.workspace_key !== state.grant?.key || value.resource_fingerprint !== state.grant?.fingerprint) throw new Error(t("混合批次回程与原提案不一致"));
+    if (source === "file") {
+      const file = value as WorkspaceChangeView;
+      return { ...file, source, path: file.preview.path, description: `${file.preview.operation} · ${file.preview.before_sha256 || "∅"} → ${file.preview.after_sha256 || "∅"} · ${file.preview.before_bytes} → ${file.preview.after_bytes} bytes`, diff: file.preview.diff, truncated: file.preview.truncated };
+    }
+    const directory = value as DirectoryPreviewView;
+    return { ...directory, source, description: `${directory.operation} · ${directory.before_fingerprint || "∅"} · mode ${directory.mode?.toString(8) || "—"}` };
+  }
+  private async readMixedCandidates(): Promise<void> {
+    const state = this.workspace(); if (!state || state.mixedSending || state.busy) return;
+    const key = this.key(), generation = this.generation;
+    state.busy = true; this.render();
+    try {
+      const grant = await requestJson<WorkspaceView>(this.native(state));
+      const params = new URLSearchParams({ limit: "20" });
+      const after = state.mixedDirectoryAfter.at(-1); if (after) params.set("after", after);
+      const [files, directories] = await Promise.all([
+        requestJson<WorkspaceChangeView[]>(`${this.native(state)}/changes?offset=${state.mixedFileOffset}&limit=20`),
+        grant.tool_names.includes("directory_query") ? requestJson<DirectoryPage>(`${this.native(state)}/directory-changes?${params}`) : Promise.resolve(null),
+      ]);
+      if (!this.isCurrent(key, generation)) return;
+      state.grant = grant;
+      if (!Array.isArray(files) || files.length > 20 || directories && (directories.kind !== "proposals" || !Array.isArray(directories.proposals) || directories.proposals.length > 20)) throw new Error(t("混合批次回程与原提案不一致"));
+      files.forEach(item => this.asCandidate("file", item, state));
+      directories?.proposals.forEach(item => this.asCandidate("directory", item, state));
+      state.mixedFiles = files; state.mixedDirectories = directories?.proposals || []; state.mixedDirectoryNext = directories?.next_after || null;
+      state.mixedCandidatesLoaded = true; state.mixedMessage = "";
+    } catch (error) { if (this.isCurrent(key, generation)) state.mixedMessage = errorText(error); }
+    finally { state.busy = false; if (this.isCurrent(key, generation)) this.render(); }
+  }
+  private async candidatePage(source: "file" | "directory", direction: number): Promise<void> {
+    const state = this.workspace(); if (!state || state.busy) return;
+    if (source === "file") state.mixedFileOffset = Math.max(0, state.mixedFileOffset + direction * 20);
+    else if (direction < 0) { if (state.mixedDirectoryAfter.length <= 1) return; state.mixedDirectoryAfter.pop(); }
+    else { if (!state.mixedDirectoryNext) return; state.mixedDirectoryAfter.push(state.mixedDirectoryNext); }
+    await this.readMixedCandidates();
+  }
+  private mixedWritable(state: WorkspaceState): boolean {
+    return state.agent.session.status === "open" && !["ask", "plan"].includes(String(state.agent.session.permissions.mode))
+      && state.grant?.available === true && state.grant.writable;
+  }
+  private candidateEligible(state: WorkspaceState, item: MixedCandidate, action: MixedBatchRequest["action"]): boolean {
+    return this.mixedWritable(state) && state.grant!.tool_names.includes(item.source === "file" ? "workspace_change" : "directory_change")
+      && (action === "apply" ? item.status === "proposed" && item.expires_at > Date.now() / 1000
+        : action === "keep" ? item.status === "applied" : item.status === "applied" || item.status === "kept");
+  }
+  private async recoverMixedPending(): Promise<void> {
+    const state = this.workspace(); if (!state?.mixedPending) return;
+    await this.queryMixed("key", state.mixedPending.request_key);
+  }
+  private async startMixed(action: MixedBatchRequest["action"], retry = false): Promise<void> {
+    const state = this.workspace(); if (!state || state.busy || state.mixedSending || state.mixedCacheInvalid || !this.mixedWritable(state)) return;
+    const key = this.key(), generation = this.generation;
+    const request = retry ? state.mixedPending : { action, request_key: crypto.randomUUID(),
+      targets: Array.from(state.mixedSelected.values(), item => ({ source: item.source, proposal_id: item.proposal_id, expected_revision: item.revision })) } satisfies MixedBatchRequest;
+    if (!request || !request.targets.length || request.targets.length > 32 || retry && !state.mixedMissing || !retry && state.mixedPending) return;
+    if (state.mixedHistory?.items.some(item => item.producer_status === "running") || state.mixedBatch?.producer_status === "running") return;
+    state.mixedSending = true; this.render();
+    try {
+      const current = await Promise.all(request.targets.map(async target => {
+        const path = target.source === "file" ? "changes" : "directory-changes";
+        const value = await requestJson<WorkspaceChangeView | DirectoryPreviewView>(`${this.native(state)}/${path}/${encodeURIComponent(target.proposal_id)}`);
+        const item = this.asCandidate(target.source, value, state);
+        if (item.proposal_id !== target.proposal_id || item.revision !== target.expected_revision || !this.candidateEligible(state, item, request.action)) throw new Error(t("混合提案版本或状态已变化，请重新审阅"));
+        return item;
+      }));
+      if (!this.isCurrent(key, generation)) return;
+      if (retry && state.mixedFingerprint !== state.grant?.fingerprint) throw new Error(t("工作区资源版本已变化，请查询原历史"));
+      const label = t({ apply: "应用混合批次", keep: "保留混合批次", undo: "撤销混合批次" }[request.action]);
+      if (!window.confirm(`${t("确认所选混合提案？")}\n${label} · ${state.agent.name}\n${current.map(item => `${item.source} · ${item.path}${item.target_path ? ` → ${item.target_path}` : ""} · r${item.revision}\n${item.description}`).join("\n")}\n${t("各项独立执行，可能部分成功")}`)) return;
+      state.mixedPending = request; state.mixedFingerprint = state.grant!.fingerprint; state.mixedMissing = false; state.mixedQuery = request.request_key; this.persistMixed(state);
+      const value = await requestJson<MixedBatchView>(`${this.native(state)}/mixed-batches?confirmed=true`, { method: "POST", body: JSON.stringify(request) });
+      this.acceptMixed(state, value, request);
+    } catch (error) {
+      state.mixedMessage = errorText(error);
+      if (state.mixedPending) {
+        try {
+          const original = await requestJsonNullable<MixedBatchView>(`${this.native(state)}/mixed-batches/by-key?${new URLSearchParams({ request_key: request.request_key })}`);
+          if (original) this.acceptMixed(state, original, request);
+          else if (error instanceof ApiError) { state.mixedPending = null; state.mixedMissing = false; this.persistMixed(state); }
+          else state.mixedMissing = true;
+        } catch { /* 未知结果保留原键，只允许用户主动查询。 */ }
+      }
+    } finally {
+      state.mixedSending = false;
+      if (this.isCurrent(key, generation)) { this.render(); this.schedule(); }
+    }
   }
   private async mixedPage(direction: number): Promise<void> {
     const state = this.workspace(); if (!state || state.busy) return;
@@ -407,8 +571,9 @@ export class ChangeListUI {
         ? await requestJsonNullable<MixedBatchView>(`${base}/by-key?${new URLSearchParams({ request_key: value })}`)
         : await requestJson<MixedBatchView>(`${base}/${encodeURIComponent(value)}${kind === "wait" ? "/wait?timeout_seconds=2" : ""}`, kind === "wait" ? { method: "POST" } : undefined);
       if (!this.isCurrent(key, generation) || version !== state.mixedVersion) return;
-      if (result) { state.mixedBatch = this.validateMixed(state, result, kind === "key" ? undefined : value, kind === "key" ? value : undefined); state.mixedMessage = ""; }
-      else state.mixedMessage = t("未找到原批次，结果尚未确认，请按原键继续查询");
+      if (result) { state.mixedBatch = this.validateMixed(state, result, kind === "key" ? undefined : value, kind === "key" ? value : undefined);
+        if (state.mixedPending?.request_key === result.request_key) this.acceptMixed(state, result, state.mixedPending); state.mixedMessage = ""; }
+      else { state.mixedMessage = t("未找到原批次，结果尚未确认，请按原键继续查询"); if (state.mixedPending?.request_key === value) state.mixedMissing = true; }
       this.render(); this.schedule();
     } catch (error) { if (this.isCurrent(key, generation) && version === state.mixedVersion) { state.mixedMessage = errorText(error); this.render(); this.notice(errorText(error), true); } }
   }
@@ -453,7 +618,7 @@ export class ChangeListUI {
   private render(): void {
     const state = this.workspace(), native = Boolean(state), key = this.key(), generation = this.generation;
     const root = node("change-items"); root.replaceChildren();
-    node("change-native-pages").hidden = node("change-native-history").hidden = node("change-mixed-history").hidden = !native;
+    node("change-native-pages").hidden = node("change-native-history").hidden = node("change-mixed-history").hidden = node("change-mixed-review").hidden = !native;
     node("change-clear").hidden = native;
     for (const [id, label] of [["change-undo-all", native ? "撤销本页" : "全部撤销"], ["change-keep-all", native ? "保留本页" : "全部保留"]]) {
       node(id!).dataset.i18n = label!; node(id!).textContent = t(label!);
@@ -533,6 +698,7 @@ export class ChangeListUI {
     const results = node("change-mixed-results"); results.replaceChildren();
     const history = node("change-mixed-batches"); history.replaceChildren();
     const key = this.key(), generation = this.generation, batch = state.mixedBatch;
+    this.renderMixedCandidates(state);
     (node("change-mixed-query") as HTMLInputElement).value = state.mixedQuery;
     node("change-mixed-info").textContent = t("批次历史共{total}项", { total: state.mixedHistory?.total || 0 });
     node("change-mixed-status").textContent = state.mixedMessage;
@@ -556,5 +722,41 @@ export class ChangeListUI {
     }
     button("change-mixed-prev").disabled = state.busy || state.mixedCursors.length <= 1;
     button("change-mixed-next").disabled = state.busy || !state.mixedHistory?.next_cursor;
+  }
+  private renderMixedCandidates(state: WorkspaceState): void {
+    const container = node("change-mixed-options"); container.replaceChildren();
+    const key = this.key(), generation = this.generation;
+    for (const [source, values] of [["file", state.grant ? state.mixedFiles : []], ["directory", state.grant ? state.mixedDirectories : []]] as const) {
+      for (const value of values) {
+        const item = this.asCandidate(source, value, state), id = candidateKey(item);
+        const row = document.createElement("article"); row.className = "change-card"; row.dataset.mixedCandidate = id;
+        const label = document.createElement("label"), choose = document.createElement("input"); choose.type = "checkbox";
+        choose.checked = state.mixedSelected.has(id);
+        choose.disabled = state.busy || state.mixedSending || Boolean(state.mixedPending) || !this.mixedWritable(state)
+          || !["proposed", "applied", "kept"].includes(item.status) || !state.grant?.tool_names.includes(source === "file" ? "workspace_change" : "directory_change");
+        choose.onchange = () => { if (!this.isCurrent(key, generation)) return; if (choose.checked) { if (state.mixedSelected.size >= 32) { choose.checked = false; state.mixedMessage = t("最多选择32项混合提案"); } else state.mixedSelected.set(id, item); } else state.mixedSelected.delete(id); this.render(); };
+        const name = document.createElement("span"); name.textContent = `${t(source === "file" ? "文件" : "目录")} · ${item.path}${item.target_path ? ` → ${item.target_path}` : ""} · r${item.revision} · ${item.status}`;
+        label.append(choose, name); row.append(label);
+        const condition = document.createElement("p"); condition.textContent = item.description; row.append(condition);
+        if (item.diff !== undefined) { const details = document.createElement("details"), summary = document.createElement("summary"), diff = document.createElement("pre"); summary.textContent = t("查看所选文件差异"); diff.textContent = item.diff; details.append(summary, diff); row.append(details); if (item.truncated) { const note = document.createElement("p"); note.textContent = t("差异摘要已截断，执行使用原完整提案"); row.append(note); } }
+        const open = document.createElement("button"); open.type = "button"; open.textContent = t(source === "file" ? "查看文件差异与证明" : "查看原目录提案");
+        open.onclick = () => { if (this.isCurrent(key, generation)) void (source === "file" ? this.openWorkspaceProposal(state.agent.agent_id, item.proposal_id) : this.openDirectoryProposal(state.agent.agent_id, item.proposal_id)).catch(error => this.notice(errorText(error), true)); };
+        row.append(open); container.append(row);
+      }
+    }
+    node("change-mixed-selected").textContent = `${t("已选择{count}项混合提案", { count: state.mixedSelected.size })}\n${Array.from(state.mixedSelected.values(), item => `${item.source} · ${item.path} · r${item.revision}`).join("\n")}`;
+    for (const action of ["apply", "keep", "undo"] as const) button(`change-mixed-${action}`).disabled = state.busy || state.mixedSending || Boolean(state.mixedPending) || state.mixedCacheInvalid || !state.mixedSelected.size
+      || !Array.from(state.mixedSelected.values()).every(item => this.candidateEligible(state, item, action)) || state.mixedBatch?.producer_status === "running";
+    button("change-mixed-options-refresh").disabled = state.busy || state.mixedSending || state.agent.session.status !== "open";
+    button("change-mixed-clear-selection").disabled = !state.mixedSelected.size || state.mixedSending || Boolean(state.mixedPending);
+    button("change-mixed-files-prev").disabled = state.busy || state.mixedFileOffset === 0;
+    button("change-mixed-files-next").disabled = state.busy || state.mixedFiles.length < 20;
+    button("change-mixed-directories-prev").disabled = state.busy || state.mixedDirectoryAfter.length <= 1;
+    button("change-mixed-directories-next").disabled = state.busy || !state.mixedDirectoryNext;
+    node("change-mixed-pending").hidden = !state.mixedPending && !state.mixedCacheInvalid;
+    node("change-mixed-pending-key").textContent = state.mixedPending?.request_key || t("本地混合恢复记录无效，请查询历史");
+    button("change-mixed-recover").disabled = !state.mixedPending;
+    button("change-mixed-retry").disabled = !state.mixedPending || !state.mixedMissing || state.mixedSending || !this.mixedWritable(state);
+    button("change-mixed-clear-cache").hidden = !state.mixedCacheInvalid;
   }
 }
