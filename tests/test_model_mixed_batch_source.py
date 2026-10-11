@@ -341,7 +341,7 @@ async def test_0040_host_hash_nonempty_0039_upgrade_and_model_source_downgrade_g
         async with store.database.engine.connect() as sql:
             assert (
                 await sql.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0040_mixed_batch_model_sources"
+            ).scalar_one() == "0041_workspace_tree_plans"
             assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         workspace.close()

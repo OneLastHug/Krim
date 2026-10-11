@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     LargeBinary,
     String,
@@ -750,6 +751,93 @@ class MixedWorkspaceBatchChildRow(Base):
         ForeignKey("workspace_directory_attempts.operation_id"), nullable=True, unique=True
     )
     admission_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class WorkspaceTreePlanRow(Base):
+    __tablename__ = "workspace_tree_plans"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        CheckConstraint(
+            "producer_status IN ('planned','running','finished','cancelled','interrupted')",
+            name="ck_tree_plan_status",
+        ),
+        CheckConstraint("step_count >= 1 AND step_count <= 16384", name="ck_tree_step_count"),
+        CheckConstraint("metadata_bytes >= 0", name="ck_tree_metadata_bytes"),
+    )
+    plan_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    command_id: Mapped[str] = mapped_column(ForeignKey("command_executions.command_id"))
+    source_hash: Mapped[str] = mapped_column(String(64))
+    root_path: Mapped[str] = mapped_column(String(512))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    snapshot_revision: Mapped[str] = mapped_column(String(64))
+    frozen: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    metadata_bytes: Mapped[int] = mapped_column(Integer)
+    step_count: Mapped[int] = mapped_column(Integer)
+    producer_status: Mapped[str] = mapped_column(String(16), default="planned")
+    created_owner_id: Mapped[str] = mapped_column(String(36))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    stop_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceTreeStepRow(Base):
+    __tablename__ = "workspace_tree_steps"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "path"),
+        ForeignKeyConstraint(
+            ["plan_id", "parent_position"],
+            ["workspace_tree_steps.plan_id", "workspace_tree_steps.position"],
+        ),
+        CheckConstraint("position >= 0 AND position < 16384", name="ck_tree_position"),
+        CheckConstraint(
+            "(position=0 AND source='directory' AND parent_position IS NULL) OR "
+            "(position>0 AND parent_position IS NOT NULL "
+            "AND parent_position>=0 AND parent_position<position)",
+            name="ck_tree_parent_position",
+        ),
+        CheckConstraint("mode >= 0 AND mode <= 511", name="ck_tree_mode"),
+        CheckConstraint("status IN ('pending','rejected','skipped')", name="ck_tree_step_status"),
+        CheckConstraint(
+            "(source='directory' AND sha256 IS NULL AND byte_size IS NULL "
+            "AND file_proposal_id IS NULL AND file_operation_id IS NULL) OR "
+            "(source='file' AND sha256 IS NOT NULL AND byte_size IS NOT NULL AND byte_size>=0 "
+            "AND directory_proposal_id IS NULL AND directory_operation_id IS NULL)",
+            name="ck_tree_source_references",
+        ),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_plans.plan_id"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(16))
+    path: Mapped[str] = mapped_column(String(512))
+    mode: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_proposal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_proposals.proposal_id"), nullable=True, unique=True
+    )
+    directory_proposal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_proposals.proposal_id"), nullable=True, unique=True
+    )
+    expected_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_attempts.operation_id"), nullable=True, unique=True
+    )
+    directory_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_attempts.operation_id"), nullable=True, unique=True
+    )
+    admission_open: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

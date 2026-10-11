@@ -66,7 +66,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "package": krim_agent.__file__,
-                    "migration": "0040_mixed_batch_model_sources",
+                    "migration": "0041_workspace_tree_plans",
                     "revision": enabled.profile.revision,
                     "resource_hash": view.resource_hash,
                     "secret_free": True,

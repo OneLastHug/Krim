@@ -116,13 +116,13 @@ async def main():
             async with ai.runtime.repository.database.engine.connect() as sql:
                 assert (
                     await sql.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one() == "0040_mixed_batch_model_sources"
+                ).scalar_one() == "0041_workspace_tree_plans"
                 assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
             print(
                 json.dumps(
                     {
                         "package": krim_agent.__file__,
-                        "schema": "0040_mixed_batch_model_sources",
+                        "schema": "0041_workspace_tree_plans",
                         "same_model_context": True,
                         "original_run_call": True,
                         "real_file_directory": True,
