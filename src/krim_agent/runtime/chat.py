@@ -66,6 +66,7 @@ from krim_agent.tools.core import (
     Decision,
     DirectoryChangeBackend,
     InteractionPublisher,
+    MixedBatchQueryBackend,
     Policy,
     QuestionHandler,
     TaskBackend,
@@ -149,6 +150,7 @@ class ChatRuntime:
         task_store: TaskBackend | None = None,
         workspace_changes: WorkspaceChangeService | None = None,
         directory_changes: DirectoryChangeBackend | None = None,
+        workspace_mixed_queries: MixedBatchQueryBackend | None = None,
         workspace: WorkspaceBinding | None = None,
         execution: ExecutionBinding | None = None,
         commands: CommandBackend | None = None,
@@ -198,6 +200,7 @@ class ChatRuntime:
             WorkspaceEditStore(repository.database, owner_id=agent_owner_id)
         )
         self.directory_changes = directory_changes
+        self.workspace_mixed_queries = workspace_mixed_queries
         self.workspace = workspace
         self.execution, self.commands = execution, commands
         self.interactions = InteractionService(
@@ -1059,6 +1062,7 @@ class ChatRuntime:
                         commands=self.commands,
                         workspace_changes=self.workspace_changes,
                         directory_changes=self.directory_changes,
+                        workspace_mixed_queries=self.workspace_mixed_queries,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
                         interaction_publisher=publish_interaction,

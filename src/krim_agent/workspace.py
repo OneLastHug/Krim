@@ -17,7 +17,9 @@ from pydantic import Field, JsonValue
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 
-WORKSPACE_READ_TOOL_NAMES = frozenset({"workspace_read", "workspace_list", "workspace_search"})
+WORKSPACE_READ_TOOL_NAMES = frozenset(
+    {"workspace_read", "workspace_list", "workspace_search", "workspace_mixed_query"}
+)
 WORKSPACE_CHANGE_TOOL_NAMES = frozenset(
     {"workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize"}
 )

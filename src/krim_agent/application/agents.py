@@ -83,6 +83,7 @@ from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.tools.workspace_changes import workspace_change_tools
+from krim_agent.tools.workspace_mixed_queries import mixed_batch_query_tool
 from krim_agent.workspace import (
     WORKSPACE_TOOL_NAMES,
     WORKSPACE_WRITE_TOOL_NAMES,
@@ -568,6 +569,17 @@ class AgentService:
             self.runtime.workspace = binding
         return binding
 
+    def register_mixed_batch_queries(self) -> None:
+        """可信宿主显式启用新只读工具；不改变既有冻结Agent的工具集合。"""
+        definition = mixed_batch_query_tool()
+        existing = next(
+            (item for item in self.runtime.tools.definitions if item.name == definition.name), None
+        )
+        if existing is not None and existing is not definition:
+            raise ValueError("混合查询工具名称已由其它定义占用")
+        if existing is None:
+            self.runtime.tools.register(definition)
+
     def disable_workspace(self, key: str) -> None:
         self.resources.disable_workspace(key)
 
@@ -754,6 +766,7 @@ class AgentService:
                     else None,
                     workspace_changes=self.manager.workspace_changes,
                     directory_changes=self.manager.directory_changes,
+                    workspace_mixed_queries=self.manager.mixed_queries,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
                     checkpoint_capture=checkpoint_capture,
