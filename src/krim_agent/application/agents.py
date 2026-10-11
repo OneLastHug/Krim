@@ -123,6 +123,7 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from krim_agent.workspace_mixed_batch import MixedBatchFence
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestoreFence,
@@ -655,6 +656,7 @@ class AgentService:
         *,
         confirmed: bool = False,
         batch_fence: NativeBatchFence | None = None,
+        mixed_fence: MixedBatchFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
         command_admitted: Callable[[str], None] | None = None,
@@ -736,6 +738,7 @@ class AgentService:
                     workspace_changes=self.manager.workspace_changes,
                     directory_changes=self.manager.directory_changes,
                     workspace_batch=batch_fence,
+                    mixed_batch=mixed_fence,
                     checkpoint_capture=checkpoint_capture,
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
@@ -795,6 +798,13 @@ class AgentService:
                 "workspace_batch_child_closed": 409,
                 "workspace_batch_operation_conflict": 409,
                 "workspace_batch_dependency": 409,
+                "workspace_mixed_batch_action": 403,
+                "workspace_mixed_batch_fence_mismatch": 403,
+                "workspace_mixed_batch_request_reserved": 403,
+                "workspace_mixed_batch_fenced": 409,
+                "workspace_mixed_batch_child_closed": 409,
+                "workspace_mixed_batch_operation_conflict": 409,
+                "workspace_mixed_batch_corrupt": 409,
                 "workspace_checkpoint_fenced": 409,
                 "workspace_checkpoint_target": 403,
                 "workspace_checkpoint_action": 403,

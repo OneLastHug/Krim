@@ -95,6 +95,12 @@ class WorkspaceChangeService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if context.mixed_batch is not None and (
+                context.mixed_batch.source != "file" or operation != "change"
+            ):
+                raise ServiceError(
+                    "workspace_mixed_batch_action", "混合子项只能执行原来源的冻结动作", 403
+                )
             if context.checkpoint_capture is not None:
                 raise ServiceError(
                     "workspace_checkpoint_action", "检查点捕获上下文不能执行文件修改动作", 403
@@ -256,6 +262,7 @@ class WorkspaceChangeService:
             binding.fingerprint,
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
+            mixed_fence=context.mixed_batch,
         )
         if previous is not None:
             return previous.view
@@ -274,6 +281,7 @@ class WorkspaceChangeService:
             call_id=context.call_id,
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
+            mixed_fence=context.mixed_batch,
         )
         if not created:
             return attempt.view

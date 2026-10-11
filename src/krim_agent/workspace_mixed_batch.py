@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
 from pydantic import Field, model_validator
 
 from krim_agent.protocol.models import StrictModel, check_json
-from krim_agent.workspace_change import WorkspaceAttemptView
-from krim_agent.workspace_directory import DirectoryAttemptView
+from krim_agent.workspace_change import WorkspaceAttemptView, WorkspaceChangeAction
+from krim_agent.workspace_directory import DirectoryAttemptView, DirectoryChangeAction
 
 MixedBatchAction = Literal["apply", "keep", "undo"]
 MixedBatchItemStatus = Literal["pending", "running", "done", "rejected", "uncertain", "skipped"]
@@ -136,3 +137,26 @@ class MixedBatchHistoryPage(StrictModel):
     total: int = Field(ge=0, le=5000)
     items: list[MixedBatchSummary] = Field(max_length=32)
     next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class MixedBatchFence:
+    """可信宿主内部凭据；不属于HTTP、SDK请求或模型工具参数。"""
+
+    batch_id: str
+    position: int
+    token: str
+    source: Literal["file", "directory"]
+
+
+@dataclass(frozen=True)
+class MixedBatchDispatch:
+    fence: MixedBatchFence
+    request: WorkspaceChangeAction | DirectoryChangeAction
+
+
+@dataclass(frozen=True)
+class MixedBatchExecution:
+    view: MixedBatchView
+    token: str
+    children: tuple[MixedBatchDispatch, ...]

@@ -36,6 +36,7 @@ from krim_agent.workspace_change import (
     WorkspaceOperationProofView,
 )
 from krim_agent.workspace_list import NativeBatchFence
+from krim_agent.workspace_mixed_batch import MixedBatchFence
 from krim_agent.workspace_restore import CheckpointRestoreFence
 from krim_agent.workspace_writer import FileRecovery, FileSnapshot, PreparedFileChange
 
@@ -53,6 +54,7 @@ from .database import (
     WorkspaceLedgerGuardRow,
 )
 from .directory_fences import assert_file_directory_fence
+from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request
 from .workspace_batches import assert_batch_execution, assert_batch_request
 from .workspace_restores import assert_restore_execution, assert_restore_request
 
@@ -560,6 +562,7 @@ class WorkspaceEditStore:
         *,
         batch_fence: NativeBatchFence | None = None,
         restore_fence: CheckpointRestoreFence | None = None,
+        mixed_fence: MixedBatchFence | None = None,
     ) -> StoredWorkspaceAttempt | None:
         value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
@@ -599,6 +602,16 @@ class WorkspaceEditStore:
                 await self._resource(
                     session, scope_id, proposal.workspace_key, resource_fingerprint
                 )
+            await assert_mixed_request(
+                session,
+                self.owner_id,
+                scope_id,
+                resource_fingerprint,
+                "file",
+                request,
+                mixed_fence,
+                row.operation_id if row is not None else None,
+            )
             return self._attempt(row) if row is not None else None
 
     @staticmethod
@@ -836,6 +849,7 @@ class WorkspaceEditStore:
         call_id: str | None = None,
         batch_fence: NativeBatchFence | None = None,
         restore_fence: CheckpointRestoreFence | None = None,
+        mixed_fence: MixedBatchFence | None = None,
     ) -> tuple[StoredWorkspaceAttempt, bool]:
         self._key(request.request_key)
         digest_value = digest(
@@ -868,6 +882,16 @@ class WorkspaceEditStore:
                 request,
                 resource_fingerprint,
                 restore_fence,
+                previous.operation_id if previous is not None else None,
+            )
+            mixed_child = await assert_mixed_request(
+                session,
+                self.owner_id,
+                scope_id,
+                resource_fingerprint,
+                "file",
+                request,
+                mixed_fence,
                 previous.operation_id if previous is not None else None,
             )
             proposal = await self._proposal(session, scope_id, request.proposal_id)
@@ -1015,6 +1039,9 @@ class WorkspaceEditStore:
             if restore_child is not None:
                 restore_child.operation_id = operation_id
                 restore_child.admission_open = False
+            if mixed_child is not None:
+                mixed_child.file_operation_id = operation_id
+                mixed_child.admission_open = False
             session.add(WorkspaceFileLockRow(file_key=lock_id, operation_id=operation_id))
             await session.flush()
             return self._attempt(row), True
@@ -1045,6 +1072,7 @@ class WorkspaceEditStore:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             await assert_file_directory_fence(session, self._attempt(row).prepared)
             await assert_batch_execution(session, self.owner_id, operation_id)
+            await assert_mixed_execution(session, self.owner_id, "file", operation_id)
             await assert_restore_execution(session, self.owner_id, operation_id)
             await assert_command_proposal(
                 session, proposal, self._change(proposal).prepared, applying=row.action == "apply"
@@ -1127,6 +1155,7 @@ class WorkspaceEditStore:
                     session, scope_id, proposal.workspace_key, proposal.resource_fingerprint
                 )
                 await assert_batch_execution(session, self.owner_id, operation_id)
+                await assert_mixed_execution(session, self.owner_id, "file", operation_id)
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
             if len(row.receipt_history) >= 16:

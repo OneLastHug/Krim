@@ -136,7 +136,9 @@ def _assert_live(row: NativeWorkspaceBatchRow, owner_id: str) -> None:
         raise ServiceError("workspace_batch_fenced", "原生批次已结束或执行资格失效", 409)
 
 
-async def _assert_undo_tip(session: AsyncSession, child: NativeWorkspaceBatchChildRow) -> None:
+async def assert_file_undo_tip(
+    session: AsyncSession, proposal: str, physical_key: str, apply_sequence: int | None
+) -> None:
     from .workspace_edits import digest
 
     # SHA相等不证明没有后继；跨scope/资源检查真实物理文件当前仍生效的修改。
@@ -160,7 +162,7 @@ async def _assert_undo_tip(session: AsyncSession, child: NativeWorkspaceBatchChi
         )
     )
     for proposal_id, prepared, path, status, sequence in rows:
-        if proposal_id == child.proposal_id:
+        if proposal_id == proposal:
             continue
         metadata = PreparedChangeMetadata.model_validate(prepared)
         key = digest(
@@ -170,10 +172,10 @@ async def _assert_undo_tip(session: AsyncSession, child: NativeWorkspaceBatchChi
             }
         )
         # 0026后新apply均有真实序号；已稳定legacy历史早于known，仍执行/未核实者不作此推断。
-        if key == child.file_key and (
-            child.apply_sequence is None
+        if key == physical_key and (
+            apply_sequence is None
             or status in {"applying", "undoing", "keeping", "uncertain"}
-            or (sequence is not None and sequence > child.apply_sequence)
+            or (sequence is not None and sequence > apply_sequence)
         ):
             raise ServiceError(
                 "workspace_batch_dependency", "同文件仍有后继或顺序未知的修改，须先处理", 409
@@ -225,7 +227,7 @@ async def assert_batch_request(
     ):
         raise ServiceError("workspace_batch_child_closed", "批次子项已关闭后续操作准入", 409)
     if request.action == "undo":
-        await _assert_undo_tip(session, child)
+        await assert_file_undo_tip(session, child.proposal_id, child.file_key, child.apply_sequence)
     return child
 
 
