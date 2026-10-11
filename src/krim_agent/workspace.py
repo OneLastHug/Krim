@@ -28,6 +28,7 @@ WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
         "directory_reconcile",
         "directory_finalize",
         "directory_query",
+        "directory_source_preview",
         "directory_inspect",
     }
 )

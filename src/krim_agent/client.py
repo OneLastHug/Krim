@@ -52,6 +52,10 @@ from .execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from .execution.directory_publication import (
+    CommandDirectoryProposalRequest,
+    CommandDirectoryProposalView,
+)
 from .execution.management import CommandAccepted, CommandHistoryPage, CommandHistoryRequest
 from .execution.publication import (
     CommandChangesPage,
@@ -380,6 +384,22 @@ class KrimClient:
         )
         self._check(response)
         return CommandProposalView.model_validate_json(response.content)
+
+    def agent_command_directory_propose(
+        self,
+        agent_id: str,
+        request: CommandDirectoryProposalRequest,
+        *,
+        confirmed: bool = False,
+    ) -> CommandDirectoryProposalView:
+        request = CommandDirectoryProposalRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            _command_path(agent_id, request.command_id) + "/directory-proposals",
+            json=request.model_dump(mode="json"),
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return CommandDirectoryProposalView.model_validate_json(response.content)
 
     def __exit__(
         self,

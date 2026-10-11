@@ -10,6 +10,11 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.directory_publication import (
+    CommandDirectoryEntry,
+    CommandDirectoryProposalRequest,
+    CommandDirectoryProposalView,
+)
 from krim_agent.execution.management import (
     CommandAccepted,
     CommandHistoryEntry,
@@ -100,6 +105,9 @@ from .types import (
 )
 
 __all__ = [
+    "CommandDirectoryEntry",
+    "CommandDirectoryProposalRequest",
+    "CommandDirectoryProposalView",
     "DirectoryInspectRequest",
     "DirectoryInspectView",
     "DirectoryAttemptView",

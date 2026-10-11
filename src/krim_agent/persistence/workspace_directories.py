@@ -246,7 +246,7 @@ class WorkspaceDirectoryStore:
     ) -> tuple[StoredDirectory, bool]:
         self.files._key(key)
         validate(change, original=True)
-        if not isinstance(change.spec, DirectoryChangeSpec) or not 0 < ttl_seconds <= 86400:
+        if type(change.spec) is not DirectoryChangeSpec or not 0 < ttl_seconds <= 86400:
             raise ServiceError("workspace_directory_proposal", "目录提案规格、资源或TTL无效", 422)
         if len(fingerprint) != 64 or any(c not in "0123456789abcdef" for c in fingerprint):
             raise ServiceError("workspace_binding_changed", "工作区资源指纹无效", 422)
@@ -575,6 +575,9 @@ class WorkspaceDirectoryStore:
                     )
                 return self._attempt(previous), False
             proposal = await self._proposal(session, scope, request.proposal_id)
+            from .command_directory_proposals import assert_directory_source
+
+            await assert_directory_source(session, proposal)
             original = decode(proposal.prepared)
             await self.files._resource(session, scope, proposal.workspace_key, fingerprint)
             if (
@@ -702,6 +705,9 @@ class WorkspaceDirectoryStore:
             ):
                 raise ServiceError("workspace_directory_lease_lost", "目录原生产者租约失效", 409)
             proposal = await self._proposal(session, scope, row.proposal_id)
+            from .command_directory_proposals import assert_directory_source
+
+            await assert_directory_source(session, proposal)
             if proposal.active_operation_id != identifier:
                 raise ServiceError("workspace_directory_state", "目录发布资格已变化", 409)
             await self.files._resource(

@@ -590,7 +590,7 @@ async def test_same_proposal_race_and_nonempty_migration_refuses_loss(runtime, t
         async with runtime.repository.database.engine.connect() as sql:
             assert (
                 await sql.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0036_workspace_directory_ledger"
+            ).scalar_one() == "0037_command_directory_sources"
             assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()

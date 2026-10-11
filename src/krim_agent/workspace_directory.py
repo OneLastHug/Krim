@@ -8,7 +8,7 @@ import os
 import stat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import uuid4
 
@@ -54,6 +54,19 @@ class DirectoryRestoreSpec(StrictModel):
     original_token: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+class ArtifactDirectorySpec(DirectoryChangeSpec):
+    """仅从原命令目录manifest派生，普通preview不接受来源字段。"""
+
+    command_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def create_only(self) -> ArtifactDirectorySpec:
+        if self.operation != "create":
+            raise ValueError("命令目录来源当前只派生创建容器提案")
+        return self
+
+
 class DirectoryPreviewView(StrictModel):
     proposal_id: str
     scope_id: str
@@ -89,6 +102,12 @@ class DirectoryPreviewRequest(StrictModel):
     spec: DirectoryChangeSpec
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
     ttl_seconds: float = Field(default=3600, gt=0, le=86400, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def ordinary_spec(self) -> DirectoryPreviewRequest:
+        if type(self.spec) is not DirectoryChangeSpec:
+            raise ValueError("普通目录预览不接受内部来源规格")
+        return self
 
 
 class DirectoryOperationRequest(StrictModel):
@@ -278,8 +297,11 @@ class PreparedDirectoryChange:
 
     @property
     def spec(self) -> DirectoryChangeSpec | DirectoryRestoreSpec:
-        if json.loads(self.spec_json).get("operation") == "restore_deleted":
+        value = json.loads(self.spec_json)
+        if value.get("operation") == "restore_deleted":
             return DirectoryRestoreSpec.model_validate_json(self.spec_json)
+        if "command_id" in value:
+            return ArtifactDirectorySpec.model_validate_json(self.spec_json)
         return DirectoryChangeSpec.model_validate_json(self.spec_json)
 
 
@@ -452,6 +474,13 @@ class WorkspaceDirectoryWriter:
             value = self._snapshot(fd, name, missing=True)
             self._files._check_parent(parent, identity)
             return value
+
+    def prepare_artifact(self, spec: ArtifactDirectorySpec) -> PreparedDirectoryChange:
+        request = ArtifactDirectorySpec.model_validate(spec.model_dump())
+        prepared = self.prepare(
+            DirectoryChangeSpec(path=request.path, operation="create", mode=request.mode)
+        )
+        return replace(prepared, spec_json=request.model_dump_json())
 
     def _receipt(
         self,

@@ -204,7 +204,7 @@ def main():
         )
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0036_workspace_directory_ledger"
+            == "0037_command_directory_sources"
         )
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
     print(

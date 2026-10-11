@@ -45,6 +45,10 @@ from krim_agent.execution.agent_models import (
     CommandSummary,
 )
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
+from krim_agent.execution.directory_publication import (
+    CommandDirectoryProposalRequest,
+    CommandDirectoryProposalView,
+)
 from krim_agent.execution.linux import LinuxSandboxRunner
 from krim_agent.execution.management import (
     CommandAccepted,
@@ -843,6 +847,8 @@ class AgentService:
                 "execution_destination_exists": 409,
                 "execution_artifact_baseline": 409,
                 "execution_artifact_mode": 422,
+                "execution_directories_unrecorded": 409,
+                "execution_directory_not_found": 404,
                 "execution_proposal_source": 409,
                 "execution_proposal_unavailable": 503,
                 "workspace_directory_not_found": 404,
@@ -1142,6 +1148,24 @@ class AgentService:
             json.dumps(
                 await self._workspace_call(
                     agent_id, "command_propose", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def command_directory_propose(
+        self,
+        agent_id: str,
+        request: CommandDirectoryProposalRequest,
+        *,
+        confirmed: bool = False,
+    ) -> CommandDirectoryProposalView:
+        return CommandDirectoryProposalView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "directory_source_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
                 )
             )
         )

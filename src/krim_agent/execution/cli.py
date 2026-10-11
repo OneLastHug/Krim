@@ -6,6 +6,7 @@ from pathlib import Path
 from krim_agent.client import KrimClient
 
 from .agent_models import AgentCommandRequest, CommandSummary
+from .directory_publication import CommandDirectoryProposalRequest
 from .publication import CommandProposalRequest
 
 
@@ -58,6 +59,17 @@ def execute(client: KrimClient, args: argparse.Namespace, parser: argparse.Argum
             confirmed=args.confirm,
         )
         print(page.model_dump_json(indent=2))
+        return 0
+    if args.action == "directory-propose":
+        directory_request = CommandDirectoryProposalRequest.model_validate_json(
+            _request(args.request, parser)
+        )
+        if args.value is not None and args.value != directory_request.command_id:
+            parser.error("命令标识与目录提案请求不一致")
+        directory_proposal = client.agent_command_directory_propose(
+            args.agent_id, directory_request, confirmed=args.confirm
+        )
+        print(directory_proposal.model_dump_json(indent=2))
         return 0
     if args.action == "propose":
         request = CommandProposalRequest.model_validate_json(_request(args.request, parser))

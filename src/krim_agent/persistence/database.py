@@ -646,6 +646,27 @@ class WorkspaceDirectoryLockRow(Base):
     directory_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
+class CommandDirectoryProposalRow(Base):
+    __tablename__ = "command_directory_proposals"
+    __table_args__ = (
+        CheckConstraint("mode >= 0 AND mode <= 511", name="ck_command_directory_mode"),
+        CheckConstraint("accept_failed IN (0,1)", name="ck_command_directory_accept"),
+        CheckConstraint(
+            "ttl_seconds > 0 AND ttl_seconds <= 86400", name="ck_command_directory_ttl"
+        ),
+    )
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_proposals.proposal_id"), primary_key=True
+    )
+    command_id: Mapped[str] = mapped_column(ForeignKey("command_executions.command_id"), index=True)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    path: Mapped[str] = mapped_column(String(512))
+    mode: Mapped[int] = mapped_column(Integer)
+    entry_key: Mapped[str] = mapped_column(String(64))
+    ttl_seconds: Mapped[float] = mapped_column(Float)
+    accept_failed: Mapped[int] = mapped_column(Integer)
+
+
 class NativeWorkspaceBatchRow(Base):
     __tablename__ = "native_workspace_batches"
     __table_args__ = (

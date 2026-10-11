@@ -15,6 +15,10 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.directory_publication import (
+    CommandDirectoryProposalRequest,
+    CommandDirectoryProposalView,
+)
 from krim_agent.execution.management import (
     CommandAccepted,
     CommandHistoryPage,
@@ -138,6 +142,16 @@ class AgentSession:
         self, request: CommandProposalRequest, *, confirmed: bool = False
     ) -> CommandProposalView:
         return await self.service.command_propose(self.agent_id, request, confirmed=confirmed)
+
+    async def propose_command_directory(
+        self,
+        request: CommandDirectoryProposalRequest,
+        *,
+        confirmed: bool = False,
+    ) -> CommandDirectoryProposalView:
+        return await self.service.command_directory_propose(
+            self.agent_id, request, confirmed=confirmed
+        )
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)
