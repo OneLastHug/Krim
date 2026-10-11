@@ -22,7 +22,16 @@ WORKSPACE_CHANGE_TOOL_NAMES = frozenset(
     {"workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize"}
 )
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
-    {"directory_preview", "directory_change", "directory_reconcile", "directory_finalize"}
+    {
+        "directory_preview",
+        "directory_change",
+        "directory_reconcile",
+        "directory_finalize",
+        "directory_query",
+    }
+)
+WORKSPACE_WRITE_TOOL_NAMES = WORKSPACE_CHANGE_TOOL_NAMES | (
+    WORKSPACE_DIRECTORY_TOOL_NAMES - {"directory_query"}
 )
 WORKSPACE_TOOL_NAMES = (
     WORKSPACE_READ_TOOL_NAMES | WORKSPACE_CHANGE_TOOL_NAMES | WORKSPACE_DIRECTORY_TOOL_NAMES

@@ -79,20 +79,91 @@ class DirectoryPreviewView(StrictModel):
 
 
 class DirectoryChangeAction(StrictModel):
-    proposal_id: str = Field(min_length=1, max_length=36)
+    proposal_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
     action: Literal["apply", "undo", "keep"]
     expected_revision: int = Field(ge=0)
-    request_key: str = Field(min_length=1, max_length=128)
+    request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
 
 
 class DirectoryPreviewRequest(StrictModel):
     spec: DirectoryChangeSpec
-    request_key: str = Field(min_length=1, max_length=128)
-    ttl_seconds: float = Field(default=3600, gt=0, le=86400)
+    request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
+    ttl_seconds: float = Field(default=3600, gt=0, le=86400, allow_inf_nan=False)
 
 
 class DirectoryOperationRequest(StrictModel):
-    operation_id: str = Field(min_length=1, max_length=36)
+    operation_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+DirectoryQueryKind = Literal[
+    "proposal", "operation", "history", "proposals", "proposal_by_key", "operation_by_key"
+]
+
+
+class DirectoryQueryRequest(StrictModel):
+    kind: DirectoryQueryKind
+    identifier: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    request_key: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
+    after: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    limit: int = Field(default=32, ge=1, le=32)
+
+    @model_validator(mode="after")
+    def selection(self) -> DirectoryQueryRequest:
+        if self.kind in {"proposal", "operation", "history"}:
+            if self.identifier is None or self.request_key is not None:
+                raise ValueError("目录查询须只提供原identifier")
+        elif self.kind.endswith("_by_key"):
+            if self.request_key is None or self.identifier is not None or self.after is not None:
+                raise ValueError("按原键查询须只提供request_key")
+        elif self.identifier is not None or self.request_key is not None:
+            raise ValueError("目录列表只接受游标/容量")
+        if self.kind not in {"history", "proposals"} and self.after is not None:
+            raise ValueError("单项目录查询不接受after")
+        if self.kind not in {"history", "proposals"} and self.limit != 32:
+            raise ValueError("单项目录查询不接受分页容量")
+        return self
+
+
+class DirectoryQueryResult(StrictModel):
+    kind: DirectoryQueryKind
+    proposal: DirectoryPreviewView | None = None
+    operation: DirectoryAttemptView | None = None
+    proposals: list[DirectoryPreviewView] = Field(default_factory=list, max_length=32)
+    history: list[DirectoryAttemptView] = Field(default_factory=list, max_length=32)
+    next_after: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+
+    @model_validator(mode="after")
+    def selection(self) -> DirectoryQueryResult:
+        if self.kind in {"history", "proposals"}:
+            if self.proposal is not None or self.operation is not None:
+                raise ValueError("目录页不能附带单项查询事实")
+            if self.kind == "history":
+                if self.proposals:
+                    raise ValueError("目录历史页不能混入提案列表")
+                last = self.history[-1].operation_id if self.history else None
+            else:
+                if self.history:
+                    raise ValueError("目录提案页不能混入操作历史")
+                last = self.proposals[-1].proposal_id if self.proposals else None
+            if self.next_after is not None and self.next_after != last:
+                raise ValueError("目录页游标须指向本页末项")
+        else:
+            if self.proposals or self.history or self.next_after is not None:
+                raise ValueError("目录单项查询不能附带分页事实")
+            if self.kind in {"proposal", "proposal_by_key"}:
+                if self.operation is not None or self.kind == "proposal" and self.proposal is None:
+                    raise ValueError("目录提案查询结果无效")
+            elif self.proposal is not None or self.kind == "operation" and self.operation is None:
+                raise ValueError("目录操作查询结果无效")
+        return self
 
 
 class DirectoryAttemptView(StrictModel):

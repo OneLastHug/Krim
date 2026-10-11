@@ -175,6 +175,15 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
+from krim_agent.workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryOperationRequest,
+    DirectoryPreviewRequest,
+    DirectoryPreviewView,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -194,6 +203,14 @@ from .web import mount_browser_ui
 WorkspaceIdentifier = Annotated[
     str, PathParameter(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$")
 ]
+
+
+def _directory_parameters(request: Request, allowed: set[str]) -> None:
+    """不忽略宿主路径或重复参数；目录公开入口只接受明确声明的选择。"""
+    items = request.query_params.multi_items()
+    names = {name for name, _ in items}
+    if not names <= allowed | {"confirmed"} or len(items) != len(names):
+        raise ServiceError("invalid_request", "目录查询参数未知或重复", 422)
 
 
 class TopicsResponse(BaseModel):
@@ -961,6 +978,153 @@ def create_app(
     @app.post("/v1/agents/{agent_id}/workspace/search")
     async def agent_workspace_search(agent_id: str, payload: SearchFilesInput) -> WorkspaceSearch:
         return await agent_service.workspace_search(agent_id, payload)
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-changes/preview")
+    async def agent_directory_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: DirectoryPreviewRequest,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryPreviewView:
+        _directory_parameters(request, set())
+        return await agent_service.directory_preview(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-changes")
+    async def agent_directory_change(
+        agent_id: WorkspaceIdentifier,
+        payload: DirectoryChangeAction,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryAttemptView:
+        _directory_parameters(request, set())
+        return await agent_service.directory_change(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-changes")
+    async def agent_directory_proposals(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        after: str | None = Query(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryQueryResult:
+        _directory_parameters(request, {"after", "limit"})
+        return await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="proposals", after=after, limit=limit),
+            confirmed=confirmed,
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-changes/by-key")
+    async def agent_directory_proposal_by_key(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"),
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryPreviewView | None:
+        _directory_parameters(request, {"request_key"})
+        result = await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="proposal_by_key", request_key=request_key),
+            confirmed=confirmed,
+        )
+        return result.proposal
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-changes/{proposal_id}")
+    async def agent_directory_proposal(
+        agent_id: WorkspaceIdentifier,
+        proposal_id: WorkspaceIdentifier,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryPreviewView:
+        _directory_parameters(request, set())
+        result = await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="proposal", identifier=proposal_id),
+            confirmed=confirmed,
+        )
+        if result.proposal is None:
+            raise ServiceError("workspace_directory_not_found", "原目录提案不存在", 404)
+        return result.proposal
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-changes/{proposal_id}/history")
+    async def agent_directory_history(
+        agent_id: WorkspaceIdentifier,
+        proposal_id: WorkspaceIdentifier,
+        request: Request,
+        after: str | None = Query(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryQueryResult:
+        _directory_parameters(request, {"after", "limit"})
+        return await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="history", identifier=proposal_id, after=after, limit=limit),
+            confirmed=confirmed,
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-operations/by-key")
+    async def agent_directory_operation_by_key(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"),
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryAttemptView | None:
+        _directory_parameters(request, {"request_key"})
+        result = await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="operation_by_key", request_key=request_key),
+            confirmed=confirmed,
+        )
+        return result.operation
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-operations/{operation_id}")
+    async def agent_directory_operation(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryAttemptView:
+        _directory_parameters(request, set())
+        result = await agent_service.directory_query(
+            agent_id,
+            DirectoryQueryRequest(kind="operation", identifier=operation_id),
+            confirmed=confirmed,
+        )
+        if result.operation is None:
+            raise ServiceError("workspace_directory_operation_not_found", "原目录操作不存在", 404)
+        return result.operation
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-operations/{operation_id}/reconcile")
+    async def agent_directory_reconcile(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        payload: DirectoryOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryAttemptView:
+        _directory_parameters(request, set())
+        operation = payload or DirectoryOperationRequest(operation_id=operation_id)
+        if operation.operation_id != operation_id:
+            raise ServiceError(
+                "workspace_directory_operation_mismatch", "路径与目录操作标识不一致", 422
+            )
+        return await agent_service.directory_reconcile(agent_id, operation, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-operations/{operation_id}/finalize")
+    async def agent_directory_finalize(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        payload: DirectoryOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryAttemptView:
+        _directory_parameters(request, set())
+        operation = payload or DirectoryOperationRequest(operation_id=operation_id)
+        if operation.operation_id != operation_id:
+            raise ServiceError(
+                "workspace_directory_operation_mismatch", "路径与目录操作标识不一致", 422
+            )
+        return await agent_service.directory_finalize(agent_id, operation, confirmed=confirmed)
 
     @app.post("/v1/agents/{agent_id}/workspace/changes/preview")
     async def agent_workspace_preview(

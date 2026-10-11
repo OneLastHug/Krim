@@ -76,8 +76,8 @@ from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.workspace import (
-    WORKSPACE_CHANGE_TOOL_NAMES,
     WORKSPACE_TOOL_NAMES,
+    WORKSPACE_WRITE_TOOL_NAMES,
     Workspace,
     WorkspaceBinding,
     WorkspaceFile,
@@ -104,6 +104,8 @@ from krim_agent.workspace_directory import (
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
@@ -503,7 +505,7 @@ class AgentService:
         except KeyError:
             raise ServiceError("agent_profile_workspace", "工作区未登记或已停用", 422) from None
         if (
-            set(config.tool_names) & (WORKSPACE_CHANGE_TOOL_NAMES | {"command_propose"})
+            set(config.tool_names) & (WORKSPACE_WRITE_TOOL_NAMES | {"command_propose"})
             and not binding.workspace.writable
         ):
             raise ServiceError("workspace_read_only", "只读工作区不可登记修改工具", 422)
@@ -578,7 +580,7 @@ class AgentService:
             for tool in definition.tools.definitions
             if tool.name not in WORKSPACE_TOOL_NAMES or workspace is not None
             if tool.name not in COMMAND_TOOL_NAMES or definition.execution is not None
-            if tool.name not in WORKSPACE_CHANGE_TOOL_NAMES
+            if tool.name not in WORKSPACE_WRITE_TOOL_NAMES
             or (workspace is not None and workspace.workspace.writable)
         ]
         try:
@@ -664,6 +666,7 @@ class AgentService:
                     "command_changes",
                     "command_history",
                     "command_inspect",
+                    "directory_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -835,6 +838,28 @@ class AgentService:
                 "execution_artifact_mode": 422,
                 "execution_proposal_source": 409,
                 "execution_proposal_unavailable": 503,
+                "workspace_directory_not_found": 404,
+                "workspace_directory_operation_not_found": 404,
+                "workspace_directory_closed": 503,
+                "workspace_directory_backend_missing": 503,
+                "workspace_directory_busy": 409,
+                "workspace_directory_conflict": 409,
+                "workspace_directory_proposal": 409,
+                "workspace_directory_state": 409,
+                "workspace_directory_lease_lost": 409,
+                "workspace_directory_receipt_unverified": 409,
+                "workspace_directory_active": 409,
+                "workspace_directory_page": 422,
+                "workspace_directory_type": 422,
+                "workspace_directory_mode": 422,
+                "workspace_directory_nonempty": 409,
+                "workspace_directory_limit": 429,
+                "workspace_directory_authority": 409,
+                "workspace_directory_intent": 503,
+                "workspace_directory_operation_mismatch": 422,
+                "workspace_directory_operation": 422,
+                "workspace_directory_corrupt": 409,
+                "workspace_directory_self_close": 409,
             }.get(error.code, 502)
             raise ServiceError(error.code, str(error), status) from error
         finally:
@@ -883,6 +908,17 @@ class AgentService:
             json.dumps(
                 await self._workspace_call(
                     agent_id, "directory_finalize", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def directory_query(
+        self, agent_id: str, request: DirectoryQueryRequest, *, confirmed: bool = False
+    ) -> DirectoryQueryResult:
+        return DirectoryQueryResult.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "directory_query", request.model_dump(), confirmed=confirmed
                 )
             )
         )

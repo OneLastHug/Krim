@@ -11,6 +11,8 @@ from krim_agent.workspace_directory import (
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
 )
 
 from .core import ToolContext, ToolDefinition, ToolError
@@ -33,6 +35,15 @@ def directory_change_tools() -> tuple[ToolDefinition, ...]:
         await context.directory_changes.validate_result(operation, value, context)
 
     return (
+        ToolDefinition(
+            "directory_query",
+            "只读查询目录提案、原操作、历史、列表或原请求键，不重放目录动作",
+            DirectoryQueryRequest,
+            lambda arguments, context: execute("query", arguments, context),
+            "read",
+            output_schema=DirectoryQueryResult,
+            output_guard=lambda value, context: guard("query", value, context),
+        ),
         ToolDefinition(
             "directory_preview",
             "冻结单个已授权空目录的创建或删除条件提案，不发布目录",

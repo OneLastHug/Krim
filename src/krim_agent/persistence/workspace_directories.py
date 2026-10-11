@@ -10,7 +10,7 @@ from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue, TypeAdapter
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.domain import ServiceError
@@ -374,6 +374,117 @@ class WorkspaceDirectoryStore:
             )
             return [self._attempt(row) for row in rows]
 
+    async def proposals(
+        self, scope: str, *, after: str | None = None, limit: int = 32
+    ) -> tuple[list[StoredDirectory], str | None]:
+        if not 1 <= limit <= 32:
+            raise ServiceError("workspace_directory_page", "目录列表容量须为1–32", 422)
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.files._scope(session, scope, writing=False)
+            query = (
+                select(WorkspaceDirectoryProposalRow)
+                .where(WorkspaceDirectoryProposalRow.scope_id == scope)
+                .order_by(
+                    WorkspaceDirectoryProposalRow.created_at,
+                    WorkspaceDirectoryProposalRow.proposal_id,
+                )
+            )
+            if after is not None:
+                cursor = await self._proposal(session, scope, after)
+                query = query.where(
+                    or_(
+                        WorkspaceDirectoryProposalRow.created_at > cursor.created_at,
+                        and_(
+                            WorkspaceDirectoryProposalRow.created_at == cursor.created_at,
+                            WorkspaceDirectoryProposalRow.proposal_id > cursor.proposal_id,
+                        ),
+                    )
+                )
+            rows = list(await session.scalars(query.limit(limit + 1)))
+            page = rows[:limit]
+            return [self._view(row) for row in page], (
+                page[-1].proposal_id if len(rows) > limit else None
+            )
+
+    async def history_page(
+        self, scope: str, proposal_id: str, *, after: str | None = None, limit: int = 32
+    ) -> tuple[list[StoredDirectoryAttempt], str | None]:
+        if not 1 <= limit <= 32:
+            raise ServiceError("workspace_directory_page", "目录历史容量须为1–32", 422)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            await self.files._writer(session)
+            await self.files._scope(session, scope, writing=False)
+            await self._proposal(session, scope, proposal_id)
+            query = (
+                select(WorkspaceDirectoryAttemptRow)
+                .where(
+                    WorkspaceDirectoryAttemptRow.scope_id == scope,
+                    WorkspaceDirectoryAttemptRow.proposal_id == proposal_id,
+                )
+                .order_by(
+                    WorkspaceDirectoryAttemptRow.created_at,
+                    WorkspaceDirectoryAttemptRow.operation_id,
+                )
+            )
+            if after is not None:
+                cursor = await session.get(WorkspaceDirectoryAttemptRow, after)
+                if cursor is None or cursor.scope_id != scope or cursor.proposal_id != proposal_id:
+                    raise ServiceError(
+                        "workspace_directory_operation_not_found", "目录历史游标不属于原提案", 404
+                    )
+                query = query.where(
+                    or_(
+                        WorkspaceDirectoryAttemptRow.created_at > cursor.created_at,
+                        and_(
+                            WorkspaceDirectoryAttemptRow.created_at == cursor.created_at,
+                            WorkspaceDirectoryAttemptRow.operation_id > cursor.operation_id,
+                        ),
+                    )
+                )
+            rows = list(await session.scalars(query.limit(limit + 1)))
+            page = rows[:limit]
+            for row in page:
+                await self._expire_attempt(session, row)
+            return [self._attempt(row) for row in page], (
+                page[-1].operation_id if len(rows) > limit else None
+            )
+
+    async def proposal_by_key(self, scope: str, key: str) -> StoredDirectory | None:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.files._scope(session, scope, writing=False)
+            row = await session.scalar(
+                select(WorkspaceDirectoryProposalRow).where(
+                    WorkspaceDirectoryProposalRow.scope_id == scope,
+                    WorkspaceDirectoryProposalRow.request_key == key,
+                )
+            )
+            return self._view(row) if row is not None else None
+
+    async def operation_by_key(self, scope: str, key: str) -> StoredDirectoryAttempt | None:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            await self.files._writer(session)
+            await self.files._scope(session, scope, writing=False)
+            row = await session.scalar(
+                select(WorkspaceDirectoryAttemptRow).where(
+                    WorkspaceDirectoryAttemptRow.scope_id == scope,
+                    WorkspaceDirectoryAttemptRow.request_key == key,
+                )
+            )
+            if row is None:
+                return None
+            await self._expire_attempt(session, row)
+            return self._attempt(row)
+
+    async def _expire_attempt(
+        self, session: AsyncSession, row: WorkspaceDirectoryAttemptRow
+    ) -> None:
+        if row.status == "running" and (row.lease_expires_at or 0) <= time.time():
+            row.status, row.owner_id, row.lease_expires_at = "uncertain", None, None
+            row.updated_at = utc_now()
+            proposal = await self._proposal(session, row.scope_id, row.proposal_id)
+            if proposal.active_operation_id == row.operation_id:
+                proposal.status = "uncertain"
+
     async def effect(self, scope: str, identifier: str) -> DirectoryEffect:
         async with self.database.write_lock, self.database.sessions() as session:
             await self.files._scope(session, scope, writing=False)
@@ -405,11 +516,7 @@ class WorkspaceDirectoryStore:
                 raise ServiceError(
                     "workspace_directory_operation_not_found", "目录操作不在该作用域", 404
                 )
-            if row.status == "running" and (row.lease_expires_at or 0) <= time.time():
-                row.status, row.owner_id, row.lease_expires_at = "uncertain", None, None
-                row.updated_at = utc_now()
-                proposal = await self._proposal(session, scope, row.proposal_id)
-                proposal.status = "uncertain"
+            await self._expire_attempt(session, row)
             return self._attempt(row)
 
     async def _fence(self, session: AsyncSession, change: PreparedDirectoryChange) -> str:

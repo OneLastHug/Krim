@@ -43,6 +43,16 @@ from krim_agent.workspace_checkpoint import (
     WorkspaceCheckpointFileView,
     WorkspaceCheckpointView,
 )
+from krim_agent.workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryChangeSpec,
+    DirectoryOperationRequest,
+    DirectoryPreviewRequest,
+    DirectoryPreviewView,
+    DirectoryQueryRequest,
+    DirectoryQueryResult,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchItemView,
@@ -88,6 +98,14 @@ from .types import (
 )
 
 __all__ = [
+    "DirectoryAttemptView",
+    "DirectoryChangeAction",
+    "DirectoryChangeSpec",
+    "DirectoryOperationRequest",
+    "DirectoryPreviewRequest",
+    "DirectoryPreviewView",
+    "DirectoryQueryRequest",
+    "DirectoryQueryResult",
     "SkillPackageRequest",
     "package_from_archive",
     "package_from_directory",
