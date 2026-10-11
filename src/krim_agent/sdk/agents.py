@@ -67,7 +67,11 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
-from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
+from krim_agent.workspace_mixed_batch import (
+    MixedBatchHistoryPage,
+    MixedBatchRequest,
+    MixedBatchView,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -437,6 +441,13 @@ class AgentSession:
 
     async def mixed_change_batch_by_key(self, request_key: str) -> MixedBatchView | None:
         return await self.service.workspace_mixed_batch_by_key(self.agent_id, request_key)
+
+    async def mixed_change_batch_history(
+        self, *, cursor: str | None = None, limit: int = 32
+    ) -> MixedBatchHistoryPage:
+        return await self.service.workspace_mixed_batch_history(
+            self.agent_id, cursor=cursor, limit=limit
+        )
 
     async def wait_mixed_change_batch(
         self, batch_id: str, *, timeout_seconds: float = 30

@@ -135,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
             "start-mixed-batch",
             "mixed-batch",
             "mixed-batch-by-key",
+            "mixed-batch-history",
             "wait-mixed-batch",
             "cancel-mixed-batch",
             *_CHECKPOINT_ACTIONS,
@@ -620,6 +621,10 @@ def _workspace_command(
             print("null")
             return
         result = mixed
+    elif args.action == "mixed-batch-history":
+        result = client.agent_workspace_mixed_batch_history(
+            args.agent_id, cursor=args.cursor, limit=args.limit if args.limit is not None else 32
+        )
     elif args.action == "wait-mixed-batch":
         if not args.value:
             parser.error("workspace wait-mixed-batch需要批次标识")

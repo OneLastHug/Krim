@@ -199,7 +199,11 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
-from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
+from krim_agent.workspace_mixed_batch import (
+    MixedBatchHistoryPage,
+    MixedBatchRequest,
+    MixedBatchView,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -1330,6 +1334,18 @@ def create_app(
         _mixed_batch_parameters(request, {"confirmed"})
         return await agent_service.workspace_start_mixed_batch(
             agent_id, payload, confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/mixed-batches/history")
+    async def agent_workspace_mixed_batch_history(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        cursor: str | None = Query(default=None, max_length=1024),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> MixedBatchHistoryPage:
+        _mixed_batch_parameters(request, {"cursor", "limit"})
+        return await agent_service.workspace_mixed_batch_history(
+            agent_id, cursor=cursor, limit=limit
         )
 
     @app.get("/v1/agents/{agent_id}/workspace/mixed-batches/by-key")

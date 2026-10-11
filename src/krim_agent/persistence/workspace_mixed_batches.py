@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.domain import ServiceError
@@ -21,10 +21,12 @@ from krim_agent.workspace_mixed_batch import (
     MixedBatchDispatch,
     MixedBatchExecution,
     MixedBatchFence,
+    MixedBatchHistoryPage,
     MixedBatchItemStatus,
     MixedBatchItemView,
     MixedBatchRequest,
     MixedBatchStatus,
+    MixedBatchSummary,
     MixedBatchTarget,
     MixedBatchView,
 )
@@ -39,8 +41,22 @@ from .database import (
 )
 from .directory_fences import entry_key
 from .mixed_batch_fences import MIXED_REQUEST_PREFIX, assert_live
+from .workspace_batches import (
+    _MAX_HISTORY,
+    _batch_status,
+    _decode_history_cursor,
+    _history_cursor,
+)
 from .workspace_directories import WorkspaceDirectoryStore
 from .workspace_edits import WorkspaceEditStore, digest
+
+_MIXED_HISTORY_PREFIX = "krim-mixed-history:"
+
+
+def _mixed_history_error() -> ServiceError:
+    return ServiceError(
+        "workspace_mixed_batch_history_cursor_invalid", "混合批次游标无效或作用域不符", 422
+    )
 
 
 @dataclass(frozen=True)
@@ -560,6 +576,202 @@ class MixedBatchStore:
                 return None
             await self._expire(sql, row)
             return await self._view(sql, row)
+
+    @staticmethod
+    def _history_cursor(
+        scope: str, upper: tuple[datetime, str], before: tuple[datetime, str]
+    ) -> str:
+        return _MIXED_HISTORY_PREFIX + _history_cursor(scope, upper, before)
+
+    @staticmethod
+    def _decode_history_cursor(
+        cursor: str, scope: str
+    ) -> tuple[tuple[datetime, str], tuple[datetime, str]]:
+        try:
+            if (
+                not isinstance(cursor, str)
+                or not 1 <= len(cursor) <= 1024
+                or not cursor.startswith(_MIXED_HISTORY_PREFIX)
+            ):
+                raise _mixed_history_error()
+            return _decode_history_cursor(cursor[len(_MIXED_HISTORY_PREFIX) :], scope)
+        except ServiceError:
+            raise _mixed_history_error() from None
+
+    async def history(
+        self, scope: str, *, cursor: str | None = None, limit: int = 32
+    ) -> MixedBatchHistoryPage:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ServiceError(
+                "workspace_mixed_batch_history_limit_invalid", "混合批次历史每页须为1至32项", 422
+            )
+        decoded = self._decode_history_cursor(cursor, scope) if cursor is not None else None
+        batch = MixedWorkspaceBatchRow
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._scope(sql, scope, writing=False)
+            bounded = (
+                select(batch.batch_id)
+                .where(batch.scope_id == scope)
+                .limit(_MAX_HISTORY + 1)
+                .subquery()
+            )
+            total = await sql.scalar(select(func.count()).select_from(bounded)) or 0
+            if total > _MAX_HISTORY:
+                raise ServiceError(
+                    "workspace_mixed_batch_history_too_large", "混合批次历史超过5000项读取上限", 409
+                )
+            conditions = [batch.scope_id == scope]
+            if decoded is not None:
+                upper, before = decoded
+                for created, identifier in (upper, before):
+                    if (
+                        await sql.scalar(
+                            select(batch.batch_id).where(
+                                batch.scope_id == scope,
+                                batch.created_at == created,
+                                batch.batch_id == identifier,
+                            )
+                        )
+                        is None
+                    ):
+                        raise _mixed_history_error()
+                conditions.append(
+                    (batch.created_at < upper[0])
+                    | ((batch.created_at == upper[0]) & (batch.batch_id <= upper[1]))
+                )
+                total = (
+                    await sql.scalar(select(func.count()).select_from(batch).where(*conditions))
+                    or 0
+                )
+                conditions.append(
+                    (batch.created_at < before[0])
+                    | ((batch.created_at == before[0]) & (batch.batch_id < before[1]))
+                )
+            expired = and_(
+                batch.producer_status == "running",
+                or_(batch.lease_expires_at.is_(None), batch.lease_expires_at <= time.time()),
+            )
+            rows = (
+                (
+                    await sql.execute(
+                        select(
+                            batch.batch_id,
+                            batch.request_key,
+                            batch.action,
+                            case((expired, "interrupted"), else_=batch.producer_status).label(
+                                "producer_status"
+                            ),
+                            batch.snapshot_revision,
+                            case(
+                                (expired, "workspace_mixed_batch_lease_expired"),
+                                else_=batch.stop_reason,
+                            ).label("stop_reason"),
+                            batch.created_at,
+                            batch.updated_at,
+                        )
+                        .where(*conditions)
+                        .order_by(batch.created_at.desc(), batch.batch_id.desc())
+                        .limit(limit + 1)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                if decoded is not None:
+                    raise _mixed_history_error()
+                return MixedBatchHistoryPage(scope_id=scope, total=0, items=[], next_cursor=None)
+            upper = (
+                decoded[0] if decoded is not None else (rows[0]["created_at"], rows[0]["batch_id"])
+            )
+            selected = rows[:limit]
+            child = MixedWorkspaceBatchChildRow
+            file = WorkspaceEditAttemptRow
+            directory = WorkspaceDirectoryAttemptRow
+            effective = func.coalesce(file.status, directory.status, child.status)
+            invalid = or_(
+                and_(
+                    child.file_operation_id.is_not(None),
+                    or_(
+                        file.operation_id.is_(None),
+                        file.scope_id != scope,
+                        file.proposal_id != child.proposal_id,
+                        file.action != batch.action,
+                        file.expected_revision != child.expected_revision,
+                        file.request_key != child.request_key,
+                    ),
+                ),
+                and_(
+                    child.directory_operation_id.is_not(None),
+                    or_(
+                        directory.operation_id.is_(None),
+                        directory.scope_id != scope,
+                        directory.proposal_id != child.proposal_id,
+                        directory.action != batch.action,
+                        directory.expected_revision != child.expected_revision,
+                        directory.request_key != child.request_key,
+                    ),
+                ),
+            )
+            counts = {
+                count.batch_id: count
+                for count in await sql.execute(
+                    select(
+                        child.batch_id,
+                        func.count().label("item_count"),
+                        func.sum(case((effective == "done", 1), else_=0)).label("done_count"),
+                        func.sum(case((effective.in_(["running", "uncertain"]), 1), else_=0)).label(
+                            "unresolved_count"
+                        ),
+                        func.sum(case((invalid, 1), else_=0)).label("invalid_count"),
+                        func.max(func.coalesce(file.updated_at, directory.updated_at)).label(
+                            "operation_updated_at"
+                        ),
+                    )
+                    .join(batch, batch.batch_id == child.batch_id)
+                    .outerjoin(file, file.operation_id == child.file_operation_id)
+                    .outerjoin(directory, directory.operation_id == child.directory_operation_id)
+                    .where(child.batch_id.in_([row["batch_id"] for row in selected]))
+                    .group_by(child.batch_id)
+                )
+            }
+            summaries: list[MixedBatchSummary] = []
+            for row in selected:
+                count = counts.get(row["batch_id"])
+                if count is not None and count.invalid_count:
+                    raise ServiceError(
+                        "workspace_mixed_batch_corrupt", "混合历史原操作关联不完整", 409
+                    )
+                total_items = count.item_count if count is not None else 0
+                done = count.done_count if count is not None else 0
+                unresolved = count.unresolved_count if count is not None else 0
+                updated = row["updated_at"]
+                if count is not None and count.operation_updated_at is not None:
+                    updated = max(updated, count.operation_updated_at)
+                status = _batch_status(row["producer_status"], total_items, done, unresolved)
+                summaries.append(
+                    MixedBatchSummary.model_validate(
+                        {
+                            **dict(row),
+                            "status": status,
+                            "item_count": total_items,
+                            "done_count": done,
+                            "created_at": row["created_at"].replace(tzinfo=UTC),
+                            "updated_at": updated.replace(tzinfo=UTC),
+                        }
+                    )
+                )
+            last = selected[-1]
+            return MixedBatchHistoryPage(
+                scope_id=scope,
+                total=total,
+                items=summaries,
+                next_cursor=(
+                    self._history_cursor(scope, upper, (last["created_at"], last["batch_id"]))
+                    if len(rows) > limit
+                    else None
+                ),
+            )
 
     async def cancel(self, scope: str, identifier: str) -> MixedBatchView:
         async with self.database.write_lock, self.database.sessions.begin() as sql:

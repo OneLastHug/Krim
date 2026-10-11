@@ -126,7 +126,7 @@ from .workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
-from .workspace_mixed_batch import MixedBatchRequest, MixedBatchView
+from .workspace_mixed_batch import MixedBatchHistoryPage, MixedBatchRequest, MixedBatchView
 from .workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -1147,6 +1147,25 @@ class KrimClient:
         )
         self._check(response)
         return TypeAdapter(MixedBatchView | None).validate_json(response.content)
+
+    def agent_workspace_mixed_batch_history(
+        self, agent_id: str, *, cursor: str | None = None, limit: int = 32
+    ) -> MixedBatchHistoryPage:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ClientError(
+                "混合批次历史页大小须为1至32",
+                code="workspace_mixed_batch_history_limit_invalid",
+                status=422,
+            )
+        params: dict[str, str | int] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches/history",
+            params=params,
+        )
+        self._check(response)
+        return MixedBatchHistoryPage.model_validate_json(response.content)
 
     def agent_workspace_wait_mixed_batch(
         self, agent_id: str, batch_id: str, *, timeout_seconds: float = 30
