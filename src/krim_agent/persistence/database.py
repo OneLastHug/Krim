@@ -668,6 +668,79 @@ class CommandDirectoryProposalRow(Base):
     accept_failed: Mapped[int] = mapped_column(Integer)
 
 
+class MixedWorkspaceBatchRow(Base):
+    __tablename__ = "mixed_workspace_batches"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        CheckConstraint("action IN ('apply','keep','undo')", name="ck_mixed_batch_action"),
+        CheckConstraint(
+            "producer_status IN ('running','finished','cancelled','interrupted')",
+            name="ck_mixed_batch_producer_status",
+        ),
+    )
+    batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    snapshot_revision: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    producer_status: Mapped[str] = mapped_column(String(16), default="running")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    stop_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class MixedWorkspaceBatchChildRow(Base):
+    __tablename__ = "mixed_workspace_batch_children"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "source", "proposal_id"),
+        CheckConstraint("position >= 0 AND position < 32", name="ck_mixed_batch_position"),
+        CheckConstraint(
+            "status IN ('pending','rejected','skipped')", name="ck_mixed_batch_child_status"
+        ),
+        CheckConstraint(
+            "(source='file' AND file_proposal_id=proposal_id AND file_proposal_id IS NOT NULL "
+            "AND directory_proposal_id IS NULL AND directory_operation_id IS NULL "
+            "AND target_path IS NULL) OR "
+            "(source='directory' AND directory_proposal_id=proposal_id "
+            "AND directory_proposal_id IS NOT NULL AND file_proposal_id IS NULL "
+            "AND file_operation_id IS NULL)",
+            name="ck_mixed_batch_source_references",
+        ),
+    )
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("mixed_workspace_batches.batch_id"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16))
+    proposal_id: Mapped[str] = mapped_column(String(36))
+    file_proposal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_proposals.proposal_id"), nullable=True
+    )
+    directory_proposal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_proposals.proposal_id"), nullable=True
+    )
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    path: Mapped[str] = mapped_column(String(512))
+    target_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    physical_keys: Mapped[list[JsonValue]] = mapped_column(JSON)
+    request_key: Mapped[str] = mapped_column(String(128), unique=True)
+    file_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_edit_attempts.operation_id"), nullable=True, unique=True
+    )
+    directory_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_attempts.operation_id"), nullable=True, unique=True
+    )
+    admission_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
 class NativeWorkspaceBatchRow(Base):
     __tablename__ = "native_workspace_batches"
     __table_args__ = (

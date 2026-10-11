@@ -146,7 +146,7 @@ async def test_attachment_migration_head_and_downgrade_protection(repository):
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0038_directory_move_target_lock"
+        ).scalar() == "0039_mixed_workspace_batches"
 
 
 async def test_large_attachment_body_is_bounded_without_expanding_other_json_routes(api):
