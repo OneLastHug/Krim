@@ -117,12 +117,12 @@ async def main() -> None:
                 )
                 assert (
                     await sql.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one() == "0040_mixed_batch_model_sources"
+                ).scalar_one() == "0041_workspace_tree_plans"
             print(
                 json.dumps(
                     {
                         "package": krim_agent.__file__,
-                        "schema": "0040_mixed_batch_model_sources",
+                        "schema": "0041_workspace_tree_plans",
                         "source_links": 1,
                         "created": True,
                         "undone": True,

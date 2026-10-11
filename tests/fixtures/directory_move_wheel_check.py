@@ -165,7 +165,7 @@ def main():
         )
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0040_mixed_batch_model_sources"
+            == "0041_workspace_tree_plans"
         )
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
     print(
