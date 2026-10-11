@@ -8,6 +8,8 @@ from pydantic import BaseModel, JsonValue
 from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -35,6 +37,15 @@ def directory_change_tools() -> tuple[ToolDefinition, ...]:
         await context.directory_changes.validate_result(operation, value, context)
 
     return (
+        ToolDefinition(
+            "directory_inspect",
+            "只读检查已授权相对目录的存在、指纹、普通模式和空性，不修改目录",
+            DirectoryInspectRequest,
+            lambda arguments, context: execute("inspect", arguments, context),
+            "read",
+            output_schema=DirectoryInspectView,
+            output_guard=lambda value, context: guard("inspect", value, context),
+        ),
         ToolDefinition(
             "directory_query",
             "只读查询目录提案、原操作、历史、列表或原请求键，不重放目录动作",

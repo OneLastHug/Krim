@@ -22,6 +22,8 @@ from krim_agent.workspace_directory import (
     DirectoryChangeAction,
     DirectoryChangeReceipt,
     DirectoryEffect,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryQueryRequest,
@@ -70,6 +72,23 @@ class DirectoryChangeService:
         if self._closed:
             raise ToolError("workspace_directory_closed", "目录事务服务已关闭")
         try:
+            if operation == "inspect":
+                inspection = DirectoryInspectRequest.model_validate(payload)
+                _, read_binding = await self.changes._guard(context, writing=False)
+                snapshot = await workspace_io(
+                    WorkspaceDirectoryWriter(read_binding.require()).capture, inspection.path
+                )
+                await self.changes._guard(context, writing=False)
+                result_view = DirectoryInspectView(
+                    path=inspection.path,
+                    found=snapshot is not None,
+                    fingerprint=snapshot.fingerprint if snapshot else None,
+                    mode=snapshot.mode if snapshot else None,
+                    empty=snapshot.empty if snapshot else None,
+                )
+                read_value = result_view.model_dump(mode="json")
+                context._directory_response = (operation, json.dumps(read_value, sort_keys=True))
+                return read_value
             if operation == "preview":
                 request = DirectoryPreviewRequest.model_validate(payload)
                 scope, binding = await self.changes._guard(context)
@@ -214,7 +233,7 @@ class DirectoryChangeService:
 
     async def _query_guard(self, context: ToolContext) -> tuple[str, WorkspaceBinding]:
         if context.origin != "host" or context.run_id != "local":
-            return await self.changes._guard(context)
+            return await self.changes._guard(context, writing=False)
         if self._closed or context.workspace is None:
             raise ServiceError("workspace_unbound", "目录查询没有原工作区绑定", 409)
         binding = context.workspace

@@ -28,10 +28,11 @@ WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
         "directory_reconcile",
         "directory_finalize",
         "directory_query",
+        "directory_inspect",
     }
 )
 WORKSPACE_WRITE_TOOL_NAMES = WORKSPACE_CHANGE_TOOL_NAMES | (
-    WORKSPACE_DIRECTORY_TOOL_NAMES - {"directory_query"}
+    WORKSPACE_DIRECTORY_TOOL_NAMES - {"directory_query", "directory_inspect"}
 )
 WORKSPACE_TOOL_NAMES = (
     WORKSPACE_READ_TOOL_NAMES | WORKSPACE_CHANGE_TOOL_NAMES | WORKSPACE_DIRECTORY_TOOL_NAMES

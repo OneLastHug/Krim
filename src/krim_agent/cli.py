@@ -178,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     directories.add_argument(
         "action",
         choices=[
+            "inspect",
             "preview",
             "apply",
             "undo",
@@ -193,7 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
         ],
     )
     directories.add_argument("agent_id", help="Agent实例标识")
-    directories.add_argument("value", nargs="?", help="原proposal/operation标识或请求键")
+    directories.add_argument(
+        "value", nargs="?", help="相对目录路径、原proposal/operation标识或请求键"
+    )
     directories.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
     directories.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
     directories.add_argument("--request-key", help="request key（请求键）：明确幂等键")
@@ -662,7 +665,11 @@ def _directory_command(
         args.revision is not None or args.request_key is not None
     ):
         parser.error("--revision/--request-key仅用于目录apply/undo/keep")
-    if args.action == "preview":
+    if args.action == "inspect":
+        if not args.value:
+            parser.error("directories inspect需要工作区相对目录路径")
+        result = client.agent_directory_inspect(args.agent_id, args.value, confirmed=args.confirm)
+    elif args.action == "preview":
         if not args.request:
             parser.error("directories preview需要--request本地JSON文件")
         try:

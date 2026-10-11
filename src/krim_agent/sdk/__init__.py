@@ -47,6 +47,8 @@ from krim_agent.workspace_directory import (
     DirectoryAttemptView,
     DirectoryChangeAction,
     DirectoryChangeSpec,
+    DirectoryInspectRequest,
+    DirectoryInspectView,
     DirectoryOperationRequest,
     DirectoryPreviewRequest,
     DirectoryPreviewView,
@@ -98,6 +100,8 @@ from .types import (
 )
 
 __all__ = [
+    "DirectoryInspectRequest",
+    "DirectoryInspectView",
     "DirectoryAttemptView",
     "DirectoryChangeAction",
     "DirectoryChangeSpec",

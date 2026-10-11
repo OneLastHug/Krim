@@ -58,13 +58,15 @@ class WorkspaceChangeService:
         self._active_operation_ids: set[str] = set()
         self._closed = False
 
-    async def _guard(self, context: ToolContext) -> tuple[str, WorkspaceBinding]:
+    async def _guard(
+        self, context: ToolContext, *, writing: bool = True
+    ) -> tuple[str, WorkspaceBinding]:
         if self._closed:
             raise ServiceError("workspace_service_closed", "工作区修改服务已关闭", 503)
         binding = context.workspace
         if binding is None:
             raise ServiceError("workspace_unbound", "当前会话没有工作区授权", 409)
-        if not binding.require().writable:
+        if writing and not binding.require().writable:
             raise ServiceError("workspace_read_only", "宿主未授权工作区写能力", 403)
         database = self.store.database
         async with database.write_lock, database.sessions() as session:
