@@ -113,7 +113,7 @@ async def main():
                     head = (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
                     ).scalar()
-                    assert head == "0038_directory_move_target_lock"
+                    assert head == "0039_mixed_workspace_batches"
             print(
                 json.dumps(
                     {

@@ -117,12 +117,12 @@ async def main() -> None:
                 )
                 assert (
                     await sql.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one() == "0038_directory_move_target_lock"
+                ).scalar_one() == "0039_mixed_workspace_batches"
             print(
                 json.dumps(
                     {
                         "package": krim_agent.__file__,
-                        "schema": "0038_directory_move_target_lock",
+                        "schema": "0039_mixed_workspace_batches",
                         "source_links": 1,
                         "created": True,
                         "undone": True,

@@ -610,7 +610,7 @@ async def test_budgets_migration_refuses_to_discard_accounts(repository):
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0038_directory_move_target_lock"
+        ).scalar() == "0039_mixed_workspace_batches"
     assert (await store.accounts())[0].owner_id == "protected"
 
 

@@ -18,7 +18,14 @@ async def run_cli(url, *args):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+    except BaseException:
+        # 超时或取消时回收原CLI测试子进程，再传播原异常。
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+        raise
     assert process.returncode == 0, stderr.decode()
     return stdout.decode()
 
