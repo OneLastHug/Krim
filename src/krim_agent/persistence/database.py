@@ -227,6 +227,36 @@ class OAuthClientRegistrationRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class OAuthBrowserCallbackRow(Base):
+    __tablename__ = "oauth_browser_callbacks"
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ('pending','exchanging','complete','failed','cancelled','expired')",
+            name="ck_oauth_browser_phase",
+        ),
+        CheckConstraint("expires_at > created_at", name="ck_oauth_browser_ttl"),
+        CheckConstraint(
+            "(phase IN ('pending','exchanging') AND ciphertext IS NOT NULL) OR "
+            "(phase NOT IN ('pending','exchanging') AND ciphertext IS NULL)",
+            name="ck_oauth_browser_intent",
+        ),
+    )
+    attempt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    scope: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(32))
+    subject: Mapped[str] = mapped_column(String(256))
+    resource_hash: Mapped[str] = mapped_column(String(64))
+    browser_hash: Mapped[str] = mapped_column(String(64))
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    phase: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class WorkflowCheckpointRow(Base):
     __tablename__ = "workflow_checkpoints"
     __table_args__ = (

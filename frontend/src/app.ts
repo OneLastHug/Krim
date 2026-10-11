@@ -30,6 +30,7 @@ import { applyLocale, currentLocale, loadLocale, localDate, t } from "./i18n.js"
 import { BackgroundStreams } from "./background-streams.js";
 import { AgentsUI } from "./agents-ui.js";
 import { MCPUI } from "./mcp-ui.js";
+import { OAuthUI } from "./oauth-ui.js";
 
 type State = {
   topics: TopicView[];
@@ -139,6 +140,7 @@ const agentsUI: AgentsUI = new AgentsUI($("agents"), {
   prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
 });
 const mcpUI = new MCPUI($("mcp-resources"), showNotice, loadAgents);
+const oauthUI = new OAuthUI($("mcp-oauth"), showNotice);
 let agentsLoading = false;
 let agentsReloadNeeded = false;
 const completedAgentRuns = new Set<string>();
@@ -170,6 +172,7 @@ function redrawLocale(): void {
   attachmentsUI.refreshLocale();
   renderExecutionResources();
   mcpUI.refreshLocale();
+  oauthUI.refreshLocale();
   $("topic-heading").textContent = state.tree?.topic.title || t("请选择话题");
   $("composer-mode").textContent = t(state.editingMessageId ? "编辑后会创建新分支，原消息保留" : "Enter 发送 · Shift+Enter 换行");
   $("connection").textContent = t($("connection").classList.contains("ready") ? "本地服务已连接" : "需要连接");
@@ -697,10 +700,10 @@ async function createAgent(): Promise<void> {
   } catch (error) { showNotice(errorText(error), true); }
   finally { button.disabled = false; }
 }
-async function refresh(): Promise<void> { if (state.topicId) await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents(), mcpUI.load()]); }
+async function refresh(): Promise<void> { if (state.topicId) await loadTopic(state.topicId); await Promise.all([loadTopics(), loadAgents(), mcpUI.load(), oauthUI.load()]); }
 function setup(): void {
   $("locale-select").addEventListener("change", (event) => { void changeLocale((event.target as HTMLSelectElement).value).catch((error: unknown) => { ($("locale-select") as HTMLSelectElement).value = currentLocale(); showNotice(errorText(error), true); }); });
-  $("mcp-refresh").addEventListener("click", () => void mcpUI.load());
+  $("mcp-refresh").addEventListener("click", () => { void mcpUI.load(); void oauthUI.load(); });
   $("new-topic").addEventListener("click", () => void createTopic()); $("refresh").addEventListener("click", () => void refresh()); $("composer").addEventListener("submit", (event) => void sendMessage(event as SubmitEvent));
   $("compact-preview").addEventListener("click", () => void compact(false)); $("compact-confirm").addEventListener("click", () => void compact(true)); $("run-stop").addEventListener("click", () => void stopRun()); $("run-resume").addEventListener("click", () => void resumeRun()); $("agent-create").addEventListener("click", () => void createAgent()); $("branch-select").addEventListener("change", (event) => void selectBranch((event.target as HTMLSelectElement).value));
   $("edit-cancel").addEventListener("click", () => { state.editingMessageId = null; promptContextUI.setText("", true); $("edit-cancel").hidden = true; $("composer-mode").textContent = t("Enter 发送 · Shift+Enter 换行"); }); $("key-toggle").addEventListener("click", () => { $("key-form").hidden = !$("key-form").hidden; }); $("key-form").addEventListener("submit", (event) => { event.preventDefault(); setApiKey(text("api-key").value); void boot(); });
@@ -709,7 +712,7 @@ function setup(): void {
   text("workflow-json").addEventListener("input", () => renderWorkflowGraph()); $("workflow-add-constant").addEventListener("click", () => addWorkflowNode("constant")); $("workflow-add-output").addEventListener("click", () => addWorkflowNode("output")); $("workflow-connect").addEventListener("click", () => connectWorkflowNodes()); $("workflow-run").addEventListener("click", () => void runWorkflow()); $("workflow-pause").addEventListener("click", () => void workflowControl("pause")); $("workflow-resume").addEventListener("click", () => void workflowControl("resume")); $("workflow-stop").addEventListener("click", () => void workflowControl("stop")); $("workflow-save-node").addEventListener("click", () => saveWorkflowNode()); $("workflow-delete-node").addEventListener("click", () => deleteWorkflowNode()); $("workflow-delete-edge").addEventListener("click", () => deleteWorkflowEdge()); $("workflow-rerun").addEventListener("click", () => void rerunWorkflow()); $("workflow-restore").addEventListener("click", () => void restoreWorkflow()); $("workflow-load-run").addEventListener("click", () => void loadWorkflowRun()); renderWorkflowGraph(); workflowView();
   text("prompt").addEventListener("keydown", (event) => { const keyEvent = event as KeyboardEvent; if (keyEvent.key === "Enter" && !keyEvent.shiftKey && !keyEvent.isComposing) { keyEvent.preventDefault(); ($("composer") as HTMLFormElement).requestSubmit(); } });
 }
-async function boot(): Promise<void> { clearLinkCache(); try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); await backgroundStreams.start(); await restoreLocale(currentLocale()); renderTopics(); await loadAgents(); await mcpUI.load(); if (!state.topicId && state.topics[0]) { const selected = new URLSearchParams(location.search).get("topic"); await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id); } $("connection").textContent = t("本地服务已连接"); $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = t("需要连接"); $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
+async function boot(): Promise<void> { clearLinkCache(); try { const health = await requestJson<{ provider: string }>("/healthz"); $("model-label").textContent = health.provider; state.topics = (await requestJson<{ topics: TopicView[] }>("/v1/topics")).topics; state.agents = await requestJson<AgentDescriptor[]>("/v1/agents/catalog"); state.handles = await requestJson<AgentView[]>("/v1/agents"); await loadWorkflowRuns(); await backgroundStreams.start(); await restoreLocale(currentLocale()); renderTopics(); await loadAgents(); await mcpUI.load(); await oauthUI.load(); if (!state.topicId && state.topics[0]) { const selected = new URLSearchParams(location.search).get("topic"); await loadTopic(state.topics.find((topic) => topic.id === selected)?.id || state.topics[0].id); } $("connection").textContent = t("本地服务已连接"); $("connection").classList.add("ready"); $("key-form").hidden = true; text("api-key").value = ""; showNotice(); } catch (error) { $("connection").textContent = t("需要连接"); $("connection").classList.remove("ready"); showNotice(errorText(error), true); $("key-form").hidden = false; } }
 setupHostBridge();
 setup();
 void boot();
@@ -720,7 +723,7 @@ setInterval(() => {
     void loadInteractions().catch(() => undefined); void loadProposals().catch(() => undefined);
   }
 }, 500);
-window.addEventListener("pagehide", () => { backgroundStreams.close(); mcpUI.dispose(); });
+window.addEventListener("pagehide", () => { backgroundStreams.close(); mcpUI.dispose(); oauthUI.dispose(); });
 
 async function saveAgentConfig(): Promise<void> {
   const name = text("agent-config-name").value.trim();

@@ -4,7 +4,7 @@ async function open(page: Page): Promise<void> {
   await page.goto("/ui/"); await page.getByLabel("服务访问密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
   await expect(page.locator("#connection")).toContainText("本地服务已连接");
-  await expect(page.locator("#mcp-resources .mcp-resource")).toHaveCount(3);
+  await expect(page.locator("#mcp-resources .mcp-resource")).toHaveCount(4);
 }
 function card(page: Page, name = "browser_mcp"): Locator { return page.locator(`.mcp-resource[data-name="${name}"]`); }
 async function control(page: Page, row: Locator, label: string): Promise<void> {

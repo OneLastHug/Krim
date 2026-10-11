@@ -4,7 +4,7 @@ import re
 import secrets
 from urllib.parse import urlsplit
 
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -27,6 +27,22 @@ class LocalBoundary:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        oauth_callback = scope["method"] == "GET" and scope["path"] == "/v1/mcp/oauth/callback"
+        if scope["path"] == "/v1/mcp/oauth/callback":
+            # 在任何拒绝/回程前去掉URI查询；ASGI访问日志不得输出授权码或state。
+            scope["krim.oauth_query"] = scope.get("query_string", b"")
+            scope["query_string"] = b""
+            original_send = send
+
+            async def callback_send(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    secured = MutableHeaders(scope=message)
+                    secured["Cache-Control"] = "no-store"
+                    secured["Referrer-Policy"] = "no-referrer"
+                    secured["X-Content-Type-Options"] = "nosniff"
+                await original_send(message)
+
+            send = callback_send
         headers = Headers(scope=scope)
 
         async def reject(code: str, message: str, status: int) -> None:
@@ -50,7 +66,7 @@ class LocalBoundary:
             await reject("origin_denied", "不允许跨站请求", 403)
             return
         public_ui = scope["method"] in {"GET", "HEAD"} and scope["path"] in PUBLIC_UI_PATHS
-        if self.key and scope["path"] != "/healthz" and not public_ui:
+        if self.key and scope["path"] != "/healthz" and not public_ui and not oauth_callback:
             actual = headers.get("authorization", "")
             if not secrets.compare_digest(actual.encode(), f"Bearer {self.key}".encode()):
                 await reject("unauthorized", "需要有效的 Bearer API Key", 401)

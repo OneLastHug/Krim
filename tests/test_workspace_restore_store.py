@@ -299,7 +299,7 @@ async def test_restore_migration_0028_roundtrip_metadata_and_nonempty_guard(runt
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0034_oauth_client_registrations"
+            ).scalar_one() == "0035_oauth_browser_callbacks"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
 
             def compare(sync):
