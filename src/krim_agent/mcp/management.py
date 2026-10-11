@@ -87,7 +87,7 @@ def _public_hash(spec: TrustedMCPServer) -> str:
     payload["version"] = spec.version
     payload["auth_kind"] = type(spec.auth).__qualname__ if spec.auth is not None else None
     if isinstance(spec.auth, MCPOAuthAuth):
-        configured = spec.auth.config
+        configured = spec.auth.declared_config
         if configured is not None:
             authorization = configured.model_dump(mode="json", exclude={"client_secret"})
             authorization["allowed_hosts"] = sorted(authorization["allowed_hosts"])

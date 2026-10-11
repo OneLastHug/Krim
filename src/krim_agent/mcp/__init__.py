@@ -3,6 +3,12 @@
 from .auth import MCPAuthError, MCPOAuthAuth
 from .bridge import MCPBridge
 from .client import MCPConnection, MCPConnectionError, validate_server_url
+from .client_store import (
+    OAuthClientBinding,
+    OAuthClientRegistrationStore,
+    OAuthClientSnapshot,
+    PersistentOAuthClientRegistrationStore,
+)
 from .discovery import OAuthDiscoveryClient, OAuthMetadata, RegisteredClient
 from .management import (
     MCPBootstrap,
@@ -53,6 +59,10 @@ __all__ = [
     "PKCERequest",
     "PersistentEncryptedTokenStore",
     "PersistentEncryptedStateStore",
+    "OAuthClientBinding",
+    "OAuthClientRegistrationStore",
+    "OAuthClientSnapshot",
+    "PersistentOAuthClientRegistrationStore",
     "MCPManager",
     "MCPPublicDescription",
     "MCPResourceView",
