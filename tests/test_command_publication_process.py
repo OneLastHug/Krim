@@ -14,9 +14,12 @@ pytestmark = pytest.mark.skipif(
 WORKER = Path(__file__).with_name("fixtures") / "command_publication_worker.py"
 
 
-def run(root, mode):
+def run(root, mode, *, binary=False):
     result = subprocess.run(
-        [sys.executable, str(WORKER), str(root), mode], capture_output=True, text=True, timeout=30
+        [sys.executable, str(WORKER), str(root), mode, *(["--binary"] if binary else [])],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert result.returncode == (23 if mode.startswith("crash") else 0), (
         result.stdout + result.stderr
@@ -51,3 +54,28 @@ def test_dead_publication_process_is_reconciled_without_repeating_command_or_fil
         "done" if mode == "crash-after" else "rejected"
     )
     assert result["content"] == ("artifact" if mode == "crash-after" else "before")
+
+
+def test_binary_proposal_apply_and_exact_undo_restore_across_real_processes(tmp_path):
+    first = run(tmp_path, "preview", binary=True)
+    assert first["content"] == b"\0\xffbefore".hex() and first["calls"] == 1
+    published = run(tmp_path, "apply", binary=True)
+    assert published["content"] == b"\0\x80artifact".hex() and published["calls"] == 0
+    undone = run(tmp_path, "undo", binary=True)
+    assert undone["content"] == b"\0\xffbefore".hex() and undone["calls"] == 0
+    assert undone["proposal_id"] == first["proposal_id"]
+
+
+@pytest.mark.parametrize("mode", ["crash-before", "crash-after"])
+def test_binary_publication_crash_reconciles_original_operation_without_replay(tmp_path, mode):
+    run(tmp_path, mode, binary=True)
+    with sqlite3.connect(tmp_path / "agent.sqlite") as database:
+        database.execute("UPDATE agent_handles SET lease_expires_at=0")
+        database.execute("UPDATE workspace_edit_attempts SET lease_expires_at=0")
+    recovered = run(tmp_path, "recover", binary=True)
+    assert recovered["calls"] == 0
+    assert recovered["status"] == ("done" if mode == "crash-after" else "rejected")
+    assert (
+        recovered["content"]
+        == (b"\0\x80artifact" if mode == "crash-after" else b"\0\xffbefore").hex()
+    )

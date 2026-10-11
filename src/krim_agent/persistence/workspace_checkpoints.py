@@ -33,15 +33,16 @@ from .database import (
 from .workspace_edits import WorkspaceEditStore, digest, snapshot_metadata
 
 
-def encode_capture(capture: CapturedFile) -> dict[str, JsonValue]:
+def encode_capture(capture: CapturedFile, *, allow_binary: bool = False) -> dict[str, JsonValue]:
     snapshot = capture.snapshot
     if snapshot is not None:
-        if b"\0" in snapshot.data or len(snapshot.data) > 8388608:
+        if len(snapshot.data) > 8388608 or (not allow_binary and b"\0" in snapshot.data):
             raise ServiceError("workspace_checkpoint_content", "检查点只保存有界文本内容", 422)
-        try:
-            snapshot.data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ServiceError("workspace_encoding", "检查点内容须为UTF-8", 422) from None
+        if not allow_binary:
+            try:
+                snapshot.data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ServiceError("workspace_encoding", "检查点内容须为UTF-8", 422) from None
     value = CapturedFileMetadata(
         path=capture.path,
         workspace_fingerprint=capture.workspace_fingerprint,

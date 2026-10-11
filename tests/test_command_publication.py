@@ -304,6 +304,61 @@ async def test_binary_artifact_is_readable_and_preserves_private_bytes_on_publis
         await service.close()
 
 
+@pytest.mark.parametrize("payload", [b"\0\xff\x01", b"\xff\xfe\x80"])
+@pytest.mark.parametrize("action", ["binary", "text", "delete", "unchanged"])
+async def test_binary_input_preserves_original_bytes_through_apply_keep_and_undo(
+    runtime, tmp_path, payload, action
+):
+    target = tmp_path / "input.bin"
+    target.write_bytes(payload)
+    target.chmod(0o640)
+    original = target.stat()
+    code = {
+        "binary": "open('input.bin','wb').write(bytes([0,128,4,5]))",
+        "text": "open('input.bin','w').write('text result')",
+        "delete": "import os;os.unlink('input.bin')",
+        "unchanged": "print(open('input.bin','rb').read().hex())",
+    }[action]
+    service, agent = await setup(runtime, tmp_path)
+    try:
+        result = await execute(agent, code, ["input.bin"])
+        assert result.outcome == "completed" and result.artifacts_complete
+        assert target.read_bytes() == payload
+        saved = await service.manager.commands.store.files(
+            "session:" + agent.session_id, result.command_id, "input"
+        )
+        assert saved["input.bin"].data == payload and saved["input.bin"].mode == 0o640
+        proposal = await propose(agent, result, "input.bin")
+        preview = proposal.proposal.preview
+        assert preview.before_sha256 == hashlib.sha256(payload).hexdigest()
+        assert preview.before_bytes == len(payload)
+        assert preview.truncated and "binary" in preview.diff
+        applied = await act(agent, proposal.proposal)
+        assert applied.status == "done" and applied.receipt.changed == (action != "unchanged")
+        if action == "delete":
+            assert not target.exists()
+        else:
+            assert (
+                target.read_bytes()
+                == {
+                    "binary": b"\0\x80\x04\x05",
+                    "text": b"text result",
+                    "unchanged": payload,
+                }[action]
+            )
+        assert (await act(agent, proposal.proposal, "keep")).status == "done"
+        undone = await act(agent, proposal.proposal, "undo")
+        assert undone.status == "done" and target.read_bytes() == payload
+        restored = target.stat()
+        assert (restored.st_mode & 0o777, restored.st_uid, restored.st_gid) == (
+            0o640,
+            original.st_uid,
+            original.st_gid,
+        )
+    finally:
+        await service.close()
+
+
 @pytest.mark.parametrize("before_exists", [False, True])
 @pytest.mark.parametrize("payload", [b"\0\xff\x01", b"\xff\xfe\x80"])
 async def test_binary_artifact_keep_undo_and_text_entry_remains_strict(
@@ -368,11 +423,12 @@ async def test_binary_artifact_new_target_and_capacity_are_not_bypassed(runtime,
 
 
 @pytest.mark.parametrize("after_commit", [False, True])
+@pytest.mark.parametrize("before_data", [b"old text", b"\0original", b"\xff\xfeoriginal"])
 async def test_binary_artifact_receipt_failure_reconciles_original_operation(
-    runtime, tmp_path, monkeypatch, after_commit
+    runtime, tmp_path, monkeypatch, after_commit, before_data
 ):
     target = tmp_path / "source.txt"
-    target.write_text("old text")
+    target.write_bytes(before_data)
     service, agent = await setup(runtime, tmp_path)
     settle = service.workspace_edits.settle
     fired = False
@@ -406,7 +462,7 @@ async def test_binary_artifact_receipt_failure_reconciles_original_operation(
         assert reconciled.status == "done"
         await agent.finalize_file_change(operation.operation_id)
         assert (await act(agent, proposal.proposal, "undo")).status == "done"
-        assert target.read_text() == "old text"
+        assert target.read_bytes() == before_data
     finally:
         await service.close()
 

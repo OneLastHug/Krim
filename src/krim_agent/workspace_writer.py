@@ -330,6 +330,7 @@ class WorkspaceWriter:
         *,
         authorize: Callable[[], None] | None = None,
         require_writable: bool = True,
+        allow_binary: bool = False,
     ) -> CapturedFile:
         """捕获完整有界文件或明确缺失；不发布文件修改。"""
         with self._locked_parent(path, lambda: False, require_writable=require_writable) as (
@@ -341,7 +342,7 @@ class WorkspaceWriter:
                 authorize()
             identity = _identity(os.fstat(fd))
             snapshot = self._snapshot(fd, name, missing=True)
-            if snapshot is not None:
+            if snapshot is not None and not allow_binary:
                 self._text(snapshot.data)
             self._check_parent(parent, identity)
             return CapturedFile(path, self.workspace.fingerprint, identity, snapshot)
@@ -352,6 +353,7 @@ class WorkspaceWriter:
         *,
         authorize: Callable[[], None] | None = None,
         require_writable: bool = True,
+        allow_binary: bool = False,
     ) -> None:
         """全部捕获后在同一协作锁内检查未变化，不把零散读取冒充可用快照。"""
         if not 1 <= len(captures) <= 32:
@@ -368,7 +370,7 @@ class WorkspaceWriter:
                 try:
                     self._check_parent(parent, capture.parent_identity)
                     actual = self._snapshot(fd, name, missing=True)
-                    if actual is not None:
+                    if actual is not None and not allow_binary:
                         self._text(actual.data)
                     if not self._same_before(actual, capture.snapshot):
                         raise ServiceError(
@@ -434,7 +436,9 @@ class WorkspaceWriter:
                 raise ServiceError("workspace_conflict", "撤销目标已偏离原应用后版本", 409)
             after = original.before.data if original.before is not None else None
             if after is not None:
-                self._text(after)
+                self._bounded_bytes(after)
+                if not isinstance(original.spec, ArtifactFileSpec):
+                    self._text(after)
             spec = RestoreFileSpec(
                 path=original.spec.path,
                 expected_sha256=before.sha256 if before is not None else None,
@@ -650,7 +654,7 @@ class WorkspaceWriter:
         _rename_function()
         if change.after is not None:
             self._bounded_bytes(change.after)
-            if not isinstance(change.spec, ArtifactFileSpec):
+            if not isinstance(change.spec, (ArtifactFileSpec, RestoreFileSpec)):
                 self._text(change.after)
         with self._locked_parent(change.spec.path, cancelled) as (fd, parent, name):
             # 校验在文件锁内，核实者不能在校验与发布之间抢先认定“没有修改”。

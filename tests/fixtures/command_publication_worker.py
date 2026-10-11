@@ -30,13 +30,17 @@ class Runner(LinuxSandboxRunner):
 
 
 async def main():
-    directory, mode = sys.argv[1:]
+    directory, mode = sys.argv[1:3]
+    binary = "--binary" in sys.argv[3:]
     root = Path(directory)
     files, state_path = root / "files", root / "state.json"
     fresh = mode in {"preview", "crash-before", "crash-after"}
     if fresh:
         await asyncio.to_thread(files.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread((files / "file.txt").write_text, "before")
+        if binary:
+            await asyncio.to_thread((files / "file.txt").write_bytes, b"\0\xffbefore")
+        else:
+            await asyncio.to_thread((files / "file.txt").write_text, "before")
     runner = Runner()
     settings = Settings(database_url=f"sqlite+aiosqlite:///{root / 'agent.sqlite'}")
     async with await PythonAI.create(settings=settings) as ai:
@@ -80,7 +84,9 @@ async def main():
                             "/usr/bin/python3",
                             "-I",
                             "-c",
-                            "open('file.txt','w').write('artifact')",
+                            "open('file.txt','wb').write(bytes([0,128])+b'artifact')"
+                            if binary
+                            else "open('file.txt','w').write('artifact')",
                         ]
                     ),
                 )
@@ -142,6 +148,24 @@ async def main():
             )
             assert original.proposal.proposal_id == state["proposal_id"]
             status = operation.status
+        elif mode == "undo":
+            proposal = await agent.file_change(state["proposal_id"])
+            operation = await agent.change_file(
+                WorkspaceChangeAction(
+                    proposal_id=proposal.proposal_id,
+                    expected_revision=proposal.revision,
+                    action="undo",
+                    request_key="undo",
+                )
+            )
+            assert operation.status == "done"
+            await agent.finalize_file_change(operation.operation_id)
+            status = operation.status
+        content = (
+            (await asyncio.to_thread((files / "file.txt").read_bytes)).hex()
+            if binary
+            else await asyncio.to_thread((files / "file.txt").read_text)
+        )
         print(
             json.dumps(
                 {
@@ -149,7 +173,7 @@ async def main():
                     "mode": mode,
                     "calls": runner.calls,
                     "status": status,
-                    "content": await asyncio.to_thread((files / "file.txt").read_text),
+                    "content": content,
                     **state,
                 }
             ),

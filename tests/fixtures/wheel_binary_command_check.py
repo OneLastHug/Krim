@@ -110,11 +110,53 @@ async def main() -> None:
                 confirmed=True,
             )
             assert applied.status == "done" and (workspace / "out.bin").read_bytes() == b"\0\xff"
+            second = await session.execute_command(
+                AgentCommandRequest(
+                    request_key="wheel-binary-input",
+                    input_paths=["out.bin"],
+                    command=CommandSpec(
+                        argv=[
+                            "/usr/bin/python3",
+                            "-I",
+                            "-c",
+                            "data=open('out.bin','rb').read();print(data.hex());"
+                            "open('out.bin','wb').write(data+bytes([128]))",
+                        ]
+                    ),
+                ),
+                confirmed=True,
+            )
+            assert second.outcome == "completed" and second.stdout_text == "00ff\n"
+            binary = await session.propose_command_change(
+                CommandProposalRequest(
+                    command_id=second.command_id,
+                    path="out.bin",
+                    request_key="binary-input-proposal",
+                )
+            )
+            for action in ("apply", "keep", "undo"):
+                current = await session.file_change(binary.proposal.proposal_id)
+                receipt = await session.change_file(
+                    WorkspaceChangeAction(
+                        proposal_id=current.proposal_id,
+                        expected_revision=current.revision,
+                        action=action,
+                        request_key="binary-input-" + action,
+                    ),
+                    confirmed=True,
+                )
+                assert receipt.status == "done"
+                assert (workspace / "out.bin").read_bytes() == (
+                    b"\0\xff" if action == "undo" else b"\0\xff\x80"
+                )
+                await session.finalize_file_change(receipt.operation_id, confirmed=True)
             print(
                 {
                     "package": krim_agent.__file__,
                     "command": result.outcome,
                     "file": "binary-published",
+                    "input": "binary-captured",
+                    "undo": "exact-bytes-restored",
                 }
             )
 
