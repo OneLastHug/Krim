@@ -23,8 +23,14 @@ async function agent(page: Page, name: string, mode = "agent", selected = tools,
 }
 
 async function confirmed(page: Page, panel: Locator, key: string, accept = true): Promise<void> {
-  page.once("dialog", dialog => accept ? dialog.accept() : dialog.dismiss());
+  let settled!: () => void;
+  const handled = new Promise<void>(resolve => { settled = resolve; });
+  page.once("dialog", dialog => {
+    const action = accept ? dialog.accept() : dialog.dismiss();
+    void action.finally(settled);
+  });
   await panel.getByRole("button", { name: key, exact: true }).click();
+  await handled;
 }
 
 async function control(page: Page, action: string, path = "empty", agent_id?: string) {

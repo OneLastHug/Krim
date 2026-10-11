@@ -173,12 +173,14 @@ export interface WorkspaceFile { path: string; sha256: string; byte_size: number
 export interface WorkspaceSearch { matches: Array<{ path: string; line: number; text: string }>; files_scanned: number; files_skipped: number; truncated: boolean; }
 export type WorkspaceAction = "apply" | "undo" | "keep";
 export interface DirectorySpec {
-  path: string; operation: "create" | "delete"; expected_fingerprint?: string | null; mode?: number | null;
+  path: string; operation: "create" | "delete" | "move"; expected_fingerprint?: string | null;
+  mode?: number | null; target_path?: string | null;
 }
 export interface DirectoryPreviewRequest { spec: DirectorySpec; request_key: string; }
 export interface DirectoryPreviewView {
   proposal_id: string; scope_id: string; workspace_key: string; resource_fingerprint: string;
-  path: string; operation: "create" | "delete"; before_fingerprint: string | null; mode: number | null;
+  path: string; operation: "create" | "delete" | "move"; target_path?: string | null;
+  before_fingerprint: string | null; mode: number | null;
   revision: number; status: WorkspaceChangeView["status"]; expires_at: number;
 }
 export interface DirectoryAction {

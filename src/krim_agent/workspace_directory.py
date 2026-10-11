@@ -1,4 +1,4 @@
-"""单目录空目录条件事务；持久账本/公开消费在ADR-0087后续单元接入。"""
+"""单空目录条件事务；创建/删除/移动与原账本消费共享身份和父级门禁。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -22,7 +22,7 @@ from krim_agent.workspace_writer import WorkspaceWriter, _identity, _rename_func
 
 
 class DirectoryChangeSpec(StrictModel):
-    """可信内部目录意图；不作为旧文本 workspace_change 公共参数。"""
+    """独立目录公开意图；不作为旧文本 workspace_change 参数。"""
 
     path: str = Field(min_length=1, max_length=512)
     operation: Literal["create", "delete", "move"]
@@ -112,6 +112,7 @@ class DirectoryPreviewView(StrictModel):
     resource_fingerprint: str
     path: str
     operation: Literal["create", "delete", "move"]
+    target_path: str | None = Field(default=None, min_length=1, max_length=512)
     before_fingerprint: str | None
     mode: int | None
     revision: int = Field(ge=0)
@@ -127,6 +128,25 @@ class DirectoryPreviewView(StrictModel):
         "uncertain",
     ]
     expires_at: float
+
+    @model_validator(mode="after")
+    def conditions(self) -> DirectoryPreviewView:
+        DirectoryChangeSpec(
+            path=self.path,
+            operation=self.operation,
+            target_path=self.target_path,
+            expected_fingerprint=self.before_fingerprint,
+            mode=self.mode,
+        )
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_empty_target(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """普通create/delete响应省略新增空字段，让旧Client继续严格解析。"""
+        value: dict[str, object] = handler(self)
+        if self.target_path is None:
+            value.pop("target_path", None)
+        return value
 
 
 class DirectoryChangeAction(StrictModel):
@@ -919,8 +939,7 @@ class WorkspaceDirectoryWriter:
         try:
             with self._locked_parents((source_path, target_path), cancelled) as parents:
                 source_fd, target_fd = parents[source_parent], parents[target_parent]
-                self._files._check_parent(source_parent, change.parent_identity)
-                self._files._check_parent(target_parent, change.target_parent_identity)
+                self._check_move_parents(change, parents, source_parent, target_parent)
                 if authorize is not None:
                     authorize()
                 source = self._snapshot(source_fd, source_name, missing=True)
@@ -933,10 +952,18 @@ class WorkspaceDirectoryWriter:
                     record_intent(recovery)
                 if authorize is not None:
                     authorize()
+                self._check_move_parents(change, parents, source_parent, target_parent)
+                source = self._snapshot(source_fd, source_name, missing=True)
+                target = self._snapshot(target_fd, target_name, missing=True)
+                if not self._same(source, change.before) or target is not None:
+                    return self._receipt(change, "rejected", "workspace_directory_conflict")
                 if cancelled():
                     return self._receipt(change, "rejected", "workspace_write_cancelled")
                 attempted = True
-                os.rename(source_name, target_name, src_dir_fd=source_fd, dst_dir_fd=target_fd)
+                try:
+                    rename_at(source_fd, source_name, target_name, target_fd=target_fd)
+                except FileExistsError:
+                    return self._receipt(change, "rejected", "workspace_directory_conflict")
                 os.fsync(source_fd)
                 if target_fd != source_fd:
                     os.fsync(target_fd)
@@ -951,6 +978,7 @@ class WorkspaceDirectoryWriter:
                         changed=True,
                         recovery=recovery,
                     )
+                self._check_move_parents(change, parents, source_parent, target_parent)
                 return self._receipt(change, "done", after=after, changed=True)
         except (OSError, ServiceError) as error:
             return self._receipt(
@@ -959,6 +987,82 @@ class WorkspaceDirectoryWriter:
                 error.code if isinstance(error, ServiceError) else "workspace_directory_io",
                 changed=attempted,
                 recovery=recovery if attempted else None,
+            )
+
+    def _check_move_parents(
+        self,
+        change: PreparedDirectoryChange,
+        parents: dict[str, int],
+        source_parent: str,
+        target_parent: str,
+    ) -> None:
+        assert change.target_parent_identity is not None
+        for parent, wanted in (
+            (source_parent, change.parent_identity),
+            (target_parent, change.target_parent_identity),
+        ):
+            if _identity(os.fstat(parents[parent])) != wanted:
+                raise ServiceError("workspace_parent_changed", "目录父身份已变化", 409)
+            self._files._check_parent(parent, wanted)
+
+    def verify_keep(
+        self,
+        change: PreparedDirectoryChange,
+        effect: DirectoryEffect,
+        *,
+        abort: Callable[[], bool] | None = None,
+        authorize: Callable[[], None] | None = None,
+    ) -> DirectoryEffect:
+        """保留只核对原完整效果；移动同时检查双父、源缺失与目标身份。"""
+        self._validate(change)
+        if (
+            effect.receipt.status != "done"
+            or effect.receipt.path != change.spec.path
+            or effect.receipt.operation_token != change.token
+            or effect.receipt.before_fingerprint
+            != (change.before.fingerprint if change.before else None)
+            or effect.receipt.after_fingerprint
+            != (effect.observed_after.fingerprint if effect.observed_after else None)
+        ):
+            raise ServiceError("workspace_directory_receipt", "保留须绑定原完整效果", 409)
+        cancelled = abort or (lambda: False)
+        spec = change.spec
+        try:
+            if isinstance(spec, DirectoryChangeSpec) and spec.operation == "move":
+                assert spec.target_path is not None
+                source_parent = "/".join(self.workspace._parts(spec.path)[:-1]) or "."
+                target_parent = "/".join(self.workspace._parts(spec.target_path)[:-1]) or "."
+                with self._locked_parents((spec.path, spec.target_path), cancelled) as parents:
+                    self._check_move_parents(change, parents, source_parent, target_parent)
+                    if authorize is not None:
+                        authorize()
+                        self._check_move_parents(change, parents, source_parent, target_parent)
+                    source = self._snapshot(
+                        parents[source_parent], self.workspace._parts(spec.path)[-1], missing=True
+                    )
+                    target = self._snapshot(
+                        parents[target_parent],
+                        self.workspace._parts(spec.target_path)[-1],
+                        missing=True,
+                    )
+                    matches = source is None and target == effect.observed_after
+            else:
+                with self._locked_parent(spec.path, cancelled) as (fd, parent, name):
+                    self._files._check_parent(parent, change.parent_identity)
+                    if authorize is not None:
+                        authorize()
+                        self._files._check_parent(parent, change.parent_identity)
+                    matches = self._snapshot(fd, name, missing=True) == effect.observed_after
+            if cancelled():
+                return self._receipt(change, "rejected", "workspace_write_cancelled")
+            if not matches:
+                return self._receipt(change, "rejected", "workspace_directory_conflict")
+            return replace(effect, receipt=replace(effect.receipt, changed=False))
+        except (OSError, ServiceError) as error:
+            return self._receipt(
+                change,
+                "rejected",
+                error.code if isinstance(error, ServiceError) else "workspace_directory_io",
             )
 
     def prepare_undo(
@@ -1057,12 +1161,22 @@ class WorkspaceDirectoryWriter:
     ) -> None:
         self._validate(change)
         if reference.target_path is not None:
+            spec = change.spec
+            expected_target = (
+                spec.target_path
+                if isinstance(spec, DirectoryMoveRestoreSpec)
+                or isinstance(spec, DirectoryChangeSpec)
+                and spec.operation == "move"
+                else None
+            )
             if (
                 reference.target_parent_identity is None
                 or reference.workspace_fingerprint != change.workspace_fingerprint
                 or reference.path != change.spec.path
                 or reference.parent_identity != change.parent_identity
                 or reference.target_parent_identity != change.target_parent_identity
+                or reference.target_path != expected_target
+                or reference.expected != change.before
             ):
                 raise ServiceError("workspace_directory_reference", "目录移动双父引用不匹配", 409)
             return
@@ -1143,6 +1257,7 @@ class WorkspaceDirectoryWriter:
                 with self._locked_parents(
                     (source_path, reference.target_path), lambda: False
                 ) as parents:
+                    self._check_move_parents(change, parents, source_parent, target_parent)
                     source = self._snapshot(
                         parents[source_parent], self.workspace._parts(source_path)[-1], missing=True
                     )

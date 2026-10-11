@@ -18,6 +18,7 @@ const labels: Record<string, string> = {
   uncertain: "目录结果待核实", running: "目录操作执行中", done: "目录操作已确认",
 };
 const actionLabels: Record<WorkspaceAction, string> = { apply: "应用目录事务", keep: "保留目录事务", undo: "撤销目录事务" };
+const operationLabels = { create: "新建目录", delete: "删除空目录", move: "移动空目录" };
 
 function text<K extends keyof HTMLElementTagNameMap>(tag: K, key: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag); node.dataset.i18n = key; node.textContent = t(key); return node;
@@ -34,16 +35,35 @@ async function digest(value: unknown): Promise<string> {
   const data = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
   return Array.from(new Uint8Array(data), byte => byte.toString(16).padStart(2, "0")).join("");
 }
+function proposalSpec(value: DirectoryPreviewView): DirectorySpec {
+  if (!identifier(value.proposal_id) || !relative(value.path) || !Object.hasOwn(operationLabels, value.operation)) throw new Error(t("目录回程与原提案不一致"));
+  if (value.operation === "create") {
+    if (value.target_path != null || value.before_fingerprint !== null || !Number.isInteger(value.mode) || value.mode! < 448 || value.mode! > 511) throw new Error(t("目录回程与原提案不一致"));
+    return { path: value.path, operation: "create", mode: value.mode };
+  }
+  if (!/^[0-9a-f]{64}$/.test(value.before_fingerprint || "") || value.mode !== null) throw new Error(t("目录回程与原提案不一致"));
+  if (value.operation === "move") {
+    if (typeof value.target_path !== "string" || !relative(value.target_path) || value.target_path === value.path) throw new Error(t("目录回程与原提案不一致"));
+    return { path: value.path, operation: "move", expected_fingerprint: value.before_fingerprint, target_path: value.target_path };
+  }
+  if (value.target_path != null) throw new Error(t("目录回程与原提案不一致"));
+  return { path: value.path, operation: "delete", expected_fingerprint: value.before_fingerprint };
+}
+function proposalPath(value: DirectoryPreviewView): string {
+  return value.operation === "move" ? `${value.path} → ${value.target_path}` : value.path;
+}
 
 export class DirectoryChangesUI {
   readonly root = document.createElement("details");
   private editor = document.createElement("fieldset");
   private mode = document.createElement("select");
   private path = document.createElement("input");
+  private targetPath = document.createElement("input");
   private directoryMode = document.createElement("input");
   private fingerprint = document.createElement("input");
   private modeRow: HTMLLabelElement;
   private fingerprintRow: HTMLLabelElement;
+  private targetRow: HTMLLabelElement;
   private state = document.createElement("p");
   private notice = document.createElement("p");
   private pendingBox = document.createElement("div");
@@ -83,13 +103,14 @@ export class DirectoryChangesUI {
     this.root.className = "directory-changes"; this.root.hidden = true;
     this.root.append(text("summary", "目录事务与历史"));
     this.editor.className = "directory-editor"; this.editor.append(text("legend", "准备目录事务"));
-    for (const [value, key] of [["create", "新建目录"], ["delete", "删除空目录"]] as const) {
+    for (const [value, key] of Object.entries(operationLabels)) {
       const option = text("option", key); option.value = value; this.mode.append(option);
     }
     this.field("目录操作", this.mode); this.field("目录相对路径", this.path);
+    this.targetRow = this.field("目标目录相对路径", this.targetPath);
     this.modeRow = this.field("新目录权限（十进制）", this.directoryMode);
     this.fingerprintRow = this.field("原目录指纹", this.fingerprint);
-    this.path.maxLength = 512; this.fingerprint.maxLength = 64;
+    this.path.maxLength = 512; this.targetPath.maxLength = 512; this.fingerprint.maxLength = 64;
     this.directoryMode.type = "number"; this.directoryMode.min = "448"; this.directoryMode.max = "511"; this.directoryMode.value = "488";
     const controls = document.createElement("div"); controls.className = "actions";
     controls.append(
@@ -108,7 +129,7 @@ export class DirectoryChangesUI {
     this.root.append(this.editor, this.notice, this.pendingBox, pages, this.pageInfo, this.list, this.detail);
     this.readCache();
     this.path.oninput = () => { this.fingerprint.value = ""; this.state.textContent = ""; this.sync(); };
-    for (const field of [this.mode, this.directoryMode, this.fingerprint]) field.oninput = () => this.sync();
+    for (const field of [this.mode, this.directoryMode, this.fingerprint, this.targetPath]) field.oninput = () => this.sync();
     this.mode.onchange = () => this.sync();
     this.root.ontoggle = () => { if (this.root.open && this.bound && !this.loaded && !this.busy) void this.work(() => this.refresh()); };
     this.renderPending(); this.sync();
@@ -154,7 +175,8 @@ export class DirectoryChangesUI {
     this.editor.hidden = !live;
     this.editor.disabled = this.busy || !live || this.disposed;
     this.mode.disabled = !this.permitted("directory_preview");
-    this.modeRow.hidden = this.mode.value !== "create"; this.fingerprintRow.hidden = this.mode.value !== "delete";
+    this.modeRow.hidden = this.mode.value !== "create"; this.fingerprintRow.hidden = this.mode.value === "create";
+    this.targetRow.hidden = this.mode.value !== "move";
     for (const [button, control] of this.buttons) {
       button.disabled = this.busy || !this.bound || this.disposed || Boolean(control.tool && !this.permitted(control.tool)) || Boolean(control.enabled && !control.enabled());
     }
@@ -190,6 +212,7 @@ export class DirectoryChangesUI {
   }
 
   private spec(): DirectorySpec {
+    if (this.mode.value === "move") return { path: this.path.value, operation: "move", expected_fingerprint: this.fingerprint.value, target_path: this.targetPath.value };
     return this.mode.value === "create"
       ? { path: this.path.value, operation: "create", mode: Number(this.directoryMode.value) }
       : { path: this.path.value, operation: "delete", expected_fingerprint: this.fingerprint.value };
@@ -198,6 +221,7 @@ export class DirectoryChangesUI {
   private valid(): boolean {
     if (!relative(this.path.value)) return false;
     if (this.mode.value === "delete") return /^[0-9a-f]{64}$/.test(this.fingerprint.value);
+    if (this.mode.value === "move") return /^[0-9a-f]{64}$/.test(this.fingerprint.value) && relative(this.targetPath.value) && this.path.value !== this.targetPath.value;
     const mode = Number(this.directoryMode.value);
     return this.mode.value === "create" && Number.isInteger(mode) && mode >= 448 && mode <= 511;
   }
@@ -221,7 +245,7 @@ export class DirectoryChangesUI {
   private async sendPreview(body: DirectoryPreviewRequest): Promise<void> {
     try {
       const proposal = await this.read<DirectoryPreviewView>(`${this.base}/directory-changes/preview?confirmed=true`, { method: "POST", body: JSON.stringify(body) });
-      if (proposal.path !== body.spec.path || !IDENTIFIER.test(proposal.proposal_id)) throw new Error(t("目录回程与原提案不一致"));
+      if (JSON.stringify(proposalSpec(proposal)) !== JSON.stringify(body.spec)) throw new Error(t("目录回程与原提案不一致"));
       this.cache.pending = undefined; this.select(proposal.proposal_id); this.proposal = proposal; this.persist();
       this.notice.textContent = t("目录提案已保存，请审阅后确认"); this.listAfter = null; this.listPrevious = [];
       await this.readList(); await this.readSelected(); this.loaded = true;
@@ -261,7 +285,7 @@ export class DirectoryChangesUI {
     if (value === null) { this.notice.textContent = t("尚未找到原目录请求，请查询或明确重试原参数"); return; }
     if (pending.kind === "preview") {
       const proposal = value as DirectoryPreviewView;
-      if (!IDENTIFIER.test(proposal.proposal_id)) throw new Error(t("目录回程与原提案不一致"));
+      if (await digest(proposalSpec(proposal)) !== pending.digest) throw new Error(t("目录回程与原提案不一致"));
       this.select(proposal.proposal_id); this.proposal = proposal;
     } else {
       const operation = value as DirectoryAttemptView;
@@ -289,6 +313,7 @@ export class DirectoryChangesUI {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) }); if (this.listAfter) params.set("after", this.listAfter);
     const page = await this.read<DirectoryPage>(`${this.base}/directory-changes?${params}`);
     if (page.kind !== "proposals" || !Array.isArray(page.proposals) || page.proposals.length > PAGE_SIZE) throw new Error(t("目录查询回程类型无效"));
+    for (const proposal of page.proposals) proposalSpec(proposal);
     this.items = page.proposals; this.listNext = page.next_after;
     if (!this.cache.selected && page.proposals[0]) { this.select(page.proposals[0].proposal_id); this.persist(); }
   }
@@ -304,6 +329,7 @@ export class DirectoryChangesUI {
     const id = this.cache.selected;
     const proposal = await this.read<DirectoryPreviewView>(`${this.base}/directory-changes/${encodeURIComponent(id)}`);
     if (proposal.proposal_id !== id) throw new Error(t("目录回程与原提案不一致"));
+    proposalSpec(proposal);
     this.proposal = proposal;
     await this.readHistory();
     if (this.operationId) await this.readOperation(this.operationId);
@@ -340,8 +366,8 @@ export class DirectoryChangesUI {
     const visible = this.proposal; if (!visible || !this.allowedAction(action)) return;
     const current = await this.read<DirectoryPreviewView>(`${this.base}/directory-changes/${encodeURIComponent(visible.proposal_id)}`);
     this.proposal = current;
-    if (current.revision !== visible.revision || !this.allowedAction(action, current)) throw new Error(t("目录版本已变化，请重新审阅"));
-    if (!window.confirm(t("确认{action}：{path}（修订版本{revision}）？", { action: t(actionLabels[action]), path: current.path, revision: current.revision }))) return;
+    if (current.revision !== visible.revision || JSON.stringify(proposalSpec(current)) !== JSON.stringify(proposalSpec(visible)) || !this.allowedAction(action, current)) throw new Error(t("目录版本已变化，请重新审阅"));
+    if (!window.confirm(t("确认{action}：{path}（修订版本{revision}）？", { action: t(actionLabels[action]), path: proposalPath(current), revision: current.revision }))) return;
     const body: DirectoryAction = { proposal_id: current.proposal_id, action, expected_revision: current.revision, request_key: crypto.randomUUID() };
     this.cache.pending = { kind: "action", body }; this.pendingMissing = false; this.persist(); await this.sendAction(body);
   }
@@ -369,7 +395,7 @@ export class DirectoryChangesUI {
     for (const item of this.items) {
       const row = document.createElement("li"); row.dataset.proposalId = item.proposal_id;
       const button = this.button("查看目录提案", async () => { this.select(item.proposal_id); this.persist(); await this.readSelected(); }, "directory_query");
-      button.removeAttribute("data-i18n"); button.textContent = `${item.path} · ${t(labels[item.status] || item.status)} · r${item.revision}`;
+      button.removeAttribute("data-i18n"); button.textContent = `${proposalPath(item)} · ${t(labels[item.status] || item.status)} · r${item.revision}`;
       row.append(button); this.list.append(row);
     }
   }
@@ -377,9 +403,9 @@ export class DirectoryChangesUI {
   private renderDetail(): void {
     this.clear(this.detail); const proposal = this.proposal; if (!proposal) return;
     this.detail.dataset.proposalId = proposal.proposal_id;
-    const title = document.createElement("strong"); title.textContent = `${proposal.path} · ${t(labels[proposal.status] || proposal.status)}`;
+    const title = document.createElement("strong"); title.textContent = `${proposalPath(proposal)} · ${t(labels[proposal.status] || proposal.status)}`;
     const condition = document.createElement("pre"); condition.className = "directory-condition";
-    condition.textContent = `${t(proposal.operation === "create" ? "新建目录" : "删除空目录")}\n${t("修订版本")}: ${proposal.revision}\n${t("原目录指纹")}: ${proposal.before_fingerprint || t("不存在")}\n${t("新目录权限（十进制）")}: ${proposal.mode ?? "—"}`;
+    condition.textContent = `${t(operationLabels[proposal.operation])}\n${t("修订版本")}: ${proposal.revision}\n${t("原目录指纹")}: ${proposal.before_fingerprint || t("不存在")}\n${t("新目录权限（十进制）")}: ${proposal.mode ?? "—"}${proposal.operation === "move" ? `\n${t("目标目录相对路径")}: ${proposal.target_path}\n${t("目标必须不存在")}` : ""}`;
     this.detail.append(title, condition);
     const controls = document.createElement("div"); controls.className = "actions";
     for (const action of ["apply", "keep", "undo"] as const) controls.append(this.button(actionLabels[action], () => this.action(action), "directory_change", () => this.allowedAction(action)));

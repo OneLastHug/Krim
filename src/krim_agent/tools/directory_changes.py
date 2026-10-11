@@ -81,7 +81,7 @@ def directory_change_tools() -> tuple[ToolDefinition, ...]:
         ),
         ToolDefinition(
             "directory_preview",
-            "冻结单个已授权空目录的创建或删除条件提案，不发布目录",
+            "冻结单个已授权空目录的创建、删除或移动条件提案，不发布目录；移动目标须缺失",
             DirectoryPreviewRequest,
             lambda arguments, context: execute("preview", arguments, context),
             "read",

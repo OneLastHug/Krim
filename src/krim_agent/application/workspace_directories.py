@@ -458,24 +458,13 @@ class DirectoryChangeService:
                     if item.view.action == "apply" and item.view.status == "done"
                 )
                 source_effect = await self.store.effect(scope, source.view.operation_id)
-                actual = await workspace_io(writer.capture, prepared.spec.path)
-                if actual != source_effect.observed_after:
-                    effect = DirectoryEffect(
-                        DirectoryChangeReceipt(
-                            prepared.spec.path,
-                            "rejected",
-                            prepared.before.fingerprint if prepared.before else None,
-                            None,
-                            False,
-                            "workspace_directory_conflict",
-                            False,
-                            prepared.token,
-                        )
-                    )
-                else:
-                    effect = replace(
-                        source_effect, receipt=replace(source_effect.receipt, changed=False)
-                    )
+                effect = await workspace_io(
+                    writer.verify_keep,
+                    prepared,
+                    source_effect,
+                    abort=lambda: abort.is_set() or not binding.available or self._closed,
+                    authorize=authorize,
+                )
             else:
                 try:
                     effect = await workspace_io(
