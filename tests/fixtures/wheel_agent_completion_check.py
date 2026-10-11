@@ -113,7 +113,7 @@ async def main():
                     head = (
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
                     ).scalar()
-                    assert head == "0035_oauth_browser_callbacks"
+                    assert head == "0036_workspace_directory_ledger"
             print(
                 json.dumps(
                     {

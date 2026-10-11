@@ -54,6 +54,51 @@ class DirectoryRestoreSpec(StrictModel):
     original_token: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+class DirectoryPreviewView(StrictModel):
+    proposal_id: str
+    scope_id: str
+    workspace_key: str
+    resource_fingerprint: str
+    path: str
+    operation: Literal["create", "delete"]
+    before_fingerprint: str | None
+    mode: int | None
+    revision: int = Field(ge=0)
+    status: Literal[
+        "proposed",
+        "applying",
+        "applied",
+        "undoing",
+        "undone",
+        "keeping",
+        "kept",
+        "rejected",
+        "uncertain",
+    ]
+    expires_at: float
+
+
+class DirectoryChangeAction(StrictModel):
+    proposal_id: str = Field(min_length=1, max_length=36)
+    action: Literal["apply", "undo", "keep"]
+    expected_revision: int = Field(ge=0)
+    request_key: str = Field(min_length=1, max_length=128)
+
+
+class DirectoryAttemptView(StrictModel):
+    operation_id: str
+    proposal_id: str
+    scope_id: str
+    action: Literal["apply", "undo", "keep"]
+    expected_revision: int
+    status: Literal["running", "done", "rejected", "uncertain"]
+    receipt: DirectoryChangeReceipt | None
+    recovery_required: bool
+    cleanup_pending: bool
+    created_at: float
+    updated_at: float
+
+
 @dataclass(frozen=True)
 class DirectorySnapshot:
     mode: int
@@ -65,6 +110,29 @@ class DirectorySnapshot:
     gid: int
     nlink: int
     empty: bool
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int
+            for value in (
+                self.mode,
+                self.device,
+                self.inode,
+                self.mtime_ns,
+                self.ctime_ns,
+                self.uid,
+                self.gid,
+                self.nlink,
+            )
+        ):
+            raise ValueError("目录快照整数类型无效")
+        if (
+            not 0 <= self.mode <= 0o777
+            or any(value < 0 for value in (self.device, self.inode, self.uid, self.gid))
+            or self.nlink < 1
+            or type(self.empty) is not bool
+        ):
+            raise ValueError("目录快照属性无效")
 
     @property
     def identity(self) -> tuple[int, int]:
@@ -116,6 +184,16 @@ class DirectoryChangeReceipt:
     error_code: str | None = None
     recovery_required: bool = False
     operation_token: str = ""
+
+    def __post_init__(self) -> None:
+        if (self.status == "done") != (self.error_code is None) or self.recovery_required != (
+            self.status == "uncertain"
+        ):
+            raise ValueError("目录回执状态/错误/恢复标志不一致")
+        if len(self.operation_token) != 32 or any(
+            c not in "0123456789abcdef" for c in self.operation_token
+        ):
+            raise ValueError("目录回执必须绑定原操作token")
 
 
 @dataclass(frozen=True)

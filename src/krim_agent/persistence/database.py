@@ -589,6 +589,63 @@ class WorkspaceFileLockRow(Base):
     )
 
 
+class WorkspaceDirectoryProposalRow(Base):
+    __tablename__ = "workspace_directory_proposals"
+    __table_args__ = (UniqueConstraint("scope_id", "request_key"),)
+    proposal_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    path: Mapped[str] = mapped_column(String(512))
+    prepared: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="proposed")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[float] = mapped_column(Float)
+    active_operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceDirectoryAttemptRow(Base):
+    __tablename__ = "workspace_directory_attempts"
+    __table_args__ = (UniqueConstraint("scope_id", "request_key"),)
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_proposals.proposal_id"), index=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    previous_status: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prepared: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    observed_after: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    receipt: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    recovery: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    receipt_history: Mapped[list[JsonValue]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceDirectoryLockRow(Base):
+    __tablename__ = "workspace_directory_locks"
+    lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_attempts.operation_id"), unique=True
+    )
+    directory_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
 class NativeWorkspaceBatchRow(Base):
     __tablename__ = "native_workspace_batches"
     __table_args__ = (

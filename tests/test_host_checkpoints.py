@@ -203,7 +203,7 @@ async def test_host_checkpoint_migration_and_downgrade_refuse_snapshot_loss(repo
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0035_oauth_browser_callbacks"
+        ).scalar() == "0036_workspace_directory_ledger"
     assert (await catalog.catalog(topic.id)).checkpoints[0].status == "creating"
 
 
