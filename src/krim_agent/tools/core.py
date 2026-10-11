@@ -52,6 +52,13 @@ class WorkspaceChangeBackend(Protocol):
     ) -> dict[str, JsonValue]: ...
 
 
+class DirectoryChangeBackend(Protocol):
+    async def tool_operation(
+        self, operation: str, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
+
+
 class WorkspaceCheckpointBackend(Protocol):
     async def capture_read(
         self, payload: dict[str, Any], context: ToolContext
@@ -136,6 +143,8 @@ class ToolContext:
     # 由可信宿主绑定；模型参数和HTTP请求不能设置此字段。
     workspace: WorkspaceBinding | None = None
     workspace_changes: WorkspaceChangeBackend | None = None
+    directory_changes: DirectoryChangeBackend | None = None
+    _directory_response: tuple[str, str] | None = field(default=None, repr=False)
     workspace_batch: NativeBatchFence | None = None
     checkpoint_capture: CheckpointCaptureFence | None = None
     checkpoint_restore: CheckpointRestoreFence | None = None
@@ -173,6 +182,7 @@ class ToolContext:
             trace_owner_id=self.trace_owner_id,
             workspace=self.workspace,
             workspace_changes=self.workspace_changes,
+            directory_changes=self.directory_changes,
             workspace_batch=self.workspace_batch,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,

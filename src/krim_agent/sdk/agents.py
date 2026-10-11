@@ -42,6 +42,14 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
+from krim_agent.workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryChangeSpec,
+    DirectoryOperationRequest,
+    DirectoryPreviewRequest,
+    DirectoryPreviewView,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -129,6 +137,41 @@ class AgentSession:
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)
+
+    async def preview_directory_change(
+        self,
+        spec: DirectoryChangeSpec,
+        *,
+        request_key: str | None = None,
+        ttl_seconds: float = 3600,
+        confirmed: bool = False,
+    ) -> DirectoryPreviewView:
+        return await self.service.directory_preview(
+            self.agent_id,
+            DirectoryPreviewRequest(
+                spec=spec, request_key=request_key or str(uuid4()), ttl_seconds=ttl_seconds
+            ),
+            confirmed=confirmed,
+        )
+
+    async def change_directory(
+        self, request: DirectoryChangeAction, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return await self.service.directory_change(self.agent_id, request, confirmed=confirmed)
+
+    async def reconcile_directory_change(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return await self.service.directory_reconcile(
+            self.agent_id, DirectoryOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def finalize_directory_change(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return await self.service.directory_finalize(
+            self.agent_id, DirectoryOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
 
     async def execute(self, prompt: str, *, idempotency_key: str | None = None) -> ExecResult:
         result = await self.service.execute(

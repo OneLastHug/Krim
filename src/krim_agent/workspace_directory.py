@@ -85,6 +85,16 @@ class DirectoryChangeAction(StrictModel):
     request_key: str = Field(min_length=1, max_length=128)
 
 
+class DirectoryPreviewRequest(StrictModel):
+    spec: DirectoryChangeSpec
+    request_key: str = Field(min_length=1, max_length=128)
+    ttl_seconds: float = Field(default=3600, gt=0, le=86400)
+
+
+class DirectoryOperationRequest(StrictModel):
+    operation_id: str = Field(min_length=1, max_length=36)
+
+
 class DirectoryAttemptView(StrictModel):
     operation_id: str
     proposal_id: str

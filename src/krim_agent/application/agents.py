@@ -72,6 +72,7 @@ from krim_agent.runtime.chat import RunState
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
+from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.workspace import (
@@ -96,6 +97,13 @@ from krim_agent.workspace_checkpoint import (
     CheckpointCaptureFence,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointView,
+)
+from krim_agent.workspace_directory import (
+    DirectoryAttemptView,
+    DirectoryChangeAction,
+    DirectoryOperationRequest,
+    DirectoryPreviewRequest,
+    DirectoryPreviewView,
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
@@ -513,7 +521,7 @@ class AgentService:
     ) -> WorkspaceBinding:
         if writable or isinstance(root, Workspace) and root.writable:
             existing = {item.name: item for item in self.runtime.tools.definitions}
-            for definition in workspace_change_tools():
+            for definition in (*workspace_change_tools(), *directory_change_tools()):
                 if definition.name in existing and existing[definition.name] is not definition:
                     raise ValueError("工作区修改工具名称已由其它定义占用")
         binding = self.resources.register_workspace(
@@ -521,7 +529,7 @@ class AgentService:
         )
         if binding.workspace.writable:
             registered_names = {item.name for item in self.runtime.tools.definitions}
-            for definition in workspace_change_tools():
+            for definition in (*workspace_change_tools(), *directory_change_tools()):
                 if definition.name not in registered_names:
                     self.runtime.tools.register(definition)
         if default:
@@ -709,6 +717,7 @@ class AgentService:
                     if command_admitted is not None
                     else None,
                     workspace_changes=self.manager.workspace_changes,
+                    directory_changes=self.manager.directory_changes,
                     workspace_batch=batch_fence,
                     checkpoint_capture=checkpoint_capture,
                     checkpoint_restore=checkpoint_restore,
@@ -834,6 +843,48 @@ class AgentService:
     async def workspace_read(self, agent_id: str, request: ReadFileInput) -> WorkspaceFile:
         return WorkspaceFile.model_validate(
             await self._workspace_call(agent_id, "workspace_read", request.model_dump())
+        )
+
+    async def directory_preview(
+        self, agent_id: str, request: DirectoryPreviewRequest, *, confirmed: bool = False
+    ) -> DirectoryPreviewView:
+        return DirectoryPreviewView.model_validate(
+            await self._workspace_call(
+                agent_id, "directory_preview", request.model_dump(), confirmed=confirmed
+            )
+        )
+
+    async def directory_change(
+        self, agent_id: str, request: DirectoryChangeAction, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return DirectoryAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "directory_change", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def directory_reconcile(
+        self, agent_id: str, request: DirectoryOperationRequest, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return DirectoryAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "directory_reconcile", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def directory_finalize(
+        self, agent_id: str, request: DirectoryOperationRequest, *, confirmed: bool = False
+    ) -> DirectoryAttemptView:
+        return DirectoryAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "directory_finalize", request.model_dump(), confirmed=confirmed
+                )
+            )
         )
 
     async def command_execute(
@@ -1737,6 +1788,7 @@ class AgentService:
     async def close(self) -> None:
         self.assert_external_command_control()
         self.manager.commands.assert_external_close()
+        self.manager.directory_changes.assert_external_close()
         self.workspace_batches.assert_external_close()
         async with self._start_lock:
             self._closed = True
