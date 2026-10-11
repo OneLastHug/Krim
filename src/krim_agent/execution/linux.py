@@ -25,9 +25,11 @@ from uuid import uuid4
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import Workspace
 
+from .directories import directory_metadata_limit
 from .models import (
     CommandSpec,
     ExecutionArtifact,
+    ExecutionDirectory,
     ExecutionResult,
     ExecutionStatus,
     SandboxFile,
@@ -466,6 +468,10 @@ class LinuxSandboxRunner:
         deadline = start + self.limits.startup_seconds
         stdout, stderr, wire = handle._stdout, handle._stderr, bytearray()
         artifacts: list[ExecutionArtifact] = []
+        directories: list[ExecutionDirectory] = []
+        directory_paths: set[str] = set()
+        directory_bytes = 2
+        scanned_entries = 0
         paths: set[str] = set()
         total = 0
         dispatched = started = ready = finished = complete = truncated = artifact_error = False
@@ -623,10 +629,40 @@ class LinuxSandboxRunner:
                             exit_code = value["code"]
                             stopped = value["descendants_stopped"]
                             truncated = bool(value["output_limit"])
+                        elif kind == "directory":
+                            if exit_code is None or finished:
+                                raise ValueError("directory order")
+                            path, mode = value["path"], value["mode"]
+                            scanned_entries += 1
+                            if scanned_entries > self.limits.artifact_files * 4:
+                                raise ValueError("directory entries")
+                            try:
+                                if not isinstance(path, str) or not Workspace._parts(path):
+                                    raise ValueError("path")
+                            except (ServiceError, ValueError):
+                                artifact_error = True
+                                continue
+                            if (
+                                path in directory_paths
+                                or path in paths
+                                or len(directory_paths) + len(paths)
+                                >= self.limits.artifact_files * 4
+                                or type(mode) is not int
+                                or not 0 <= mode <= 0o777
+                            ):
+                                raise ValueError("directory")
+                            directory_bytes += len(json.dumps({"path": path, "mode": mode})) + 2
+                            if directory_bytes > directory_metadata_limit(self.limits):
+                                raise ValueError("directory metadata")
+                            directory_paths.add(path)
+                            directories.append(ExecutionDirectory(path, mode))
                         elif kind == "artifact":
                             if exit_code is None or finished:
                                 raise ValueError("artifact order")
                             path = value["path"]
+                            scanned_entries += 1
+                            if scanned_entries > self.limits.artifact_files * 4:
+                                raise ValueError("artifact entries")
                             try:
                                 if not Workspace._parts(path):
                                     raise ValueError("path")
@@ -638,7 +674,10 @@ class LinuxSandboxRunner:
                             total += len(data)
                             if (
                                 path in paths
+                                or path in directory_paths
                                 or len(paths) >= self.limits.artifact_files
+                                or len(directory_paths) + len(paths)
+                                >= self.limits.artifact_files * 4
                                 or len(data) > self.limits.file_bytes
                                 or total > self.limits.artifact_bytes
                                 or type(mode) is not int
@@ -658,6 +697,15 @@ class LinuxSandboxRunner:
                                 raise ValueError("finished")
                             finished = True
                             complete = value["artifacts_complete"] and not artifact_error
+                            if complete:
+                                # 所有父目录必须真实采集，不能从文件名推断空目录集合。
+                                for path in paths | directory_paths:
+                                    parents = path.split("/")[:-1]
+                                    if any(
+                                        "/".join(parents[:index]) not in directory_paths
+                                        for index in range(1, len(parents) + 1)
+                                    ):
+                                        raise ValueError("directory parent")
                         elif kind == "error":
                             failure = "execution_broker_failed"
                         else:
@@ -730,6 +778,9 @@ class LinuxSandboxRunner:
             stopped,
             failure or ("execution_artifact_invalid" if not complete and reason is None else None),
             time.monotonic() - start,
+            tuple(sorted(directories, key=lambda item: item.path))
+            if exit_code is not None
+            else None,
         )
 
     async def close(self) -> None:

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from krim_agent.execution.agent_models import AgentCommandRequest
+from krim_agent.execution.directories import read_directory_manifest
 from krim_agent.execution.models import ExecutionStatus, SandboxFile
 from krim_agent.execution.publication import (
     ChangeKind,
@@ -21,7 +22,7 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
-from krim_agent.execution.records import CommandFile, CommandSnapshot
+from krim_agent.execution.records import CommandDirectory, CommandFile, CommandSnapshot
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_change import ArtifactFileSpec
@@ -65,6 +66,7 @@ class CommandSource:
     inputs: dict[str, SandboxFile]
     captures: dict[str, CapturedFile]
     artifacts: dict[str, CommandFile]
+    directories: dict[str, CommandDirectory] | None
 
     @property
     def outcome(self) -> ExecutionStatus:
@@ -164,6 +166,8 @@ async def load_source(session: AsyncSession, scope: str, identifier: str) -> Com
         artifacts = {item.path: item for item in values}
         if len(artifacts) != len(values) or len(values) != result["artifact_files"]:
             raise ValueError("artifacts")
+        manifest = read_directory_manifest(result, set(artifacts), snapshot.limits)
+        directories = {item.path: item for item in manifest.entries} if manifest else None
     except (KeyError, ValueError, TypeError, ValidationError):
         raise ServiceError("execution_source_corrupt", "命令来源或产物清单校验失败", 409) from None
     return CommandSource(
@@ -174,6 +178,7 @@ async def load_source(session: AsyncSession, scope: str, identifier: str) -> Com
         inputs,
         captures,
         artifacts,
+        directories,
     )
 
 

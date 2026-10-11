@@ -64,6 +64,12 @@ class ExecutionArtifact:
 
 
 @dataclass(frozen=True)
+class ExecutionDirectory:
+    path: str
+    mode: int
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
@@ -78,3 +84,5 @@ class ExecutionResult:
     descendants_stopped: int
     error_code: str | None
     elapsed_seconds: float
+    # None表示没有目录观察；空tuple须同时完整才确认没有目录。
+    directories: tuple[ExecutionDirectory, ...] | None = None
