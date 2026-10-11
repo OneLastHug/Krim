@@ -275,6 +275,24 @@ export interface NativeBatchHistoryPage {
   source: "workspace"; scope_id: string; total: number; items: NativeBatchSummary[]; next_cursor: string | null;
 }
 export interface NativeCheckpointCreate { title: string; paths: string[]; request_key: string; }
+export interface MixedBatchItemView {
+  source: "file" | "directory"; position: number; proposal_id: string; expected_revision: number;
+  path: string; target_path: string | null; status: NativeBatchItemView["status"];
+  operation: WorkspaceAttemptView | DirectoryAttemptView | null; error_code: string | null;
+}
+export interface MixedBatchView {
+  batch_id: string; scope_id: string; request_key: string; snapshot_revision: string;
+  action: WorkspaceAction; status: NativeBatchView["status"]; producer_status: NativeBatchView["producer_status"];
+  items: MixedBatchItemView[]; stop_reason: string | null; created_at: string; updated_at: string;
+}
+export interface MixedBatchSummary {
+  batch_id: string; request_key: string; action: WorkspaceAction; status: MixedBatchView["status"];
+  producer_status: MixedBatchView["producer_status"]; snapshot_revision: string; item_count: number; done_count: number;
+  stop_reason: string | null; created_at: string; updated_at: string;
+}
+export interface MixedBatchHistoryPage {
+  scope_id: string; total: number; items: MixedBatchSummary[]; next_cursor: string | null;
+}
 export interface NativeCheckpointView {
   source: "workspace"; checkpoint_id: string; scope_id: string; title: string; request_key: string;
   workspace_key: string; resource_fingerprint: string;
