@@ -11,13 +11,19 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
+from krim_agent.execution.directory_publication import CommandDirectoryProposalRequest
 from krim_agent.persistence.agent_sessions import guard_agent_topic
+from krim_agent.persistence.command_directory_proposals import (
+    CommandDirectoryProposalStore,
+    directory_entry,
+)
 from krim_agent.persistence.workspace_directories import WorkspaceDirectoryStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
 from krim_agent.tools.workspace import workspace_io
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_directory import (
+    ArtifactDirectorySpec,
     DirectoryAttemptView,
     DirectoryChangeAction,
     DirectoryChangeReceipt,
@@ -49,6 +55,7 @@ class DirectoryChangeService:
         self._operations: dict[asyncio.Task[DirectoryAttemptView], Event] = {}
         self._active: set[str] = set()
         self._closed = False
+        self.command_sources = CommandDirectoryProposalStore(self.store)
 
     def assert_external_close(self) -> None:
         task = _current.get()
@@ -72,6 +79,62 @@ class DirectoryChangeService:
         if self._closed:
             raise ToolError("workspace_directory_closed", "目录事务服务已关闭")
         try:
+            if operation == "source_preview":
+                source_request = CommandDirectoryProposalRequest.model_validate(payload)
+                scope, source_binding = await self.changes._guard(context)
+                execution = context.execution
+                if execution is None:
+                    raise ServiceError("execution_unbound", "目录来源需要原执行资源授权", 409)
+                execution.require()
+                previous = await self.command_sources.find(
+                    scope,
+                    source_request,
+                    source_binding,
+                    run_id=context.run_id if context.run_id != "local" else None,
+                )
+                if previous is None:
+                    source = await self.command_sources.source(scope, source_request.command_id)
+                    if (
+                        source.workspace != source_binding.manifest()
+                        or source.snapshot.resource != execution.resource
+                    ):
+                        raise ServiceError(
+                            "execution_proposal_source", "目录来源与当前工作区/执行资源不匹配", 403
+                        )
+                    if source.outcome != "completed" and not source_request.accept_failed:
+                        raise ServiceError(
+                            "execution_failed_artifacts", "失败命令目录须显式accept_failed", 409
+                        )
+                    entry = directory_entry(source, source_request.path)
+                    if not entry.creatable:
+                        raise ServiceError(
+                            "execution_artifact_mode", "目录模式不支持本宿主受控创建", 422
+                        )
+                    spec = ArtifactDirectorySpec(
+                        path=entry.path,
+                        operation="create",
+                        mode=entry.mode,
+                        command_id=source_request.command_id,
+                        source_hash=source.source_hash,
+                    )
+                    prepared = await workspace_io(
+                        WorkspaceDirectoryWriter(source_binding.require()).prepare_artifact, spec
+                    )
+                    await self.changes._guard(context)
+                    execution.require()
+                    previous = await self.command_sources.create(
+                        scope,
+                        source_request,
+                        source_binding,
+                        prepared,
+                        run_id=context.run_id if context.run_id != "local" else None,
+                    )
+                source_value = previous.model_dump(mode="json")
+                context._directory_response = (
+                    operation,
+                    json.dumps(source_value, sort_keys=True),
+                )
+                return source_value
             if operation == "inspect":
                 inspection = DirectoryInspectRequest.model_validate(payload)
                 _, read_binding = await self.changes._guard(context, writing=False)

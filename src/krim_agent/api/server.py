@@ -104,6 +104,10 @@ from krim_agent.execution.agent_models import (
     CommandSlice,
     CommandSummary,
 )
+from krim_agent.execution.directory_publication import (
+    CommandDirectoryProposalRequest,
+    CommandDirectoryProposalView,
+)
 from krim_agent.execution.linux import LinuxSandboxRunner
 from krim_agent.execution.management import (
     CommandAccepted,
@@ -953,6 +957,17 @@ def create_app(
         if payload.command_id != command_id:
             raise ServiceError("execution_command_mismatch", "路径与原命令标识不一致", 422)
         return await agent_service.command_propose(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/commands/{command_id}/directory-proposals")
+    async def agent_command_directory_propose(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        payload: CommandDirectoryProposalRequest,
+        confirmed: bool = Query(default=False),
+    ) -> CommandDirectoryProposalView:
+        if payload.command_id != command_id:
+            raise ServiceError("execution_command_mismatch", "路径与原命令标识不一致", 422)
+        return await agent_service.command_directory_propose(agent_id, payload, confirmed=confirmed)
 
     @app.get("/v1/agents/{agent_id}/workspace")
     async def agent_workspace(agent_id: str) -> WorkspaceView:

@@ -230,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
             "cancel",
             "changes",
             "propose",
+            "directory-propose",
         ],
     )
     commands.add_argument("agent_id")
