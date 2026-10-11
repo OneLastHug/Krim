@@ -29,8 +29,8 @@ NAMES = ["workspace_read", "command_execute", "command_get", "command_read", "co
 
 
 class CountingRunner(LinuxSandboxRunner):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, limits=None):
+        super().__init__(limits=limits)
         self.calls = 0
 
     async def start(self, *args, **kwargs):
@@ -38,14 +38,16 @@ class CountingRunner(LinuxSandboxRunner):
         return await super().start(*args, **kwargs)
 
 
-async def setup(runtime, root, *, policy=None, names=None, mode="agent", persistent=False):
+async def setup(
+    runtime, root, *, policy=None, names=None, mode="agent", persistent=False, limits=None
+):
     async def allow(*_args):
         return "allow"
 
     runtime.tool_policy = policy or allow
     service = AgentService(runtime, runtime.settings)
     service.register_workspace("files", root, version="1", writable=False)
-    runner = CountingRunner()
+    runner = CountingRunner(limits=limits)
     service.register_execution("sandbox", runner, version="1", owned=True)
     await service.profile_put(
         AgentProfileUpdate(
@@ -457,7 +459,7 @@ async def test_execution_resource_is_explicit_and_version_is_frozen_on_restore(r
         await correct.close()
 
 
-@pytest.mark.parametrize("fault", ["symlink", "hardlink", "binary", "mode"])
+@pytest.mark.parametrize("fault", ["symlink", "hardlink", "mode"])
 async def test_input_file_types_cannot_bypass_original_workspace_rules(runtime, tmp_path, fault):
     import os
 
@@ -468,9 +470,8 @@ async def test_input_file_types_cannot_bypass_original_workspace_rules(runtime, 
         (tmp_path / "other").write_text("data")
         os.link(tmp_path / "other", file)
     else:
-        file.write_bytes(b"\0data" if fault == "binary" else b"data")
-        if fault == "mode":
-            file.chmod(0o2644)
+        file.write_bytes(b"data")
+        file.chmod(0o2644)
     service, session, runner = await setup(runtime, tmp_path)
     try:
         with pytest.raises(ServiceError) as rejected:
@@ -478,7 +479,6 @@ async def test_input_file_types_cannot_bypass_original_workspace_rules(runtime, 
         assert rejected.value.code in {
             "workspace_access",
             "workspace_link",
-            "workspace_binary",
             "execution_input_file",
         }
         assert runner.calls == 0

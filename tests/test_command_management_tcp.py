@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -139,6 +140,70 @@ async def test_sync_client_uses_real_tcp_for_execution_and_publication(command_s
 
     await asyncio.to_thread(scenario)
     assert (root / "output.txt").read_text() == "artifact"
+
+
+async def test_sync_client_binary_input_and_exact_undo_use_real_tcp(command_server):
+    url, root, _app = command_server
+    target = root / "input.bin"
+    original = b"\0\xffinput"
+    target.write_bytes(original)
+
+    def scenario():
+        with KrimClient(url, "test-key") as client:
+            identifier = configure(client)
+            intent = AgentCommandRequest(
+                request_key="binary-tcp",
+                input_paths=["input.bin"],
+                command=CommandSpec(
+                    argv=[
+                        "/usr/bin/python3",
+                        "-I",
+                        "-c",
+                        "data=open('input.bin','rb').read();print(data.hex());"
+                        "open('input.bin','wb').write(bytes([255,0,128]))",
+                    ]
+                ),
+            )
+            accepted = client.agent_command_start(identifier, intent, confirmed=True)
+            result = client.agent_command_wait(identifier, accepted.command_id)
+            assert result.outcome == "completed" and target.read_bytes() == original
+            assert (
+                client.agent_command_read(identifier, result.command_id).text
+                == original.hex() + "\n"
+            )
+            raw = client.agent_command_read(
+                identifier, result.command_id, source="artifact", path="input.bin"
+            )
+            assert base64.b64decode(raw.data_base64) == b"\xff\0\x80"
+            proposal = client.agent_command_propose(
+                identifier,
+                CommandProposalRequest(
+                    command_id=result.command_id, path="input.bin", request_key="binary-proposal"
+                ),
+            )
+            assert proposal.proposal.preview.truncated
+            for action in ("apply", "keep", "undo"):
+                current = client.agent_workspace_proposal(identifier, proposal.proposal.proposal_id)
+                receipt = client.agent_workspace_change(
+                    identifier,
+                    WorkspaceChangeAction(
+                        proposal_id=current.proposal_id,
+                        action=action,
+                        expected_revision=current.revision,
+                        request_key="binary-" + action,
+                    ),
+                    confirmed=True,
+                )
+                assert receipt.status == "done"
+                assert target.read_bytes() == (original if action == "undo" else b"\xff\0\x80")
+            assert (
+                client.agent_command_start(identifier, intent, confirmed=True).command_id
+                == result.command_id
+            )
+            assert len(client.agent_command_history(identifier).entries) == 1
+
+    await asyncio.to_thread(scenario)
+    assert target.read_bytes() == original
 
 
 async def test_cli_commands_and_exit_codes_use_real_server(command_server, tmp_path):

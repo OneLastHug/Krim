@@ -38,8 +38,8 @@ from krim_agent.persistence.workspace_checkpoints import encode_capture
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
 from krim_agent.tools.workspace import ReadFileInput, workspace_io, workspace_tools
-from krim_agent.workspace import WorkspaceBinding
-from krim_agent.workspace_writer import CapturedFile, WorkspaceWriter
+from krim_agent.workspace import WorkspaceBinding, WorkspaceFile
+from krim_agent.workspace_writer import CapturedFile, WorkspaceWriter, preview_text
 
 from .command_publication import CommandPublicationService
 from .workspace_changes import WorkspaceChangeService
@@ -289,6 +289,7 @@ class AgentCommandService:
                 WorkspaceWriter(frame.workspace.require()).capture_file,
                 frame.path,
                 require_writable=False,
+                allow_binary=True,
                 authorize=authorize,
             )
             await self._guard(context)
@@ -297,9 +298,26 @@ class AgentCommandService:
             if capture.snapshot.mode & ~0o777:
                 raise ServiceError("execution_input_file", "命令输入不接受特殊权限位", 422)
             frame.captured = capture
-            frame.expected = frame.workspace.workspace.file_view(
-                capture.path, capture.snapshot.data, capture.snapshot.data.decode("utf-8")
-            ).model_dump(mode="json")
+            text, binary = preview_text(capture.snapshot.data)
+            if binary:
+                # 仅可信命令捕获返回摘要；不把二进制转码为虚假的文件正文。
+                view = WorkspaceFile(
+                    path=capture.path,
+                    sha256=capture.snapshot.sha256,
+                    byte_size=len(capture.snapshot.data),
+                    start_line=1,
+                    lines=0,
+                    content=(
+                        f"binary bytes={len(capture.snapshot.data)} "
+                        f"sha256={capture.snapshot.sha256}\n"
+                    ),
+                    truncated=True,
+                )
+            else:
+                view = frame.workspace.workspace.file_view(
+                    capture.path, capture.snapshot.data, text
+                )
+            frame.expected = view.model_dump(mode="json")
             return copy.deepcopy(frame.expected)
         except ServiceError as error:
             raise ToolError(error.code, str(error)) from error
@@ -403,6 +421,7 @@ class AgentCommandService:
                         WorkspaceWriter(workspace.require()).verify_captured,
                         tuple(captures),
                         require_writable=False,
+                        allow_binary=True,
                     )
                 await check()
                 origin: dict[str, JsonValue] = {
@@ -410,7 +429,8 @@ class AgentCommandService:
                     "workspace": workspace.manifest() if workspace else None,
                     # 纳秒和inode保留为私有JSON字符串，不损失64位精度或冒充JS安全整数。
                     "captures": [
-                        json.dumps(encode_capture(item), sort_keys=True) for item in captures
+                        json.dumps(encode_capture(item, allow_binary=True), sort_keys=True)
+                        for item in captures
                     ],
                 }
                 admission = asyncio.create_task(
