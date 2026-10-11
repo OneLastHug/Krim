@@ -340,7 +340,7 @@ async def test_migration_protects_nonempty_eval_history(repository):
         async with repository.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0035_oauth_browser_callbacks"
+            ).scalar() == "0036_workspace_directory_ledger"
     finally:
         await service.close()
 

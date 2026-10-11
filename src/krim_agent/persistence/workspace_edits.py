@@ -52,6 +52,7 @@ from .database import (
     WorkspaceFileLockRow,
     WorkspaceLedgerGuardRow,
 )
+from .directory_fences import assert_file_directory_fence
 from .workspace_batches import assert_batch_execution, assert_batch_request
 from .workspace_restores import assert_restore_execution, assert_restore_request
 
@@ -934,6 +935,7 @@ class WorkspaceEditStore:
                     "workspace_revision_conflict", "修改提案版本已变化或达到上限", 409
                 )
             lock_id = file_key(prepared)
+            await assert_file_directory_fence(session, prepared)
             if await session.get(WorkspaceFileLockRow, lock_id) is not None:
                 raise ServiceError("workspace_file_busy", "该文件有执行中或未核实操作", 409)
             count = await session.scalar(select(func.count()).select_from(WorkspaceEditAttemptRow))
@@ -1041,6 +1043,7 @@ class WorkspaceEditStore:
             proposal = await self._proposal(session, scope_id, row.proposal_id)
             if proposal.active_operation_id != operation_id:
                 raise ServiceError("workspace_operation_conflict", "提案与操作指针不匹配", 409)
+            await assert_file_directory_fence(session, self._attempt(row).prepared)
             await assert_batch_execution(session, self.owner_id, operation_id)
             await assert_restore_execution(session, self.owner_id, operation_id)
             await assert_command_proposal(
