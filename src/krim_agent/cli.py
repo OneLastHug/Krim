@@ -231,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
             "changes",
             "propose",
             "directory-propose",
+            "directory-changes",
         ],
     )
     commands.add_argument("agent_id")

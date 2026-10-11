@@ -53,6 +53,8 @@ from .execution.agent_models import (
     CommandSummary,
 )
 from .execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -400,6 +402,37 @@ class KrimClient:
         )
         self._check(response)
         return CommandDirectoryProposalView.model_validate_json(response.content)
+
+    def agent_command_directory_changes(
+        self,
+        agent_id: str,
+        command_id: str,
+        *,
+        after: str | None = None,
+        limit: int = 32,
+        confirmed: bool = False,
+    ) -> CommandDirectoryChangesPage:
+        request = CommandDirectoryChangesRequest(command_id=command_id, after=after, limit=limit)
+        response = self._http.get(
+            _command_path(agent_id, command_id) + "/directory-changes",
+            params={
+                **request.model_dump(exclude={"command_id"}, exclude_none=True),
+                "confirmed": str(confirmed).lower(),
+            },
+        )
+        self._check(response)
+        value = CommandDirectoryChangesPage.model_validate_json(response.content)
+        if (
+            value.command_id != request.command_id
+            or len(value.entries) > request.limit
+            or any(
+                request.after is not None and item.path <= request.after for item in value.entries
+            )
+        ):
+            raise ClientError(
+                "目录来源回程与原选择不一致", code="execution_source_response", status=502
+            )
+        return value
 
     def __exit__(
         self,

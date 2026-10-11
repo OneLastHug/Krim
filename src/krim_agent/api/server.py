@@ -105,6 +105,8 @@ from krim_agent.execution.agent_models import (
     CommandSummary,
 )
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -968,6 +970,28 @@ def create_app(
         if payload.command_id != command_id:
             raise ServiceError("execution_command_mismatch", "路径与原命令标识不一致", 422)
         return await agent_service.command_directory_propose(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}/directory-changes")
+    async def agent_command_directory_changes(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        request: Request,
+        after: str | None = Query(default=None, min_length=1, max_length=512),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> CommandDirectoryChangesPage:
+        _directory_parameters(request, {"after", "limit"})
+        try:
+            selection = CommandDirectoryChangesRequest(
+                command_id=command_id, after=after, limit=limit
+            )
+        except ValidationError:
+            raise ServiceError("invalid_request", "目录来源游标参数无效", 422) from None
+        return await agent_service.command_directory_changes(
+            agent_id,
+            selection,
+            confirmed=confirmed,
+        )
 
     @app.get("/v1/agents/{agent_id}/workspace")
     async def agent_workspace(agent_id: str) -> WorkspaceView:

@@ -19,6 +19,7 @@ COMMAND_TOOL_NAMES = frozenset(
         "command_history",
         "command_inspect",
         "directory_source_preview",
+        "directory_source_query",
     }
 )
 

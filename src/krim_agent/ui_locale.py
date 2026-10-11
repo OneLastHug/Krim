@@ -280,6 +280,22 @@ TRANSLATIONS: dict[str, str] = {
     "工作区": "Workspace",
     "文件修改与历史": "File changes and history",
     "目录事务与历史": "Directory changes and history",
+    "查看命令目录成果": "View command directory results",
+    "命令目录成果": "Command directory results",
+    "原目录来源": "Original directory source",
+    "来源完整": "Source complete",
+    "来源不完整": "Source incomplete",
+    "没有目录成果": "No directory results",
+    "确认从原命令目录生成容器提案：{path}？": (
+        "Create a directory container proposal from the original command: {path}?"
+    ),
+    "命令目录提案已保存，请审阅目录事务": (
+        "Command directory proposal saved; review the directory change"
+    ),
+    "审阅目录提案": "Review directory proposal",
+    "生成目录提案": "Create directory proposal",
+    "较早目录成果": "Earlier directory results",
+    "较晚目录成果": "Later directory results",
     "准备目录事务": "Prepare directory change",
     "目录操作": "Directory operation",
     "目录相对路径": "Directory relative path",

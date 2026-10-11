@@ -29,6 +29,7 @@ function paths(value) {
 export class CommandsUI {
     notice;
     openProposal;
+    openDirectoryProposal;
     root = document.createElement("details");
     base;
     storageKey;
@@ -64,6 +65,9 @@ export class CommandsUI {
     summary;
     inspected;
     changes;
+    directoryChanges;
+    directoryPages = [null];
+    directoryPageIndex = 0;
     changePages = [null];
     changePageIndex = 0;
     slice;
@@ -73,9 +77,10 @@ export class CommandsUI {
     proposal;
     pendingProposals = new Map();
     poll;
-    constructor(agentId, notice, openProposal) {
+    constructor(agentId, notice, openProposal, openDirectoryProposal) {
         this.notice = notice;
         this.openProposal = openProposal;
+        this.openDirectoryProposal = openDirectoryProposal;
         this.base = "/v1/agents/" + encodeURIComponent(agentId) + "/commands";
         this.storageKey = "krim-command-pending:" + agentId;
         try {
@@ -176,7 +181,7 @@ export class CommandsUI {
             return false;
         if (tool === "command_execute" || tool === "command_cancel")
             return this.sessionOpen && mode !== "plan";
-        if (tool === "command_propose") {
+        if (tool === "command_propose" || tool === "directory_source_preview") {
             // Session permissions只保存工作区身份指纹，不把writable复制进冻结清单；
             // UI读取当前WorkspaceView，后端WorkspaceChange/来源校验仍最终裁决。
             return this.sessionOpen && this.workspace?.available === true && this.workspace.writable;
@@ -393,6 +398,9 @@ export class CommandsUI {
         this.sliceIndex = 0;
         this.changePages = [null];
         this.changePageIndex = 0;
+        this.directoryChanges = undefined;
+        this.directoryPages = [null];
+        this.directoryPageIndex = 0;
     }
     async readSelected() {
         if (!this.selected)
@@ -438,7 +446,7 @@ export class CommandsUI {
         }
         const actions = document.createElement("div");
         actions.className = "actions";
-        actions.append(this.button("刷新原命令", () => this.readSelected()), this.button("等待原命令", () => this.wait(), "command_get", () => !terminal(view)), this.button("取消原命令", () => this.cancel(), "command_cancel", () => !terminal(view)), this.button("读取标准输出", () => this.readOutput("stdout"), "command_read"), this.button("读取错误输出", () => this.readOutput("stderr"), "command_read"), this.button("查看命令文件变化", () => this.readChanges(), "command_changes", () => terminal(view) && view.artifacts_complete && view.processes_reaped));
+        actions.append(this.button("刷新原命令", () => this.readSelected()), this.button("等待原命令", () => this.wait(), "command_get", () => !terminal(view)), this.button("取消原命令", () => this.cancel(), "command_cancel", () => !terminal(view)), this.button("读取标准输出", () => this.readOutput("stdout"), "command_read"), this.button("读取错误输出", () => this.readOutput("stderr"), "command_read"), this.button("查看命令文件变化", () => this.readChanges(), "command_changes", () => terminal(view) && view.artifacts_complete && view.processes_reaped), this.button("查看命令目录成果", () => this.readDirectoryChanges(), "directory_source_query", () => terminal(view) && view.artifacts_complete && view.processes_reaped));
         this.detail.append(actions);
         if (view.output_truncated)
             this.detail.append(text("p", "命令输出已截断"));
@@ -448,6 +456,8 @@ export class CommandsUI {
             this.renderOutput();
         if (this.changes)
             this.renderChanges();
+        if (this.directoryChanges)
+            this.renderDirectoryChanges();
         if (this.proposal) {
             const section = document.createElement("section");
             section.className = "command-proposal";
@@ -541,6 +551,63 @@ export class CommandsUI {
             section.append(row);
         }
         section.append(this.button("较早文件变化", () => this.readChanges(-1), "command_changes", () => this.changePageIndex > 0), this.button("较晚文件变化", () => this.readChanges(1), "command_changes", () => changes.next_after !== null));
+        this.detail.append(section);
+    }
+    async readDirectoryChanges(direction = 0) {
+        if (!this.selected || !this.permitted("directory_source_query"))
+            return;
+        if (direction > 0 && this.directoryChanges?.next_after) {
+            this.directoryPages = this.directoryPages.slice(0, this.directoryPageIndex + 1);
+            this.directoryPages.push(this.directoryChanges.next_after);
+        }
+        this.directoryPageIndex += direction;
+        const query = new URLSearchParams({ limit: "32" });
+        const after = this.directoryPages[this.directoryPageIndex];
+        if (after)
+            query.set("after", after);
+        this.directoryChanges = await this.request(this.commandPath() + "/directory-changes?" + query);
+        this.renderDetail();
+    }
+    async proposeDirectory(entry) {
+        if (!this.selected || !this.permitted("directory_source_preview"))
+            return;
+        if (!window.confirm(t("确认从原命令目录生成容器提案：{path}？", { path: entry.path })))
+            return;
+        const body = {
+            command_id: this.selected, path: entry.path, request_key: crypto.randomUUID(),
+            accept_failed: this.state?.outcome !== "completed",
+        };
+        const proposal = await this.request(this.commandPath() + "/directory-proposals?confirmed=true", { method: "POST", body: JSON.stringify(body) });
+        this.noticeBox.textContent = t("命令目录提案已保存，请审阅目录事务");
+        await this.readDirectoryChanges();
+        await this.openDirectoryProposal(proposal.proposal.proposal_id);
+    }
+    renderDirectoryChanges() {
+        const changes = this.directoryChanges;
+        if (!changes)
+            return;
+        const section = document.createElement("section");
+        section.className = "command-directory-changes";
+        section.append(text("h3", "命令目录成果"));
+        const meta = document.createElement("p");
+        meta.textContent = `${t("原目录来源")}: ${changes.source_hash} · ${status(changes.outcome)} · ${changes.complete ? t("来源完整") : t("来源不完整")}`;
+        section.append(meta);
+        if (!changes.entries.length)
+            section.append(text("p", "没有目录成果"));
+        for (const entry of changes.entries) {
+            const row = document.createElement("div");
+            row.className = "command-directory-row";
+            row.dataset.path = entry.path;
+            const info = document.createElement("p");
+            info.textContent = `${entry.path} · mode ${entry.mode.toString(8).padStart(4, "0")} · ${t(entry.empty ? "空目录" : "非空目录")}`;
+            row.append(info);
+            if (entry.proposal_id)
+                row.append(this.button("审阅目录提案", () => this.openDirectoryProposal(entry.proposal_id), "directory_query"));
+            else
+                row.append(this.button("生成目录提案", () => this.proposeDirectory(entry), "directory_source_preview", () => entry.creatable && this.sessionOpen));
+            section.append(row);
+        }
+        section.append(this.button("较早目录成果", () => this.readDirectoryChanges(-1), "directory_source_query", () => this.directoryPageIndex > 0), this.button("较晚目录成果", () => this.readDirectoryChanges(1), "directory_source_query", () => changes.next_after !== null));
         this.detail.append(section);
     }
     async propose(entry) {

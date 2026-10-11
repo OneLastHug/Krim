@@ -16,6 +16,8 @@ from krim_agent.execution.agent_models import (
     CommandSummary,
 )
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -150,6 +152,16 @@ class AgentSession:
         confirmed: bool = False,
     ) -> CommandDirectoryProposalView:
         return await self.service.command_directory_propose(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def command_directory_changes(
+        self,
+        request: CommandDirectoryChangesRequest,
+        *,
+        confirmed: bool = False,
+    ) -> CommandDirectoryChangesPage:
+        return await self.service.command_directory_changes(
             self.agent_id, request, confirmed=confirmed
         )
 

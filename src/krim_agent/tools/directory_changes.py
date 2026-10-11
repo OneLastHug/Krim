@@ -6,6 +6,8 @@ from typing import Any
 from pydantic import BaseModel, JsonValue
 
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -41,6 +43,15 @@ def directory_change_tools() -> tuple[ToolDefinition, ...]:
         await context.directory_changes.validate_result(operation, value, context)
 
     return (
+        ToolDefinition(
+            "directory_source_query",
+            "分页读取原命令完整目录manifest与已有目录提案，不发布目录",
+            CommandDirectoryChangesRequest,
+            lambda arguments, context: execute("source_query", arguments, context),
+            "read",
+            output_schema=CommandDirectoryChangesPage,
+            output_guard=lambda value, context: guard("source_query", value, context),
+        ),
         ToolDefinition(
             "directory_source_preview",
             "从原命令完整目录manifest冻结单目录容器提案，不伪造文件字节",
