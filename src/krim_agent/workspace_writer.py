@@ -220,10 +220,22 @@ def _rename_function() -> Callable[[int, bytes, int, bytes, int], int]:
     return cast(Callable[[int, bytes, int, bytes, int], int], function)
 
 
-def rename_at(parent_fd: int, source: str, target: str, *, exchange: bool = False) -> None:
+def rename_at(
+    parent_fd: int,
+    source: str,
+    target: str,
+    *,
+    target_fd: int | None = None,
+    exchange: bool = False,
+) -> None:
     # Linux RENAME_EXCHANGE=2，RENAME_NOREPLACE=1；不退化为可覆盖路径的普通rename。
+    destination_fd = parent_fd if target_fd is None else target_fd
     result = _rename_function()(
-        parent_fd, os.fsencode(source), parent_fd, os.fsencode(target), 2 if exchange else 1
+        parent_fd,
+        os.fsencode(source),
+        destination_fd,
+        os.fsencode(target),
+        2 if exchange else 1,
     )
     if result != 0:
         code = ctypes.get_errno()

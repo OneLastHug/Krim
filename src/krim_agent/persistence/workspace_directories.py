@@ -227,6 +227,7 @@ class WorkspaceDirectoryStore:
                 resource_fingerprint=row.resource_fingerprint,
                 path=spec.path,
                 operation=spec.operation,
+                target_path=spec.target_path,
                 before_fingerprint=change.before.fingerprint if change.before else None,
                 mode=spec.mode,
                 revision=row.revision,

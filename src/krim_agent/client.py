@@ -824,7 +824,18 @@ class KrimClient:
             json=request.model_dump(mode="json"),
         )
         self._check(response)
-        return DirectoryPreviewView.model_validate_json(response.content)
+        value = DirectoryPreviewView.model_validate_json(response.content)
+        if (
+            value.path != request.spec.path
+            or value.operation != request.spec.operation
+            or value.target_path != request.spec.target_path
+            or value.before_fingerprint != request.spec.expected_fingerprint
+            or value.mode != request.spec.mode
+        ):
+            raise ClientError(
+                "目录预览回程与原条件不一致", code="workspace_directory_response", status=502
+            )
+        return value
 
     def agent_directory_change(
         self, agent_id: str, request: DirectoryChangeAction, *, confirmed: bool = False

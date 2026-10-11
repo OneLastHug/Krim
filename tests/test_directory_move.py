@@ -1,7 +1,6 @@
 """单空目录移动的双父级条件锁、原inode撤销和unknown核实。"""
 
 import errno
-import os
 import sys
 
 import pytest
@@ -82,16 +81,16 @@ def test_move_unknown_reconciles_without_replaying_rename(tmp_path, monkeypatch)
         writer = WorkspaceDirectoryWriter(workspace)
         before = writer.capture("a/empty")
         plan = writer.prepare(move("a/empty", "b/moved", before.fingerprint))
-        original = os.rename
+        original = module.rename_at
         called = False
 
-        def unknown(source_name, target_name, *args, **kwargs):
+        def unknown(source_fd, source_name, target_name, *args, **kwargs):
             nonlocal called
             called = True
-            original(source_name, target_name, *args, **kwargs)
+            original(source_fd, source_name, target_name, *args, **kwargs)
             raise OSError(errno.EIO, "lost rename result")
 
-        monkeypatch.setattr(module.os, "rename", unknown)
+        monkeypatch.setattr(module, "rename_at", unknown)
         uncertain = writer.apply(plan)
         assert called and uncertain.receipt.status == "uncertain" and uncertain.recovery is not None
         assert not source.exists() and (tmp_path / "b" / "moved").is_dir()
