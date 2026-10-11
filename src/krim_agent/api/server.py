@@ -199,6 +199,7 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -211,6 +212,13 @@ from .web import mount_browser_ui
 WorkspaceIdentifier = Annotated[
     str, PathParameter(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$")
 ]
+
+
+def _mixed_batch_parameters(request: Request, allowed: set[str]) -> None:
+    items = request.query_params.multi_items()
+    names = {name for name, _ in items}
+    if not names <= allowed or len(items) != len(names):
+        raise ServiceError("workspace_mixed_batch_parameters", "混合批次参数无效或重复", 422)
 
 
 def _directory_parameters(request: Request, allowed: set[str]) -> None:
@@ -1311,6 +1319,53 @@ def create_app(
         agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
     ) -> NativeBatchView:
         return await agent_service.workspace_cancel_batch(agent_id, batch_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/mixed-batches", status_code=202)
+    async def agent_workspace_mixed_batch_start(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        payload: MixedBatchRequest,
+        confirmed: bool = Query(default=False),
+    ) -> MixedBatchView:
+        _mixed_batch_parameters(request, {"confirmed"})
+        return await agent_service.workspace_start_mixed_batch(
+            agent_id, payload, confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/mixed-batches/by-key")
+    async def agent_workspace_mixed_batch_by_key(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"),
+    ) -> MixedBatchView | None:
+        _mixed_batch_parameters(request, {"request_key"})
+        return await agent_service.workspace_mixed_batch_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/mixed-batches/{batch_id}")
+    async def agent_workspace_mixed_batch_get(
+        request: Request, agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
+    ) -> MixedBatchView:
+        _mixed_batch_parameters(request, set())
+        return await agent_service.workspace_mixed_batch(agent_id, batch_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/mixed-batches/{batch_id}/wait")
+    async def agent_workspace_mixed_batch_wait(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        batch_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300, allow_inf_nan=False),
+    ) -> MixedBatchView:
+        _mixed_batch_parameters(request, {"timeout_seconds"})
+        return await agent_service.workspace_wait_mixed_batch(
+            agent_id, batch_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/mixed-batches/{batch_id}/cancel")
+    async def agent_workspace_mixed_batch_cancel(
+        request: Request, agent_id: WorkspaceIdentifier, batch_id: WorkspaceIdentifier
+    ) -> MixedBatchView:
+        _mixed_batch_parameters(request, set())
+        return await agent_service.workspace_cancel_mixed_batch(agent_id, batch_id)
 
     @app.post("/v1/agents/{agent_id}/workspace/native-checkpoints", status_code=202)
     async def agent_workspace_checkpoint_create(

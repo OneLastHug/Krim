@@ -32,6 +32,7 @@ from .workspace_directory import (
     DirectoryQueryKind,
 )
 from .workspace_list import NativeBatchRequest, NativeBatchView
+from .workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 from .workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -131,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
             "batch-history",
             "wait-batch",
             "cancel-batch",
+            "start-mixed-batch",
+            "mixed-batch",
+            "mixed-batch-by-key",
+            "wait-mixed-batch",
+            "cancel-mixed-batch",
             *_CHECKPOINT_ACTIONS,
         ],
     )
@@ -495,7 +501,18 @@ def _workspace_command(
     client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
     result: BaseModel | Sequence[BaseModel]
-    if args.action in {"native-batch", "wait-batch", "cancel-batch"} and args.batch_id:
+    if (
+        args.action
+        in {
+            "native-batch",
+            "wait-batch",
+            "cancel-batch",
+            "mixed-batch",
+            "wait-mixed-batch",
+            "cancel-mixed-batch",
+        }
+        and args.batch_id
+    ):
         if args.value and args.value != args.batch_id:
             parser.error("位置参数与--batch-id的批次标识不一致")
         args.value = args.batch_id
@@ -577,6 +594,42 @@ def _workspace_command(
         if not args.value:
             parser.error("workspace cancel-batch需要批次标识")
         result = client.agent_workspace_cancel_native_batch(args.agent_id, args.value)
+    elif args.action == "start-mixed-batch":
+        if not args.request:
+            parser.error("workspace start-mixed-batch需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(16385)
+            if len(raw) > 16384:
+                parser.error("混合批次请求不能超过16KiB")
+            mixed_request = MixedBatchRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("混合批次请求无效；请检查action、source、proposal/revision和request_key")
+        result = client.agent_workspace_start_mixed_batch(
+            args.agent_id, mixed_request, confirmed=args.confirm
+        )
+    elif args.action == "mixed-batch":
+        if not args.value:
+            parser.error("workspace mixed-batch需要批次标识")
+        result = client.agent_workspace_mixed_batch(args.agent_id, args.value)
+    elif args.action == "mixed-batch-by-key":
+        if not args.request_key:
+            parser.error("workspace mixed-batch-by-key需要--request-key")
+        mixed = client.agent_workspace_mixed_batch_by_key(args.agent_id, args.request_key)
+        if mixed is None:
+            print("null")
+            return
+        result = mixed
+    elif args.action == "wait-mixed-batch":
+        if not args.value:
+            parser.error("workspace wait-mixed-batch需要批次标识")
+        result = client.agent_workspace_wait_mixed_batch(
+            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
+        )
+    elif args.action == "cancel-mixed-batch":
+        if not args.value:
+            parser.error("workspace cancel-mixed-batch需要批次标识")
+        result = client.agent_workspace_cancel_mixed_batch(args.agent_id, args.value)
     elif args.action == "preview":
         if not args.request:
             parser.error("workspace preview需要--request本地JSON文件")
@@ -648,6 +701,12 @@ def _workspace_command(
     if (
         isinstance(result, NativeBatchView)
         and args.action in {"start-batch", "wait-batch"}
+        and result.status not in {"running", "done"}
+    ):
+        parser.exit(1)
+    if (
+        isinstance(result, MixedBatchView)
+        and args.action in {"start-mixed-batch", "wait-mixed-batch"}
         and result.status not in {"running", "done"}
     ):
         parser.exit(1)

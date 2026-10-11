@@ -34,6 +34,7 @@ from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
+from krim_agent.application.workspace_mixed_batches import MixedBatchService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
@@ -69,6 +70,7 @@ from krim_agent.persistence.agent_sessions import assert_session_open, guard_age
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
+from krim_agent.persistence.workspace_mixed_batches import MixedBatchStore
 from krim_agent.persistence.workspace_restores import WorkspaceRestoreStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -123,7 +125,12 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
-from krim_agent.workspace_mixed_batch import MixedBatchFence
+from krim_agent.workspace_mixed_batch import (
+    MixedBatchDispatch,
+    MixedBatchFence,
+    MixedBatchRequest,
+    MixedBatchView,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestoreFence,
@@ -224,6 +231,14 @@ class AgentService:
             self.workspace_batch_store,
             self._workspace_batch_authorize,
             self._workspace_batch_child,
+        )
+        self.workspace_mixed_batch_store = MixedBatchStore(
+            self.workspace_edits, self.manager.directory_changes.store
+        )
+        self.workspace_mixed_batches = MixedBatchService(
+            self.workspace_mixed_batch_store,
+            self._workspace_batch_authorize,
+            self._mixed_batch_child,
         )
         self.workspace_checkpoint_store = WorkspaceCheckpointStore(self.workspace_edits)
         self.workspace_checkpoints = WorkspaceCheckpointService(
@@ -644,6 +659,7 @@ class AgentService:
             return 0
         recovered = await self.workspace_edits.recover_interrupted()
         recovered += await self.workspace_batch_store.recover_interrupted()
+        recovered += await self.workspace_mixed_batch_store.recover_interrupted()
         recovered += await self.workspace_restore_store.recover_interrupted()
         self._workspace_recovered = True
         return recovered
@@ -1453,6 +1469,46 @@ class AgentService:
     ) -> NativeBatchView:
         return await self.workspace_batches.start(agent_id, request, confirmed=confirmed)
 
+    async def _mixed_batch_child(
+        self, agent_id: str, dispatch: MixedBatchDispatch, confirmed: bool
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            "workspace_change" if dispatch.fence.source == "file" else "directory_change",
+            dispatch.request.model_dump(),
+            confirmed=confirmed,
+            mixed_fence=dispatch.fence,
+        )
+
+    async def workspace_start_mixed_batch(
+        self, agent_id: str, request: MixedBatchRequest, *, confirmed: bool = False
+    ) -> MixedBatchView:
+        return await self.workspace_mixed_batches.start(agent_id, request, confirmed=confirmed)
+
+    async def workspace_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_mixed_batch_store.get(f"session:{session.session_id}", batch_id)
+
+    async def workspace_mixed_batch_by_key(
+        self, agent_id: str, request_key: str
+    ) -> MixedBatchView | None:
+        session = await self.session(agent_id)
+        return await self.workspace_mixed_batch_store.by_key(
+            f"session:{session.session_id}", request_key
+        )
+
+    async def workspace_wait_mixed_batch(
+        self, agent_id: str, batch_id: str, *, timeout_seconds: float = 30
+    ) -> MixedBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_mixed_batches.wait(
+            f"session:{session.session_id}", batch_id, timeout_seconds=timeout_seconds
+        )
+
+    async def workspace_cancel_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
+        session = await self.session(agent_id)
+        return await self.workspace_mixed_batches.cancel(f"session:{session.session_id}", batch_id)
+
     async def workspace_batch(self, agent_id: str, batch_id: str) -> NativeBatchView:
         session = await self.session(agent_id)
         return await self.workspace_batch_store.get(f"session:{session.session_id}", batch_id)
@@ -1900,6 +1956,7 @@ class AgentService:
         self.manager.commands.assert_external_close()
         self.manager.directory_changes.assert_external_close()
         self.workspace_batches.assert_external_close()
+        self.workspace_mixed_batches.assert_external_close()
         async with self._start_lock:
             self._closed = True
         try:
@@ -1911,6 +1968,7 @@ class AgentService:
             await self.workspace_restores.close()
             await self.workspace_checkpoints.close()
             await self.workspace_batches.close()
+            await self.workspace_mixed_batches.close()
             operations = list(self._workspace_operations)
             for operation in operations:
                 if not operation.cancelling():

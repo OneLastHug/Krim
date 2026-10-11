@@ -72,6 +72,14 @@ from krim_agent.workspace_list import (
     NativeChangeItem,
     NativeChangePage,
 )
+from krim_agent.workspace_mixed_batch import (
+    MixedBatchHistoryPage,
+    MixedBatchItemView,
+    MixedBatchRequest,
+    MixedBatchSummary,
+    MixedBatchTarget,
+    MixedBatchView,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestoreItem,
@@ -147,6 +155,12 @@ __all__ = [
     "WorkspaceCheckpointFileView",
     "WorkspaceCheckpointView",
     "NativeBatchHistoryPage",
+    "MixedBatchHistoryPage",
+    "MixedBatchItemView",
+    "MixedBatchRequest",
+    "MixedBatchSummary",
+    "MixedBatchTarget",
+    "MixedBatchView",
     "NativeBatchSummary",
     "NativeBatchItemView",
     "NativeBatchRequest",

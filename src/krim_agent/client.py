@@ -126,6 +126,7 @@ from .workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from .workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 from .workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -1111,6 +1112,65 @@ class KrimClient:
         )
         self._check(response)
         return NativeBatchView.model_validate_json(response.content)
+
+    def agent_workspace_start_mixed_batch(
+        self, agent_id: str, request: MixedBatchRequest, *, confirmed: bool = False
+    ) -> MixedBatchView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return MixedBatchView.model_validate_json(response.content)
+
+    def agent_workspace_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches/"
+            f"{_workspace_identifier(batch_id)}"
+        )
+        self._check(response)
+        return MixedBatchView.model_validate_json(response.content)
+
+    def agent_workspace_mixed_batch_by_key(
+        self, agent_id: str, request_key: str
+    ) -> MixedBatchView | None:
+        if not 1 <= len(request_key) <= 128 or any(
+            ord(char) < 32 or ord(char) == 127 for char in request_key
+        ):
+            raise ClientError(
+                "混合批次原请求键无效", code="workspace_request_key_invalid", status=422
+            )
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches/by-key",
+            params={"request_key": request_key},
+        )
+        self._check(response)
+        return TypeAdapter(MixedBatchView | None).validate_json(response.content)
+
+    def agent_workspace_wait_mixed_batch(
+        self, agent_id: str, batch_id: str, *, timeout_seconds: float = 30
+    ) -> MixedBatchView:
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+            raise ClientError(
+                "批次等待时间须为有限的0–300秒", code="workspace_mixed_batch_timeout", status=422
+            )
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches/"
+            f"{_workspace_identifier(batch_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        self._check(response)
+        return MixedBatchView.model_validate_json(response.content)
+
+    def agent_workspace_cancel_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/mixed-batches/"
+            f"{_workspace_identifier(batch_id)}/cancel"
+        )
+        self._check(response)
+        return MixedBatchView.model_validate_json(response.content)
 
     def agent_workspace_create_checkpoint(
         self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
