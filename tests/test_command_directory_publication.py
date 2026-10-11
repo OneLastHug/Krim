@@ -16,6 +16,7 @@ from krim_agent.agents import AgentProfile, AgentProfileUpdate
 from krim_agent.client import KrimClient
 from krim_agent.execution import CommandSpec
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -35,6 +36,7 @@ NAMES = [
     "command_get",
     "workspace_read",
     "directory_source_preview",
+    "directory_source_query",
     "directory_change",
     "directory_query",
     "directory_reconcile",
@@ -62,6 +64,14 @@ async def test_real_command_directory_source_create_keep_undo_and_same_key(runti
         assert view.proposal.path == "empty" and view.proposal.operation == "create"
         repeated = await proposal(service, agent, result.command_id)
         assert repeated.proposal.proposal_id == view.proposal.proposal_id
+        catalog = await service.command_directory_changes(
+            agent.agent_id,
+            CommandDirectoryChangesRequest(command_id=result.command_id, limit=1),
+        )
+        assert (
+            catalog.entries[0].path == "empty"
+            and catalog.entries[0].proposal_id == view.proposal.proposal_id
+        )
         applied = await agent.change_directory(
             DirectoryChangeAction(
                 proposal_id=view.proposal.proposal_id,
@@ -231,6 +241,13 @@ async def test_sync_client_real_tcp_source_proposal_and_original_directory_actio
             )
             proposal = client.agent_command_directory_propose(agent.agent_id, request)
             assert proposal.directory.empty and proposal.proposal.mode == 0o750
+            page = client.agent_command_directory_changes(
+                agent.agent_id, result.command_id, limit=1
+            )
+            assert (
+                page.entries[0].path == "empty"
+                and page.entries[0].proposal_id == proposal.proposal.proposal_id
+            )
             applied = client.agent_directory_change(
                 agent.agent_id,
                 DirectoryChangeAction(
@@ -291,6 +308,23 @@ async def test_sync_client_real_tcp_source_proposal_and_original_directory_actio
     assert process.returncode == 0, stderr.decode()
     value = json.loads(stdout)
     assert value["command_id"] == request.command_id and value["proposal"]["status"] == "undone"
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "krim_agent",
+        "commands",
+        "directory-changes",
+        agent_id,
+        request.command_id,
+        "--url",
+        url,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), 20)
+    assert process.returncode == 0, stderr.decode()
+    assert json.loads(stdout)["entries"][0]["path"] == "empty"
 
 
 async def test_same_key_concurrent_previews_have_one_source_link(runtime, tmp_path):

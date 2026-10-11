@@ -116,6 +116,15 @@ export class DirectoryChangesUI {
 
   dispose(): void { this.disposed = true; this.sync(); }
 
+  async focusProposal(proposalId: string): Promise<void> {
+    if (this.busy || this.disposed) throw new Error(t("Agent 实例不可用"));
+    this.root.open = true;
+    await this.work(async () => {
+      this.grant = await this.read<WorkspaceView>(this.base);
+      this.select(proposalId); this.persist(); await this.readSelected(); this.loaded = true;
+    });
+  }
+
   update(bound: boolean, available: boolean, mode: unknown, grant?: WorkspaceView): void {
     this.bound = bound; this.available = available; this.sessionMode = typeof mode === "string" ? mode : "agent";
     if (grant) this.grant = grant;

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import time
+from typing import Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
+    CommandDirectoryDelta,
     CommandDirectoryEntry,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
@@ -97,6 +101,63 @@ class CommandDirectoryProposalStore:
         async with self.database.write_lock, self.database.sessions() as session:
             await self.directories.files._scope(session, scope, writing=False)
             return await load_source(session, scope, command_id)
+
+    async def page(
+        self, scope: str, request: CommandDirectoryChangesRequest
+    ) -> CommandDirectoryChangesPage:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.directories.files._scope(session, scope, writing=False)
+            source = await load_source(session, scope, request.command_id)
+            if source.directories is None:
+                raise ServiceError(
+                    "execution_directories_unrecorded", "原命令尚无可靠目录来源", 409
+                )
+            if request.after is not None and request.after not in source.directories:
+                raise ServiceError("execution_directory_not_found", "目录游标不属于原命令来源", 404)
+            paths = [
+                path
+                for path in sorted(source.directories)
+                if request.after is None or path > request.after
+            ]
+            page = [directory_entry(source, path) for path in paths[: request.limit]]
+            proposal_ids: dict[str, str] = {}
+            rows = await session.scalars(
+                select(WorkspaceDirectoryProposalRow)
+                .join(
+                    CommandDirectoryProposalRow,
+                    CommandDirectoryProposalRow.proposal_id
+                    == WorkspaceDirectoryProposalRow.proposal_id,
+                )
+                .where(
+                    WorkspaceDirectoryProposalRow.scope_id == scope,
+                    WorkspaceDirectoryProposalRow.path.in_([item.path for item in page]),
+                    CommandDirectoryProposalRow.command_id == request.command_id,
+                    CommandDirectoryProposalRow.source_hash == source.source_hash,
+                )
+                .order_by(
+                    WorkspaceDirectoryProposalRow.created_at,
+                    WorkspaceDirectoryProposalRow.proposal_id,
+                )
+            )
+            for row in rows:
+                await assert_directory_source(session, row)
+                proposal_ids[row.path] = row.proposal_id
+            return CommandDirectoryChangesPage(
+                command_id=request.command_id,
+                source_hash=source.source_hash,
+                outcome=cast(Literal["completed", "failed", "output_limit"], source.outcome),
+                entries=[
+                    CommandDirectoryDelta(
+                        path=item.path,
+                        mode=item.mode,
+                        empty=item.empty,
+                        creatable=item.creatable,
+                        proposal_id=proposal_ids.get(item.path),
+                    )
+                    for item in page
+                ],
+                next_after=page[-1].path if len(paths) > request.limit else None,
+            )
 
     async def _view(
         self, session: AsyncSession, proposal: WorkspaceDirectoryProposalRow

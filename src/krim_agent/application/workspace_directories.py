@@ -11,7 +11,11 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
-from krim_agent.execution.directory_publication import CommandDirectoryProposalRequest
+from krim_agent.execution.binding import ExecutionBinding
+from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesRequest,
+    CommandDirectoryProposalRequest,
+)
 from krim_agent.persistence.agent_sessions import guard_agent_topic
 from krim_agent.persistence.command_directory_proposals import (
     CommandDirectoryProposalStore,
@@ -79,13 +83,29 @@ class DirectoryChangeService:
         if self._closed:
             raise ToolError("workspace_directory_closed", "目录事务服务已关闭")
         try:
+            if operation == "source_query":
+                catalog_request = CommandDirectoryChangesRequest.model_validate(payload)
+                scope, catalog_binding, catalog_execution = await self._source_guard(
+                    context, history=True
+                )
+                source = await self.command_sources.source(scope, catalog_request.command_id)
+                if (
+                    source.workspace != catalog_binding.manifest()
+                    or source.snapshot.resource != catalog_execution.resource
+                ):
+                    raise ServiceError(
+                        "execution_proposal_source", "目录来源与原资源绑定不一致", 403
+                    )
+                catalog_value = await self.command_sources.page(scope, catalog_request)
+                if catalog_value.source_hash != source.source_hash:
+                    raise ServiceError("execution_source_corrupt", "目录来源查阅期间变化", 409)
+                await self._source_guard(context, history=True)
+                source_value = catalog_value.model_dump(mode="json")
+                context._directory_response = (operation, json.dumps(source_value, sort_keys=True))
+                return source_value
             if operation == "source_preview":
                 source_request = CommandDirectoryProposalRequest.model_validate(payload)
-                scope, source_binding = await self.changes._guard(context)
-                execution = context.execution
-                if execution is None:
-                    raise ServiceError("execution_unbound", "目录来源需要原执行资源授权", 409)
-                execution.require()
+                scope, source_binding, execution = await self._source_guard(context)
                 previous = await self.command_sources.find(
                     scope,
                     source_request,
@@ -120,8 +140,7 @@ class DirectoryChangeService:
                     prepared = await workspace_io(
                         WorkspaceDirectoryWriter(source_binding.require()).prepare_artifact, spec
                     )
-                    await self.changes._guard(context)
-                    execution.require()
+                    await self._source_guard(context)
                     previous = await self.command_sources.create(
                         scope,
                         source_request,
@@ -129,6 +148,7 @@ class DirectoryChangeService:
                         prepared,
                         run_id=context.run_id if context.run_id != "local" else None,
                     )
+                await self._source_guard(context)
                 source_value = previous.model_dump(mode="json")
                 context._directory_response = (
                     operation,
@@ -293,6 +313,27 @@ class DirectoryChangeService:
             raise ToolError(
                 "workspace_directory_receipt_unverified", "目录回程未保留原后端事实，请查询原操作"
             )
+
+    async def _source_guard(
+        self, context: ToolContext, *, history: bool = False
+    ) -> tuple[str, WorkspaceBinding, ExecutionBinding]:
+        scope, binding = (
+            await self._query_guard(context) if history else await self.changes._guard(context)
+        )
+        execution = context.execution
+        if execution is None:
+            raise ServiceError("execution_unbound", "目录来源需要原执行资源授权", 409)
+        if not history or context.origin != "host" or context.run_id != "local":
+            execution.require()
+        async with self.store.database.write_lock, self.store.database.sessions() as session:
+            row = await guard_agent_topic(
+                session, context.topic_id, context.session_id, context.agent_id, self.store.owner_id
+            )
+            if row is not None and row.permissions.get(
+                "execution"
+            ) != execution.resource.model_dump(mode="json"):
+                raise ServiceError("execution_binding_changed", "目录来源执行资源已变化", 403)
+        return scope, binding, execution
 
     async def _query_guard(self, context: ToolContext) -> tuple[str, WorkspaceBinding]:
         if context.origin != "host" or context.run_id != "local":

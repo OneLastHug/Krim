@@ -198,6 +198,18 @@ export interface DirectoryPage {
 export interface DirectoryInspectView {
   path: string; found: boolean; fingerprint: string | null; mode: number | null; empty: boolean | null;
 }
+export interface CommandDirectoryDelta {
+  path: string; mode: number; empty: boolean; creatable: boolean; proposal_id: string | null;
+}
+export interface CommandDirectoryChangesPage {
+  command_id: string; source_hash: string; outcome: NonNullable<CommandHistoryEntry["outcome"]>;
+  complete: boolean; entries: CommandDirectoryDelta[]; next_after: string | null;
+}
+export interface CommandDirectoryProposalView {
+  command_id: string; source_hash: string; outcome: CommandDirectoryChangesPage["outcome"];
+  accept_failed: boolean; directory: { path: string; mode: number; empty: boolean; creatable: boolean };
+  proposal: DirectoryPreviewView;
+}
 export interface FileChangeSpec {
   path: string; operation: "write" | "replace" | "delete"; expected_sha256: string | null;
   content?: string | null; replacements?: Array<{ old_text: string; new_text: string; occurrences: number }>;

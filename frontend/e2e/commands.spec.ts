@@ -2,7 +2,8 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
 const tools = ["workspace_read", "workspace_preview", "workspace_change", "workspace_reconcile", "workspace_finalize",
-  "command_execute", "command_get", "command_read", "command_cancel", "command_history", "command_inspect", "command_changes", "command_propose"];
+  "command_execute", "command_get", "command_read", "command_cancel", "command_history", "command_inspect", "command_changes", "command_propose",
+  "directory_source_preview", "directory_source_query", "directory_query", "directory_change", "directory_reconcile", "directory_finalize"];
 test.setTimeout(60_000);
 
 async function connect(page: Page, topic: string): Promise<void> {
@@ -73,6 +74,25 @@ test("真实命令、输出分页与纯文本、产物审阅及独立批准和�
     await expect(files.locator(".workspace-change-detail strong")).toContainText("文件已撤销");
     expect((await (await page.request.get(`/v1/agents/${id}/workspace/read?path=command-flow.txt`, { headers })).json()).content).toBe("before\n");
     await panel.screenshot({ path: test.info().outputPath("command-panel.png") });
+  } finally { await page.request.delete(`/v1/agents/${id}`, { headers }); }
+});
+
+test("命令目录成果分页发现、来源提案导航与独立撤销", async ({ page }) => {
+  const { id, card, panel } = await agent(page, "browser-command-directories");
+  const directories = card.locator(".directory-changes");
+  try {
+    await draft(panel, "import os;os.mkdir('command-empty')");
+    await confirm(page, panel, "执行受控命令");
+    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
+    await panel.getByRole("button", { name: "查看命令目录成果", exact: true }).click();
+    const row = panel.locator('.command-directory-row[data-path="command-empty"]');
+    await expect(row).toContainText("空目录");
+    await confirm(page, row, "生成目录提案");
+    await expect(directories.locator(".directory-detail > strong")).toContainText("目录待确认");
+    await confirm(page, directories, "应用目录事务");
+    await expect(directories.locator(".directory-detail > strong")).toContainText("目录已应用");
+    await confirm(page, directories, "撤销目录事务");
+    await expect(directories.locator(".directory-detail > strong")).toContainText("目录已撤销");
   } finally { await page.request.delete(`/v1/agents/${id}`, { headers }); }
 });
 

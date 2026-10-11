@@ -11,6 +11,8 @@ from krim_agent.execution.agent_models import (
     CommandSummary,
 )
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryEntry,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
@@ -105,6 +107,8 @@ from .types import (
 )
 
 __all__ = [
+    "CommandDirectoryChangesPage",
+    "CommandDirectoryChangesRequest",
     "CommandDirectoryEntry",
     "CommandDirectoryProposalRequest",
     "CommandDirectoryProposalView",

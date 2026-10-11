@@ -71,6 +71,18 @@ def execute(client: KrimClient, args: argparse.Namespace, parser: argparse.Argum
         )
         print(directory_proposal.model_dump_json(indent=2))
         return 0
+    if args.action == "directory-changes":
+        if not args.value:
+            parser.error("命令目录changes需要原command_id")
+        directory_page = client.agent_command_directory_changes(
+            args.agent_id,
+            args.value,
+            after=args.after,
+            limit=args.limit if args.limit is not None else 32,
+            confirmed=args.confirm,
+        )
+        print(directory_page.model_dump_json(indent=2))
+        return 0
     if args.action == "propose":
         request = CommandProposalRequest.model_validate_json(_request(args.request, parser))
         if args.value is not None and args.value != request.command_id:

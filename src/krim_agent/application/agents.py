@@ -46,6 +46,8 @@ from krim_agent.execution.agent_models import (
 )
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
 from krim_agent.execution.directory_publication import (
+    CommandDirectoryChangesPage,
+    CommandDirectoryChangesRequest,
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
@@ -678,6 +680,7 @@ class AgentService:
                     "command_history",
                     "command_inspect",
                     "directory_query",
+                    "directory_source_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -1164,6 +1167,24 @@ class AgentService:
                 await self._workspace_call(
                     agent_id,
                     "directory_source_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def command_directory_changes(
+        self,
+        agent_id: str,
+        request: CommandDirectoryChangesRequest,
+        *,
+        confirmed: bool = False,
+    ) -> CommandDirectoryChangesPage:
+        return CommandDirectoryChangesPage.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "directory_source_query",
                     request.model_dump(),
                     confirmed=confirmed,
                 )
