@@ -737,6 +737,7 @@ class PythonAI:
             self._agent_service.assert_external_command_control()
             self._agent_service.manager.commands.assert_external_close()
             self._agent_service.workspace_trees.assert_external_close()
+            self._agent_service.manager.tree_models.assert_external_close()
             self._agent_service.workspace_batches.assert_external_close()
         if self._mcp_service is not None:
             self._mcp_service.assert_external_close()

@@ -21,6 +21,8 @@ COMMAND_TOOL_NAMES = frozenset(
         "directory_source_preview",
         "directory_source_query",
         "workspace_tree_prepare",
+        "workspace_tree_model_prepare",
+        "workspace_tree_start",
     }
 )
 

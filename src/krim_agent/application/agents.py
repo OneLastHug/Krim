@@ -87,6 +87,7 @@ from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFile
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.tools.workspace_mixed_batches import mixed_batch_start_tool
 from krim_agent.tools.workspace_mixed_queries import mixed_batch_query_tool
+from krim_agent.tools.workspace_model_trees import model_tree_tools
 from krim_agent.tools.workspace_trees import tree_prepare_tool, tree_query_tool
 from krim_agent.workspace import (
     WORKSPACE_TOOL_NAMES,
@@ -148,6 +149,7 @@ from krim_agent.workspace_restore import (
 from krim_agent.workspace_tree import (
     TreePlanDispatch,
     TreePlanFence,
+    TreePlanModelSource,
     TreePlanRequest,
     TreePlanStepPage,
     TreePlanView,
@@ -264,6 +266,7 @@ class AgentService:
             self._workspace_tree_child,
             prepare=self._prepare_tree,
         )
+        self.manager.tree_models.prepare = self._prepare_tree
         self.workspace_checkpoint_store = WorkspaceCheckpointStore(self.workspace_edits)
         self.workspace_checkpoints = WorkspaceCheckpointService(
             self.workspace_checkpoint_store,
@@ -627,6 +630,16 @@ class AgentService:
     def disable_workspace(self, key: str) -> None:
         self.resources.disable_workspace(key)
 
+    def register_tree_models(self) -> None:
+        """显式新增模型准备/启动工具；保留既有冻结工具与host准备语义。"""
+        definitions = model_tree_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型目录树工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_execution(
         self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
     ) -> ExecutionBinding:
@@ -813,6 +826,7 @@ class AgentService:
                     directory_changes=self.manager.directory_changes,
                     workspace_mixed_queries=self.manager.mixed_queries,
                     workspace_tree_queries=self.manager.tree_queries,
+                    workspace_tree_models=self.manager.tree_models,
                     workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
@@ -891,6 +905,9 @@ class AgentService:
                 "workspace_tree_model_run_closed": 409,
                 "workspace_tree_model_call_conflict": 409,
                 "workspace_tree_model_context": 403,
+                "workspace_tree_model_closed": 503,
+                "workspace_tree_model_unverified": 409,
+                "workspace_tree_model_reentrant": 409,
                 "workspace_tree_fence_mismatch": 403,
                 "workspace_tree_request_reserved": 403,
                 "workspace_tree_resource_conflict": 403,
@@ -1595,8 +1612,17 @@ class AgentService:
 
     async def _prepare_tree(self, request: TreePlanRequest, context: ToolContext) -> TreePlanView:
         scope, binding, execution = await self.manager.directory_changes._source_guard(context)
+        model_source = (
+            TreePlanModelSource(context.run_id, context.call_id)
+            if context.origin == "model"
+            else None
+        )
         if await self.workspace_tree_store.by_key(scope, request.request_key) is not None:
-            return (await self.workspace_tree_store.reserve(scope, binding, request, None))[0]
+            return (
+                await self.workspace_tree_store.reserve(
+                    scope, binding, request, None, model_source=model_source
+                )
+            )[0]
         source = await self.manager.directory_changes.command_sources.source(
             scope, request.command_id
         )
@@ -1622,7 +1648,11 @@ class AgentService:
             ),
         )
         await self.manager.directory_changes._source_guard(context)
-        return (await self.workspace_tree_store.reserve(scope, binding, request, prepared))[0]
+        return (
+            await self.workspace_tree_store.reserve(
+                scope, binding, request, prepared, model_source=model_source
+            )
+        )[0]
 
     async def workspace_prepare_tree(
         self, agent_id: str, request: TreePlanRequest, *, confirmed: bool = False
@@ -1658,7 +1688,9 @@ class AgentService:
 
     async def workspace_cancel_tree(self, agent_id: str, plan_id: str) -> TreePlanView:
         session = await self.session(agent_id)
-        return await self.workspace_trees.cancel(f"session:{session.session_id}", plan_id)
+        scope = f"session:{session.session_id}"
+        await self.manager.tree_models.cancel_if_running(scope, plan_id)
+        return await self.workspace_trees.cancel(scope, plan_id)
 
     async def workspace_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
         session = await self.session(agent_id)
@@ -2139,6 +2171,7 @@ class AgentService:
     async def close(self) -> None:
         self.assert_external_command_control()
         self.workspace_trees.assert_external_close()
+        self.manager.tree_models.assert_external_close()
         self.manager.commands.assert_external_close()
         self.manager.directory_changes.assert_external_close()
         self.workspace_batches.assert_external_close()

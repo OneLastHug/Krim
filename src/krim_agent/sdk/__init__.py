@@ -90,6 +90,7 @@ from krim_agent.workspace_tree import (
     TreePlanQuery,
     TreePlanQueryResult,
     TreePlanRequest,
+    TreePlanStartRequest,
     TreePlanStepPage,
     TreePlanView,
 )
@@ -172,6 +173,7 @@ __all__ = [
     "TreePlanQuery",
     "TreePlanQueryResult",
     "TreePlanStepPage",
+    "TreePlanStartRequest",
     "TreePlanView",
     "NativeBatchSummary",
     "NativeBatchItemView",
