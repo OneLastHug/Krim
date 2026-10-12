@@ -21,9 +21,11 @@ def leave_workspace_execution(token: Token[tuple[WorkspaceTasks, str] | None]) -
     _current.reset(token)
 
 
-def inside_workspace_execution() -> bool:
+def inside_workspace_execution(tasks: WorkspaceTasks | None = None) -> bool:
     current = _current.get()
     if current is None:
+        return False
+    if tasks is not None and current[0] is not tasks:
         return False
     entry = current[0].get(current[1])
     # Hook创建的后台Task可继承标记；原生产者已结束时不再视为内部调用。

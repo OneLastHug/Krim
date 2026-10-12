@@ -158,7 +158,7 @@ async def test_short_circuit_is_partial_but_post_hook_error_retains_actual_done(
 
         registry.add_global_pre(shortcut)
         short = await run(agent, request)
-        assert short.status == "partial"
+        assert short.status == "partial", short.model_dump()
         item = next(item for item in short.items if item.source == source)
         assert item.operation is None and item.status == "rejected"
         registry._global_pre.clear()

@@ -84,7 +84,24 @@ async def test_chain_keep_and_reverse_undo_sort_targets_and_use_real_ledger(runt
         ]
         stamp = file.stat()
         kept = await run_batch(session, request(page, items=list(reversed(page.items))))
-        assert kept.status == "done" and file.stat() == stamp
+        current = file.stat()
+        attributes = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        # 原keep核实会读取内容并推进atime，内容与身份/权限/纳秒修改时间仍须完全保持。
+        assert kept.status == "done"
+        assert tuple(getattr(current, name) for name in attributes) == tuple(
+            getattr(stamp, name) for name in attributes
+        )
+        assert file.read_bytes() == b"C\n"
         assert [item.proposal_id for item in kept.items] == [second.proposal_id, first.proposal_id]
         assert all(not item.operation.receipt.changed for item in kept.items)
         proof = await session.file_change_proof(kept.items[1].operation.operation_id)

@@ -64,7 +64,7 @@ async def publish(service, agent, store, execution, position):
     await store.finish_step(scope, identifier, execution.token, position)
 
 
-async def metadata(service, agent, store, identifier, root, source, provider):
+async def metadata(service, agent, store, identifier, root, source, provider, *, worker=False):
     scope = "session:" + agent.session_id
     value = await store.get(scope, identifier)
     page = await store.steps(scope, identifier)
@@ -78,12 +78,13 @@ async def metadata(service, agent, store, identifier, root, source, provider):
         "view": value.model_dump(mode="json"),
         "steps": page.model_dump(mode="json"),
         "provider_calls": provider.calls,
+        "worker": worker,
     }
     (root / "metadata.json").write_text(json.dumps(result))
     return result
 
 
-async def produce(ai, root, phase, source, provider):
+async def produce(ai, root, phase, source, provider, *, worker=False):
     service = ai.agents()
     await service.profile_put(
         AgentProfileUpdate(
@@ -149,33 +150,62 @@ async def produce(ai, root, phase, source, provider):
         ),
         prepared,
     )
-    execution = await store.claim(scope, view.plan_id)
+    execution = None if worker else await store.claim(scope, view.plan_id)
     if phase == "complete":
-        preview = await store.dispatch(scope, view.plan_id, execution.token, 0)
-        try:
-            await service._workspace_call(
-                agent.agent_id, preview.name, preview.request.model_dump(), confirmed=True
+        if worker:
+            original_execute = service.workspace_trees.execute
+
+            async def checked_close(identifier, dispatch, confirmed):
+                try:
+                    await ai.close()
+                except ServiceError as error:
+                    assert error.code == "workspace_tree_close_reentrant" and error.status == 409
+                    assert not ai._closed and not service._closed
+                else:
+                    raise AssertionError("树回调不能关闭SDK或数据库")
+                return await original_execute(identifier, dispatch, confirmed)
+
+            service.workspace_trees.execute = checked_close
+            await service.workspace_start_tree(agent.agent_id, view.plan_id, confirmed=True)
+            done = await service.workspace_wait_tree(
+                agent.agent_id, view.plan_id, timeout_seconds=20
             )
-        except ServiceError as error:
-            assert error.code == "workspace_tree_request_reserved" and error.status == 403
+            assert done.status == "done"
+            assert (
+                await service.workspace_start_tree(agent.agent_id, view.plan_id, confirmed=True)
+                == done
+            )
         else:
-            raise AssertionError("公开内部树key不能获得准入")
-        for position in range(3):
-            await publish(service, agent, store, execution, position)
-        assert (await store.finish(scope, view.plan_id, execution.token)).status == "done"
+            preview = await store.dispatch(scope, view.plan_id, execution.token, 0)
+            try:
+                await service._workspace_call(
+                    agent.agent_id, preview.name, preview.request.model_dump(), confirmed=True
+                )
+            except ServiceError as error:
+                assert error.code == "workspace_tree_request_reserved" and error.status == 403
+            else:
+                raise AssertionError("公开内部树key不能获得准入")
+            for position in range(3):
+                await publish(service, agent, store, execution, position)
+            assert (await store.finish(scope, view.plan_id, execution.token)).status == "done"
         print(
-            json.dumps(await metadata(service, agent, store, view.plan_id, root, source, provider)),
+            json.dumps(
+                await metadata(
+                    service, agent, store, view.plan_id, root, source, provider, worker=worker
+                )
+            ),
             flush=True,
         )
         return
     assert phase == "after-write"
     position = 0 if source == "directory" else 2
-    for parent in range(position):
-        await publish(service, agent, store, execution, parent)
-    await invoke(
-        service, agent, await store.dispatch(scope, view.plan_id, execution.token, position)
-    )
-    dispatch = await store.dispatch(scope, view.plan_id, execution.token, position)
+    if not worker:
+        for parent in range(position):
+            await publish(service, agent, store, execution, parent)
+        await invoke(
+            service, agent, await store.dispatch(scope, view.plan_id, execution.token, position)
+        )
+        dispatch = await store.dispatch(scope, view.plan_id, execution.token, position)
     backend = store.files if source == "file" else store.directories
     original_settle = backend.settle
     entered, release = Event(), Event()
@@ -186,11 +216,19 @@ async def produce(ai, root, phase, source, provider):
         return await original_settle(*args, **kwargs)
 
     backend.settle = before_receipt
-    task = asyncio.create_task(invoke(service, agent, dispatch))
+    if worker:
+        await service.workspace_start_tree(agent.agent_id, view.plan_id, confirmed=True)
+        task = service.workspace_trees._tasks[view.plan_id][1]
+    else:
+        task = asyncio.create_task(invoke(service, agent, dispatch))
     try:
         assert await asyncio.to_thread(entered.wait, 25)
         print(
-            json.dumps(await metadata(service, agent, store, view.plan_id, root, source, provider)),
+            json.dumps(
+                await metadata(
+                    service, agent, store, view.plan_id, root, source, provider, worker=worker
+                )
+            ),
             flush=True,
         )
         assert (await asyncio.to_thread(sys.stdin.readline)).strip() == "release"
@@ -222,6 +260,12 @@ async def recover(ai, root, phase, provider):
             await store.directories.operation(value["scope"], operation_id)
         current = await store.get(value["scope"], value["plan_id"])
         assert current.producer_status == "interrupted"
+        if value.get("worker"):
+            assert (
+                await service.workspace_start_tree(agent.agent_id, value["plan_id"], confirmed=True)
+                == current
+            )
+            assert not service.workspace_trees._tasks
         page = await store.steps(value["scope"], value["plan_id"])
         assert page.items[position].status == "uncertain"
         resolved = await (
@@ -292,7 +336,14 @@ async def main():
         if phase in {"read", "recover"}:
             await recover(ai, root, phase, provider)
         else:
-            await produce(ai, root, phase, source, provider)
+            await produce(
+                ai,
+                root,
+                phase.removeprefix("worker-"),
+                source,
+                provider,
+                worker=phase.startswith("worker-"),
+            )
 
 
 asyncio.run(main())
