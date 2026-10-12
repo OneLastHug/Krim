@@ -159,6 +159,10 @@ class TreePlanQueryResult(StrictModel):
         return self
 
 
+class TreePlanStartRequest(StrictModel):
+    plan_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$")
+
+
 @dataclass(frozen=True)
 class TreePlanModelSource:
     run_id: str

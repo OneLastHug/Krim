@@ -62,7 +62,11 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.registry),
         id(context.workspace),
         id(context.execution),
+        id(context.commands),
+        id(context.workspace_changes),
+        id(context.directory_changes),
         id(context.workspace_tree_queries),
+        id(context.workspace_tree_models),
         id(context.model_tools),
         id(context.policy),
         id(context.approval_handler),
@@ -206,6 +210,7 @@ class ToolRegistry:
         tree_fence = parent.tree_fence
         tree_prepare = name == "workspace_tree_prepare"
         tree_query = name == "workspace_tree_query"
+        tree_model = name in {"workspace_tree_model_prepare", "workspace_tree_start"}
         tree_scope = (
             parent.run_id,
             parent.topic_id,
@@ -217,6 +222,15 @@ class ToolRegistry:
         try:
             if tree_prepare and (parent.origin != "host" or parent.run_id != "local"):
                 raise ToolError("workspace_tree_model_unbound", "树准备尚未绑定原模型Run/call")
+            if tree_model and (
+                parent.origin != "model"
+                or parent.run_id == "local"
+                or parent.agent_id is None
+                or parent.session_id is None
+            ):
+                raise ToolError(
+                    "workspace_tree_model_context", "模型树工具需要原Agent/session/Run/call"
+                )
             if tree_fence is not None:
                 expected = (
                     (
@@ -291,6 +305,7 @@ class ToolRegistry:
                 child.arguments = parsed.model_dump(by_alias=True)
                 original_arguments = copy.deepcopy(child.arguments)
                 original_query_binding = _tree_query_binding(child) if tree_query else None
+                original_model_binding = _tree_query_binding(child) if tree_model else None
                 original_tree_binding = (
                     _tree_query_binding(child) if tree_fence is not None else None
                 )
@@ -316,6 +331,17 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if tree_model and (
+                    child.arguments != original_arguments
+                    or _tree_query_binding(child) != original_model_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_fence_mismatch", "Hook不能替换原模型树参数或调用上下文"
+                    )
+                if tree_model and short is not None:
+                    raise ToolError(
+                        "workspace_tree_model_unverified", "模型树工具必须保留真实原事实回程"
+                    )
                 if tree_query and (
                     child.arguments != original_arguments
                     or _tree_query_binding(child) != original_query_binding
@@ -401,10 +427,22 @@ class ToolRegistry:
                     short.value if short is not None else await definition.executor(parsed, child)
                 )
                 query_response = child._tree_query_response
+                model_response = child._tree_model_response
                 if definition.post_execute is not None:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if tree_model and (
+                    child.arguments != original_arguments
+                    or _tree_query_binding(child) != original_model_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_fence_mismatch", "Hook不能替换原模型树参数或调用上下文"
+                    )
+                if tree_model and child._tree_model_response != model_response:
+                    raise ToolError(
+                        "workspace_tree_model_unverified", "Hook不能替换原模型树回程标记"
+                    )
                 if tree_fence is not None and (
                     child.tree_fence != tree_fence
                     or child.arguments != original_arguments
@@ -446,13 +484,17 @@ class ToolRegistry:
             self._observe(
                 ToolAudit(
                     call_id=query_audit[0]
-                    if tree_query or tree_fence is not None
+                    if tree_query or tree_model or tree_fence is not None
                     else child.call_id,
-                    run_id=query_audit[1] if tree_query or tree_fence is not None else child.run_id,
+                    run_id=query_audit[1]
+                    if tree_query or tree_model or tree_fence is not None
+                    else child.run_id,
                     name=name,
                     risk=definition.risk,
                     decision=decision,
-                    depth=query_audit[2] if tree_query or tree_fence is not None else child.depth,
+                    depth=query_audit[2]
+                    if tree_query or tree_model or tree_fence is not None
+                    else child.depth,
                     ok=code is None,
                     code=code,
                 )

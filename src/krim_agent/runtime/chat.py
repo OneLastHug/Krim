@@ -73,6 +73,7 @@ from krim_agent.tools.core import (
     TaskBackend,
     ToolDefinition,
     ToolExecutionBudget,
+    TreePlanModelBackend,
     TreePlanQueryBackend,
 )
 from krim_agent.tools.discovery import ToolDiscovery
@@ -154,6 +155,7 @@ class ChatRuntime:
         directory_changes: DirectoryChangeBackend | None = None,
         workspace_mixed_queries: MixedBatchQueryBackend | None = None,
         workspace_tree_queries: TreePlanQueryBackend | None = None,
+        workspace_tree_models: TreePlanModelBackend | None = None,
         workspace_mixed_batches: MixedBatchWriteBackend | None = None,
         workspace: WorkspaceBinding | None = None,
         execution: ExecutionBinding | None = None,
@@ -206,6 +208,7 @@ class ChatRuntime:
         self.directory_changes = directory_changes
         self.workspace_mixed_queries = workspace_mixed_queries
         self.workspace_tree_queries = workspace_tree_queries
+        self.workspace_tree_models = workspace_tree_models
         self.workspace_mixed_batches = workspace_mixed_batches
         self.workspace = workspace
         self.execution, self.commands = execution, commands
@@ -1070,6 +1073,7 @@ class ChatRuntime:
                         directory_changes=self.directory_changes,
                         workspace_mixed_queries=self.workspace_mixed_queries,
                         workspace_tree_queries=self.workspace_tree_queries,
+                        workspace_tree_models=self.workspace_tree_models,
                         workspace_mixed_batches=self.workspace_mixed_batches,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
