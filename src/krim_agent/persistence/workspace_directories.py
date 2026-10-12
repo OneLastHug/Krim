@@ -598,6 +598,9 @@ class WorkspaceDirectoryStore:
             return self._attempt(row)
 
     async def _fence(self, session: AsyncSession, change: PreparedDirectoryChange) -> str:
+        from .tree_move_fences import assert_no_move_lock, directory_keys
+
+        await assert_no_move_lock(session, directory_keys(change))
         key = entry_key(change.parent_identity, change.spec.path)
         move_spec = change.spec
         move_target_path = (
@@ -894,6 +897,9 @@ class WorkspaceDirectoryStore:
                 )
             )
             prepared = decode(row.prepared)
+            from .tree_move_fences import assert_no_move_lock, directory_keys
+
+            await assert_no_move_lock(session, directory_keys(prepared))
             expected_lock = entry_key(prepared.parent_identity, prepared.spec.path)
             prepared_target_path = (
                 prepared.spec.target_path
@@ -931,6 +937,9 @@ class WorkspaceDirectoryStore:
                 raise ServiceError("workspace_directory_lease_lost", "目录意图不属于原生产者", 409)
             prepared = decode(row.prepared)
             await self.files._scope(session, scope, writing=True, run_id=row.run_id)
+            from .tree_move_fences import assert_no_move_lock, directory_keys
+
+            await assert_no_move_lock(session, directory_keys(prepared))
             if (
                 reference.path != prepared.spec.path
                 or reference.parent_identity != prepared.parent_identity

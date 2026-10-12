@@ -216,7 +216,7 @@ async def test_nonempty_batch_downgrade_refuses_loss_and_empty_roundtrip(reposit
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0042_workspace_tree_model_sources"
+            ).scalar_one() == "0043_tree_move_ledger"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         workspace.close()

@@ -817,7 +817,7 @@ async def test_real_process_crash_restart_reconciles_and_never_replays_file_acti
                 "UPDATE workspace_edit_attempts SET lease_expires_at = ?", (time.time() - 1,)
             )
     second = await process("recover" if mode.startswith("crash") else "resume")
-    assert second["calls"] == 0 and second["migration"] == "0042_workspace_tree_model_sources"
+    assert second["calls"] == 0 and second["migration"] == "0043_tree_move_ledger"
     assert second["status"] == ("rejected" if mode == "crash-before" else "done")
     if first:
         assert second["operation_id"] == first["operation_id"]

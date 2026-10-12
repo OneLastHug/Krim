@@ -20,6 +20,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -30,6 +31,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -646,6 +648,162 @@ class WorkspaceDirectoryLockRow(Base):
     )
     directory_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     target_lock_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class WorkspaceTreeMoveProposalRow(Base):
+    __tablename__ = "workspace_tree_move_proposals"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        CheckConstraint(
+            "revision >= 0 AND revision <= 9007199254740991", name="ck_tree_move_revision"
+        ),
+        CheckConstraint(
+            "status IN ('proposed','applying','applied','undoing','undone','keeping',"
+            "'kept','rejected','uncertain','cancelled')",
+            name="ck_tree_move_proposal_status",
+        ),
+    )
+    proposal_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    request: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    source_path: Mapped[str] = mapped_column(String(512))
+    target_path: Mapped[str] = mapped_column(String(512))
+    prepared: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    status: Mapped[str] = mapped_column(String(16), default="proposed")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[float] = mapped_column(Float)
+    active_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_tree_move_attempts.operation_id",
+            name="fk_tree_move_active_operation",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceTreeMoveAttemptRow(Base):
+    __tablename__ = "workspace_tree_move_attempts"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key"),
+        UniqueConstraint("operation_id", "proposal_id"),
+        CheckConstraint("action IN ('apply','undo','keep')", name="ck_tree_move_action"),
+        CheckConstraint(
+            "status IN ('running','done','rejected','uncertain')",
+            name="ck_tree_move_attempt_status",
+        ),
+        CheckConstraint(
+            "expected_revision >= 0 AND expected_revision <= 9007199254740989",
+            name="ck_tree_move_expected_revision",
+        ),
+        CheckConstraint(
+            "intent_recorded IN (0,1) AND cancelled IN (0,1)", name="ck_tree_move_flags"
+        ),
+        CheckConstraint(
+            "(status = 'running' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+            "(status != 'running' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_tree_move_owner",
+        ),
+        CheckConstraint(
+            "(run_id IS NULL AND call_id IS NULL) OR (run_id IS NOT NULL AND call_id IS NOT NULL)",
+            name="ck_tree_move_run_call",
+        ),
+        CheckConstraint(
+            "(after_prepared IS NULL AND after_payload IS NULL) OR "
+            "(after_prepared IS NOT NULL AND after_payload IS NOT NULL)",
+            name="ck_tree_move_after",
+        ),
+        CheckConstraint(
+            "status NOT IN ('done','rejected') OR receipt IS NOT NULL", name="ck_tree_move_receipt"
+        ),
+    )
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_move_proposals.proposal_id"), index=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    previous_status: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prepared: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    after_prepared: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    after_payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    receipt_history: Mapped[list[JsonValue]] = mapped_column(JSON, default=list)
+    intent_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceTreeMoveLockRow(Base):
+    __tablename__ = "workspace_tree_move_locks"
+    __table_args__ = (
+        UniqueConstraint("kind", "lock_key"),
+        CheckConstraint("kind IN ('entry','directory')", name="ck_tree_move_lock_kind"),
+    )
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_move_attempts.operation_id"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class WorkspaceTreeMoveModelSourceRow(Base):
+    __tablename__ = "workspace_tree_move_model_sources"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["operation_id", "proposal_id"],
+            [
+                "workspace_tree_move_attempts.operation_id",
+                "workspace_tree_move_attempts.proposal_id",
+            ],
+        ),
+        UniqueConstraint("operation_id"),
+        Index(
+            "uq_tree_move_model_preview_parent",
+            "proposal_id",
+            unique=True,
+            sqlite_where=sql_text("kind = 'preview'"),
+            postgresql_where=sql_text("kind = 'preview'"),
+        ),
+        CheckConstraint(
+            "kind IN ('preview','apply','undo','keep')", name="ck_tree_move_model_kind"
+        ),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_tree_move_model_call"),
+        CheckConstraint(
+            "(kind = 'preview' AND operation_id IS NULL) OR "
+            "(kind != 'preview' AND operation_id IS NOT NULL)",
+            name="ck_tree_move_model_operation",
+        ),
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    call_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_move_proposals.proposal_id")
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class CommandDirectoryProposalRow(Base):
