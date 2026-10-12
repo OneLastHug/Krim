@@ -1,4 +1,4 @@
-"""受原Registry保护的目录树准备；仅持久冻结，不启动生产者或Writer。"""
+"""受原Registry保护的目录树准备和查询；不启动生产者或Writer。"""
 
 import json
 from functools import cache
@@ -7,9 +7,37 @@ from typing import Any
 from pydantic import BaseModel, JsonValue
 
 from krim_agent.protocol.domain import ServiceError
-from krim_agent.workspace_tree import TreePlanRequest, TreePlanView
+from krim_agent.workspace_tree import (
+    TreePlanQuery,
+    TreePlanQueryResult,
+    TreePlanRequest,
+    TreePlanView,
+)
 
 from .core import ToolContext, ToolDefinition, ToolError
+
+
+@cache
+def tree_query_tool() -> ToolDefinition:
+    async def execute(arguments: BaseModel, context: ToolContext) -> dict[str, JsonValue]:
+        if context.workspace_tree_queries is None:
+            raise ToolError("workspace_tree_backend_missing", "当前上下文缺少目录树查询服务")
+        return await context.workspace_tree_queries.tool_query(arguments.model_dump(), context)
+
+    async def guard(value: Any, context: ToolContext) -> None:
+        if context.workspace_tree_queries is None:
+            raise ToolError("workspace_tree_backend_missing", "当前上下文缺少目录树查询服务")
+        await context.workspace_tree_queries.validate_query(value, context)
+
+    return ToolDefinition(
+        "workspace_tree_query",
+        "读取当前会话原目录树、原请求键或步骤页，不准备、启动或重放目录文件动作",
+        TreePlanQuery,
+        execute,
+        "read",
+        output_schema=TreePlanQueryResult,
+        output_guard=guard,
+    )
 
 
 @cache

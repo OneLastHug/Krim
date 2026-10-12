@@ -18,6 +18,7 @@ from krim_agent.application.workspace_changes import WorkspaceChangeService
 from krim_agent.application.workspace_directories import DirectoryChangeService
 from krim_agent.application.workspace_mixed_queries import MixedBatchQueryService
 from krim_agent.application.workspace_model_batches import ModelMixedBatchService
+from krim_agent.application.workspace_tree_queries import TreePlanQueryService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES, ExecutionBinding
@@ -466,6 +467,7 @@ class AgentManager:
         )
         self.directory_changes = DirectoryChangeService(self.workspace_changes)
         self.mixed_queries = MixedBatchQueryService(self.workspace_changes, self.directory_changes)
+        self.tree_queries = TreePlanQueryService(self.workspace_changes, self.directory_changes)
         self.mixed_batch_writer = ModelMixedBatchService(
             self.workspace_changes, self.directory_changes
         )
@@ -762,6 +764,7 @@ class AgentManager:
             workspace_changes=self.workspace_changes,
             directory_changes=self.directory_changes,
             workspace_mixed_queries=self.mixed_queries,
+            workspace_tree_queries=self.tree_queries,
             workspace_mixed_batches=self.mixed_batch_writer,
             workspace=definition.workspace,
             execution=definition.execution,

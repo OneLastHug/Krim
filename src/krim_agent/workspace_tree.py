@@ -119,6 +119,46 @@ class TreePlanStepPage(StrictModel):
     next_after: int | None = Field(default=None, ge=0, lt=16384)
 
 
+class TreePlanQuery(StrictModel):
+    kind: Literal["plan", "by_key", "steps"]
+    plan_id: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"
+    )
+    request_key: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
+    after: int | None = Field(default=None, ge=0, lt=16384)
+    limit: int = Field(default=32, ge=1, le=32)
+
+    @model_validator(mode="after")
+    def selection(self) -> "TreePlanQuery":
+        if self.kind == "by_key":
+            if self.request_key is None or self.plan_id is not None:
+                raise ValueError("目录树原键查询须只提供request_key")
+        elif self.plan_id is None or self.request_key is not None:
+            raise ValueError("目录树计划/步骤查询须只提供plan_id")
+        if self.kind != "steps" and (self.after is not None or self.limit != 32):
+            raise ValueError("目录树单项查询不接受步骤分页参数")
+        return self
+
+
+class TreePlanQueryResult(StrictModel):
+    kind: Literal["plan", "by_key", "steps"]
+    plan: TreePlanView | None = None
+    steps: TreePlanStepPage | None = None
+
+    @model_validator(mode="after")
+    def one_result(self) -> "TreePlanQueryResult":
+        if self.kind == "steps" and (self.steps is None or self.plan is not None):
+            raise ValueError("目录树步骤回程须只提供原步骤页")
+        if self.kind != "steps" and self.steps is not None:
+            raise ValueError("目录树单项回程不能携带步骤页")
+        if self.kind == "plan" and self.plan is None:
+            raise ValueError("目录树按ID回程缺少原计划")
+        check_json(self.model_dump(mode="json"))
+        return self
+
+
 @dataclass(frozen=True)
 class TreePlanFence:
     plan_id: str

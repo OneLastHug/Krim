@@ -87,7 +87,7 @@ from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFile
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.tools.workspace_mixed_batches import mixed_batch_start_tool
 from krim_agent.tools.workspace_mixed_queries import mixed_batch_query_tool
-from krim_agent.tools.workspace_trees import tree_prepare_tool
+from krim_agent.tools.workspace_trees import tree_prepare_tool, tree_query_tool
 from krim_agent.workspace import (
     WORKSPACE_TOOL_NAMES,
     WORKSPACE_WRITE_TOOL_NAMES,
@@ -613,6 +613,17 @@ class AgentService:
         if existing is None:
             self.runtime.tools.register(definition)
 
+    def register_tree_queries(self) -> None:
+        """显式启用原目录树只读工具；既有Agent冻结定义不静默扩大。"""
+        definition = tree_query_tool()
+        existing = next(
+            (item for item in self.runtime.tools.definitions if item.name == definition.name), None
+        )
+        if existing is not None and existing is not definition:
+            raise ValueError("目录树查询工具名称已由其它定义占用")
+        if existing is None:
+            self.runtime.tools.register(definition)
+
     def disable_workspace(self, key: str) -> None:
         self.resources.disable_workspace(key)
 
@@ -801,6 +812,7 @@ class AgentService:
                     workspace_changes=self.manager.workspace_changes,
                     directory_changes=self.manager.directory_changes,
                     workspace_mixed_queries=self.manager.mixed_queries,
+                    workspace_tree_queries=self.manager.tree_queries,
                     workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
@@ -888,6 +900,8 @@ class AgentService:
                 "workspace_tree_idempotency_conflict": 409,
                 "workspace_tree_backend_missing": 503,
                 "workspace_tree_prepare_unverified": 409,
+                "workspace_tree_query_unverified": 409,
+                "workspace_tree_query_mismatch": 403,
                 "workspace_tree_root_not_found": 404,
                 "workspace_tree_existing_input": 409,
                 "workspace_tree_step_limit": 409,
