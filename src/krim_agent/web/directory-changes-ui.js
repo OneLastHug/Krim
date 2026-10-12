@@ -146,13 +146,14 @@ export class DirectoryChangesUI {
         this.sync();
     }
     dispose() { this.disposed = true; this.sync(); }
-    async focusProposal(proposalId) {
+    async focusProposal(proposalId, operationId) {
         if (this.busy || this.disposed)
             throw new Error(t("Agent 实例不可用"));
         this.root.open = true;
         await this.work(async () => {
             this.grant = await this.read(this.base);
             this.select(proposalId);
+            this.operationId = operationId;
             this.persist();
             await this.readSelected();
             this.loaded = true;

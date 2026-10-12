@@ -212,6 +212,24 @@ export interface CommandDirectoryProposalView {
   accept_failed: boolean; directory: { path: string; mode: number; empty: boolean; creatable: boolean };
   proposal: DirectoryPreviewView;
 }
+export interface TreePlanRequest {
+  command_id: string; source_hash: string; root_path: string; request_key: string;
+  accept_failed: boolean; max_entries: number;
+}
+export interface TreePlanView {
+  plan_id: string; scope_id: string; command_id: string; source_hash: string; root_path: string;
+  workspace_key: string; resource_fingerprint: string; request_key: string; snapshot_revision: string;
+  status: "planned" | "running" | "done" | "partial" | "failed" | "uncertain" | "cancelled" | "interrupted";
+  producer_status: "planned" | "running" | "finished" | "cancelled" | "interrupted";
+  step_count: number; done_count: number; stop_reason: string | null; created_at: string; updated_at: string;
+}
+export interface TreePlanStepView {
+  position: number; parent_position: number | null; source: "file" | "directory"; path: string;
+  mode: number; sha256: string | null; byte_size: number | null;
+  status: "pending" | "running" | "done" | "rejected" | "uncertain" | "skipped";
+  error_code: string | null; proposal_id: string | null; operation: WorkspaceAttemptView | DirectoryAttemptView | null;
+}
+export interface TreePlanStepPage { plan_id: string; scope_id: string; items: TreePlanStepView[]; next_after: number | null; }
 export interface FileChangeSpec {
   path: string; operation: "write" | "replace" | "delete"; expected_sha256: string | null;
   content?: string | null; replacements?: Array<{ old_text: string; new_text: string; occurrences: number }>;

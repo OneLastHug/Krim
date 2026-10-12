@@ -4,6 +4,95 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "目录树审阅与控制": "Directory tree review and control",
+    "目录树待启动": "Directory tree planned",
+    "目录树执行中": "Directory tree running",
+    "目录树已确认": "Directory tree confirmed",
+    "目录树部分完成": "Directory tree partially completed",
+    "目录树执行失败": "Directory tree failed",
+    "目录树结果待核实": "Directory tree needs verification",
+    "目录树已取消": "Directory tree cancelled",
+    "目录树已中断": "Directory tree interrupted",
+    "步骤待执行": "Step pending",
+    "步骤执行中": "Step running",
+    "步骤已确认": "Step confirmed",
+    "步骤已拒绝": "Step rejected",
+    "步骤结果待核实": "Step needs verification",
+    "步骤已跳过": "Step skipped",
+    "准备目录树计划": "Prepare directory tree plan",
+    "目录树原请求键（可留空自动生成）": "Tree request key (leave blank to generate)",
+    "目录树步骤容量": "Tree step capacity",
+    "明确接受失败命令的完整目录树成果": (
+        "Explicitly accept complete tree artifacts of a failed command"
+    ),
+    "准备只保存计划，请审阅全部步骤后另行确认启动。": (
+        "Preparation saves a plan; review all steps before separately confirming execution."
+    ),
+    "目录树标识或原请求键": "Tree ID or original request key",
+    "按标识读取目录树": "Read tree by ID",
+    "按原键找回目录树": "Read tree by original key",
+    "刷新原目录树": "Refresh original tree",
+    "目录树回程与原来源不一致": "Tree response does not match its original source",
+    "目录树响应未确认，请先查询原请求": (
+        "Tree response is uncertain; query the original request first"
+    ),
+    "未找到原目录树；重新选择原来源后仅可明确同键同参数重试": (
+        "Original tree not found; reselect the original source for an explicit retry "
+        "with the same key and arguments"
+    ),
+    "已读取原目录树，未重新执行": "Original tree read without re-executing it",
+    "未确认目录树只能使用原参数与原请求键重试": (
+        "Retry an unconfirmed tree with its original arguments and request key"
+    ),
+    "确认保存以下目录树计划？准备后仍需另行确认启动。": (
+        "Save this tree plan? Execution still requires a separate confirmation."
+    ),
+    "目录树计划已保存，请审阅步骤后确认启动": (
+        "Tree plan saved; review steps before confirming execution"
+    ),
+    "确认发布目录树：{path}（共{count}步）？各项独立执行，可能部分成功。": (
+        "Publish tree {path} ({count} steps)? "
+        "Items execute independently and may succeed partially."
+    ),
+    "确认取消原目录树：{path}？已完成项保留原回执。": (
+        "Cancel original tree {path}? Completed items retain their original receipts."
+    ),
+    "目录树步骤回程与原计划不一致": "Tree step response does not match the original plan",
+    "目录树根": "Tree root",
+    "原命令": "Original command",
+    "已确认步骤": "Confirmed steps",
+    "确认启动原目录树": "Confirm original tree execution",
+    "等待原目录树": "Wait for original tree",
+    "取消原目录树": "Cancel original tree",
+    "请导航原操作核实结果；查询不会重新发布目录树。": (
+        "Open the original operation to verify its result; queries do not republish the tree."
+    ),
+    "目录树步骤页{page} · 本页{count}项": "Tree step page {page} · {count} items on this page",
+    "父步骤": "Parent step",
+    "查看原文件提案": "View original file proposal",
+    "上一页目录树步骤": "Previous tree step page",
+    "下一页目录树步骤": "Next tree step page",
+    "本地目录树恢复记录无效或无法保存，写入已关闭": (
+        "Local tree recovery record is invalid or cannot be saved; writes are disabled"
+    ),
+    "清除无效目录树恢复记录": "Clear invalid tree recovery record",
+    "仅清除本地目录树恢复记录，随后请查询原键；不会重发请求？": (
+        "Clear only local tree recovery data, "
+        "then query the original key without replaying requests?"
+    ),
+    "浏览器无法保存目录树恢复记录，尚未发送新请求": (
+        "The browser cannot save tree recovery data; no new request has been sent"
+    ),
+    "查询未确认目录树": "Read unconfirmed tree",
+    "放弃未找到的本地准备记录": "Discard local preparation record after empty lookup",
+    "原键尚未找到不证明未执行；仅放弃本地准备记录，不取消远端计划：{key}？": (
+        "An empty lookup does not prove no execution; discard only local preparation data "
+        "without cancelling a remote plan: {key}?"
+    ),
+    "已放弃本地准备记录；原键仍可查询：{key}": (
+        "Local preparation data discarded; the original key can still be queried: {key}"
+    ),
+    "审阅目录树成果": "Review tree artifacts",
     "MCP资源": "MCP resources",
     "刷新MCP资源": "Refresh MCP resources",
     "只显示可信宿主已登记的MCP资源": "Only MCP resources registered by a trusted host are shown",

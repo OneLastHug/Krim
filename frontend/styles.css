@@ -190,6 +190,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .command-changes h3 { margin: 0 0 5px; font-size: 0.82rem; }
 .command-change-row { padding: 5px 0; border-top: 1px solid var(--line); }
 .agent-commands [hidden] { display: none; }
+.workspace-trees { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.tree-editor, .tree-query { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); min-width: 0; }
+.tree-editor label, .tree-query label { display: grid; gap: 4px; font-size: 0.8rem; }
+.tree-editor input, .tree-query input { width: 100%; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--canvas); }
+.tree-editor input[type="checkbox"] { width: auto; justify-self: start; }
+.tree-detail { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.tree-status, .tree-pending, .tree-editor p, .tree-detail p, .tree-detail strong, .tree-detail code { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 0.78rem; }
+.agent-card .tree-source, .agent-card .tree-meta, .agent-card .tree-steps pre { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 0.76rem; }
+.tree-steps { padding-left: 20px; }
+.tree-steps li { padding: 6px 0; border-top: 1px solid var(--line); }
+.tree-steps code { display: block; }
+.workspace-trees .actions { flex-wrap: wrap; }
 .layout { height: calc(100vh - 100px); align-items: start; }
 .sidebar { max-height: calc(100vh - 160px); overflow: auto; }
 .conversation { height: calc(100vh - 160px); min-height: 520px; }

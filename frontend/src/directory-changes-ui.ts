@@ -137,12 +137,12 @@ export class DirectoryChangesUI {
 
   dispose(): void { this.disposed = true; this.sync(); }
 
-  async focusProposal(proposalId: string): Promise<void> {
+  async focusProposal(proposalId: string, operationId?: string): Promise<void> {
     if (this.busy || this.disposed) throw new Error(t("Agent 实例不可用"));
     this.root.open = true;
     await this.work(async () => {
       this.grant = await this.read<WorkspaceView>(this.base);
-      this.select(proposalId); this.persist(); await this.readSelected(); this.loaded = true;
+      this.select(proposalId); this.operationId = operationId; this.persist(); await this.readSelected(); this.loaded = true;
     });
   }
 

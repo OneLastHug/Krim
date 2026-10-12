@@ -6,6 +6,7 @@ import {
   type CommandDirectoryChangesPage, type CommandDirectoryProposalView,
 } from "./api.js";
 import { currentLocale, localDate, t } from "./i18n.js";
+import { WorkspaceTreesUI } from "./workspace-trees-ui.js";
 
 const labels: Record<string, string> = {
   preparing: "命令准备中", dispatched: "命令已派发", running: "命令运行中", finished: "命令已结束",
@@ -80,12 +81,15 @@ export class CommandsUI {
   private proposal: CommandProposalView | undefined;
   private pendingProposals = new Map<string, { key: string; accept_failed: boolean }>();
   private poll: number | undefined;
+  private trees: WorkspaceTreesUI;
+  private agent: AgentView | undefined;
 
   constructor(agentId: string, private notice: (message: string, error?: boolean) => void,
-    private openProposal: (proposalId: string) => Promise<void>,
-    private openDirectoryProposal: (proposalId: string) => Promise<void>) {
+    private openProposal: (proposalId: string, operationId?: string) => Promise<void>,
+    private openDirectoryProposal: (proposalId: string, operationId?: string) => Promise<void>) {
     this.base = "/v1/agents/" + encodeURIComponent(agentId) + "/commands";
     this.storageKey = "krim-command-pending:" + agentId;
+    this.trees = new WorkspaceTreesUI(agentId, notice, openProposal, openDirectoryProposal);
     try {
       const key = sessionStorage.getItem(this.storageKey);
       if (key && keyValid(key)) this.pending = { key, retry: false };
@@ -126,10 +130,10 @@ export class CommandsUI {
     const filterRow = document.createElement("div"); this.field(filterRow, "命令当前页筛选", this.filter);
     this.filter.onchange = () => { this.renderList(); this.sync(); };
     this.listing.className = "command-list"; this.detail.className = "command-detail";
-    this.root.append(this.editor, this.pendingBox, this.noticeBox, query, toolbar, filterRow, this.pageInfo, this.listing, this.detail);
+    this.root.append(this.editor, this.pendingBox, this.noticeBox, query, toolbar, filterRow, this.pageInfo, this.listing, this.detail, this.trees.root);
     for (const element of [this.argv, this.cwd, this.inputs, this.directories, this.key, this.lookup]) element.oninput = () => this.sync();
     this.root.ontoggle = () => {
-      if (!this.root.open) this.clearPoll();
+      if (!this.root.open) { this.clearPoll(); this.trees.root.open = false; }
       else if (!this.loaded && this.bound) void this.work(() => this.refresh());
       else this.schedulePoll();
     };
@@ -137,10 +141,12 @@ export class CommandsUI {
   }
 
   update(agent: AgentView): void {
+    this.agent = agent;
     const reopened = !this.sessionOpen && agent.session.status === "open";
     this.permissions = agent.session.permissions;
     this.bound = Boolean(this.permissions.execution);
     this.sessionOpen = agent.session.status === "open";
+    this.trees.update(agent, this.workspace);
     this.root.hidden = !this.bound;
     if (this.locale !== currentLocale()) {
       this.locale = currentLocale(); this.renderList(); this.renderDetail();
@@ -149,7 +155,7 @@ export class CommandsUI {
     if (this.bound && this.root.open && (!this.loaded || reopened) && !this.busy) void this.work(() => this.refresh());
   }
 
-  dispose(): void { this.disposed = true; this.clearPoll(); this.abort.abort(); }
+  dispose(): void { this.disposed = true; this.clearPoll(); this.abort.abort(); this.trees.dispose(); }
 
   private field(parent: HTMLElement, key: string, element: HTMLElement): void {
     const row = document.createElement("label"); row.append(text("span", key), element);
@@ -161,7 +167,7 @@ export class CommandsUI {
     if (!this.bound || !Array.isArray(names) || !names.includes(tool) || mode === "ask") return false;
     if (tool === "command_execute" || tool === "command_cancel")
       return this.sessionOpen && mode !== "plan";
-    if (tool === "command_propose" || tool === "directory_source_preview") {
+    if (tool === "command_propose" || tool === "directory_source_preview" || tool === "workspace_tree_prepare") {
       // Session permissions只保存工作区身份指纹，不把writable复制进冻结清单；
       // UI读取当前WorkspaceView，后端WorkspaceChange/来源校验仍最终裁决。
       return this.sessionOpen && this.workspace?.available === true && this.workspace.writable;
@@ -260,6 +266,7 @@ export class CommandsUI {
   private async refresh(): Promise<void> {
     if (this.permissions.workspace && this.sessionOpen) {
       this.workspace = await this.request<WorkspaceView>(this.base.replace(/\/commands$/, "/workspace"));
+      if (this.agent) this.trees.update(this.agent, this.workspace);
     }
     if (this.permitted("command_history")) await this.readHistory();
     if (this.pending && this.permitted("command_get")) await this.findPending();
@@ -448,6 +455,7 @@ export class CommandsUI {
       const info = document.createElement("p"); info.textContent = `${entry.path} · mode ${entry.mode.toString(8).padStart(4, "0")} · ${t(entry.empty ? "空目录" : "非空目录")}`; row.append(info);
       if (entry.proposal_id) row.append(this.button("审阅目录提案", () => this.openDirectoryProposal(entry.proposal_id!), "directory_query"));
       else row.append(this.button("生成目录提案", () => this.proposeDirectory(entry), "directory_source_preview", () => entry.creatable && this.sessionOpen));
+      row.append(this.button("审阅目录树成果", async () => { this.trees.selectSource(changes, entry.path); }, "workspace_tree_prepare", () => changes.complete && entry.creatable && this.sessionOpen));
       section.append(row);
     }
     section.append(

@@ -1,6 +1,7 @@
 /** 原命令事实只读消费；启动、取消与文件提案各自经过现有权限链。 */
 import { errorText, requestJson, requestJsonNullable, } from "./api.js";
 import { currentLocale, localDate, t } from "./i18n.js";
+import { WorkspaceTreesUI } from "./workspace-trees-ui.js";
 const labels = {
     preparing: "命令准备中", dispatched: "命令已派发", running: "命令运行中", finished: "命令已结束",
     interrupted: "命令已中断", completed: "命令已完成", failed: "命令失败", timed_out: "命令超时",
@@ -77,12 +78,15 @@ export class CommandsUI {
     proposal;
     pendingProposals = new Map();
     poll;
+    trees;
+    agent;
     constructor(agentId, notice, openProposal, openDirectoryProposal) {
         this.notice = notice;
         this.openProposal = openProposal;
         this.openDirectoryProposal = openDirectoryProposal;
         this.base = "/v1/agents/" + encodeURIComponent(agentId) + "/commands";
         this.storageKey = "krim-command-pending:" + agentId;
+        this.trees = new WorkspaceTreesUI(agentId, notice, openProposal, openDirectoryProposal);
         try {
             const key = sessionStorage.getItem(this.storageKey);
             if (key && keyValid(key))
@@ -139,12 +143,14 @@ export class CommandsUI {
         this.filter.onchange = () => { this.renderList(); this.sync(); };
         this.listing.className = "command-list";
         this.detail.className = "command-detail";
-        this.root.append(this.editor, this.pendingBox, this.noticeBox, query, toolbar, filterRow, this.pageInfo, this.listing, this.detail);
+        this.root.append(this.editor, this.pendingBox, this.noticeBox, query, toolbar, filterRow, this.pageInfo, this.listing, this.detail, this.trees.root);
         for (const element of [this.argv, this.cwd, this.inputs, this.directories, this.key, this.lookup])
             element.oninput = () => this.sync();
         this.root.ontoggle = () => {
-            if (!this.root.open)
+            if (!this.root.open) {
                 this.clearPoll();
+                this.trees.root.open = false;
+            }
             else if (!this.loaded && this.bound)
                 void this.work(() => this.refresh());
             else
@@ -153,10 +159,12 @@ export class CommandsUI {
         this.sync();
     }
     update(agent) {
+        this.agent = agent;
         const reopened = !this.sessionOpen && agent.session.status === "open";
         this.permissions = agent.session.permissions;
         this.bound = Boolean(this.permissions.execution);
         this.sessionOpen = agent.session.status === "open";
+        this.trees.update(agent, this.workspace);
         this.root.hidden = !this.bound;
         if (this.locale !== currentLocale()) {
             this.locale = currentLocale();
@@ -167,7 +175,7 @@ export class CommandsUI {
         if (this.bound && this.root.open && (!this.loaded || reopened) && !this.busy)
             void this.work(() => this.refresh());
     }
-    dispose() { this.disposed = true; this.clearPoll(); this.abort.abort(); }
+    dispose() { this.disposed = true; this.clearPoll(); this.abort.abort(); this.trees.dispose(); }
     field(parent, key, element) {
         const row = document.createElement("label");
         row.append(text("span", key), element);
@@ -181,7 +189,7 @@ export class CommandsUI {
             return false;
         if (tool === "command_execute" || tool === "command_cancel")
             return this.sessionOpen && mode !== "plan";
-        if (tool === "command_propose" || tool === "directory_source_preview") {
+        if (tool === "command_propose" || tool === "directory_source_preview" || tool === "workspace_tree_prepare") {
             // Session permissions只保存工作区身份指纹，不把writable复制进冻结清单；
             // UI读取当前WorkspaceView，后端WorkspaceChange/来源校验仍最终裁决。
             return this.sessionOpen && this.workspace?.available === true && this.workspace.writable;
@@ -339,6 +347,8 @@ export class CommandsUI {
     async refresh() {
         if (this.permissions.workspace && this.sessionOpen) {
             this.workspace = await this.request(this.base.replace(/\/commands$/, "/workspace"));
+            if (this.agent)
+                this.trees.update(this.agent, this.workspace);
         }
         if (this.permitted("command_history"))
             await this.readHistory();
@@ -605,6 +615,7 @@ export class CommandsUI {
                 row.append(this.button("审阅目录提案", () => this.openDirectoryProposal(entry.proposal_id), "directory_query"));
             else
                 row.append(this.button("生成目录提案", () => this.proposeDirectory(entry), "directory_source_preview", () => entry.creatable && this.sessionOpen));
+            row.append(this.button("审阅目录树成果", async () => { this.trees.selectSource(changes, entry.path); }, "workspace_tree_prepare", () => changes.complete && entry.creatable && this.sessionOpen));
             section.append(row);
         }
         section.append(this.button("较早目录成果", () => this.readDirectoryChanges(-1), "directory_source_query", () => this.directoryPageIndex > 0), this.button("较晚目录成果", () => this.readDirectoryChanges(1), "directory_source_query", () => changes.next_after !== null));
