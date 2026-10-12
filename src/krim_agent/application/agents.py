@@ -83,10 +83,11 @@ from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, Tas
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
-from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput
+from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.tools.workspace_mixed_batches import mixed_batch_start_tool
 from krim_agent.tools.workspace_mixed_queries import mixed_batch_query_tool
+from krim_agent.tools.workspace_trees import tree_prepare_tool
 from krim_agent.workspace import (
     WORKSPACE_TOOL_NAMES,
     WORKSPACE_WRITE_TOOL_NAMES,
@@ -111,6 +112,7 @@ from krim_agent.workspace_checkpoint import (
     WorkspaceCheckpointView,
 )
 from krim_agent.workspace_directory import (
+    ArtifactDirectorySpec,
     DirectoryAttemptView,
     DirectoryChangeAction,
     DirectoryInspectRequest,
@@ -120,6 +122,7 @@ from krim_agent.workspace_directory import (
     DirectoryPreviewView,
     DirectoryQueryRequest,
     DirectoryQueryResult,
+    WorkspaceDirectoryWriter,
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
@@ -145,6 +148,7 @@ from krim_agent.workspace_restore import (
 from krim_agent.workspace_tree import (
     TreePlanDispatch,
     TreePlanFence,
+    TreePlanRequest,
     TreePlanStepPage,
     TreePlanView,
 )
@@ -255,7 +259,10 @@ class AgentService:
             self.workspace_edits, self.manager.directory_changes.store
         )
         self.workspace_trees = WorkspaceTreeService(
-            self.workspace_tree_store, self._workspace_batch_authorize, self._workspace_tree_child
+            self.workspace_tree_store,
+            self._workspace_batch_authorize,
+            self._workspace_tree_child,
+            prepare=self._prepare_tree,
         )
         self.workspace_checkpoint_store = WorkspaceCheckpointStore(self.workspace_edits)
         self.workspace_checkpoints = WorkspaceCheckpointService(
@@ -564,7 +571,7 @@ class AgentService:
     ) -> WorkspaceBinding:
         writing = writable or isinstance(root, Workspace) and root.writable
         selected = (
-            (*workspace_change_tools(), *directory_change_tools())
+            (*workspace_change_tools(), *directory_change_tools(), tree_prepare_tool())
             if writing
             else tuple(
                 item for item in directory_change_tools() if item.name == "directory_inspect"
@@ -798,6 +805,7 @@ class AgentService:
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
                     tree_fence=tree_fence,
+                    workspace_trees=self.workspace_trees,
                     checkpoint_capture=checkpoint_capture,
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
@@ -877,6 +885,15 @@ class AgentService:
                 "workspace_tree_proposal_conflict": 409,
                 "workspace_tree_operation_conflict": 409,
                 "workspace_tree_corrupt": 409,
+                "workspace_tree_idempotency_conflict": 409,
+                "workspace_tree_backend_missing": 503,
+                "workspace_tree_prepare_unverified": 409,
+                "workspace_tree_root_not_found": 404,
+                "workspace_tree_existing_input": 409,
+                "workspace_tree_step_limit": 409,
+                "workspace_tree_metadata_limit": 409,
+                "workspace_tree_limit": 429,
+                "workspace_tree_service_closed": 503,
                 "workspace_checkpoint_fenced": 409,
                 "workspace_checkpoint_target": 403,
                 "workspace_checkpoint_action": 403,
@@ -1556,6 +1573,49 @@ class AgentService:
         self, agent_id: str, plan_id: str, *, confirmed: bool = False
     ) -> TreePlanView:
         return await self.workspace_trees.start(agent_id, plan_id, confirmed=confirmed)
+
+    async def _prepare_tree(self, request: TreePlanRequest, context: ToolContext) -> TreePlanView:
+        scope, binding, execution = await self.manager.directory_changes._source_guard(context)
+        if await self.workspace_tree_store.by_key(scope, request.request_key) is not None:
+            return (await self.workspace_tree_store.reserve(scope, binding, request, None))[0]
+        source = await self.manager.directory_changes.command_sources.source(
+            scope, request.command_id
+        )
+        if source.source_hash != request.source_hash:
+            raise ServiceError("workspace_tree_source_conflict", "树准备的原命令摘要不匹配", 409)
+        if source.workspace != binding.manifest() or source.snapshot.resource != execution.resource:
+            raise ServiceError(
+                "workspace_tree_resource_conflict", "树准备不属于原工作区/执行资源", 403
+            )
+        if source.outcome != "completed" and not request.accept_failed:
+            raise ServiceError("execution_failed_artifacts", "失败目录树成果须显式接受", 409)
+        root = source.directories.get(request.root_path) if source.directories is not None else None
+        if root is None:
+            raise ServiceError("workspace_tree_root_not_found", "原完整来源没有所选目录根", 404)
+        prepared = await workspace_io(
+            WorkspaceDirectoryWriter(binding.require()).prepare_artifact,
+            ArtifactDirectorySpec(
+                path=request.root_path,
+                operation="create",
+                mode=root.mode,
+                command_id=request.command_id,
+                source_hash=request.source_hash,
+            ),
+        )
+        await self.manager.directory_changes._source_guard(context)
+        return (await self.workspace_tree_store.reserve(scope, binding, request, prepared))[0]
+
+    async def workspace_prepare_tree(
+        self, agent_id: str, request: TreePlanRequest, *, confirmed: bool = False
+    ) -> TreePlanView:
+        value = await self._workspace_call(
+            agent_id, "workspace_tree_prepare", request.model_dump(), confirmed=confirmed
+        )
+        return TreePlanView.model_validate_json(json.dumps(value))
+
+    async def workspace_tree_by_key(self, agent_id: str, request_key: str) -> TreePlanView | None:
+        session = await self.session(agent_id)
+        return await self.workspace_tree_store.by_key(f"session:{session.session_id}", request_key)
 
     async def workspace_tree(self, agent_id: str, plan_id: str) -> TreePlanView:
         session = await self.session(agent_id)

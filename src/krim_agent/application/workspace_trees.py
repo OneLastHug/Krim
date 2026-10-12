@@ -8,7 +8,12 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from krim_agent.protocol.domain import ServiceError
-from krim_agent.workspace_tree import TreePlanDispatch, TreePlanExecution, TreePlanView
+from krim_agent.workspace_tree import (
+    TreePlanDispatch,
+    TreePlanExecution,
+    TreePlanRequest,
+    TreePlanView,
+)
 
 from .workspace_changes import _wait
 from .workspace_execution import (
@@ -19,10 +24,12 @@ from .workspace_execution import (
 
 if TYPE_CHECKING:
     from krim_agent.persistence.workspace_tree_plans import WorkspaceTreePlanStore
+    from krim_agent.tools import ToolContext
 
 
 AuthorizeTree = Callable[[str], Awaitable[tuple[str, str, str]]]
 ExecuteTreeStep = Callable[[str, TreePlanDispatch, bool], Awaitable[object]]
+PrepareTree = Callable[[TreePlanRequest, "ToolContext"], Awaitable[TreePlanView]]
 
 
 class WorkspaceTreeService:
@@ -33,6 +40,7 @@ class WorkspaceTreeService:
         execute: ExecuteTreeStep,
         *,
         max_active: int = 16,
+        prepare: PrepareTree | None = None,
     ) -> None:
         if type(max_active) is not int or not 1 <= max_active <= 64:
             raise ValueError("树Worker并发须为1–64整数")
@@ -41,6 +49,28 @@ class WorkspaceTreeService:
         self._tasks: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._start_lock = asyncio.Lock()
         self._closed = False
+        self._prepare = prepare
+
+    async def prepare(self, request: TreePlanRequest, context: ToolContext) -> TreePlanView:
+        if self._closed:
+            raise ServiceError("workspace_tree_service_closed", "树准备服务已关闭", 503)
+        if context.origin != "host" or context.run_id != "local":
+            raise ServiceError("workspace_tree_model_unbound", "树准备尚未绑定原模型Run/call", 403)
+        if any(
+            value is not None
+            for value in (
+                context.tree_fence,
+                context.mixed_batch,
+                context.workspace_batch,
+                context.checkpoint_capture,
+                context.checkpoint_restore,
+                context.command_capture,
+            )
+        ):
+            raise ServiceError("workspace_tree_action", "其他事务凭据不能用于新树准备", 403)
+        if self._prepare is None:
+            raise ServiceError("workspace_tree_backend_missing", "树准备服务未装配原来源守卫", 503)
+        return await self._prepare(request, context)
 
     async def start(self, agent_id: str, plan_id: str, *, confirmed: bool = False) -> TreePlanView:
         if type(confirmed) is not bool:

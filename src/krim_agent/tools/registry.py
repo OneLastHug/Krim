@@ -169,7 +169,18 @@ class ToolRegistry:
     ) -> Result:
         mixed_fence = parent.mixed_batch
         tree_fence = parent.tree_fence
+        tree_prepare = name == "workspace_tree_prepare"
+        tree_scope = (
+            parent.run_id,
+            parent.topic_id,
+            parent.session_id,
+            parent.agent_id,
+            parent.origin,
+            parent.source_call_id,
+        )
         try:
+            if tree_prepare and (parent.origin != "host" or parent.run_id != "local"):
+                raise ToolError("workspace_tree_model_unbound", "树准备尚未绑定原模型Run/call")
             if tree_fence is not None:
                 expected = (
                     (
@@ -253,6 +264,24 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if tree_prepare and (
+                    child.arguments != original_arguments
+                    or (
+                        child.run_id,
+                        child.topic_id,
+                        child.session_id,
+                        child.agent_id,
+                        child.origin,
+                        child.source_call_id,
+                    )
+                    != tree_scope
+                    or child.workspace is not parent.workspace
+                    or child.execution is not parent.execution
+                    or child.workspace_trees is not parent.workspace_trees
+                ):
+                    raise ToolError(
+                        "workspace_tree_fence_mismatch", "Hook不能替换原树准备参数或来源上下文"
+                    )
                 if tree_fence is not None and (
                     child.tree_fence != tree_fence
                     or child.arguments != original_arguments

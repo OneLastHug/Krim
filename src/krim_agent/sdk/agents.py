@@ -77,6 +77,7 @@ from krim_agent.workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -435,6 +436,39 @@ class AgentSession:
         return await self.service.workspace_start_mixed_batch(
             self.agent_id, request, confirmed=confirmed
         )
+
+    async def prepare_directory_tree(
+        self, request: TreePlanRequest, *, confirmed: bool = False
+    ) -> TreePlanView:
+        return await self.service.workspace_prepare_tree(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def start_directory_tree(self, plan_id: str, *, confirmed: bool = False) -> TreePlanView:
+        return await self.service.workspace_start_tree(self.agent_id, plan_id, confirmed=confirmed)
+
+    async def directory_tree(self, plan_id: str) -> TreePlanView:
+        return await self.service.workspace_tree(self.agent_id, plan_id)
+
+    async def directory_tree_by_key(self, request_key: str) -> TreePlanView | None:
+        return await self.service.workspace_tree_by_key(self.agent_id, request_key)
+
+    async def directory_tree_steps(
+        self, plan_id: str, *, after: int | None = None, limit: int = 32
+    ) -> TreePlanStepPage:
+        return await self.service.workspace_tree_steps(
+            self.agent_id, plan_id, after=after, limit=limit
+        )
+
+    async def wait_directory_tree(
+        self, plan_id: str, *, timeout_seconds: float = 30
+    ) -> TreePlanView:
+        return await self.service.workspace_wait_tree(
+            self.agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_directory_tree(self, plan_id: str) -> TreePlanView:
+        return await self.service.workspace_cancel_tree(self.agent_id, plan_id)
 
     async def mixed_change_batch(self, batch_id: str) -> MixedBatchView:
         return await self.service.workspace_mixed_batch(self.agent_id, batch_id)

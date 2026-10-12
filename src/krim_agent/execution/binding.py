@@ -20,6 +20,7 @@ COMMAND_TOOL_NAMES = frozenset(
         "command_inspect",
         "directory_source_preview",
         "directory_source_query",
+        "workspace_tree_prepare",
     }
 )
 

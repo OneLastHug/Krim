@@ -86,6 +86,7 @@ from krim_agent.workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -161,6 +162,9 @@ __all__ = [
     "MixedBatchSummary",
     "MixedBatchTarget",
     "MixedBatchView",
+    "TreePlanRequest",
+    "TreePlanStepPage",
+    "TreePlanView",
     "NativeBatchSummary",
     "NativeBatchItemView",
     "NativeBatchRequest",
