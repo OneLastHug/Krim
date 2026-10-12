@@ -110,7 +110,7 @@ export class AgentsUI {
     const workspace = new WorkspaceUI(agent.agent_id, this.actions.notice);
     const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
     const directories = new DirectoryChangesUI(agent.agent_id, this.actions.notice);
-    const commands = new CommandsUI(agent.agent_id, this.actions.notice, proposalId => changes.focusProposal(proposalId), proposalId => directories.focusProposal(proposalId));
+    const commands = new CommandsUI(agent.agent_id, this.actions.notice, (proposalId, operationId) => changes.focusProposal(proposalId, operationId), (proposalId, operationId) => directories.focusProposal(proposalId, operationId));
     root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, commands.root);
     const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, commands, checkpoints };
     execute.onclick = () => {

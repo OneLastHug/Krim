@@ -88,7 +88,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
             and context.workspace_batch is not None
             or (
                 definition.name in {"workspace_change", "directory_change"}
-                and context.mixed_batch is not None
+                and (context.mixed_batch is not None or context.tree_fence is not None)
             )
         ):
             entered, released = gate

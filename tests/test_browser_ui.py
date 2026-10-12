@@ -46,6 +46,9 @@ async def test_static_browser_agent_app_assets_are_same_origin_and_safe(api):
         "DirectoryChangesUI" in directories_script.text
         and "directory-state" in directories_script.text
     )
+    tree_script = await api.get("/ui/workspace-trees-ui.js")
+    assert tree_script.status_code == 200 and "WorkspaceTreesUI" in tree_script.text
+    assert "tree-plans" in tree_script.text and "textContent" in tree_script.text
 
 
 async def test_static_assets_are_public_but_business_api_still_requires_bearer_key(tmp_path):
@@ -82,6 +85,8 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert change_script.status_code == 200 and "WorkspaceChangesUI" in change_script.text
         command_script = await client.get("/ui/commands-ui.js")
         assert command_script.status_code == 200 and "CommandsUI" in command_script.text
+        tree_script = await client.get("/ui/workspace-trees-ui.js")
+        assert tree_script.status_code == 200 and "WorkspaceTreesUI" in tree_script.text
         directories_script = await client.get("/ui/directory-changes-ui.js")
         assert (
             directories_script.status_code == 200
@@ -89,6 +94,9 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         )
         assert command_script.headers["x-content-type-options"] == "nosniff"
         assert (await client.get("/v1/agents/example/commands")).status_code == 401
+        assert (
+            await client.get("/v1/agents/example/workspace/tree-plans/by-key?request_key=original")
+        ).status_code == 401
         authorized = await client.get(
             "/v1/agents/catalog", headers={"Authorization": "Bearer ui-key"}
         )
@@ -104,3 +112,4 @@ def test_frontend_sources_and_built_assets_exist():
     assert (Path("src/krim_agent/web") / "index.html").exists()
     assert (Path("src/krim_agent/web") / "app.js").exists()
     assert (Path("src/krim_agent/web") / "directory-changes-ui.js").exists()
+    assert (Path("src/krim_agent/web") / "workspace-trees-ui.js").exists()
