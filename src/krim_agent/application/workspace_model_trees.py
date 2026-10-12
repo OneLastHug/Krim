@@ -332,7 +332,7 @@ class ModelTreeService:
             ) from None
 
     def assert_external_close(self) -> None:
-        if inside_workspace_execution():
+        if inside_workspace_execution(self._tasks):
             raise ServiceError("workspace_tree_model_reentrant", "模型树回调不能关闭当前服务", 409)
 
     async def cancel_if_running(self, scope: str, plan_id: str) -> bool:

@@ -657,6 +657,7 @@ async def test_host_write_capability_registers_tools_without_granting_permission
             "workspace_change",
             "workspace_reconcile",
             "workspace_finalize",
+            "workspace_tree_prepare",
         }
         from krim_agent.workspace_change import WorkspaceChangeAction
 
