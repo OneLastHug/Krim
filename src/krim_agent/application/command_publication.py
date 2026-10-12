@@ -61,7 +61,9 @@ class CommandPublicationService:
         if scope != edit_scope or workspace is not current_workspace:
             raise ServiceError("execution_proposal_source", "命令与发布作用域不匹配", 403)
         run_id = context.run_id if context.run_id != "local" else None
-        previous = await self.store.find(scope, request, workspace, run_id=run_id)
+        previous = await self.store.find(
+            scope, request, workspace, run_id=run_id, tree_fence=context.tree_fence
+        )
         if previous is not None:
             return previous
         source = await self.store.source(scope, request.command_id)
@@ -117,4 +119,6 @@ class CommandPublicationService:
             authorize=authorize,
         )
         await check()
-        return await self.store.create(scope, request, workspace, prepared, run_id=run_id)
+        return await self.store.create(
+            scope, request, workspace, prepared, run_id=run_id, tree_fence=context.tree_fence
+        )

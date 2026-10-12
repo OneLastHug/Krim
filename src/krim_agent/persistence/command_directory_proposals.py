@@ -21,10 +21,12 @@ from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_directory import ArtifactDirectorySpec, PreparedDirectoryChange
+from krim_agent.workspace_tree import TreePlanFence
 
 from .command_proposals import CommandSource, load_source
 from .database import CommandDirectoryProposalRow, WorkspaceDirectoryProposalRow
 from .directory_fences import entry_key
+from .tree_fences import assert_preview, bind_proposal
 from .workspace_directories import WorkspaceDirectoryStore, decode, encode, validate
 from .workspace_edits import digest
 
@@ -183,6 +185,7 @@ class CommandDirectoryProposalStore:
         binding: WorkspaceBinding,
         *,
         run_id: str | None = None,
+        tree_fence: TreePlanFence | None = None,
     ) -> CommandDirectoryProposalView | None:
         self.directories.files._key(request.request_key)
         async with self.database.write_lock, self.database.sessions() as session:
@@ -193,6 +196,17 @@ class CommandDirectoryProposalStore:
                     WorkspaceDirectoryProposalRow.scope_id == scope,
                     WorkspaceDirectoryProposalRow.request_key == request.request_key,
                 )
+            )
+            await assert_preview(
+                session,
+                self.directories.owner_id,
+                scope,
+                binding.fingerprint,
+                "directory",
+                request,
+                tree_fence,
+                existing_proposal_id=row.proposal_id if row else None,
+                run_id=run_id,
             )
             if row is None:
                 return None
@@ -210,6 +224,7 @@ class CommandDirectoryProposalStore:
         prepared: PreparedDirectoryChange,
         *,
         run_id: str | None = None,
+        tree_fence: TreePlanFence | None = None,
     ) -> CommandDirectoryProposalView:
         self.directories.files._key(request.request_key)
         validate(prepared, original=True)
@@ -229,6 +244,18 @@ class CommandDirectoryProposalStore:
                 )
             )
             wanted = self.request_hash(request, binding)
+            tree_step = await assert_preview(
+                session,
+                self.directories.owner_id,
+                scope,
+                binding.fingerprint,
+                "directory",
+                request,
+                tree_fence,
+                prepared=prepared,
+                existing_proposal_id=previous.proposal_id if previous else None,
+                run_id=run_id,
+            )
             if previous is not None:
                 if previous.request_hash != wanted:
                     raise ServiceError(
@@ -289,6 +316,8 @@ class CommandDirectoryProposalStore:
                     accept_failed=int(request.accept_failed),
                 )
             )
+            await session.flush()
+            bind_proposal(tree_step, "directory", row.proposal_id)
             await session.flush()
             binding.require()
             return await self._view(session, row)

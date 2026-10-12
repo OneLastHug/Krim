@@ -168,7 +168,22 @@ class ToolRegistry:
         consume: Callable[[ToolDefinition, Any], Result],
     ) -> Result:
         mixed_fence = parent.mixed_batch
+        tree_fence = parent.tree_fence
         try:
+            if tree_fence is not None:
+                expected = (
+                    (
+                        "command_propose"
+                        if tree_fence.source == "file"
+                        else "directory_source_preview"
+                    )
+                    if tree_fence.phase == "preview"
+                    else ("workspace_change" if tree_fence.source == "file" else "directory_change")
+                )
+                if name != expected or mixed_fence is not None:
+                    raise ToolError("workspace_tree_action", "树步骤只能调用原来源/阶段的冻结工具")
+                if parent.origin != "host" or parent.run_id != "local":
+                    raise ToolError("workspace_tree_model_unbound", "模型树执行尚未绑定原Run/call")
             if mixed_fence is not None and name != (
                 "workspace_change" if mixed_fence.source == "file" else "directory_change"
             ):
@@ -238,6 +253,26 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if tree_fence is not None and (
+                    child.tree_fence != tree_fence
+                    or child.arguments != original_arguments
+                    or child.source_call_id != parent.source_call_id
+                    or (
+                        child.run_id,
+                        child.topic_id,
+                        child.session_id,
+                        child.agent_id,
+                        child.origin,
+                    )
+                    != (
+                        parent.run_id,
+                        parent.topic_id,
+                        parent.session_id,
+                        parent.agent_id,
+                        parent.origin,
+                    )
+                ):
+                    raise ToolError("workspace_tree_fence_mismatch", "Hook不能替换原树步骤或上下文")
                 if mixed_fence is not None and (
                     child.mixed_batch != mixed_fence
                     or child.arguments != original_arguments

@@ -263,6 +263,7 @@ class WorkspaceChangeService:
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
             mixed_fence=context.mixed_batch,
+            tree_fence=context.tree_fence,
             run_id=context.run_id if context.run_id != "local" else None,
         )
         if previous is not None:
@@ -283,6 +284,7 @@ class WorkspaceChangeService:
             batch_fence=context.workspace_batch,
             restore_fence=context.checkpoint_restore,
             mixed_fence=context.mixed_batch,
+            tree_fence=context.tree_fence,
         )
         if not created:
             return attempt.view

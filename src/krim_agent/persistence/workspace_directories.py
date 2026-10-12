@@ -29,6 +29,7 @@ from krim_agent.workspace_directory import (
     PreparedDirectoryChange,
 )
 from krim_agent.workspace_mixed_batch import MixedBatchFence
+from krim_agent.workspace_tree import TreePlanFence
 
 from .database import (
     Database,
@@ -40,6 +41,9 @@ from .database import (
 )
 from .directory_fences import directory_key, entry_key
 from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request, mixed_attempt_call
+from .tree_fences import assert_execution as assert_tree_execution
+from .tree_fences import assert_request as assert_tree_request
+from .tree_fences import bind_operation as bind_tree_operation
 from .workspace_edits import WorkspaceEditStore, decode_prepared, digest
 
 
@@ -393,6 +397,7 @@ class WorkspaceDirectoryStore:
         fingerprint: str,
         *,
         mixed_fence: MixedBatchFence | None = None,
+        tree_fence: TreePlanFence | None = None,
         run_id: str | None = None,
     ) -> StoredDirectoryAttempt | None:
         wanted = digest({"request": request.model_dump(mode="json"), "resource": fingerprint})
@@ -416,6 +421,17 @@ class WorkspaceDirectoryStore:
                 "directory",
                 request,
                 mixed_fence,
+                row.operation_id if row is not None else None,
+                run_id=run_id,
+            )
+            await assert_tree_request(
+                session,
+                self.owner_id,
+                scope,
+                fingerprint,
+                "directory",
+                request,
+                tree_fence,
                 row.operation_id if row is not None else None,
                 run_id=run_id,
             )
@@ -639,6 +655,7 @@ class WorkspaceDirectoryStore:
         run_id: str | None = None,
         call_id: str | None = None,
         mixed_fence: MixedBatchFence | None = None,
+        tree_fence: TreePlanFence | None = None,
     ) -> tuple[StoredDirectoryAttempt, bool]:
         self.files._key(request.request_key)
         validate(prepared)
@@ -660,6 +677,17 @@ class WorkspaceDirectoryStore:
                 "directory",
                 request,
                 mixed_fence,
+                previous.operation_id if previous is not None else None,
+                run_id=run_id,
+            )
+            tree_step = await assert_tree_request(
+                session,
+                self.owner_id,
+                scope,
+                fingerprint,
+                "directory",
+                request,
+                tree_fence,
                 previous.operation_id if previous is not None else None,
                 run_id=run_id,
             )
@@ -801,6 +829,7 @@ class WorkspaceDirectoryStore:
             if mixed_child is not None:
                 mixed_child.directory_operation_id = identifier
                 mixed_child.admission_open = False
+            bind_tree_operation(tree_step, "directory", identifier)
             prepared_spec = prepared.spec
             prepared_target_path = (
                 prepared_spec.target_path
@@ -840,6 +869,7 @@ class WorkspaceDirectoryStore:
                 raise ServiceError("workspace_directory_operation_not_found", "目录操作不存在", 404)
             await self.files._scope(session, scope, writing=True, run_id=row.run_id)
             await assert_mixed_execution(session, self.owner_id, "directory", identifier)
+            await assert_tree_execution(session, self.owner_id, "directory", identifier)
             if (
                 row.status != "running"
                 or row.owner_id != self.owner_id
@@ -986,6 +1016,7 @@ class WorkspaceDirectoryStore:
                     session, scope, proposal.workspace_key, proposal.resource_fingerprint
                 )
                 await assert_mixed_execution(session, self.owner_id, "directory", identifier)
+                await assert_tree_execution(session, self.owner_id, "directory", identifier)
             if resolving and row.status != "uncertain":
                 raise ServiceError("workspace_directory_state", "只有unknown可核实", 409)
             row.receipt_history = [*row.receipt_history, raw]

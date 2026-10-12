@@ -38,6 +38,22 @@ def source_store(store, source):
     return store.files if source == "file" else store.directories
 
 
+def mutation_metadata(path):
+    # 原keep核实允许读取并推进atime，仍严格检查实际写入与身份/权限变化。
+    value = path.stat()
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 async def reserve_child(store, scope, workspace, dispatch, *, request=None, fence=None):
     original_store = source_store(store, dispatch.fence.source)
     request = request or dispatch.request
@@ -541,7 +557,7 @@ async def test_registry_services_apply_keep_undo_share_original_ledger(runtime, 
     try:
         for kind in ("apply", "keep", "undo"):
             stamp = (
-                ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+                (mutation_metadata(tmp_path / "file.txt"), mutation_metadata(tmp_path / "empty"))
                 if kind == "keep"
                 else None
             )
@@ -573,7 +589,12 @@ async def test_registry_services_apply_keep_undo_share_original_ledger(runtime, 
             assert done.status == "done"
             if kind == "keep":
                 assert all(not item.operation.receipt.changed for item in done.items)
-                assert stamp == ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+                assert stamp == (
+                    mutation_metadata(tmp_path / "file.txt"),
+                    mutation_metadata(tmp_path / "empty"),
+                )
+                assert (tmp_path / "file.txt").read_bytes() == b"data"
+                assert list((tmp_path / "empty").iterdir()) == []
         assert not (tmp_path / "file.txt").exists() and not (tmp_path / "empty").exists()
         assert await attempt_counts(store.database) == (3, 3)
     finally:
@@ -845,7 +866,7 @@ async def test_cancel_between_keep_verification_and_receipt_cannot_report_kept(
             return await original_settle(*args, **kwargs)
 
         monkeypatch.setattr(original_store, "settle", pause_receipt)
-        stamp = ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+        stamp = (mutation_metadata(tmp_path / "file.txt"), mutation_metadata(tmp_path / "empty"))
         task = asyncio.create_task(invoke_child(service, agent, keep_execution.children[0]))
         await asyncio.wait_for(entered.wait(), 10)
         await store.cancel(scope, accepted.batch_id)
@@ -855,7 +876,12 @@ async def test_cancel_between_keep_verification_and_receipt_cannot_report_kept(
         cold = await store.get(scope, accepted.batch_id)
         assert cold.producer_status == "cancelled" and cold.status == "uncertain"
         assert cold.items[0].operation.operation_id == raw["operation_id"]
-        assert stamp == ((tmp_path / "file.txt").stat(), (tmp_path / "empty").stat())
+        assert stamp == (
+            mutation_metadata(tmp_path / "file.txt"),
+            mutation_metadata(tmp_path / "empty"),
+        )
+        assert (tmp_path / "file.txt").read_bytes() == b"data"
+        assert list((tmp_path / "empty").iterdir()) == []
         assert (await original_store.get(scope, target.proposal_id)).view.status != "kept"
     finally:
         release.set()
