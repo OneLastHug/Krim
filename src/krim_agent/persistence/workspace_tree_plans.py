@@ -485,6 +485,7 @@ class WorkspaceTreePlanStore:
         elif operation_id is not None or step.expected_revision is not None:
             raise _corrupt()
         if operation_id is not None:
+            model_source = await tree_model_sources.get(sql, row, "start")
             attempt = (
                 await sql.get(WorkspaceEditAttemptRow, operation_id)
                 if step.source == "file"
@@ -497,7 +498,9 @@ class WorkspaceTreePlanStore:
                 or attempt.action != "apply"
                 or attempt.expected_revision != step.expected_revision
                 or attempt.request_key != step_key(row.plan_id, step.position, "change")
-                or attempt.run_id is not None
+                or attempt.run_id != (model_source.run_id if model_source is not None else None)
+                or model_source is not None
+                and attempt.call_id != model_source.call_id
                 or step.status != "pending"
             ):
                 raise _corrupt()
@@ -710,7 +713,7 @@ class WorkspaceTreePlanStore:
             if not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_tree_fence_mismatch", "树凭据不匹配", 403)
             assert_live(row, self.owner_id)
-            await tree_model_sources.quarantine_execution(sql, row)
+            await tree_model_sources.assert_execution(sql, row)
             await self.files._scope(sql, scope, writing=True)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             await assert_source(sql, row)
@@ -727,7 +730,7 @@ class WorkspaceTreePlanStore:
             if not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_tree_fence_mismatch", "树凭据不匹配", 403)
             assert_live(row, self.owner_id)
-            await tree_model_sources.quarantine_execution(sql, row)
+            await tree_model_sources.assert_execution(sql, row)
             await self.files._scope(sql, scope, writing=True)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             await assert_source(sql, row)
@@ -747,7 +750,14 @@ class WorkspaceTreePlanStore:
             )
             phase: TreePhase = "preview" if proposal is None else "change"
             step.admission_open = True
-            fence = TreePlanFence(identifier, position, cast(TreeSource, step.source), phase, token)
+            fence = TreePlanFence(
+                identifier,
+                position,
+                cast(TreeSource, step.source),
+                phase,
+                token,
+                await tree_model_sources.get(sql, row, "start"),
+            )
             request: (
                 CommandProposalRequest
                 | CommandDirectoryProposalRequest

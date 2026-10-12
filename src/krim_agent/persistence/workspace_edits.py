@@ -58,6 +58,7 @@ from .directory_fences import assert_file_directory_fence
 from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request, mixed_attempt_call
 from .tree_fences import assert_execution as assert_tree_execution
 from .tree_fences import assert_request as assert_tree_request
+from .tree_fences import attempt_call as tree_attempt_call
 from .tree_fences import bind_operation as bind_tree_operation
 from .workspace_batches import assert_batch_execution, assert_batch_request
 from .workspace_restores import assert_restore_execution, assert_restore_request
@@ -1060,7 +1061,9 @@ class WorkspaceEditStore:
                 if request.action != "keep"
                 else None,
                 run_id=run_id,
-                call_id=await mixed_attempt_call(session, mixed_child, call_id),
+                call_id=await tree_attempt_call(
+                    session, tree_step, await mixed_attempt_call(session, mixed_child, call_id)
+                ),
             )
             session.add(row)
             await session.flush()

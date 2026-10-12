@@ -229,8 +229,19 @@ class ToolRegistry:
                 )
                 if name != expected or mixed_fence is not None:
                     raise ToolError("workspace_tree_action", "树步骤只能调用原来源/阶段的冻结工具")
-                if parent.origin != "host" or parent.run_id != "local":
-                    raise ToolError("workspace_tree_model_unbound", "模型树执行尚未绑定原Run/call")
+                if tree_fence.model_source is None:
+                    if parent.origin != "host" or parent.run_id != "local":
+                        raise ToolError(
+                            "workspace_tree_model_unbound", "模型树执行尚未绑定原Run/call"
+                        )
+                elif (
+                    parent.origin != "model"
+                    or parent.run_id != tree_fence.model_source.run_id
+                    or parent.source_call_id != tree_fence.model_source.call_id
+                ):
+                    raise ToolError(
+                        "workspace_tree_model_source_conflict", "树上下文未保留原模型来源"
+                    )
             if mixed_fence is not None and name != (
                 "workspace_change" if mixed_fence.source == "file" else "directory_change"
             ):
@@ -280,6 +291,9 @@ class ToolRegistry:
                 child.arguments = parsed.model_dump(by_alias=True)
                 original_arguments = copy.deepcopy(child.arguments)
                 original_query_binding = _tree_query_binding(child) if tree_query else None
+                original_tree_binding = (
+                    _tree_query_binding(child) if tree_fence is not None else None
+                )
                 decision = (
                     await child.policy(definition, child)
                     if child.policy is not None
@@ -333,6 +347,7 @@ class ToolRegistry:
                     )
                 if tree_fence is not None and (
                     child.tree_fence != tree_fence
+                    or _tree_query_binding(child) != original_tree_binding
                     or child.arguments != original_arguments
                     or child.source_call_id != parent.source_call_id
                     or (
@@ -390,6 +405,12 @@ class ToolRegistry:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if tree_fence is not None and (
+                    child.tree_fence != tree_fence
+                    or child.arguments != original_arguments
+                    or _tree_query_binding(child) != original_tree_binding
+                ):
+                    raise ToolError("workspace_tree_fence_mismatch", "Hook不能替换原树步骤或上下文")
                 if tree_query and (
                     child.arguments != original_arguments
                     or _tree_query_binding(child) != original_query_binding
@@ -424,12 +445,14 @@ class ToolRegistry:
                 budget.active = False
             self._observe(
                 ToolAudit(
-                    call_id=query_audit[0] if tree_query else child.call_id,
-                    run_id=query_audit[1] if tree_query else child.run_id,
+                    call_id=query_audit[0]
+                    if tree_query or tree_fence is not None
+                    else child.call_id,
+                    run_id=query_audit[1] if tree_query or tree_fence is not None else child.run_id,
                     name=name,
                     risk=definition.risk,
                     decision=decision,
-                    depth=query_audit[2] if tree_query else child.depth,
+                    depth=query_audit[2] if tree_query or tree_fence is not None else child.depth,
                     ok=code is None,
                     code=code,
                 )
