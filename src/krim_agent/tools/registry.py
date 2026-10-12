@@ -44,6 +44,41 @@ def _unique_callbacks[Callback](values: list[Callback]) -> list[Callback]:
     return result
 
 
+def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
+    """冻结原查询来源及能力身份；不序列化内部预算、Backend或凭据。"""
+    return (
+        context.run_id,
+        context.topic_id,
+        context.session_id,
+        context.agent_id,
+        context.origin,
+        context.call_id,
+        context.source_call_id,
+        context.depth,
+        context.timeout,
+        context.budget_account_ids,
+        context.trace_owner_kind,
+        context.trace_owner_id,
+        id(context.registry),
+        id(context.workspace),
+        id(context.execution),
+        id(context.workspace_tree_queries),
+        id(context.model_tools),
+        id(context.policy),
+        id(context.approval_handler),
+        id(context.question_handler),
+        id(context.interaction_publisher),
+        id(context.execution_timeouts),
+        id(context.tracer),
+        id(context.tree_fence),
+        id(context.mixed_batch),
+        id(context.workspace_batch),
+        id(context.checkpoint_capture),
+        id(context.checkpoint_restore),
+        id(context.command_capture),
+    )
+
+
 class ToolRegistry:
     def __init__(self, *, max_depth: int = 8, default_timeout: float = 10) -> None:
         self.max_depth = max_depth
@@ -170,6 +205,7 @@ class ToolRegistry:
         mixed_fence = parent.mixed_batch
         tree_fence = parent.tree_fence
         tree_prepare = name == "workspace_tree_prepare"
+        tree_query = name == "workspace_tree_query"
         tree_scope = (
             parent.run_id,
             parent.topic_id,
@@ -232,6 +268,7 @@ class ToolRegistry:
         if parent.depth >= self.max_depth:
             raise ToolError("max_depth", f"工具嵌套超过 {self.max_depth} 层")
         child = parent.child(dict(arguments))
+        query_audit = (child.call_id, child.run_id, child.depth)
         decision: Decision = "deny"
         code: str | None = None
         budget: ToolExecutionBudget | None = None
@@ -242,6 +279,7 @@ class ToolRegistry:
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
                 child.arguments = parsed.model_dump(by_alias=True)
                 original_arguments = copy.deepcopy(child.arguments)
+                original_query_binding = _tree_query_binding(child) if tree_query else None
                 decision = (
                     await child.policy(definition, child)
                     if child.policy is not None
@@ -264,6 +302,17 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if tree_query and (
+                    child.arguments != original_arguments
+                    or _tree_query_binding(child) != original_query_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_query_mismatch", "Hook不能替换原树查询参数或调用上下文"
+                    )
+                if tree_query and short is not None:
+                    raise ToolError(
+                        "workspace_tree_query_unverified", "树查询必须保留真实原账本回程"
+                    )
                 if tree_prepare and (
                     child.arguments != original_arguments
                     or (
@@ -336,10 +385,22 @@ class ToolRegistry:
                 result = (
                     short.value if short is not None else await definition.executor(parsed, child)
                 )
+                query_response = child._tree_query_response
                 if definition.post_execute is not None:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if tree_query and (
+                    child.arguments != original_arguments
+                    or _tree_query_binding(child) != original_query_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_query_mismatch", "Hook不能替换原树查询参数或调用上下文"
+                    )
+                if tree_query and child._tree_query_response != query_response:
+                    raise ToolError(
+                        "workspace_tree_query_unverified", "Hook不能替换原树查询回程标记"
+                    )
                 if definition.output_guard is not None:
                     await definition.output_guard(result, child)
                 return consume(definition, result)
@@ -363,12 +424,12 @@ class ToolRegistry:
                 budget.active = False
             self._observe(
                 ToolAudit(
-                    call_id=child.call_id,
-                    run_id=child.run_id,
+                    call_id=query_audit[0] if tree_query else child.call_id,
+                    run_id=query_audit[1] if tree_query else child.run_id,
                     name=name,
                     risk=definition.risk,
                     decision=decision,
-                    depth=child.depth,
+                    depth=query_audit[2] if tree_query else child.depth,
                     ok=code is None,
                     code=code,
                 )

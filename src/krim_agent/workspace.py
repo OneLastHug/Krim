@@ -18,7 +18,13 @@ from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 
 WORKSPACE_READ_TOOL_NAMES = frozenset(
-    {"workspace_read", "workspace_list", "workspace_search", "workspace_mixed_query"}
+    {
+        "workspace_read",
+        "workspace_list",
+        "workspace_search",
+        "workspace_mixed_query",
+        "workspace_tree_query",
+    }
 )
 WORKSPACE_CHANGE_TOOL_NAMES = frozenset(
     {

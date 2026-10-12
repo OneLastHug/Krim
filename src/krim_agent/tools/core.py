@@ -85,6 +85,13 @@ class WorkspaceTreeBackend(Protocol):
     async def prepare(self, request: TreePlanRequest, context: ToolContext) -> TreePlanView: ...
 
 
+class TreePlanQueryBackend(Protocol):
+    async def tool_query(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def validate_query(self, value: Any, context: ToolContext) -> None: ...
+
+
 class CommandBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
@@ -174,6 +181,8 @@ class ToolContext:
     tree_fence: TreePlanFence | None = None
     workspace_trees: WorkspaceTreeBackend | None = None
     _tree_prepare_response: str | None = field(default=None, repr=False)
+    workspace_tree_queries: TreePlanQueryBackend | None = None
+    _tree_query_response: str | None = field(default=None, repr=False)
     # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
@@ -220,6 +229,7 @@ class ToolContext:
             mixed_batch=self.mixed_batch,
             tree_fence=self.tree_fence,
             workspace_trees=self.workspace_trees,
+            workspace_tree_queries=self.workspace_tree_queries,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
