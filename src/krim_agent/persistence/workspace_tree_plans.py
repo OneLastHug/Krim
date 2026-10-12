@@ -35,6 +35,7 @@ from krim_agent.workspace_tree import (
     TreePlanDispatch,
     TreePlanExecution,
     TreePlanFence,
+    TreePlanModelSource,
     TreePlanRequest,
     TreePlanStatus,
     TreePlanStepPage,
@@ -46,6 +47,7 @@ from krim_agent.workspace_tree import (
 )
 from krim_agent.workspace_writer import PreparedFileChange
 
+from . import tree_model_sources
 from .command_proposals import load_source
 from .database import (
     AgentSessionRow,
@@ -108,7 +110,11 @@ class WorkspaceTreePlanStore:
         binding: WorkspaceBinding,
         request: TreePlanRequest,
         prepared: PreparedDirectoryChange | None,
+        *,
+        model_source: TreePlanModelSource | None = None,
     ) -> tuple[TreePlanView, bool]:
+        if model_source is not None:
+            tree_model_sources.validate(model_source)
         request = TreePlanRequest.model_validate(request.model_dump())
         self.files._key(request.request_key)
         wanted = self._request_hash(request, binding)
@@ -127,7 +133,11 @@ class WorkspaceTreePlanStore:
                     raise ServiceError(
                         "workspace_tree_idempotency_conflict", "树请求键已绑定其他参数", 409
                     )
+                if model_source is not None:
+                    await tree_model_sources.assert_retry(sql, previous, "prepare", model_source)
                 return await self._view(sql, previous), False
+            if model_source is not None:
+                await tree_model_sources.assert_new(sql, scope, model_source)
             if not binding.require().writable:
                 raise ServiceError("workspace_read_only", "工作区未授权目录树准备", 403)
             source = await load_source(sql, scope, request.command_id)
@@ -271,6 +281,8 @@ class WorkspaceTreePlanStore:
                     )
                 )
             await sql.flush()
+            if model_source is not None:
+                await tree_model_sources.bind(sql, row, "prepare", model_source)
             return await self._view(sql, row), True
 
     @staticmethod
@@ -547,6 +559,8 @@ class WorkspaceTreePlanStore:
         )
 
     async def _view(self, sql: AsyncSession, row: WorkspaceTreePlanRow) -> TreePlanView:
+        await tree_model_sources.get(sql, row, "prepare")
+        await tree_model_sources.get(sql, row, "start")
         values = [await self._step_view(sql, row, item) for item in await self._rows(sql, row)]
         done = sum(item.status == "done" for item in values)
         unresolved = any(item.status in {"running", "uncertain"} for item in values)
@@ -667,19 +681,27 @@ class WorkspaceTreePlanStore:
         if row.producer_status == "running" and (row.lease_expires_at or 0) <= time.time():
             await self._close(sql, row, "interrupted", "workspace_tree_lease_expired")
 
-    async def claim(self, scope: str, identifier: str) -> TreePlanExecution:
+    async def claim(
+        self, scope: str, identifier: str, *, model_source: TreePlanModelSource | None = None
+    ) -> TreePlanExecution:
+        if model_source is not None:
+            tree_model_sources.validate(model_source)
         async with self.database.write_lock, self.database.sessions.begin() as sql:
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=True)
             row = await self._row(sql, scope, identifier)
             if row.producer_status != "planned":
                 raise ServiceError("workspace_tree_claimed", "树计划已被接受或关闭，不可复活", 409)
+            if model_source is not None:
+                await tree_model_sources.assert_new(sql, scope, model_source)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             await assert_source(sql, row)
             await self._rows(sql, row)
             row.producer_status, row.owner_id = "running", self.owner_id
             row.lease_expires_at, row.updated_at = time.time() + self.lease_seconds, utc_now()
-            return TreePlanExecution(await self._view(sql, row), row.token)
+            if model_source is not None:
+                await tree_model_sources.bind(sql, row, "start", model_source)
+            return TreePlanExecution(await self._view(sql, row), row.token, model_source)
 
     async def renew(self, scope: str, identifier: str, token: str) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as sql:
@@ -688,6 +710,7 @@ class WorkspaceTreePlanStore:
             if not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_tree_fence_mismatch", "树凭据不匹配", 403)
             assert_live(row, self.owner_id)
+            await tree_model_sources.quarantine_execution(sql, row)
             await self.files._scope(sql, scope, writing=True)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             await assert_source(sql, row)
@@ -704,6 +727,7 @@ class WorkspaceTreePlanStore:
             if not secrets.compare_digest(row.token, token):
                 raise ServiceError("workspace_tree_fence_mismatch", "树凭据不匹配", 403)
             assert_live(row, self.owner_id)
+            await tree_model_sources.quarantine_execution(sql, row)
             await self.files._scope(sql, scope, writing=True)
             await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
             await assert_source(sql, row)

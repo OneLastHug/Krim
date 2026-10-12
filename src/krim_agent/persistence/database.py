@@ -789,6 +789,21 @@ class WorkspaceTreePlanRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class WorkspaceTreeModelSourceRow(Base):
+    __tablename__ = "workspace_tree_plan_model_sources"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_tree_model_call"),
+        CheckConstraint("kind IN ('prepare','start')", name="ck_tree_model_kind"),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_tree_model_call"),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_plans.plan_id"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    call_id: Mapped[str] = mapped_column(String(128))
+
+
 class WorkspaceTreeStepRow(Base):
     __tablename__ = "workspace_tree_steps"
     __table_args__ = (

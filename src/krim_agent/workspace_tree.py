@@ -160,18 +160,26 @@ class TreePlanQueryResult(StrictModel):
 
 
 @dataclass(frozen=True)
+class TreePlanModelSource:
+    run_id: str
+    call_id: str
+
+
+@dataclass(frozen=True)
 class TreePlanFence:
     plan_id: str
     position: int
     source: TreeSource
     phase: TreePhase
     token: str
+    model_source: TreePlanModelSource | None = None
 
 
 @dataclass(frozen=True)
 class TreePlanExecution:
     view: TreePlanView
     token: str
+    model_source: TreePlanModelSource | None = None
 
 
 @dataclass(frozen=True)
