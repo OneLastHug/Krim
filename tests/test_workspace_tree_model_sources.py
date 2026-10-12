@@ -92,7 +92,9 @@ async def test_original_prepare_call_same_transaction_cold_key_closed_run_no_eff
         await service.close()
 
 
-async def test_start_separate_live_run_kind_call_unique_and_quarantine_remains(runtime, tmp_path):
+async def test_start_separate_live_run_kind_call_unique_and_source_fence_no_effects(
+    runtime, tmp_path
+):
     service, agent, scope, binding, prepared, store, request = await tree_setup(runtime, tmp_path)
     try:
         run = await origin(runtime, service, agent, "prepare-run")
@@ -117,13 +119,9 @@ async def test_start_separate_live_run_kind_call_unique_and_quarantine_remains(r
                 started_run.id,
                 "start-call",
             )
-        for operation in (
-            store.dispatch(scope, plan.plan_id, execution.token, 0),
-            store.renew(scope, plan.plan_id, execution.token),
-        ):
-            with pytest.raises(ServiceError) as unbound:
-                await operation
-            assert unbound.value.code == "workspace_tree_model_unbound"
+        dispatch = await store.dispatch(scope, plan.plan_id, execution.token, 0)
+        assert dispatch.fence.model_source == source
+        await store.renew(scope, plan.plan_id, execution.token)
         assert await ledger(store.database) == [1, 3, 2] and await counts(store.database) == [0] * 4
         cancelled = await store.cancel(scope, plan.plan_id)
         assert cancelled.status == "cancelled"

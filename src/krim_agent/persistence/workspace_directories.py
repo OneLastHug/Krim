@@ -43,6 +43,7 @@ from .directory_fences import directory_key, entry_key
 from .mixed_batch_fences import assert_mixed_execution, assert_mixed_request, mixed_attempt_call
 from .tree_fences import assert_execution as assert_tree_execution
 from .tree_fences import assert_request as assert_tree_request
+from .tree_fences import attempt_call as tree_attempt_call
 from .tree_fences import bind_operation as bind_tree_operation
 from .workspace_edits import WorkspaceEditStore, decode_prepared, digest
 
@@ -819,7 +820,9 @@ class WorkspaceDirectoryStore:
                 recovery=None,
                 cleanup_pending=False,
                 run_id=run_id,
-                call_id=await mixed_attempt_call(session, mixed_child, call_id),
+                call_id=await tree_attempt_call(
+                    session, tree_step, await mixed_attempt_call(session, mixed_child, call_id)
+                ),
                 receipt_history=[],
                 created_at=utc_now(),
                 updated_at=utc_now(),

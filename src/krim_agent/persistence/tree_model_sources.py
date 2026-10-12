@@ -90,7 +90,21 @@ async def bind(
     await sql.flush()
 
 
-async def quarantine_execution(sql: AsyncSession, plan: WorkspaceTreePlanRow) -> None:
-    """模型执行器/原事务资格接通前，记录来源不会授予host副作用资格。"""
-    if await get(sql, plan, "start") is not None:
-        raise ServiceError("workspace_tree_model_unbound", "模型树原事务执行资格尚未接通", 403)
+async def assert_execution(sql: AsyncSession, plan: WorkspaceTreePlanRow) -> None:
+    source = await get(sql, plan, "start")
+    if source is not None:
+        await run_scope(sql, plan.scope_id, source.run_id, live=True)
+
+
+async def assert_invocation(
+    sql: AsyncSession,
+    plan: WorkspaceTreePlanRow,
+    expected: TreePlanModelSource | None,
+    run_id: str | None,
+) -> None:
+    source = await get(sql, plan, "start")
+    if source != expected:
+        raise ServiceError("workspace_tree_model_source_conflict", "树围栏未保留原模型来源", 403)
+    if (source is not None and source.run_id != run_id) or (source is None and run_id is not None):
+        raise ServiceError("workspace_tree_model_run_mismatch", "原树动作Run未保留冻结来源", 403)
+    await assert_execution(sql, plan)

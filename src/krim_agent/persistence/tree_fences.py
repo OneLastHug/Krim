@@ -24,6 +24,7 @@ from krim_agent.workspace_directory import (
 from krim_agent.workspace_tree import TreePlanFence, TreePlanRequest
 from krim_agent.workspace_writer import PreparedFileChange
 
+from . import tree_model_sources
 from .database import (
     AgentSessionRow,
     WorkspaceDirectoryAttemptRow,
@@ -32,7 +33,6 @@ from .database import (
     WorkspaceTreePlanRow,
     WorkspaceTreeStepRow,
 )
-from .tree_model_sources import quarantine_execution
 
 TREE_PREVIEW_PREFIX = "krim-tree-preview:"
 TREE_ACTION_PREFIX = "krim-tree-action:"
@@ -76,6 +76,8 @@ async def lookup(
     ):
         raise ServiceError("workspace_tree_fence_mismatch", "目录树原步骤凭据不匹配", 403)
     frozen = WorkspaceTreePlanStore._frozen(plan)
+    if fence.model_source != await tree_model_sources.get(sql, plan, "start"):
+        raise ServiceError("workspace_tree_model_source_conflict", "树凭据未保留原模型来源", 403)
     if (
         step.position >= len(frozen)
         or {key: getattr(step, key) for key in frozen[step.position]} != frozen[step.position]
@@ -200,9 +202,7 @@ async def assert_preview(
         if associated != existing_proposal_id:
             raise ServiceError("workspace_tree_proposal_conflict", "树不能认领其他原提案", 409)
         return step
-    await quarantine_execution(sql, plan)
-    if run_id is not None:
-        raise ServiceError("workspace_tree_model_unbound", "模型树执行须先绑定原Run/call", 403)
+    await tree_model_sources.assert_invocation(sql, plan, fence.model_source, run_id)
     assert_live(plan, owner_id)
     await assert_source(sql, plan)
     identity = await parent_identity(sql, plan, step)
@@ -272,9 +272,7 @@ async def assert_request(
         if associated != existing_operation_id:
             raise ServiceError("workspace_tree_operation_conflict", "树不能认领其他原attempt", 409)
         return step
-    await quarantine_execution(sql, plan)
-    if run_id is not None:
-        raise ServiceError("workspace_tree_model_unbound", "模型树执行须绑定原来源", 403)
+    await tree_model_sources.assert_invocation(sql, plan, fence.model_source, run_id)
     assert_live(plan, owner_id)
     await assert_source(sql, plan)
     await parent_identity(sql, plan, step)
@@ -322,12 +320,18 @@ async def assert_execution(
         or attempt.request_key != step_key(plan.plan_id, step.position, "change")
     ):
         raise ServiceError("workspace_tree_corrupt", "树原attempt关联损坏", 409)
-    await quarantine_execution(sql, plan)
+    model_source = await tree_model_sources.get(sql, plan, "start")
+    if model_source is not None and (attempt.run_id, attempt.call_id) != (
+        model_source.run_id,
+        model_source.call_id,
+    ):
+        raise ServiceError("workspace_tree_corrupt", "树原attempt模型Run/call关联损坏", 409)
+    await tree_model_sources.assert_execution(sql, plan)
     assert_live(plan, owner_id)
     await assert_source(sql, plan)
     await lookup(
         sql,
-        TreePlanFence(plan.plan_id, step.position, source, "change", plan.token),
+        TreePlanFence(plan.plan_id, step.position, source, "change", plan.token, model_source),
         plan.scope_id,
         plan.resource_fingerprint,
         source,
@@ -344,3 +348,17 @@ async def assert_execution(
         prepared = decode(attempt.prepared)
     if prepared.parent_identity != await parent_identity(sql, plan, step):
         raise ServiceError("workspace_tree_parent_mismatch", "树父成功身份与原操作不匹配", 409)
+
+
+async def attempt_call(
+    sql: AsyncSession, step: WorkspaceTreeStepRow | None, call_id: str | None
+) -> str | None:
+    if step is None:
+        return call_id
+    plan = await sql.get(WorkspaceTreePlanRow, step.plan_id)
+    if plan is None:
+        raise ServiceError("workspace_tree_corrupt", "树原父计划缺失", 409)
+    source = await tree_model_sources.get(sql, plan, "start")
+    if source is not None and call_id != source.call_id:
+        raise ServiceError("workspace_tree_model_source_conflict", "树动作未携带原start call", 403)
+    return call_id
