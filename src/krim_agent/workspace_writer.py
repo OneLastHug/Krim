@@ -261,8 +261,21 @@ class WorkspaceWriter:
         return self.workspace._open(parent, directory=True), parent, parts[-1]
 
     def _snapshot(
-        self, parent_fd: int, name: str, *, missing: bool = False, own_links: int = 1
+        self,
+        parent_fd: int,
+        name: str,
+        *,
+        missing: bool = False,
+        own_links: int = 1,
+        byte_budget: int | None = None,
     ) -> FileSnapshot | None:
+        if byte_budget is not None and (type(byte_budget) is not int or byte_budget < 0):
+            raise ValueError("内部文件快照字节预算须为非负整数")
+        limit = (
+            self.workspace.max_file_bytes
+            if byte_budget is None
+            else min(self.workspace.max_file_bytes, byte_budget)
+        )
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
         except FileNotFoundError:
@@ -277,18 +290,18 @@ class WorkspaceWriter:
                 raise ServiceError("workspace_file_type", "修改只支持普通文件", 422)
             if initial.st_nlink != own_links:
                 raise ServiceError("workspace_link", "修改拒绝多硬链接文件", 403)
-            if initial.st_size > self.workspace.max_file_bytes:
+            if initial.st_size > limit:
                 raise ServiceError("workspace_file_limit", "文件超过工作区容量限制", 413)
             parts, size = [], 0
-            while size <= self.workspace.max_file_bytes:
-                value = os.read(fd, min(65536, self.workspace.max_file_bytes + 1 - size))
+            while size <= limit:
+                value = os.read(fd, min(65536, limit + 1 - size))
                 if not value:
                     break
                 parts.append(value)
                 size += len(value)
             raw = b"".join(parts)
             final = os.fstat(fd)
-            if size > self.workspace.max_file_bytes:
+            if size > limit:
                 raise ServiceError("workspace_file_limit", "文件超过工作区容量限制", 413)
             if (
                 initial.st_size,
