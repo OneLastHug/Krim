@@ -132,6 +132,7 @@ from .workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from .workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
 
 
 class ClientError(Exception):
@@ -1123,6 +1124,94 @@ class KrimClient:
         )
         self._check(response)
         return MixedBatchView.model_validate_json(response.content)
+
+    def agent_workspace_prepare_tree(
+        self, agent_id: str, request: TreePlanRequest, *, confirmed: bool = False
+    ) -> TreePlanView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        return TreePlanView.model_validate_json(response.content)
+
+    def agent_workspace_tree(self, agent_id: str, plan_id: str) -> TreePlanView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/{_workspace_identifier(plan_id)}"
+        )
+        self._check(response)
+        return TreePlanView.model_validate_json(response.content)
+
+    def agent_workspace_tree_by_key(self, agent_id: str, request_key: str) -> TreePlanView | None:
+        if not 1 <= len(request_key) <= 128 or any(
+            ord(char) < 32 or ord(char) == 127 for char in request_key
+        ):
+            raise ClientError("树原请求键无效", code="workspace_request_key_invalid", status=422)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/by-key",
+            params={"request_key": request_key},
+        )
+        self._check(response)
+        return TypeAdapter(TreePlanView | None).validate_json(response.content)
+
+    def agent_workspace_tree_steps(
+        self, agent_id: str, plan_id: str, *, after: int | None = None, limit: int = 32
+    ) -> TreePlanStepPage:
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 32
+            or after is not None
+            and (type(after) is not int or not 0 <= after < 16384)
+        ):
+            raise ClientError("树步骤分页参数无效", code="workspace_tree_page", status=422)
+        params: dict[str, int] = {"limit": limit}
+        if after is not None:
+            params["after"] = after
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/{_workspace_identifier(plan_id)}/steps",
+            params=params,
+        )
+        self._check(response)
+        return TreePlanStepPage.model_validate_json(response.content)
+
+    def agent_workspace_start_tree(
+        self, agent_id: str, plan_id: str, *, confirmed: bool = False
+    ) -> TreePlanView:
+        if type(confirmed) is not bool:
+            raise ClientError("树确认参数须为布尔值", code="workspace_tree_parameters", status=422)
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/{_workspace_identifier(plan_id)}/start",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        return TreePlanView.model_validate_json(response.content)
+
+    def agent_workspace_wait_tree(
+        self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
+    ) -> TreePlanView:
+        if (
+            type(timeout_seconds) not in {int, float}
+            or not math.isfinite(timeout_seconds)
+            or not 0 <= timeout_seconds <= 300
+        ):
+            raise ClientError(
+                "树等待时间须为有限的0–300秒", code="workspace_tree_timeout", status=422
+            )
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/{_workspace_identifier(plan_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        self._check(response)
+        return TreePlanView.model_validate_json(response.content)
+
+    def agent_workspace_cancel_tree(self, agent_id: str, plan_id: str) -> TreePlanView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-plans/{_workspace_identifier(plan_id)}/cancel"
+        )
+        self._check(response)
+        return TreePlanView.model_validate_json(response.content)
 
     def agent_workspace_mixed_batch(self, agent_id: str, batch_id: str) -> MixedBatchView:
         response = self._http.get(

@@ -64,7 +64,9 @@ async def publish(service, agent, store, execution, position):
     await store.finish_step(scope, identifier, execution.token, position)
 
 
-async def metadata(service, agent, store, identifier, root, source, provider, *, worker=False):
+async def metadata(
+    service, agent, store, identifier, root, source, provider, *, worker=False, public=False
+):
     scope = "session:" + agent.session_id
     value = await store.get(scope, identifier)
     page = await store.steps(scope, identifier)
@@ -79,12 +81,13 @@ async def metadata(service, agent, store, identifier, root, source, provider, *,
         "steps": page.model_dump(mode="json"),
         "provider_calls": provider.calls,
         "worker": worker,
+        "public": public,
     }
     (root / "metadata.json").write_text(json.dumps(result))
     return result
 
 
-async def produce(ai, root, phase, source, provider, *, worker=False):
+async def produce(ai, root, phase, source, provider, *, worker=False, public=False):
     service = ai.agents()
     await service.profile_put(
         AgentProfileUpdate(
@@ -103,6 +106,7 @@ async def produce(ai, root, phase, source, provider, *, worker=False):
                     "directory_change",
                     "workspace_reconcile",
                     "directory_reconcile",
+                    *(["workspace_tree_prepare"] if public else []),
                 ],
             ),
         )
@@ -129,27 +133,26 @@ async def produce(ai, root, phase, source, provider, *, worker=False):
         scope, CommandDirectoryDependencyRequest(command_id=command.command_id)
     )
     binding = service._handle(agent.agent_id).definition.workspace
-    prepared = WorkspaceDirectoryWriter(binding.require()).prepare_artifact(
-        ArtifactDirectorySpec(
-            path="tree",
-            operation="create",
-            mode=0o750,
-            command_id=command.command_id,
-            source_hash=dependency.source_hash,
-        )
-    )
     store = WorkspaceTreePlanStore(service.workspace_edits, service.manager.directory_changes.store)
-    view, _ = await store.reserve(
-        scope,
-        binding,
-        TreePlanRequest(
-            command_id=command.command_id,
-            source_hash=dependency.source_hash,
-            root_path="tree",
-            request_key="tree",
-        ),
-        prepared,
+    request = TreePlanRequest(
+        command_id=command.command_id,
+        source_hash=dependency.source_hash,
+        root_path="tree",
+        request_key="tree",
     )
+    if public:
+        view = await agent.prepare_directory_tree(request)
+    else:
+        prepared = WorkspaceDirectoryWriter(binding.require()).prepare_artifact(
+            ArtifactDirectorySpec(
+                path="tree",
+                operation="create",
+                mode=0o750,
+                command_id=command.command_id,
+                source_hash=dependency.source_hash,
+            )
+        )
+        view, _ = await store.reserve(scope, binding, request, prepared)
     execution = None if worker else await store.claim(scope, view.plan_id)
     if phase == "complete":
         if worker:
@@ -171,6 +174,9 @@ async def produce(ai, root, phase, source, provider, *, worker=False):
                 agent.agent_id, view.plan_id, timeout_seconds=20
             )
             assert done.status == "done"
+            if public:
+                assert await agent.prepare_directory_tree(request) == done
+                assert await agent.start_directory_tree(view.plan_id, confirmed=True) == done
             assert (
                 await service.workspace_start_tree(agent.agent_id, view.plan_id, confirmed=True)
                 == done
@@ -191,7 +197,15 @@ async def produce(ai, root, phase, source, provider, *, worker=False):
         print(
             json.dumps(
                 await metadata(
-                    service, agent, store, view.plan_id, root, source, provider, worker=worker
+                    service,
+                    agent,
+                    store,
+                    view.plan_id,
+                    root,
+                    source,
+                    provider,
+                    worker=worker,
+                    public=public,
                 )
             ),
             flush=True,
@@ -226,7 +240,15 @@ async def produce(ai, root, phase, source, provider, *, worker=False):
         print(
             json.dumps(
                 await metadata(
-                    service, agent, store, view.plan_id, root, source, provider, worker=worker
+                    service,
+                    agent,
+                    store,
+                    view.plan_id,
+                    root,
+                    source,
+                    provider,
+                    worker=worker,
+                    public=public,
                 )
             ),
             flush=True,
@@ -251,6 +273,18 @@ async def recover(ai, root, phase, provider):
     WorkspaceWriter.apply = WorkspaceDirectoryWriter.apply = LinuxSandboxRunner.start = forbidden
     service = ai.agents()
     store = WorkspaceTreePlanStore(service.workspace_edits, service.manager.directory_changes.store)
+    if phase == "read" and value.get("public"):
+        assert await service.restore_persistent() == 1
+        agent = AgentSession(service, value["agent_id"])
+        frozen_request = TreePlanRequest(
+            command_id=value["view"]["command_id"],
+            source_hash=value["view"]["source_hash"],
+            root_path="tree",
+            request_key="tree",
+        )
+        original = await agent.directory_tree(value["plan_id"])
+        assert await agent.prepare_directory_tree(frozen_request) == original
+        assert await agent.start_directory_tree(value["plan_id"], confirmed=True) == original
     if phase == "recover":
         assert await service.restore_persistent() == 1
         agent = AgentSession(service, value["agent_id"])
@@ -339,10 +373,11 @@ async def main():
             await produce(
                 ai,
                 root,
-                phase.removeprefix("worker-"),
+                phase.removeprefix("worker-").removeprefix("public-"),
                 source,
                 provider,
-                worker=phase.startswith("worker-"),
+                worker=phase.startswith(("worker-", "public-")),
+                public=phase.startswith("public-"),
             )
 
 

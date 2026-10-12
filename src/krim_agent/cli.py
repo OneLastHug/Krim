@@ -38,6 +38,7 @@ from .workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from .workspace_tree import TreePlanRequest, TreePlanView
 
 _CHECKPOINT_ACTIONS = (
     "create-checkpoint",
@@ -138,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
             "mixed-batch-history",
             "wait-mixed-batch",
             "cancel-mixed-batch",
+            "prepare-tree",
+            "tree",
+            "tree-by-key",
+            "tree-steps",
+            "start-tree",
+            "wait-tree",
+            "cancel-tree",
             *_CHECKPOINT_ACTIONS,
         ],
     )
@@ -166,6 +174,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workspace.add_argument("--cursor", help="cursor（游标）：原生清单快照游标")
     workspace.add_argument("--batch-id", help="batch identifier（批次标识）：查询、等待或取消批次")
+    workspace.add_argument(
+        "--after", type=int, help="after（末位游标）：tree-steps已读的末项position"
+    )
     workspace.add_argument(
         "--timeout-seconds",
         type=float,
@@ -498,6 +509,49 @@ def _workspace_checkpoint_command(
     return client.agent_workspace_execute_restore(args.agent_id, request, confirmed=args.confirm)
 
 
+def _workspace_tree_command(
+    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> BaseModel | None:
+    if args.action == "prepare-tree":
+        if not args.request or args.value:
+            parser.error("workspace prepare-tree需要--request本地JSON文件，不接受位置标识")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(16385)
+            if len(raw) > 16384:
+                parser.error("树准备请求不能超过16KiB")
+            request = TreePlanRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("树准备请求无效；请检查原command/source_hash/root_path/request_key")
+        return client.agent_workspace_prepare_tree(args.agent_id, request, confirmed=args.confirm)
+    if args.request is not None:
+        parser.error("树--request仅用于prepare-tree")
+    if args.action != "tree-steps" and args.after is not None:
+        parser.error("树--after仅用于tree-steps")
+    if args.action == "tree-by-key":
+        if not args.request_key or args.value:
+            parser.error("workspace tree-by-key需要--request-key，不接受位置标识")
+        return client.agent_workspace_tree_by_key(args.agent_id, args.request_key)
+    if not args.value or args.request_key is not None:
+        parser.error("树查询/控制需要plan标识，不能附带--request-key")
+    if args.action == "tree":
+        return client.agent_workspace_tree(args.agent_id, args.value)
+    if args.action == "tree-steps":
+        return client.agent_workspace_tree_steps(
+            args.agent_id,
+            args.value,
+            after=args.after,
+            limit=args.limit if args.limit is not None else 32,
+        )
+    if args.action == "start-tree":
+        return client.agent_workspace_start_tree(args.agent_id, args.value, confirmed=args.confirm)
+    if args.action == "wait-tree":
+        return client.agent_workspace_wait_tree(
+            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
+        )
+    return client.agent_workspace_cancel_tree(args.agent_id, args.value)
+
+
 def _workspace_command(
     client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
@@ -517,7 +571,21 @@ def _workspace_command(
         if args.value and args.value != args.batch_id:
             parser.error("位置参数与--batch-id的批次标识不一致")
         args.value = args.batch_id
-    if args.action in _CHECKPOINT_ACTIONS:
+    if args.action in {
+        "prepare-tree",
+        "tree",
+        "tree-by-key",
+        "tree-steps",
+        "start-tree",
+        "wait-tree",
+        "cancel-tree",
+    }:
+        tree = _workspace_tree_command(client, args, parser)
+        if tree is None:
+            print("null")
+            return
+        result = tree
+    elif args.action in _CHECKPOINT_ACTIONS:
         checkpoint_result = _workspace_checkpoint_command(client, args, parser)
         if checkpoint_result is None:
             print("null")
@@ -712,6 +780,12 @@ def _workspace_command(
     if (
         isinstance(result, MixedBatchView)
         and args.action in {"start-mixed-batch", "wait-mixed-batch"}
+        and result.status not in {"running", "done"}
+    ):
+        parser.exit(1)
+    if (
+        isinstance(result, TreePlanView)
+        and args.action in {"start-tree", "wait-tree"}
         and result.status not in {"running", "done"}
     ):
         parser.exit(1)

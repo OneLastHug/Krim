@@ -20,7 +20,9 @@ from krim_agent.persistence.database import (
 
 
 async def run(script, phase, source, root):
-    if "--worker" in sys.argv and phase == "complete":
+    if "--public" in sys.argv and phase == "complete":
+        phase = "public-complete"
+    elif "--worker" in sys.argv and phase == "complete":
         phase = "worker-complete"
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -78,7 +80,11 @@ async def main():
                 sys.executable,
                 "-I",
                 str(script),
-                "worker-after-write" if "--worker" in sys.argv else "after-write",
+                "public-after-write"
+                if "--public" in sys.argv
+                else "worker-after-write"
+                if "--worker" in sys.argv
+                else "after-write",
                 source,
                 str(root),
                 stdin=asyncio.subprocess.PIPE,
@@ -138,6 +144,7 @@ async def main():
                 "package": krim_agent.__file__,
                 "schema": "0041_workspace_tree_plans",
                 "worker": "--worker" in sys.argv,
+                "public": "--public" in sys.argv,
                 "results": results,
             }
         )

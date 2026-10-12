@@ -209,6 +209,7 @@ from krim_agent.workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -1335,6 +1336,77 @@ def create_app(
         return await agent_service.workspace_start_mixed_batch(
             agent_id, payload, confirmed=confirmed
         )
+
+    def tree_parameters(request: Request, allowed: set[str]) -> None:
+        values = [key for key, _value in request.query_params.multi_items()]
+        if len(values) != len(set(values)) or any(key not in allowed for key in values):
+            raise ServiceError("workspace_tree_parameters", "树参数无效或重复", 422)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-plans", status_code=201)
+    async def agent_workspace_tree_prepare(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        payload: TreePlanRequest,
+        confirmed: bool = Query(default=False),
+    ) -> TreePlanView:
+        tree_parameters(request, {"confirmed"})
+        return await agent_service.workspace_prepare_tree(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-plans/by-key")
+    async def agent_workspace_tree_by_key(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"),
+    ) -> TreePlanView | None:
+        tree_parameters(request, {"request_key"})
+        return await agent_service.workspace_tree_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-plans/{plan_id}")
+    async def agent_workspace_tree_get(
+        request: Request, agent_id: WorkspaceIdentifier, plan_id: WorkspaceIdentifier
+    ) -> TreePlanView:
+        tree_parameters(request, set())
+        return await agent_service.workspace_tree(agent_id, plan_id)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-plans/{plan_id}/steps")
+    async def agent_workspace_tree_steps(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        after: int | None = Query(default=None, ge=0, lt=16384),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> TreePlanStepPage:
+        tree_parameters(request, {"after", "limit"})
+        return await agent_service.workspace_tree_steps(agent_id, plan_id, after=after, limit=limit)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-plans/{plan_id}/start", status_code=202)
+    async def agent_workspace_tree_start(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        confirmed: bool = Query(default=False),
+    ) -> TreePlanView:
+        tree_parameters(request, {"confirmed"})
+        return await agent_service.workspace_start_tree(agent_id, plan_id, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-plans/{plan_id}/wait")
+    async def agent_workspace_tree_wait(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300, allow_inf_nan=False),
+    ) -> TreePlanView:
+        tree_parameters(request, {"timeout_seconds"})
+        return await agent_service.workspace_wait_tree(
+            agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-plans/{plan_id}/cancel")
+    async def agent_workspace_tree_cancel(
+        request: Request, agent_id: WorkspaceIdentifier, plan_id: WorkspaceIdentifier
+    ) -> TreePlanView:
+        tree_parameters(request, set())
+        return await agent_service.workspace_cancel_tree(agent_id, plan_id)
 
     @app.get("/v1/agents/{agent_id}/workspace/mixed-batches/history")
     async def agent_workspace_mixed_batch_history(
