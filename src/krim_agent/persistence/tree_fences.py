@@ -32,6 +32,7 @@ from .database import (
     WorkspaceTreePlanRow,
     WorkspaceTreeStepRow,
 )
+from .tree_model_sources import quarantine_execution
 
 TREE_PREVIEW_PREFIX = "krim-tree-preview:"
 TREE_ACTION_PREFIX = "krim-tree-action:"
@@ -199,6 +200,7 @@ async def assert_preview(
         if associated != existing_proposal_id:
             raise ServiceError("workspace_tree_proposal_conflict", "树不能认领其他原提案", 409)
         return step
+    await quarantine_execution(sql, plan)
     if run_id is not None:
         raise ServiceError("workspace_tree_model_unbound", "模型树执行须先绑定原Run/call", 403)
     assert_live(plan, owner_id)
@@ -270,6 +272,7 @@ async def assert_request(
         if associated != existing_operation_id:
             raise ServiceError("workspace_tree_operation_conflict", "树不能认领其他原attempt", 409)
         return step
+    await quarantine_execution(sql, plan)
     if run_id is not None:
         raise ServiceError("workspace_tree_model_unbound", "模型树执行须绑定原来源", 403)
     assert_live(plan, owner_id)
@@ -319,6 +322,7 @@ async def assert_execution(
         or attempt.request_key != step_key(plan.plan_id, step.position, "change")
     ):
         raise ServiceError("workspace_tree_corrupt", "树原attempt关联损坏", 409)
+    await quarantine_execution(sql, plan)
     assert_live(plan, owner_id)
     await assert_source(sql, plan)
     await lookup(
