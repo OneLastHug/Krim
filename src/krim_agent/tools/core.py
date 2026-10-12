@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from krim_agent.workspace_list import NativeBatchFence
     from krim_agent.workspace_mixed_batch import MixedBatchFence
     from krim_agent.workspace_restore import CheckpointRestoreFence
+    from krim_agent.workspace_tree import TreePlanFence
 
 if TYPE_CHECKING:
     from .registry import ToolRegistry
@@ -166,6 +167,7 @@ class ToolContext:
     _directory_response: tuple[str, str] | None = field(default=None, repr=False)
     workspace_batch: NativeBatchFence | None = None
     mixed_batch: MixedBatchFence | None = None
+    tree_fence: TreePlanFence | None = None
     # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
@@ -210,6 +212,7 @@ class ToolContext:
             workspace_mixed_batches=self.workspace_mixed_batches,
             workspace_batch=self.workspace_batch,
             mixed_batch=self.mixed_batch,
+            tree_fence=self.tree_fence,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,

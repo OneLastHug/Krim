@@ -140,6 +140,7 @@ from krim_agent.workspace_restore import (
     CheckpointRestorePreview,
     CheckpointRestoreView,
 )
+from krim_agent.workspace_tree import TreePlanFence
 
 _command_launching: ContextVar[asyncio.Task[object] | None] = ContextVar(
     "krim_command_launching", default=None
@@ -698,6 +699,7 @@ class AgentService:
         confirmed: bool = False,
         batch_fence: NativeBatchFence | None = None,
         mixed_fence: MixedBatchFence | None = None,
+        tree_fence: TreePlanFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
         command_admitted: Callable[[str], None] | None = None,
@@ -782,6 +784,7 @@ class AgentService:
                     workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
+                    tree_fence=tree_fence,
                     checkpoint_capture=checkpoint_capture,
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
@@ -848,6 +851,19 @@ class AgentService:
                 "workspace_mixed_batch_child_closed": 409,
                 "workspace_mixed_batch_operation_conflict": 409,
                 "workspace_mixed_batch_corrupt": 409,
+                "workspace_tree_action": 403,
+                "workspace_tree_model_unbound": 403,
+                "workspace_tree_fence_mismatch": 403,
+                "workspace_tree_request_reserved": 403,
+                "workspace_tree_resource_conflict": 403,
+                "workspace_tree_source_conflict": 409,
+                "workspace_tree_fenced": 409,
+                "workspace_tree_step_closed": 409,
+                "workspace_tree_parent_unresolved": 409,
+                "workspace_tree_parent_mismatch": 409,
+                "workspace_tree_proposal_conflict": 409,
+                "workspace_tree_operation_conflict": 409,
+                "workspace_tree_corrupt": 409,
                 "workspace_checkpoint_fenced": 409,
                 "workspace_checkpoint_target": 403,
                 "workspace_checkpoint_action": 403,

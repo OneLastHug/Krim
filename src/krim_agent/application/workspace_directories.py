@@ -117,6 +117,7 @@ class DirectoryChangeService:
                     source_request,
                     source_binding,
                     run_id=context.run_id if context.run_id != "local" else None,
+                    tree_fence=context.tree_fence,
                 )
                 if previous is None:
                     source = await self.command_sources.source(scope, source_request.command_id)
@@ -153,6 +154,7 @@ class DirectoryChangeService:
                         source_binding,
                         prepared,
                         run_id=context.run_id if context.run_id != "local" else None,
+                        tree_fence=context.tree_fence,
                     )
                 await self._source_guard(context)
                 source_value = previous.model_dump(mode="json")
@@ -394,6 +396,7 @@ class DirectoryChangeService:
             request,
             binding.fingerprint,
             mixed_fence=context.mixed_batch,
+            tree_fence=context.tree_fence,
             run_id=context.run_id if context.run_id != "local" else None,
         )
         if previous is not None:
@@ -428,6 +431,7 @@ class DirectoryChangeService:
             run_id=context.run_id if context.run_id != "local" else None,
             call_id=context.source_call_id or context.call_id,
             mixed_fence=context.mixed_batch,
+            tree_fence=context.tree_fence,
         )
         if not created:
             return attempt.view

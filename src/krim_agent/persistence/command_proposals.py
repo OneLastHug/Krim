@@ -26,11 +26,13 @@ from krim_agent.execution.records import CommandDirectory, CommandFile, CommandS
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_change import ArtifactFileSpec
+from krim_agent.workspace_tree import TreePlanFence
 from krim_agent.workspace_writer import CapturedFile, PreparedFileChange
 
 from .command_models import CommandFileRow, CommandRow
 from .commands import CommandStore, digest, metadata
 from .database import Base, WorkspaceEditProposalRow, WorkspaceFileEffectRow, WorkspaceFileLockRow
+from .tree_fences import assert_preview, bind_proposal
 
 if TYPE_CHECKING:
     from .workspace_edits import WorkspaceEditStore
@@ -302,6 +304,7 @@ class CommandProposalStore:
         binding: WorkspaceBinding,
         *,
         run_id: str | None = None,
+        tree_fence: TreePlanFence | None = None,
     ) -> CommandProposalView | None:
         self.edits._key(request.request_key)
         async with self.database.write_lock, self.database.sessions() as session:
@@ -312,6 +315,17 @@ class CommandProposalStore:
                     WorkspaceEditProposalRow.scope_id == scope,
                     WorkspaceEditProposalRow.request_key == request.request_key,
                 )
+            )
+            await assert_preview(
+                session,
+                self.edits.owner_id,
+                scope,
+                binding.fingerprint,
+                "file",
+                request,
+                tree_fence,
+                existing_proposal_id=row.proposal_id if row else None,
+                run_id=run_id,
             )
             if row is None:
                 return None
@@ -327,6 +341,7 @@ class CommandProposalStore:
         prepared: PreparedFileChange,
         *,
         run_id: str | None = None,
+        tree_fence: TreePlanFence | None = None,
     ) -> CommandProposalView:
         from .workspace_edits import encode_prepared, file_key
 
@@ -345,6 +360,18 @@ class CommandProposalStore:
                 )
             )
             request_hash = self.request_hash(request, binding)
+            tree_step = await assert_preview(
+                session,
+                self.edits.owner_id,
+                scope,
+                binding.fingerprint,
+                "file",
+                request,
+                tree_fence,
+                prepared=prepared,
+                existing_proposal_id=previous.proposal_id if previous else None,
+                run_id=run_id,
+            )
             if previous is not None:
                 if previous.request_hash != request_hash:
                     raise ServiceError(
@@ -394,6 +421,8 @@ class CommandProposalStore:
                 expires_at=time.time() + request.ttl_seconds,
             )
             session.add(proposal)
+            await session.flush()
+            bind_proposal(tree_step, "file", proposal.proposal_id)
             await session.flush()
             session.add(
                 CommandProposalRow(
