@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import Workspace
+from krim_agent.workspace_directory import WorkspaceDirectoryWriter
 from krim_agent.workspace_tree_snapshot import (
     WorkspaceTreeSnapshot,
     WorkspaceTreeSnapshotReader,
@@ -180,7 +181,8 @@ class WorkspaceTreeWriter:
             after,
         )
 
-    def _moved(self, change: PreparedTreeMove, after: WorkspaceTreeSnapshot) -> bool:
+    @staticmethod
+    def _moved(change: PreparedTreeMove, after: WorkspaceTreeSnapshot) -> bool:
         before = change.before
         if (
             after.root_path != change.target_path
@@ -195,7 +197,7 @@ class WorkspaceTreeWriter:
             if old.file is not None:
                 if current.directory is not None or current.file != old.file:
                     return False
-            elif current.file is not None or not self.directories._same(
+            elif current.file is not None or not WorkspaceDirectoryWriter._same(
                 current.directory, old.directory, displaced=position == 0
             ):
                 return False

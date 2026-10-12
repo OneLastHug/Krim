@@ -29,6 +29,9 @@ def directory_key(identity: tuple[int, int]) -> str:
 
 
 async def assert_file_directory_fence(session: AsyncSession, prepared: PreparedFileChange) -> None:
+    from .tree_move_fences import assert_no_move_lock, file_keys
+
+    await assert_no_move_lock(session, file_keys(prepared))
     lock = await session.scalar(
         select(WorkspaceDirectoryLockRow.operation_id).where(
             or_(

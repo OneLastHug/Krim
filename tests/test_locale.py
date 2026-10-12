@@ -173,7 +173,7 @@ async def test_locale_reopen_and_guarded_downgrade(tmp_path):
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0042_workspace_tree_model_sources"
+            ).scalar() == "0043_tree_move_ledger"
         await repository.set_topic_locale(topic.id, "zh-CN")
         async with reopened.engine.begin() as connection:
             await connection.run_sync(
