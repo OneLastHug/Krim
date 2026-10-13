@@ -4,6 +4,71 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "完整目录树移动与历史": "Complete tree moves and history",
+    "当前会话未授权树移动查询": "This session has no permission to query tree moves",
+    "准备完整树移动": "Prepare a complete tree move",
+    "源目录树相对路径": "Source tree relative path",
+    "目标目录树相对路径": "Target tree relative path",
+    "检查完整目录树": "Inspect complete tree",
+    "预览树移动": "Preview tree move",
+    "树移动原请求键": "Original tree move request key",
+    "按键查看树提案": "Read tree proposal by key",
+    "按键查看树操作": "Read tree operation by key",
+    "刷新树移动历史": "Refresh tree move history",
+    "上一页树提案": "Previous tree proposals",
+    "下一页树提案": "Next tree proposals",
+    "树移动回程与原事实不一致": "Tree move response does not match original facts",
+    "树摘要：{entries}节点、{files}文件、{bytes}字节": (
+        "Tree summary: {entries} entries, {files} files, {bytes} bytes"
+    ),
+    "树提案规模：{entries}节点、{bytes}字节": (
+        "Tree proposal size: {entries} entries, {bytes} bytes"
+    ),
+    "树提案已保存，请审阅后确认": "Tree proposal saved; review before confirming",
+    "未找到原树请求，请保留原键继续查询": (
+        "Original tree request not found; retain the original key and query again"
+    ),
+    "确认按原树条件执行此操作？": "Confirm this action under the original tree conditions?",
+    "应用树移动": "Apply tree move",
+    "撤销树移动": "Undo tree move",
+    "保留树移动": "Keep tree move",
+    "取消树移动": "Cancel tree move",
+    "确认取消原树移动？": "Confirm cancellation of the original tree move?",
+    "核实原树结果": "Verify original tree result",
+    "确认核实原树结果？": "Confirm verification of the original tree result?",
+    "暂无树移动提案": "No tree move proposals",
+    "查看树移动提案": "View tree move proposal",
+    "查看原树操作": "View original tree operation",
+    "上一页树操作": "Previous tree operations",
+    "下一页树操作": "Next tree operations",
+    "树恢复记录不可用，请先处理本地记录": (
+        "Tree recovery record unavailable; resolve the local record first"
+    ),
+    "清除本地树恢复记录": "Clear local tree recovery record",
+    "树响应尚未确认，仅查询原请求": "Tree response unconfirmed; only query the original request",
+    "查询待确认树请求": "Query unconfirmed tree request",
+    "解除本地树等待状态": "Clear local tree waiting state",
+    "保留原键；仅清除本地等待，不取消服务端任务。": (
+        "Retain the original key; clear only local waiting, without cancelling the server task."
+    ),
+    "取消进行中的树移动": "Cancel active tree move",
+    "原树取消已收束，请读取原操作": (
+        "Original tree cancellation settled; read the original operation"
+    ),
+    "已产生工作区变化": "Workspace changes occurred",
+    "未产生工作区变化": "No workspace changes occurred",
+    "树移动待确认": "Tree move proposed",
+    "树移动执行中": "Tree move running",
+    "树已移动": "Tree moved",
+    "树撤销执行中": "Tree undo running",
+    "树已撤销移动": "Tree move undone",
+    "树保留核实中": "Tree keep verification running",
+    "树移动已保留": "Tree move kept",
+    "树移动已取消": "Tree move cancelled",
+    "树操作已拒绝": "Tree operation rejected",
+    "树结果待核实": "Tree result needs verification",
+    "树操作执行中": "Tree operation running",
+    "树操作已确认": "Tree operation confirmed",
     "目录树审阅与控制": "Directory tree review and control",
     "目录树待启动": "Directory tree planned",
     "目录树执行中": "Directory tree running",
