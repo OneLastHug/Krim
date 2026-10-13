@@ -68,6 +68,7 @@ from krim_agent.execution.publication import (
 from krim_agent.execution.records import CommandView
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
+from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
@@ -83,6 +84,7 @@ from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, Tas
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
+from krim_agent.tools.tree_exchanges import tree_exchange_tools
 from krim_agent.tools.tree_moves import tree_move_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
 from krim_agent.tools.workspace_changes import workspace_change_tools
@@ -154,6 +156,18 @@ from krim_agent.workspace_tree import (
     TreePlanRequest,
     TreePlanStepPage,
     TreePlanView,
+)
+from krim_agent.workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptView,
+    TreeExchangeInspectRequest,
+    TreeExchangeInspectView,
+    TreeExchangeOperationRequest,
+    TreeExchangePreviewRequest,
+    TreeExchangePreviewView,
+    TreeExchangeQueryRequest,
+    TreeExchangeQueryResult,
+    TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
@@ -662,6 +676,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_tree_exchanges(self) -> None:
+        """显式启用双完整树工具；全量冲突检查，不扩大既有Agent冻结集合。"""
+        definitions = tree_exchange_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("双完整树交换工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_execution(
         self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
     ) -> ExecutionBinding:
@@ -754,6 +778,7 @@ class AgentService:
         recovered += await self.workspace_mixed_batch_store.recover_interrupted()
         recovered += await self.workspace_restore_store.recover_interrupted()
         recovered += await self.manager.tree_moves.store.recover_interrupted()
+        recovered += await self.manager.tree_exchanges.store.recover_interrupted()
         self._workspace_recovered = True
         return recovered
 
@@ -794,6 +819,7 @@ class AgentService:
                     "directory_query",
                     "directory_source_query",
                     "tree_move_query",
+                    "tree_exchange_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -852,6 +878,7 @@ class AgentService:
                     workspace_tree_queries=self.manager.tree_queries,
                     workspace_tree_models=self.manager.tree_models,
                     tree_moves=self.manager.tree_moves,
+                    tree_exchanges=self.manager.tree_exchanges,
                     workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
@@ -883,6 +910,28 @@ class AgentService:
                 "permission_denied": 403,
                 "approval_required": 409,
                 "workspace_unbound": 409,
+                "workspace_tree_exchange_context": 403,
+                "workspace_tree_exchange_model_context": 403,
+                "workspace_tree_exchange_source_conflict": 403,
+                "workspace_tree_exchange_closed": 503,
+                "workspace_tree_exchange_backend_missing": 503,
+                "workspace_tree_exchange_busy": 429,
+                "workspace_tree_exchange_limit": 429,
+                "workspace_tree_exchange_snapshot_limit": 413,
+                "workspace_tree_exchange_not_found": 404,
+                "workspace_tree_exchange_operation_not_found": 404,
+                "workspace_tree_exchange_unverified": 409,
+                "workspace_tree_exchange_self_close": 409,
+                "workspace_tree_exchange_page": 422,
+                "workspace_tree_seal_limit": 413,
+                "workspace_tree_seal_not_found": 404,
+                "workspace_tree_origin_incomplete": 409,
+                "workspace_tree_exchange_origin_required": 409,
+                "workspace_tree_exchange_origin_conflict": 409,
+                "workspace_tree_exchange_conflict": 409,
+                "workspace_tree_exchange_idempotency_conflict": 409,
+                "workspace_tree_exchange_state": 409,
+                "workspace_tree_exchange_active": 409,
                 "workspace_tree_move_context": 403,
                 "workspace_tree_move_model_context": 403,
                 "workspace_tree_move_source_conflict": 403,
@@ -1145,6 +1194,98 @@ class AgentService:
     async def tree_move_cancel(self, agent_id: str, proposal_id: str) -> TreeMovePreviewView:
         session = await self.session(agent_id)
         return await self.manager.tree_moves.cancel(f"session:{session.session_id}", proposal_id)
+
+    async def tree_exchange_inspect(
+        self, agent_id: str, request: TreeExchangeInspectRequest, *, confirmed: bool = False
+    ) -> TreeExchangeInspectView:
+        return TreeExchangeInspectView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_inspect",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_preview(
+        self, agent_id: str, request: TreeExchangePreviewRequest, *, confirmed: bool = False
+    ) -> TreeExchangePreviewView:
+        return TreeExchangePreviewView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_change(
+        self, agent_id: str, request: TreeExchangeAction, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        return TreeExchangeAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_change",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_query(
+        self, agent_id: str, request: TreeExchangeQueryRequest, *, confirmed: bool = False
+    ) -> TreeExchangeQueryResult:
+        return TreeExchangeQueryResult.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_query",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_reconcile(
+        self, agent_id: str, request: TreeExchangeOperationRequest, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        return TreeExchangeAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_reconcile",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_cancel(
+        self, agent_id: str, proposal_id: str
+    ) -> TreeExchangePreviewView:
+        session = await self.session(agent_id)
+        return await self.manager.tree_exchanges.cancel(
+            f"session:{session.session_id}", proposal_id
+        )
+
+    async def tree_exchange_seal(
+        self, agent_id: str, request: TreeExchangeSealRequest, *, confirmed: bool = False
+    ) -> CompletedTreeOriginView:
+        return CompletedTreeOriginView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_exchange_seal",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
 
     async def directory_inspect(
         self, agent_id: str, request: DirectoryInspectRequest, *, confirmed: bool = False
@@ -2291,6 +2432,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.manager.tree_exchanges.assert_external_close()
         self.manager.tree_moves.assert_external_close()
         self.assert_external_command_control()
         self.workspace_trees.assert_external_close()

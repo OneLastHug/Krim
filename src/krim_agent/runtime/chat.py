@@ -73,6 +73,7 @@ from krim_agent.tools.core import (
     TaskBackend,
     ToolDefinition,
     ToolExecutionBudget,
+    TreeExchangeBackend,
     TreeMoveBackend,
     TreePlanModelBackend,
     TreePlanQueryBackend,
@@ -158,6 +159,7 @@ class ChatRuntime:
         workspace_tree_queries: TreePlanQueryBackend | None = None,
         workspace_tree_models: TreePlanModelBackend | None = None,
         tree_moves: TreeMoveBackend | None = None,
+        tree_exchanges: TreeExchangeBackend | None = None,
         workspace_mixed_batches: MixedBatchWriteBackend | None = None,
         workspace: WorkspaceBinding | None = None,
         execution: ExecutionBinding | None = None,
@@ -212,6 +214,7 @@ class ChatRuntime:
         self.workspace_tree_queries = workspace_tree_queries
         self.workspace_tree_models = workspace_tree_models
         self.tree_moves = tree_moves
+        self.tree_exchanges = tree_exchanges
         self.workspace_mixed_batches = workspace_mixed_batches
         self.workspace = workspace
         self.execution, self.commands = execution, commands
@@ -1078,6 +1081,7 @@ class ChatRuntime:
                         workspace_tree_queries=self.workspace_tree_queries,
                         workspace_tree_models=self.workspace_tree_models,
                         tree_moves=self.tree_moves,
+                        tree_exchanges=self.tree_exchanges,
                         workspace_mixed_batches=self.workspace_mixed_batches,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
@@ -1225,6 +1229,8 @@ class ChatRuntime:
                 yield None
 
     async def close(self) -> None:
+        if self.tree_exchanges is not None:
+            self.tree_exchanges.assert_external_close()
         if self.tree_moves is not None:
             self.tree_moves.assert_external_close()
         if self.commands is not None:

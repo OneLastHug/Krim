@@ -111,6 +111,10 @@ class TreeMoveBackend(Protocol):
     def assert_external_close(self) -> None: ...
 
 
+class TreeExchangeBackend(TreeMoveBackend, Protocol):
+    """双完整树后端独立能力身份；沿同调用/原回程与生命周期协议。"""
+
+
 class CommandBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
@@ -206,6 +210,8 @@ class ToolContext:
     _tree_model_response: tuple[str, str] | None = field(default=None, repr=False)
     tree_moves: TreeMoveBackend | None = None
     _tree_move_response: tuple[str, str] | None = field(default=None, repr=False)
+    tree_exchanges: TreeExchangeBackend | None = None
+    _tree_exchange_response: tuple[str, str] | None = field(default=None, repr=False)
     # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
@@ -255,6 +261,7 @@ class ToolContext:
             workspace_tree_queries=self.workspace_tree_queries,
             workspace_tree_models=self.workspace_tree_models,
             tree_moves=self.tree_moves,
+            tree_exchanges=self.tree_exchanges,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
