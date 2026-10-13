@@ -100,6 +100,12 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         head = await client.head("/ui/tree-moves-ui.js")
         assert head.status_code == 200 and head.content == b""
         assert (await client.post("/ui/tree-moves-ui.js")).status_code == 401
+        exchange_script = await client.get("/ui/tree-exchanges-ui.js")
+        assert exchange_script.status_code == 200 and "TreeExchangesUI" in exchange_script.text
+        assert exchange_script.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'self'" in exchange_script.headers["content-security-policy"]
+        assert (await client.head("/ui/tree-exchanges-ui.js")).content == b""
+        assert (await client.post("/ui/tree-exchanges-ui.js")).status_code == 401
         assert (
             await client.get("/v1/agents/example/workspace/tree-moves/query?kind=proposals")
         ).status_code == 401

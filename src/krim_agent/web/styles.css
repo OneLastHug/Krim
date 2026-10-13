@@ -167,6 +167,17 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .tree-move-list, .tree-move-history { display: grid; gap: 6px; padding-left: 20px; }
 .tree-move-detail { display: grid; gap: 6px; margin-top: 8px; }
 .tree-move-pending { border-left: 3px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
+.tree-exchanges { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.tree-exchanges summary { cursor: pointer; font-weight: 700; }
+.tree-exchange-editor { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); }
+.tree-exchanges label { display: grid; gap: 4px; font-size: 0.8rem; }
+.tree-exchanges input { width: 100%; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--canvas); }
+.tree-exchanges [hidden] { display: none; }
+.tree-exchanges .actions { flex-wrap: wrap; }
+.tree-exchange-summary, .tree-exchange-condition, .tree-exchange-receipt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.8rem; }
+.tree-exchange-list, .tree-exchange-history { display: grid; gap: 6px; padding-left: 20px; }
+.tree-exchange-detail { display: grid; gap: 6px; margin-top: 8px; }
+.tree-exchange-pending { border-left: 3px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
 .directory-changes summary { cursor: pointer; font-weight: 700; }
 .directory-editor { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); }
 .directory-editor label { display: grid; gap: 4px; font-size: 0.8rem; }
