@@ -4,13 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.workspace import Workspace
 from krim_agent.workspace_change import SHA256, SnapshotMetadata
+
+CheckpointCaptureFormat = Literal["text", "bytes"]
+CheckpointContentKind = Literal["text", "binary", "absent"]
+
+
+def checkpoint_content_kind(content: bytes | None) -> CheckpointContentKind:
+    if content is None:
+        return "absent"
+    if b"\0" in content:
+        return "binary"
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return "binary"
+    return "text"
 
 
 class WorkspaceCheckpointCreate(StrictModel):
@@ -43,6 +58,14 @@ class WorkspaceCheckpointFileView(StrictModel):
     sha256: str | None = Field(pattern=SHA256)
     byte_size: int | None = Field(ge=0)
     mode: int | None = Field(ge=0, le=4095)
+    content_kind: CheckpointContentKind | None = None
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.content_kind is None:
+            value.pop("content_kind", None)
+        return value
 
 
 class WorkspaceCheckpointView(StrictModel):
@@ -53,11 +76,19 @@ class WorkspaceCheckpointView(StrictModel):
     request_key: str
     workspace_key: str
     resource_fingerprint: str
+    capture_format: CheckpointCaptureFormat = "text"
     status: Literal["capturing", "available", "failed", "cancelled", "interrupted"]
     files: list[WorkspaceCheckpointFileView] = Field(min_length=1, max_length=32)
     error_code: str | None
     created_at: datetime
     updated_at: datetime
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.capture_format == "text":
+            value.pop("capture_format", None)
+        return value
 
 
 class CapturedFileMetadata(StrictModel):
@@ -69,6 +100,14 @@ class CapturedFileMetadata(StrictModel):
     content_sha256: str | None = Field(pattern=SHA256)
     byte_size: int = Field(ge=0, le=8388608)
     snapshot_hash: str = Field(pattern=SHA256)
+    content_kind: CheckpointContentKind | None = None
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.content_kind is None:
+            value.pop("content_kind", None)
+        return value
 
     @model_validator(mode="after")
     def consistent_presence(self) -> CapturedFileMetadata:
@@ -76,6 +115,10 @@ class CapturedFileMetadata(StrictModel):
             raise ValueError("文件身份与存在性摘要不匹配")
         if self.snapshot is None and self.byte_size != 0:
             raise ValueError("不存在的文件不能带内容长度")
+        if self.content_kind is not None and (self.content_kind == "absent") != (
+            self.snapshot is None
+        ):
+            raise ValueError("原生字节种类与存在性不匹配")
         return self
 
 
@@ -84,3 +127,4 @@ class CheckpointCaptureFence:
     checkpoint_id: str
     position: int
     token: str
+    capture_format: CheckpointCaptureFormat = "text"

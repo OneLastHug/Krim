@@ -19,9 +19,11 @@ from krim_agent.protocol.models import utc_now
 from krim_agent.workspace_checkpoint import (
     CapturedFileMetadata,
     CheckpointCaptureFence,
+    CheckpointCaptureFormat,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointFileView,
     WorkspaceCheckpointView,
+    checkpoint_content_kind,
 )
 from krim_agent.workspace_writer import CapturedFile, FileSnapshot
 
@@ -33,7 +35,11 @@ from .database import (
 from .workspace_edits import WorkspaceEditStore, digest, snapshot_metadata
 
 
-def encode_capture(capture: CapturedFile, *, allow_binary: bool = False) -> dict[str, JsonValue]:
+def encode_capture(
+    capture: CapturedFile, *, allow_binary: bool = False, native_bytes: bool = False
+) -> dict[str, JsonValue]:
+    if native_bytes and not allow_binary:
+        raise ServiceError("workspace_checkpoint_format", "原生字节格式须允许私有bytes", 422)
     snapshot = capture.snapshot
     if snapshot is not None:
         if len(snapshot.data) > 8388608 or (not allow_binary and b"\0" in snapshot.data):
@@ -52,6 +58,9 @@ def encode_capture(capture: CapturedFile, *, allow_binary: bool = False) -> dict
         content_sha256=snapshot.sha256 if snapshot is not None else None,
         byte_size=len(snapshot.data) if snapshot is not None else 0,
         snapshot_hash="0" * 64,
+        content_kind=checkpoint_content_kind(snapshot.data if snapshot else None)
+        if native_bytes
+        else None,
     ).model_dump(mode="json")
     value["snapshot_hash"] = digest(
         {key: item for key, item in value.items() if key != "snapshot_hash"}
@@ -79,6 +88,8 @@ def decode_capture(value: dict[str, JsonValue] | None, content: bytes | None) ->
         checksum != metadata.content_sha256
         or (content is None) != (metadata.snapshot is None)
         or len(content or b"") != metadata.byte_size
+        or metadata.content_kind is not None
+        and metadata.content_kind != checkpoint_content_kind(content)
     ):
         raise ServiceError("workspace_checkpoint_corrupt", "检查点私有内容与身份不匹配", 409)
     snapshot = None
@@ -127,7 +138,25 @@ class WorkspaceCheckpointStore:
         row = await session.get(NativeWorkspaceCheckpointRow, identifier)
         if row is None or row.scope_id != scope:
             raise ServiceError("workspace_checkpoint_not_found", "检查点不在该作用域中", 404)
+        if row.capture_format not in {"text", "bytes"}:
+            raise ServiceError("workspace_checkpoint_corrupt", "检查点捕获格式损坏", 409)
         return row
+
+    @staticmethod
+    def _metadata(
+        row: NativeWorkspaceCheckpointRow, value: dict[str, JsonValue] | None
+    ) -> CapturedFileMetadata:
+        metadata = capture_metadata(value)
+        if (metadata.content_kind is not None) != (row.capture_format == "bytes"):
+            raise ServiceError("workspace_checkpoint_corrupt", "检查点种类与冻结格式不匹配", 409)
+        return metadata
+
+    @classmethod
+    def _decode(
+        cls, row: NativeWorkspaceCheckpointRow, entry: NativeWorkspaceCheckpointFileRow
+    ) -> CapturedFile:
+        cls._metadata(row, entry.capture_metadata)
+        return decode_capture(entry.capture_metadata, entry.content)
 
     @staticmethod
     def _end(
@@ -157,7 +186,7 @@ class WorkspaceCheckpointStore:
         )
         files = []
         for path, captured, raw in entries:
-            metadata = capture_metadata(raw) if captured else None
+            metadata = self._metadata(row, raw) if captured else None
             files.append(
                 WorkspaceCheckpointFileView(
                     path=path,
@@ -166,6 +195,7 @@ class WorkspaceCheckpointStore:
                     sha256=metadata.content_sha256 if metadata else None,
                     byte_size=metadata.byte_size if metadata else None,
                     mode=metadata.snapshot.mode if metadata and metadata.snapshot else None,
+                    content_kind=metadata.content_kind if metadata else None,
                 )
             )
         return WorkspaceCheckpointView(
@@ -175,6 +205,7 @@ class WorkspaceCheckpointStore:
             request_key=row.request_key,
             workspace_key=row.workspace_key,
             resource_fingerprint=row.resource_fingerprint,
+            capture_format=cast(CheckpointCaptureFormat, row.capture_format),
             status=cast(
                 Literal["capturing", "available", "failed", "cancelled", "interrupted"], row.status
             ),
@@ -191,16 +222,21 @@ class WorkspaceCheckpointStore:
         workspace_key: str,
         resource_fingerprint: str,
         workspace_fingerprint: str,
+        *,
+        capture_format: CheckpointCaptureFormat = "text",
     ) -> tuple[WorkspaceCheckpointView, bool]:
         request = WorkspaceCheckpointCreate.model_validate(request.model_dump())
-        fingerprint = digest(
-            {
-                "request": request.model_dump(mode="json"),
-                "key": workspace_key,
-                "resource": resource_fingerprint,
-                "workspace": workspace_fingerprint,
-            }
-        )
+        if capture_format not in {"text", "bytes"}:
+            raise ServiceError("workspace_checkpoint_format", "检查点捕获格式无效", 422)
+        original: dict[str, JsonValue] = {
+            "request": request.model_dump(mode="json"),
+            "key": workspace_key,
+            "resource": resource_fingerprint,
+            "workspace": workspace_fingerprint,
+        }
+        if capture_format == "bytes":
+            original["capture_format"] = "bytes"
+        fingerprint = digest(original)
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             topic = await self.edits._scope(session, scope, writing=False)
@@ -235,6 +271,7 @@ class WorkspaceCheckpointStore:
                 request_key=request.request_key,
                 request_hash=fingerprint,
                 title=request.title,
+                capture_format=capture_format,
                 status="capturing",
                 owner_id=self.owner_id,
                 lease_expires_at=time.time() + self.lease_seconds,
@@ -257,7 +294,12 @@ class WorkspaceCheckpointStore:
             return await self._view(session, row), True
 
     async def _live(
-        self, session: AsyncSession, scope: str, identifier: str, token: str | None = None
+        self,
+        session: AsyncSession,
+        scope: str,
+        identifier: str,
+        token: str | None = None,
+        capture_format: CheckpointCaptureFormat | None = None,
     ) -> NativeWorkspaceCheckpointRow:
         row = await self._row(session, scope, identifier)
         if (
@@ -265,6 +307,7 @@ class WorkspaceCheckpointStore:
             or row.owner_id != self.owner_id
             or (row.lease_expires_at or 0) <= time.time()
             or (token is not None and not secrets.compare_digest(row.token, token))
+            or (capture_format is not None and capture_format != row.capture_format)
         ):
             raise ServiceError("workspace_checkpoint_fenced", "检查点捕获资格已失效", 409)
         await self.edits._scope(session, scope, writing=True)
@@ -280,14 +323,20 @@ class WorkspaceCheckpointStore:
                 .order_by(NativeWorkspaceCheckpointFileRow.position)
             )
             return tuple(
-                CheckpointCaptureFence(identifier, position, row.token) for position in positions
+                CheckpointCaptureFence(
+                    identifier,
+                    position,
+                    row.token,
+                    cast(CheckpointCaptureFormat, row.capture_format),
+                )
+                for position in positions
             )
 
     async def assert_capture(
         self, scope: str, fence: CheckpointCaptureFence, path: str | None = None
     ) -> None:
         async with self.database.write_lock, self.database.sessions() as session:
-            await self._live(session, scope, fence.checkpoint_id, fence.token)
+            await self._live(session, scope, fence.checkpoint_id, fence.token, fence.capture_format)
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
@@ -303,11 +352,17 @@ class WorkspaceCheckpointStore:
     async def record(
         self, scope: str, fence: CheckpointCaptureFence, capture: CapturedFile
     ) -> None:
-        metadata = encode_capture(capture)
+        metadata = encode_capture(
+            capture,
+            allow_binary=fence.capture_format == "bytes",
+            native_bytes=fence.capture_format == "bytes",
+        )
         content = capture.snapshot.data if capture.snapshot else None
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
-            row = await self._live(session, scope, fence.checkpoint_id, fence.token)
+            row = await self._live(
+                session, scope, fence.checkpoint_id, fence.token, fence.capture_format
+            )
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
@@ -347,9 +402,7 @@ class WorkspaceCheckpointStore:
             )
             if not entries or any(not item.captured for item in entries):
                 raise ServiceError("workspace_checkpoint_incomplete", "检查点文件尚未全部捕获", 409)
-            captures = tuple(
-                decode_capture(item.capture_metadata, item.content) for item in entries
-            )
+            captures = tuple(self._decode(row, item) for item in entries)
             if any(
                 value.path != item.path or value.workspace_fingerprint != row.workspace_fingerprint
                 for value, item in zip(captures, entries, strict=True)
@@ -366,11 +419,15 @@ class WorkspaceCheckpointStore:
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
-            if entry is None or not secrets.compare_digest(row.token, fence.token):
+            if (
+                entry is None
+                or not secrets.compare_digest(row.token, fence.token)
+                or row.capture_format != fence.capture_format
+            ):
                 raise ServiceError("workspace_checkpoint_fenced", "检查点文件凭据不匹配", 403)
             if not entry.captured:
                 return None
-            value = decode_capture(entry.capture_metadata, entry.content)
+            value = self._decode(row, entry)
             if value.path != entry.path or value.workspace_fingerprint != row.workspace_fingerprint:
                 raise ServiceError("workspace_checkpoint_corrupt", "检查点路径或资源损坏", 409)
             return value
@@ -378,13 +435,17 @@ class WorkspaceCheckpointStore:
     async def renew(self, scope: str, fence: CheckpointCaptureFence) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
-            row = await self._live(session, scope, fence.checkpoint_id, fence.token)
+            row = await self._live(
+                session, scope, fence.checkpoint_id, fence.token, fence.capture_format
+            )
             row.lease_expires_at = time.time() + self.lease_seconds
 
     async def finish(self, scope: str, fence: CheckpointCaptureFence) -> WorkspaceCheckpointView:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
-            row = await self._live(session, scope, fence.checkpoint_id, fence.token)
+            row = await self._live(
+                session, scope, fence.checkpoint_id, fence.token, fence.capture_format
+            )
             entries = list(
                 await session.scalars(
                     select(NativeWorkspaceCheckpointFileRow).where(
@@ -395,9 +456,7 @@ class WorkspaceCheckpointStore:
             if not entries or any(not entry.captured for entry in entries):
                 raise ServiceError("workspace_checkpoint_incomplete", "检查点捕获未完成", 409)
             for entry in entries:
-                await self._idle_file(
-                    session, decode_capture(entry.capture_metadata, entry.content)
-                )
+                await self._idle_file(session, self._decode(row, entry))
             self._end(row, "available", None)
             await session.flush()
             return await self._view(session, row)
@@ -406,7 +465,10 @@ class WorkspaceCheckpointStore:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             row = await self._row(session, scope, fence.checkpoint_id)
-            if not secrets.compare_digest(row.token, fence.token):
+            if (
+                not secrets.compare_digest(row.token, fence.token)
+                or row.capture_format != fence.capture_format
+            ):
                 raise ServiceError("workspace_checkpoint_fenced", "检查点捕获凭据不匹配", 403)
             if row.status == "capturing":
                 self._expire(row)

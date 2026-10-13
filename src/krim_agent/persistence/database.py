@@ -1323,6 +1323,9 @@ class NativeWorkspaceCheckpointRow(Base):
     __table_args__ = (
         UniqueConstraint("scope_id", "request_key"),
         CheckConstraint(
+            "capture_format IN ('text','bytes')", name="ck_native_checkpoint_capture_format"
+        ),
+        CheckConstraint(
             "status IN ('capturing','available','failed','cancelled','interrupted')",
             name="ck_native_checkpoint_status",
         ),
@@ -1341,6 +1344,7 @@ class NativeWorkspaceCheckpointRow(Base):
     request_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(String(120))
+    capture_format: Mapped[str] = mapped_column(String(8), default="text", server_default="text")
     status: Mapped[str] = mapped_column(String(16))
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
