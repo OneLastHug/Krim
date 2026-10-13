@@ -134,6 +134,7 @@ from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.attachments import AttachmentRepository
 from krim_agent.persistence.change_lists import ChangeListRepository
 from krim_agent.persistence.checkpoints import CheckpointRepository
+from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -210,6 +211,19 @@ from krim_agent.workspace_restore import (
     CheckpointRestoreView,
 )
 from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from krim_agent.workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptView,
+    TreeExchangeInspectRequest,
+    TreeExchangeInspectView,
+    TreeExchangeOperationRequest,
+    TreeExchangePreviewRequest,
+    TreeExchangePreviewView,
+    TreeExchangeQueryKind,
+    TreeExchangeQueryRequest,
+    TreeExchangeQueryResult,
+    TreeExchangeSealRequest,
+)
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptView,
@@ -292,6 +306,7 @@ def create_app(
     workspace_version: str = "local-v1",
     workspace_writable: bool = False,
     tree_moves_enabled: bool = False,
+    tree_exchanges_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
     execution_version: str = "local-v1",
     execution_owned: bool = False,
@@ -327,6 +342,8 @@ def create_app(
     agent_service = AgentService(service, config, providers=agent_providers)
     if tree_moves_enabled:
         agent_service.register_tree_moves()
+    if tree_exchanges_enabled:
+        agent_service.register_tree_exchanges()
 
     def mcp_ready(names: list[str], resource_hash: str) -> None:
         for name in names:
@@ -1138,6 +1155,100 @@ def create_app(
         if operation.operation_id != operation_id:
             raise ServiceError("invalid_request", "路径与原树操作标识不一致", 422)
         return await agent_service.tree_move_reconcile(agent_id, operation, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-exchange-state")
+    async def agent_tree_exchange_inspect(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        path: str = Query(min_length=1, max_length=512),
+        confirmed: bool = Query(default=False),
+    ) -> TreeExchangeInspectView:
+        _directory_parameters(request, {"path"})
+        try:
+            selection = TreeExchangeInspectRequest(path=path)
+        except ValidationError:
+            raise ServiceError("invalid_request", "树相对路径无效", 422) from None
+        return await agent_service.tree_exchange_inspect(agent_id, selection, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-exchanges/preview")
+    async def agent_tree_exchange_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: TreeExchangePreviewRequest,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> TreeExchangePreviewView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_exchange_preview(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-exchanges/change")
+    async def agent_tree_exchange_change(
+        agent_id: WorkspaceIdentifier,
+        payload: TreeExchangeAction,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> TreeExchangeAttemptView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_exchange_change(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-exchanges/query")
+    async def agent_tree_exchange_query(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        kind: TreeExchangeQueryKind,
+        identifier: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        request_key: str | None = Query(
+            default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+        ),
+        after: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> TreeExchangeQueryResult:
+        _directory_parameters(request, {"kind", "identifier", "request_key", "after", "limit"})
+        try:
+            selection = TreeExchangeQueryRequest(
+                kind=kind, identifier=identifier, request_key=request_key, after=after, limit=limit
+            )
+        except ValidationError:
+            raise ServiceError("invalid_request", "树查询选择器无效", 422) from None
+        return await agent_service.tree_exchange_query(agent_id, selection, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-exchanges/{proposal_id}/cancel")
+    async def agent_tree_exchange_cancel(
+        agent_id: WorkspaceIdentifier,
+        proposal_id: WorkspaceIdentifier,
+        request: Request,
+        payload: StrictModel | None = None,
+    ) -> TreeExchangePreviewView:
+        _tree_move_parameters(request, set())
+        return await agent_service.tree_exchange_cancel(agent_id, proposal_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-exchange-operations/{operation_id}/reconcile")
+    async def agent_tree_exchange_reconcile(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        payload: TreeExchangeOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> TreeExchangeAttemptView:
+        _directory_parameters(request, set())
+        operation = payload or TreeExchangeOperationRequest(operation_id=operation_id)
+        if operation.operation_id != operation_id:
+            raise ServiceError("invalid_request", "路径与原树操作标识不一致", 422)
+        return await agent_service.tree_exchange_reconcile(agent_id, operation, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-exchanges/seal")
+    async def agent_tree_exchange_seal(
+        agent_id: WorkspaceIdentifier,
+        payload: TreeExchangeSealRequest,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> CompletedTreeOriginView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_exchange_seal(agent_id, payload, confirmed=confirmed)
 
     @app.get("/v1/agents/{agent_id}/workspace/directory-state")
     async def agent_directory_inspect(

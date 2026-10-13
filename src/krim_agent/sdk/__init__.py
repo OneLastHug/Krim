@@ -30,6 +30,7 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
 from krim_agent.skill_packages import (
     SkillPackageRequest,
     package_from_archive,
@@ -94,6 +95,22 @@ from krim_agent.workspace_tree import (
     TreePlanStepPage,
     TreePlanView,
 )
+from krim_agent.workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptPage,
+    TreeExchangeAttemptView,
+    TreeExchangeInspectRequest,
+    TreeExchangeInspectView,
+    TreeExchangeOperationRequest,
+    TreeExchangePage,
+    TreeExchangePreviewRequest,
+    TreeExchangePreviewView,
+    TreeExchangeQueryKind,
+    TreeExchangeQueryRequest,
+    TreeExchangeQueryResult,
+    TreeExchangeReceiptView,
+    TreeExchangeSealRequest,
+)
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptPage,
@@ -151,6 +168,21 @@ __all__ = [
     "TreeMoveQueryRequest",
     "TreeMoveQueryResult",
     "TreeMoveReceiptView",
+    "TreeExchangeAction",
+    "TreeExchangeAttemptPage",
+    "TreeExchangeAttemptView",
+    "TreeExchangeInspectRequest",
+    "TreeExchangeInspectView",
+    "TreeExchangeOperationRequest",
+    "TreeExchangePage",
+    "TreeExchangePreviewRequest",
+    "TreeExchangePreviewView",
+    "TreeExchangeQueryKind",
+    "TreeExchangeQueryRequest",
+    "TreeExchangeQueryResult",
+    "TreeExchangeReceiptView",
+    "TreeExchangeSealRequest",
+    "CompletedTreeOriginView",
     "CommandDirectoryChangesPage",
     "CommandDirectoryChangesRequest",
     "CommandDirectoryEntry",

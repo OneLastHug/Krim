@@ -33,6 +33,7 @@ from krim_agent.execution.publication import (
     CommandProposalView,
 )
 from krim_agent.execution.records import CommandView
+from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
@@ -78,6 +79,18 @@ from krim_agent.workspace_restore import (
     CheckpointRestoreView,
 )
 from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from krim_agent.workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptView,
+    TreeExchangeInspectRequest,
+    TreeExchangeInspectView,
+    TreeExchangeOperationRequest,
+    TreeExchangePreviewRequest,
+    TreeExchangePreviewView,
+    TreeExchangeQueryRequest,
+    TreeExchangeQueryResult,
+    TreeExchangeSealRequest,
+)
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptView,
@@ -214,6 +227,45 @@ class AgentSession:
 
     async def cancel_tree_move(self, proposal_id: str) -> TreeMovePreviewView:
         return await self.service.tree_move_cancel(self.agent_id, proposal_id)
+
+    async def inspect_exchange_tree(
+        self, path: str, *, confirmed: bool = False
+    ) -> TreeExchangeInspectView:
+        return await self.service.tree_exchange_inspect(
+            self.agent_id, TreeExchangeInspectRequest(path=path), confirmed=confirmed
+        )
+
+    async def preview_tree_exchange(
+        self, request: TreeExchangePreviewRequest, *, confirmed: bool = False
+    ) -> TreeExchangePreviewView:
+        return await self.service.tree_exchange_preview(self.agent_id, request, confirmed=confirmed)
+
+    async def change_tree_exchange(
+        self, request: TreeExchangeAction, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        return await self.service.tree_exchange_change(self.agent_id, request, confirmed=confirmed)
+
+    async def query_tree_exchange(
+        self, request: TreeExchangeQueryRequest, *, confirmed: bool = False
+    ) -> TreeExchangeQueryResult:
+        return await self.service.tree_exchange_query(self.agent_id, request, confirmed=confirmed)
+
+    async def reconcile_tree_exchange(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        return await self.service.tree_exchange_reconcile(
+            self.agent_id,
+            TreeExchangeOperationRequest(operation_id=operation_id),
+            confirmed=confirmed,
+        )
+
+    async def cancel_tree_exchange(self, proposal_id: str) -> TreeExchangePreviewView:
+        return await self.service.tree_exchange_cancel(self.agent_id, proposal_id)
+
+    async def seal_tree_exchange(
+        self, request: TreeExchangeSealRequest, *, confirmed: bool = False
+    ) -> CompletedTreeOriginView:
+        return await self.service.tree_exchange_seal(self.agent_id, request, confirmed=confirmed)
 
     async def inspect_directory(
         self, path: str, *, confirmed: bool = False
