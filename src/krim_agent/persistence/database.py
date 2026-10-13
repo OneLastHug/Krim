@@ -1116,6 +1116,39 @@ class WorkspaceTreePlanRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class WorkspaceTreeSealRow(Base):
+    __tablename__ = "workspace_tree_completed_seals"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_tree_seal_model_call"),
+        CheckConstraint(
+            "(run_id IS NULL AND call_id IS NULL) OR (run_id IS NOT NULL AND call_id IS NOT NULL)",
+            name="ck_tree_seal_run_call",
+        ),
+        CheckConstraint(
+            "call_id IS NULL OR length(call_id) BETWEEN 1 AND 128", name="ck_tree_seal_call"
+        ),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_plans.plan_id"), primary_key=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    command_id: Mapped[str] = mapped_column(ForeignKey("command_executions.command_id"))
+    source_hash: Mapped[str] = mapped_column(String(64))
+    snapshot_revision: Mapped[str] = mapped_column(String(64))
+    tree_fingerprint: Mapped[str] = mapped_column(String(64))
+    metadata_value: Mapped[dict[str, JsonValue]] = mapped_column(
+        "metadata", JSON(none_as_null=True)
+    )
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    proof: Mapped[dict[str, JsonValue]] = mapped_column(JSON(none_as_null=True))
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class WorkspaceTreeModelSourceRow(Base):
     __tablename__ = "workspace_tree_plan_model_sources"
     __table_args__ = (
