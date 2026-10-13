@@ -19,6 +19,7 @@ from .database import (
     WorkspaceDirectoryLockRow,
     WorkspaceEditAttemptRow,
     WorkspaceFileLockRow,
+    WorkspaceTreeExchangeLockRow,
     WorkspaceTreeMoveLockRow,
 )
 from .directory_fences import directory_key, entry_key
@@ -79,6 +80,25 @@ async def assert_no_move_lock(
     if await sql.scalar(query) is not None:
         raise ServiceError(
             "workspace_tree_move_busy", "原树有执行中或未核实操作，禁止命名空间发布", 409
+        )
+    exchange_query = select(WorkspaceTreeExchangeLockRow.operation_id).where(
+        or_(
+            *(
+                and_(
+                    WorkspaceTreeExchangeLockRow.kind == kind,
+                    WorkspaceTreeExchangeLockRow.lock_key == key,
+                )
+                for kind, key in keys
+            )
+        )
+    )
+    if exclude_operation_id is not None:
+        exchange_query = exchange_query.where(
+            WorkspaceTreeExchangeLockRow.operation_id != exclude_operation_id
+        )
+    if await sql.scalar(exchange_query) is not None:
+        raise ServiceError(
+            "workspace_tree_exchange_busy", "原两树有执行中或未核实交换，禁止命名空间发布", 409
         )
 
 

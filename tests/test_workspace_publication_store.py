@@ -455,7 +455,7 @@ async def test_0024_upgrade_replays_old_transitions_without_rewriting_terminal_h
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0043_tree_move_ledger"
+            ).scalar_one() == "0044_tree_exchange_ledger"
     finally:
         await database.close()
 

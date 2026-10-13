@@ -358,7 +358,7 @@ async def test_database_reopen_retains_exact_private_snapshot_and_migration_prot
         async with cold_db.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0043_tree_move_ledger"
+            ).scalar() == "0044_tree_exchange_ledger"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         with pytest.raises(RuntimeError, match="文件修改"):
             async with cold_db.engine.begin() as connection:

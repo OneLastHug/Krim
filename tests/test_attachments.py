@@ -146,7 +146,7 @@ async def test_attachment_migration_head_and_downgrade_protection(repository):
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0043_tree_move_ledger"
+        ).scalar() == "0044_tree_exchange_ledger"
 
 
 async def test_large_attachment_body_is_bounded_without_expanding_other_json_routes(api):
