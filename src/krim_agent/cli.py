@@ -39,6 +39,14 @@ from .workspace_restore import (
     CheckpointRestoreView,
 )
 from .workspace_tree import TreePlanRequest, TreePlanView
+from .workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptView,
+    TreeExchangePreviewRequest,
+    TreeExchangeQueryKind,
+    TreeExchangeQueryRequest,
+    TreeExchangeSealRequest,
+)
 from .workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptView,
@@ -75,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--tree-moves",
         action="store_true",
         help="tree moves（树移动）：显式登记非空树工具，写入仍需授权",
+    )
+    serve.add_argument(
+        "--tree-exchanges",
+        action="store_true",
+        help="tree exchanges（双树交换）：显式登记双完整树工具，写入仍需授权",
     )
     serve.add_argument(
         "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
@@ -268,6 +281,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
     )
     moves.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    exchanges = subparsers.add_parser(
+        "tree-exchanges", help="tree exchanges（双树交换）：完整目录树条件事务及原历史"
+    )
+    exchanges.add_argument(
+        "action",
+        choices=[
+            "inspect",
+            "seal",
+            "preview",
+            "get",
+            "list",
+            "by-key",
+            "operation",
+            "operation-by-key",
+            "history",
+            "apply",
+            "undo",
+            "keep",
+            "reconcile",
+            "cancel",
+        ],
+    )
+    exchanges.add_argument("agent_id", help="Agent实例标识")
+    exchanges.add_argument("value", nargs="?", help="相对树路径、原proposal/operation标识或请求键")
+    exchanges.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
+    exchanges.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
+    exchanges.add_argument("--request-key", help="request key（请求键）：明确原幂等键")
+    exchanges.add_argument("--after", help="after（游标）：上一页末项原标识")
+    exchanges.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
+    exchanges.add_argument(
+        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
+    )
+    exchanges.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    exchanges.add_argument(
+        "--expected-fingerprint", help="expected fingerprint（原完整指纹）：seal必需"
+    )
     tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
     tasks.add_argument("action", choices=["get", "history", "update"])
     tasks.add_argument("agent_id", help="Agent实例标识")
@@ -983,6 +1032,93 @@ def _tree_move_command(
         parser.exit(1)
 
 
+def _tree_exchange_command(
+    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
+        parser.error("树分页参数只适用于list/history")
+    if args.action in {"list", "preview"} and args.value is not None:
+        parser.error("树list/preview不接受位置标识")
+    if args.action != "preview" and args.request is not None:
+        parser.error("--request仅用于树preview")
+    if args.action not in {"apply", "undo", "keep"} and (
+        args.revision is not None or args.request_key is not None
+    ):
+        parser.error("--revision/--request-key仅用于树apply/undo/keep")
+    if args.action != "list" and args.action != "preview" and not args.value:
+        parser.error("树操作需要原路径、标识或请求键")
+    if args.action != "seal" and args.expected_fingerprint is not None:
+        parser.error("--expected-fingerprint仅用于tree-exchanges seal")
+    result: BaseModel
+    if args.action == "inspect":
+        result = client.agent_tree_exchange_inspect(
+            args.agent_id, args.value, confirmed=args.confirm
+        )
+    elif args.action == "seal":
+        if not args.expected_fingerprint:
+            parser.error("tree-exchanges seal需要原plan标识与--expected-fingerprint")
+        result = client.agent_tree_exchange_seal(
+            args.agent_id,
+            TreeExchangeSealRequest(
+                plan_id=args.value, expected_fingerprint=args.expected_fingerprint
+            ),
+            confirmed=args.confirm,
+        )
+    elif args.action == "preview":
+        if not args.request:
+            parser.error("tree-exchanges preview需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("树意图不能超过64KiB")
+            request = TreeExchangePreviewRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("树预览请求无效")
+        result = client.agent_tree_exchange_preview(args.agent_id, request, confirmed=args.confirm)
+    elif args.action in {"apply", "undo", "keep"}:
+        if args.revision is None or not args.request_key:
+            parser.error("树apply/undo/keep需要原提案ID、--revision和--request-key")
+        result = client.agent_tree_exchange_change(
+            args.agent_id,
+            TreeExchangeAction(
+                proposal_id=args.value,
+                action=args.action,
+                expected_revision=args.revision,
+                request_key=args.request_key,
+            ),
+            confirmed=args.confirm,
+        )
+    elif args.action == "reconcile":
+        result = client.agent_tree_exchange_reconcile(
+            args.agent_id, args.value, confirmed=args.confirm
+        )
+    elif args.action == "cancel":
+        if args.confirm:
+            parser.error("树cancel不需要--confirm")
+        result = client.agent_tree_exchange_cancel(args.agent_id, args.value)
+    else:
+        kinds: dict[str, TreeExchangeQueryKind] = {
+            "get": "proposal",
+            "list": "proposals",
+            "by-key": "by_key",
+            "operation": "operation",
+            "operation-by-key": "operation_by_key",
+            "history": "history",
+        }
+        selection = TreeExchangeQueryRequest(
+            kind=kinds[args.action],
+            identifier=args.value if args.action in {"get", "operation", "history"} else None,
+            request_key=args.value if args.action in {"by-key", "operation-by-key"} else None,
+            after=args.after,
+            limit=args.limit,
+        )
+        result = client.agent_tree_exchange_query(args.agent_id, selection, confirmed=args.confirm)
+    print(result.model_dump_json(indent=2))
+    if isinstance(result, TreeExchangeAttemptView) and result.status != "done":
+        parser.exit(1)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1032,6 +1168,8 @@ def main() -> None:
             parser.error("端口必须在 1–65535 之间")
         if args.tree_moves and not args.workspace:
             parser.error("serve --tree-moves需要已授权--workspace")
+        if args.tree_exchanges and not args.workspace:
+            parser.error("serve --tree-exchanges需要已授权--workspace")
         settings = Settings.from_env()
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
@@ -1067,6 +1205,7 @@ def main() -> None:
                 workspace_version=args.workspace_version,
                 workspace_writable=args.workspace_write,
                 tree_moves_enabled=args.tree_moves,
+                tree_exchanges_enabled=args.tree_exchanges,
                 execution_runner=execution_runner,
                 execution_version=args.execution_version,
                 execution_owned=execution_runner is not None,
@@ -1127,6 +1266,9 @@ def main() -> None:
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)
+                return
+            if args.command == "tree-exchanges":
+                _tree_exchange_command(client, args, parser)
                 return
             if args.command == "tree-moves":
                 _tree_move_command(client, args, parser)

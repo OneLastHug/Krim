@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 
 from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion, AgentResourceView
 from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
+from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
 
 from .agents import AgentDescriptor
 from .application.agents import AgentInventoryView, AgentPromptRequest, AgentView
@@ -133,6 +134,18 @@ from .workspace_restore import (
     CheckpointRestoreView,
 )
 from .workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from .workspace_tree_exchange_types import (
+    TreeExchangeAction,
+    TreeExchangeAttemptView,
+    TreeExchangeInspectRequest,
+    TreeExchangeInspectView,
+    TreeExchangeOperationRequest,
+    TreeExchangePreviewRequest,
+    TreeExchangePreviewView,
+    TreeExchangeQueryRequest,
+    TreeExchangeQueryResult,
+    TreeExchangeSealRequest,
+)
 from .workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptView,
@@ -972,6 +985,196 @@ class KrimClient:
         value = TreeMovePreviewView.model_validate_json(response.content)
         self._tree_move_match(
             value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    @staticmethod
+    def _tree_exchange_match(matched: bool) -> None:
+        if not matched:
+            raise ClientError(
+                "双树交换回程与原请求/作用域不一致",
+                code="workspace_tree_exchange_response",
+                status=502,
+            )
+
+    def agent_tree_exchange_inspect(
+        self, agent_id: str, path: str, *, confirmed: bool = False
+    ) -> TreeExchangeInspectView:
+        selection = TreeExchangeInspectRequest(path=path)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchange-state",
+            params={"path": selection.path, "confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        value = TreeExchangeInspectView.model_validate_json(response.content)
+        self._tree_exchange_match(value.path == selection.path)
+        return value
+
+    def agent_tree_exchange_preview(
+        self, agent_id: str, request: TreeExchangePreviewRequest, *, confirmed: bool = False
+    ) -> TreeExchangePreviewView:
+        request = TreeExchangePreviewRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeExchangePreviewView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.left_path == request.left_path
+            and value.right_path == request.right_path
+            and value.left_before_fingerprint == request.expected_left
+            and value.right_before_fingerprint == request.expected_right
+            and value.source_plan_id == request.source_plan_id
+            and value.origin
+            == ("completed_tree" if request.source_plan_id is not None else "existing_trees")
+            and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_exchange_change(
+        self, agent_id: str, request: TreeExchangeAction, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        request = TreeExchangeAction.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/change",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeExchangeAttemptView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.proposal_id == request.proposal_id
+            and value.action == request.action
+            and value.expected_revision == request.expected_revision
+            and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_exchange_query(
+        self, agent_id: str, request: TreeExchangeQueryRequest, *, confirmed: bool = False
+    ) -> TreeExchangeQueryResult:
+        request = TreeExchangeQueryRequest.model_validate(request.model_dump())
+        parameters = {"confirmed": str(confirmed).lower(), "kind": request.kind}
+        for key, selected in (
+            ("identifier", request.identifier),
+            ("request_key", request.request_key),
+            ("after", request.after),
+        ):
+            if selected is not None:
+                parameters[key] = selected
+        if request.kind in {"history", "proposals"}:
+            parameters["limit"] = str(request.limit)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/query",
+            params=parameters,
+        )
+        self._check(response)
+        value = TreeExchangeQueryResult.model_validate_json(response.content)
+        expected = {
+            "proposal": "proposal",
+            "by_key": "proposal",
+            "operation": "operation",
+            "operation_by_key": "operation",
+            "history": "history",
+            "proposals": "proposals",
+        }[request.kind]
+        self._tree_exchange_match(
+            value.kind == request.kind
+            and all(
+                getattr(value, field) is None
+                for field in ("proposal", "operation", "history", "proposals")
+                if field != expected
+            )
+        )
+        if request.kind in {"proposal", "operation", "history", "proposals"}:
+            self._tree_exchange_match(getattr(value, expected) is not None)
+        if value.proposal is not None:
+            self._tree_exchange_match(
+                value.proposal.scope_id == "session:" + agent_id
+                and (request.kind != "proposal" or value.proposal.proposal_id == request.identifier)
+            )
+        if value.operation is not None:
+            self._tree_exchange_match(
+                value.operation.scope_id == "session:" + agent_id
+                and (
+                    request.kind != "operation"
+                    or value.operation.operation_id == request.identifier
+                )
+            )
+        page = value.history or value.proposals
+        if page is not None:
+            identifiers = (
+                [item.operation_id for item in value.history.items]
+                if value.history is not None
+                else [item.proposal_id for item in value.proposals.items]
+                if value.proposals is not None
+                else []
+            )
+            self._tree_exchange_match(
+                len(page.items) <= request.limit
+                and identifiers == sorted(set(identifiers))
+                and all(item.scope_id == "session:" + agent_id for item in page.items)
+            )
+            after = request.after
+            if after is not None:
+                self._tree_exchange_match(all(identifier > after for identifier in identifiers))
+            self._tree_exchange_match(
+                page.next_after is None
+                or len(identifiers) == request.limit
+                and page.next_after == identifiers[-1]
+            )
+            if value.history is not None:
+                self._tree_exchange_match(
+                    all(item.proposal_id == request.identifier for item in value.history.items)
+                )
+        return value
+
+    def agent_tree_exchange_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> TreeExchangeAttemptView:
+        request = TreeExchangeOperationRequest(operation_id=operation_id)
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchange-operations/{_workspace_identifier(request.operation_id)}/reconcile",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeExchangeAttemptView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.operation_id == operation_id and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_exchange_cancel(
+        self, agent_id: str, proposal_id: str
+    ) -> TreeExchangePreviewView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/{_workspace_identifier(proposal_id)}/cancel"
+        )
+        self._check(response)
+        value = TreeExchangePreviewView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_exchange_seal(
+        self, agent_id: str, request: TreeExchangeSealRequest, *, confirmed: bool = False
+    ) -> CompletedTreeOriginView:
+        request = TreeExchangeSealRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/seal",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = CompletedTreeOriginView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.plan_id == request.plan_id
+            and value.tree_fingerprint == request.expected_fingerprint
+            and value.scope_id == "session:" + agent_id
         )
         return value
 
