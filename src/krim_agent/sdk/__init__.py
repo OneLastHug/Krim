@@ -30,7 +30,10 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.skill_packages import (
     SkillPackageRequest,
     package_from_archive,
@@ -109,6 +112,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
     TreeExchangeReceiptView,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_move import (
@@ -155,6 +159,8 @@ from .types import (
 )
 
 __all__ = [
+    "CompletedTreeOriginLookupView",
+    "TreeExchangeSealLookupRequest",
     "TreeMoveAction",
     "TreeMoveAttemptPage",
     "TreeMoveAttemptView",

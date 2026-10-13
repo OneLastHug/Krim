@@ -13,7 +13,10 @@ from pydantic import TypeAdapter
 
 from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion, AgentResourceView
 from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 
 from .agents import AgentDescriptor
 from .application.agents import AgentInventoryView, AgentPromptRequest, AgentView
@@ -144,6 +147,7 @@ from .workspace_tree_exchange_types import (
     TreeExchangePreviewView,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from .workspace_tree_move import (
@@ -1175,6 +1179,26 @@ class KrimClient:
             value.plan_id == request.plan_id
             and value.tree_fingerprint == request.expected_fingerprint
             and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_exchange_seal_query(
+        self, agent_id: str, plan_id: str, *, confirmed: bool = False
+    ) -> CompletedTreeOriginLookupView:
+        request = TreeExchangeSealLookupRequest(plan_id=plan_id)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-exchanges/seals/{_workspace_identifier(request.plan_id)}",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        value = CompletedTreeOriginLookupView.model_validate_json(response.content)
+        self._tree_exchange_match(
+            value.plan_id == plan_id
+            and (
+                value.origin is None
+                or value.origin.plan_id == plan_id
+                and value.origin.scope_id == "session:" + agent_id
+            )
         )
         return value
 

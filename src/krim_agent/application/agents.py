@@ -68,7 +68,10 @@ from krim_agent.execution.publication import (
 from krim_agent.execution.records import CommandView
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
@@ -167,6 +170,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangePreviewView,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_move import (
@@ -820,6 +824,7 @@ class AgentService:
                     "directory_source_query",
                     "tree_move_query",
                     "tree_exchange_query",
+                    "tree_exchange_seal_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -1283,6 +1288,17 @@ class AgentService:
                     "tree_exchange_seal",
                     request.model_dump(),
                     confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_exchange_seal_query(
+        self, agent_id: str, request: TreeExchangeSealLookupRequest, *, confirmed: bool = False
+    ) -> CompletedTreeOriginLookupView:
+        return CompletedTreeOriginLookupView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "tree_exchange_seal_query", request.model_dump(), confirmed=confirmed
                 )
             )
         )

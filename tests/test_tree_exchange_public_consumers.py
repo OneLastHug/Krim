@@ -612,7 +612,11 @@ async def test_factory_readonly_explicit_flag_keeps_only_inspect_and_query(runti
         service = app.state.agents
         agent = AgentSession(service, (await service.spawn("default")).agent_id)
         names = {item.name for item in service._handle(agent.agent_id).runtime.tools.definitions}
-        assert names & set(NAMES) == {"tree_exchange_inspect", "tree_exchange_query"}
+        assert names & set(NAMES) == {
+            "tree_exchange_inspect",
+            "tree_exchange_query",
+            "tree_exchange_seal_query",
+        }
         left = await agent.inspect_exchange_tree("holder/live")
         right = await agent.inspect_exchange_tree("new-parent/prepared")
         with pytest.raises(ServiceError) as refused:
