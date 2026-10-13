@@ -33,10 +33,15 @@ from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.database import (
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryProposalRow,
+    WorkspaceTreeExchangeAttemptRow,
+    WorkspaceTreeExchangeModelSourceRow,
+    WorkspaceTreeExchangeOriginRow,
+    WorkspaceTreeExchangeProposalRow,
     WorkspaceTreeModelSourceRow,
     WorkspaceTreeMoveAttemptRow,
     WorkspaceTreeMoveModelSourceRow,
     WorkspaceTreeMoveProposalRow,
+    WorkspaceTreeSealRow,
 )
 from krim_agent.protocol.domain import ChatRequest, ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -247,6 +252,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     app.state.agents.register_tree_models()
     app.state.agents.register_tree_queries()
     app.state.agents.register_tree_moves()
+    app.state.agents.register_tree_exchanges()
 
     class TestTreeMoveControl(StrictModel):
         action: Literal[
@@ -366,6 +372,267 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
             "binary_inode": binary.stat().st_ino if binary.exists() else None,
             "binary_hex": binary.read_bytes().hex() if binary.exists() else None,
         }
+
+    class TestTreeExchangeControl(StrictModel):
+        action: Literal[
+            "seed",
+            "html",
+            "catalog",
+            "stat",
+            "counts",
+            "mutate",
+            "fail_save",
+            "pause",
+            "release",
+            "gate",
+        ]
+        path: str = Field(default="tree", pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        right_path: str = Field(default="right", pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        version: Literal["old", "new"] = "old"
+        agent_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+
+    tree_exchange_fail_save = False
+    tree_exchange_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+    tree_exchange_model_calls: dict[str, int] = {}
+    original_tree_exchange_settle = app.state.agents.manager.tree_exchanges.store.settle
+    original_tree_exchange_authority = (
+        app.state.agents.manager.tree_exchanges.store.assert_execution
+    )
+
+    async def controlled_tree_exchange_settle(*args, **kwargs):
+        global tree_exchange_fail_save
+        if tree_exchange_fail_save:
+            tree_exchange_fail_save = False
+            raise OSError("synthetic browser tree move receipt failure")
+        return await original_tree_exchange_settle(*args, **kwargs)
+
+    async def controlled_tree_exchange_authority(scope, identifier):
+        gate = tree_exchange_gates.get(scope.removeprefix("session:"))
+        if gate is not None and not gate[1].is_set():
+            gate[0].set()
+            await gate[1].wait()
+        await original_tree_exchange_authority(scope, identifier)
+
+    app.state.agents.manager.tree_exchanges.store.settle = controlled_tree_exchange_settle
+    app.state.agents.manager.tree_exchanges.store.assert_execution = (
+        controlled_tree_exchange_authority
+    )
+
+    @app.post("/_test/tree-exchange")
+    async def configure_tree_exchange(payload: TestTreeExchangeControl) -> dict:
+        # 隔离合成浏览器fixture；这些控制路由不在产品API或分发包。
+        global tree_exchange_fail_save
+        target = write_root / payload.path
+        if payload.action == "html":
+            name = "<img src=x onerror=window.treeInjected=1>"
+            target = write_root / name
+        if payload.action in {"seed", "html"}:
+            (target / "sub/empty").mkdir(parents=True)
+            (target / "sub/data.bin").write_bytes(
+                b"\0\xff\x80" if payload.version == "old" else b"\x01\xfe\0"
+            )
+            target.chmod(0o750)
+            if payload.action == "html":
+                return {"path": name}
+        elif payload.action == "catalog":
+            from krim_agent.sdk import TreeExchangePreviewRequest
+
+            agent = AgentSession(app.state.agents, payload.agent_id or "")
+            inspected = await agent.inspect_exchange_tree(payload.path)
+            right = await agent.inspect_exchange_tree(payload.right_path)
+            identifiers = []
+            for _position in range(21):
+                proposal = await agent.preview_tree_exchange(
+                    TreeExchangePreviewRequest(
+                        left_path=payload.path,
+                        right_path=payload.right_path,
+                        expected_left=inspected.fingerprint,
+                        expected_right=right.fingerprint,
+                        request_key=str(uuid4()),
+                    )
+                )
+                identifiers.append(proposal.proposal_id)
+            return {"proposal_ids": identifiers}
+        elif payload.action == "mutate":
+            (target / "sub/data.bin").write_bytes(b"changed")
+        elif payload.action == "fail_save":
+            tree_exchange_fail_save = True
+        elif payload.action == "pause":
+            tree_exchange_gates[payload.agent_id or ""] = (asyncio.Event(), asyncio.Event())
+        elif payload.action == "release":
+            gate = tree_exchange_gates.get(payload.agent_id or "")
+            if gate is not None:
+                gate[1].set()
+        if payload.action == "gate":
+            gate = tree_exchange_gates.get(payload.agent_id or "")
+            return {"entered": bool(gate and gate[0].is_set())}
+        if payload.action == "counts":
+            scope = "session:" + (payload.agent_id or "")
+            async with runtime.repository.database.sessions() as sql:
+                proposals = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeExchangeProposalRow)
+                    .where(WorkspaceTreeExchangeProposalRow.scope_id == scope)
+                )
+                operations = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeExchangeAttemptRow)
+                    .where(WorkspaceTreeExchangeAttemptRow.scope_id == scope)
+                )
+                cancelled = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeExchangeAttemptRow)
+                    .where(
+                        WorkspaceTreeExchangeAttemptRow.scope_id == scope,
+                        WorkspaceTreeExchangeAttemptRow.cancelled.is_(True),
+                    )
+                )
+                sources = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeExchangeModelSourceRow)
+                    .join(
+                        WorkspaceTreeExchangeProposalRow,
+                        WorkspaceTreeExchangeModelSourceRow.proposal_id
+                        == WorkspaceTreeExchangeProposalRow.proposal_id,
+                    )
+                    .where(WorkspaceTreeExchangeProposalRow.scope_id == scope)
+                )
+                origins = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeExchangeOriginRow)
+                    .where(WorkspaceTreeExchangeOriginRow.scope_id == scope)
+                )
+                seals = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeSealRow)
+                    .where(WorkspaceTreeSealRow.scope_id == scope)
+                )
+            return {
+                "origins": origins,
+                "seals": seals,
+                "proposals": proposals,
+                "operations": operations,
+                "cancelled": cancelled,
+                "sources": sources,
+                "provider_calls": tree_exchange_model_calls.get(payload.agent_id or "", 0),
+            }
+        found = target.exists()
+        binary = target / "sub/data.bin"
+        return {
+            "found": found,
+            "inode": target.stat().st_ino if found else None,
+            "binary_inode": binary.stat().st_ino if binary.exists() else None,
+            "binary_hex": binary.read_bytes().hex() if binary.exists() else None,
+        }
+
+    class TestModelTreeExchange(StrictModel):
+        agent_id: str = Field(pattern=r"^[a-f0-9-]{36}$")
+        left_path: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        right_path: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+
+    @app.post("/_test/model-tree-exchange")
+    async def create_model_tree_exchange(payload: TestModelTreeExchange) -> dict:
+        from krim_agent.sdk import TreeExchangeQueryRequest
+
+        agents = app.state.agents
+        handle = agents._handle(payload.agent_id)
+        previous_provider, previous_policy = handle.runtime.provider, handle.runtime.tool_policy
+        preview_key, change_key = str(uuid4()), str(uuid4())
+
+        class Provider:
+            name = "offline-browser-complete-tree-exchange"
+            calls = 0
+            proposal_id = ""
+            left_fingerprint = ""
+
+            async def stream(self, messages, tools):
+                self.calls += 1
+                previous = json.loads(messages[-1].content) if self.calls > 1 else None
+                if self.calls == 1:
+                    name, arguments = "tree_exchange_inspect", {"path": payload.left_path}
+                elif self.calls == 2:
+                    self.left_fingerprint = previous["fingerprint"]
+                    name, arguments = "tree_exchange_inspect", {"path": payload.right_path}
+                elif self.calls == 3:
+                    name, arguments = (
+                        "tree_exchange_preview",
+                        {
+                            "left_path": payload.left_path,
+                            "right_path": payload.right_path,
+                            "expected_left": self.left_fingerprint,
+                            "expected_right": previous["fingerprint"],
+                            "request_key": preview_key,
+                        },
+                    )
+                elif self.calls == 4:
+                    self.proposal_id = previous["proposal_id"]
+                    name, arguments = (
+                        "tree_exchange_change",
+                        {
+                            "proposal_id": self.proposal_id,
+                            "action": "apply",
+                            "expected_revision": previous["revision"],
+                            "request_key": change_key,
+                        },
+                    )
+                elif self.calls == 5:
+                    assert previous["status"] == "done", previous
+                    name, arguments = (
+                        "tree_exchange_query",
+                        {
+                            "kind": "proposal",
+                            "identifier": self.proposal_id,
+                        },
+                    )
+                else:
+                    assert previous["proposal"]["status"] == "applied", previous
+                    yield ModelText(text="浏览器原模型双完整树交换完成")
+                    yield ModelUsage(
+                        usage=TokenUsage(input_tokens=10, output_tokens=1, total_tokens=11)
+                    )
+                    return
+                yield ModelToolCall(
+                    id=f"browser-tree-exchange-{self.calls}", name=name, arguments=arguments
+                )
+                yield ModelUsage(
+                    usage=TokenUsage(input_tokens=10, output_tokens=1, total_tokens=11)
+                )
+
+        async def allow(_definition, _context):
+            return "allow"
+
+        provider = Provider()
+        handle.runtime.provider = provider
+        handle.runtime.tool_policy = profile_policy(handle.definition.mode, allow)
+        try:
+            agent = AgentSession(agents, payload.agent_id)
+            result = await agent.execute("浏览器原模型双完整树交换", idempotency_key=str(uuid4()))
+            assert result.status == "completed", result
+            tree_exchange_model_calls[payload.agent_id] = provider.calls
+            fact = await agent.query_tree_exchange(
+                TreeExchangeQueryRequest(kind="proposal", identifier=provider.proposal_id)
+            )
+            async with runtime.repository.database.sessions() as sql:
+                sources = [
+                    (row.run_id, row.call_id)
+                    for row in await sql.scalars(
+                        select(WorkspaceTreeExchangeModelSourceRow).where(
+                            WorkspaceTreeExchangeModelSourceRow.proposal_id == provider.proposal_id
+                        )
+                    )
+                ]
+            assert set(sources) == {
+                (result.run_id, "browser-tree-exchange-3"),
+                (result.run_id, "browser-tree-exchange-4"),
+            }
+            return {
+                "proposal": fact.proposal.model_dump(mode="json"),
+                "provider_calls": provider.calls,
+                "preview_key": preview_key,
+                "change_key": change_key,
+            }
+        finally:
+            handle.runtime.provider, handle.runtime.tool_policy = previous_provider, previous_policy
 
     class TestModelTreeMove(StrictModel):
         agent_id: str = Field(pattern=r"^[a-f0-9-]{36}$")

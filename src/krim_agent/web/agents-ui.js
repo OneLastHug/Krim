@@ -6,6 +6,7 @@ import { WorkspaceUI } from "./workspace-ui.js";
 import { WorkspaceChangesUI } from "./workspace-changes-ui.js";
 import { DirectoryChangesUI } from "./directory-changes-ui.js";
 import { TreeMovesUI } from "./tree-moves-ui.js";
+import { TreeExchangesUI } from "./tree-exchanges-ui.js";
 import { CommandsUI } from "./commands-ui.js";
 export class AgentsUI {
     root;
@@ -35,6 +36,7 @@ export class AgentsUI {
                 card.commands.dispose();
                 card.directories.dispose();
                 card.treeMoves.dispose();
+                card.treeExchanges.dispose();
                 card.root.remove();
                 this.cards.delete(id);
             }
@@ -53,6 +55,7 @@ export class AgentsUI {
             card.changes.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.directories.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.treeMoves.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
+            card.treeExchanges.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.commands.update(agent);
             card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
             const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
@@ -127,9 +130,10 @@ export class AgentsUI {
         const changes = new WorkspaceChangesUI(agent.agent_id, this.actions.notice);
         const directories = new DirectoryChangesUI(agent.agent_id, this.actions.notice);
         const treeMoves = new TreeMovesUI(agent.agent_id, this.actions.notice);
+        const treeExchanges = new TreeExchangesUI(agent.agent_id, this.actions.notice);
         const commands = new CommandsUI(agent.agent_id, this.actions.notice, (proposalId, operationId) => changes.focusProposal(proposalId, operationId), (proposalId, operationId) => directories.focusProposal(proposalId, operationId));
-        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, commands.root);
-        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, commands, checkpoints };
+        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, commands.root);
+        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, commands, checkpoints };
         execute.onclick = () => {
             const prompt = input.value.trim() || this.actions.prompt();
             if (!prompt) {

@@ -229,6 +229,42 @@ export interface TreeMoveQueryResult {
   history: { items: TreeMoveAttemptView[]; next_after: string | null } | null;
   proposals: { items: TreeMovePreviewView[]; next_after: string | null } | null;
 }
+export type TreeExchangeInspectView = TreeMoveInspectView;
+export interface TreeExchangePreviewRequest {
+  left_path: string; right_path: string; expected_left: string; expected_right: string;
+  request_key: string; ttl_seconds?: number; source_plan_id?: string;
+}
+export interface TreeExchangePreviewView {
+  proposal_id: string; scope_id: string; workspace_key: string; resource_fingerprint: string;
+  left_path: string; right_path: string; left_before_fingerprint: string; right_before_fingerprint: string;
+  left_entry_count: number; right_entry_count: number; left_byte_size: number; right_byte_size: number;
+  origin: "existing_trees" | "completed_tree"; source_plan_id: string | null;
+  revision: number; status: TreeMovePreviewView["status"]; expires_at: number;
+  active_operation_id: string | null; created_at: string; updated_at: string;
+}
+export type TreeExchangeAction = DirectoryAction;
+export interface TreeExchangeAttemptView {
+  operation_id: string; proposal_id: string; scope_id: string; action: WorkspaceAction;
+  expected_revision: number; status: "running" | "done" | "rejected" | "uncertain";
+  receipt: { left_path: string; right_path: string; status: "done" | "rejected" | "uncertain";
+    left_before_fingerprint: string; right_before_fingerprint: string;
+    left_after_fingerprint: string | null; right_after_fingerprint: string | null;
+    changed: boolean; error_code: string | null; recovery_required: boolean } | null;
+  cancelled: boolean; recovery_required: boolean; created_at: string; updated_at: string;
+}
+export type TreeExchangeQueryKind = TreeMoveQueryKind;
+export interface TreeExchangeQueryResult {
+  kind: TreeExchangeQueryKind; proposal: TreeExchangePreviewView | null; operation: TreeExchangeAttemptView | null;
+  history: { items: TreeExchangeAttemptView[]; next_after: string | null } | null;
+  proposals: { items: TreeExchangePreviewView[]; next_after: string | null } | null;
+}
+export interface CompletedTreeOriginView {
+  plan_id: string; scope_id: string; command_id: string; source_hash: string;
+  outcome: "completed" | "failed" | "output_limit"; accept_failed: boolean;
+  snapshot_revision: string; root_path: string; workspace_key: string; resource_fingerprint: string;
+  tree_fingerprint: string; entry_count: number; byte_size: number; proof_hash: string;
+}
+export interface CompletedTreeOriginLookupView { plan_id: string; origin: CompletedTreeOriginView | null; }
 export interface CommandDirectoryDelta {
   path: string; mode: number; empty: boolean; creatable: boolean; proposal_id: string | null;
 }
