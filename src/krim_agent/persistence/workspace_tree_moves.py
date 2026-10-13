@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from krim_agent.generated_tree_undo import GeneratedTreeUndoSource
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
@@ -37,16 +39,21 @@ from krim_agent.workspace_tree_writer import (
     WorkspaceTreeWriter,
 )
 
+from .completed_tree_seals import CompletedTreeSealStore, SealedTreeOrigin
 from .database import (
+    WorkspaceGeneratedTreeUndoRow,
     WorkspaceTreeMoveAttemptRow,
     WorkspaceTreeMoveLockRow,
     WorkspaceTreeMoveModelSourceRow,
     WorkspaceTreeMoveProposalRow,
+    WorkspaceTreePlanRow,
 )
 from .tree_model_sources import run_scope
 from .tree_move_codec import decode_move, encode_move
 from .tree_move_fences import assert_namespace_available, move_keys
+from .workspace_directories import WorkspaceDirectoryStore, decode
 from .workspace_edits import WorkspaceEditStore, digest
+from .workspace_tree_plans import WorkspaceTreePlanStore
 
 
 def _corrupt() -> ServiceError:
@@ -92,6 +99,11 @@ class WorkspaceTreeMoveStore:
         ):
             raise ValueError("树移动租约无效")
         self.files, self.database, self.owner_id = files, files.database, files.owner_id
+        self.seals = CompletedTreeSealStore(
+            WorkspaceTreePlanStore(
+                files, WorkspaceDirectoryStore(files.database, owner_id=files.owner_id)
+            )
+        )
         self.max_proposals, self.max_snapshot_bytes, self.lease_seconds = (
             max_proposals,
             max_snapshot_bytes,
@@ -198,6 +210,197 @@ class WorkspaceTreeMoveStore:
                     "workspace_tree_move_source_conflict", "原树移动已绑定其他Run/call来源", 409
                 )
 
+    @staticmethod
+    def _generated_source_valid(source: GeneratedTreeUndoSource) -> None:
+        if not isinstance(source, GeneratedTreeUndoSource) or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", value) is None
+            for value in (
+                source.plan_id,
+                *(
+                    [source.previous_restore_operation_id]
+                    if source.previous_restore_operation_id is not None
+                    else []
+                ),
+            )
+        ):
+            raise ServiceError("workspace_generated_undo_source", "原生成根撤销来源无效", 403)
+
+    async def _generated_seal(
+        self, sql: AsyncSession, scope: str, key: str, fingerprint: str, plan_id: str
+    ) -> SealedTreeOrigin:
+        sealed = await self.seals.get_material_in_transaction(
+            sql, scope, plan_id, workspace_key=key, resource_fingerprint=fingerprint
+        )
+        if sealed is None:
+            raise ServiceError(
+                "workspace_generated_undo_seal_required", "生成根撤销须原完成树首次封存", 409
+            )
+        plan = await sql.get(WorkspaceTreePlanRow, plan_id)
+        try:
+            if plan is None:
+                raise _corrupt()
+            material = plan.frozen["root_prepared"]
+            if not isinstance(material, dict):
+                raise _corrupt()
+            root = decode(material)
+            spec = json.loads(root.spec_json)
+            if (
+                root.before is not None
+                or spec["operation"] != "create"
+                or spec["path"] != sealed.origin.snapshot.root_path
+            ):
+                raise _corrupt()
+        except (ValueError, TypeError, KeyError):
+            raise _corrupt() from None
+        return sealed
+
+    async def _restore_origin(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        key: str,
+        fingerprint: str,
+        plan_id: str,
+        identifier: str,
+    ) -> tuple[WorkspaceTreeMoveAttemptRow, WorkspaceTreeMoveProposalRow, TreeMoveEffect]:
+        attempt = await sql.get(WorkspaceTreeMoveAttemptRow, identifier)
+        if (
+            attempt is None
+            or attempt.scope_id != scope
+            or attempt.action != "undo"
+            or attempt.status != "done"
+        ):
+            raise ServiceError(
+                "workspace_generated_undo_restore_conflict",
+                "前驱必须是同作用域实际完成的根还原",
+                409,
+            )
+        proposal = await sql.get(WorkspaceTreeMoveProposalRow, attempt.proposal_id)
+        if proposal is None or (
+            proposal.scope_id != scope
+            or proposal.generated_plan_id != plan_id
+            or proposal.workspace_key != key
+            or proposal.resource_fingerprint != fingerprint
+            or proposal.active_operation_id is not None
+            or proposal.status != "undone"
+        ):
+            raise ServiceError(
+                "workspace_generated_undo_restore_conflict", "前驱还原不属于原生成根来源", 409
+            )
+        stored = await self._attempt_value(sql, attempt, proposal)
+        if (
+            stored.effect is None
+            or stored.effect.observed_after is None
+            or not stored.intent_recorded
+        ):
+            raise _corrupt()
+        return attempt, proposal, stored.effect
+
+    async def _generated_candidate(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        key: str,
+        fingerprint: str,
+        source: GeneratedTreeUndoSource,
+        prepared: PreparedTreeMove,
+    ) -> SealedTreeOrigin:
+        self._generated_source_valid(source)
+        sealed = await self._generated_seal(sql, scope, key, fingerprint, source.plan_id)
+        approved = sealed.origin.snapshot
+        if source.previous_restore_operation_id is not None:
+            _restore, prior, effect = await self._restore_origin(
+                sql, scope, key, fingerprint, source.plan_id, source.previous_restore_operation_id
+            )
+            await self._generated_origin(sql, prior)
+            assert effect.observed_after is not None
+            approved = effect.observed_after
+        if (
+            prepared.before != approved
+            or prepared.before.root_path != sealed.origin.snapshot.root_path
+            or prepared.before.parent_identity != sealed.origin.snapshot.parent_identity
+            or prepared.before.workspace_fingerprint != sealed.origin.snapshot.workspace_fingerprint
+        ):
+            raise ServiceError(
+                "workspace_generated_undo_version_conflict",
+                "根撤销须原seal或前驱实际还原的完整版本",
+                409,
+            )
+        return sealed
+
+    async def _generated_origin(
+        self, sql: AsyncSession, proposal: WorkspaceTreeMoveProposalRow
+    ) -> None:
+        link = await sql.get(WorkspaceGeneratedTreeUndoRow, proposal.proposal_id)
+        if proposal.generated_plan_id is None:
+            if link is not None:
+                raise _corrupt()
+            return
+        sealed = await self._generated_seal(
+            sql,
+            proposal.scope_id,
+            proposal.workspace_key,
+            proposal.resource_fingerprint,
+            proposal.generated_plan_id,
+        )
+        seen: set[str] = set()
+        current = proposal
+        # 显式向前遍历，避免不可信来源链递归或循环导致资格绕过。
+        while True:
+            if current.proposal_id in seen or len(seen) >= 5000:
+                raise _corrupt()
+            seen.add(current.proposal_id)
+            link = await sql.get(WorkspaceGeneratedTreeUndoRow, current.proposal_id)
+            prepared = self._proposal_value(current).prepared
+            if link is None or (
+                current.generated_plan_id != sealed.origin.view.plan_id
+                or (
+                    current.scope_id,
+                    current.workspace_key,
+                    current.resource_fingerprint,
+                    current.topic_id,
+                )
+                != (
+                    proposal.scope_id,
+                    proposal.workspace_key,
+                    proposal.resource_fingerprint,
+                    proposal.topic_id,
+                )
+                or link.source_plan_id != current.generated_plan_id
+                or (link.scope_id, link.workspace_key, link.resource_fingerprint)
+                != (current.scope_id, current.workspace_key, current.resource_fingerprint)
+                or link.tree_fingerprint != sealed.origin.snapshot.fingerprint
+                or link.proof_hash != sealed.origin.view.proof_hash
+                or link.approved_fingerprint != prepared.before.fingerprint
+                or prepared.before.root_path != sealed.origin.snapshot.root_path
+                or prepared.before.parent_identity != sealed.origin.snapshot.parent_identity
+                or prepared.before.workspace_fingerprint
+                != sealed.origin.snapshot.workspace_fingerprint
+                or _date(link.created_at) != _date(current.created_at)
+            ):
+                raise _corrupt()
+            await self._stored_source(sql, current)
+            if link.previous_restore_operation_id is None:
+                if prepared.before != sealed.origin.snapshot:
+                    raise _corrupt()
+                return
+            restore, prior, effect = await self._restore_origin(
+                sql,
+                current.scope_id,
+                current.workspace_key,
+                current.resource_fingerprint,
+                link.source_plan_id,
+                link.previous_restore_operation_id,
+            )
+            if (
+                effect.observed_after != prepared.before
+                or _date(prior.created_at) >= _date(current.created_at)
+                or _date(restore.updated_at) > _date(current.created_at)
+            ):
+                raise _corrupt()
+            current = prior
+
     async def _bytes(self, sql: AsyncSession, added: int) -> None:
         before = await sql.scalar(
             select(
@@ -225,7 +428,33 @@ class WorkspaceTreeMoveStore:
                 )
             )
         )
-        if int(before or 0) + int(operations or 0) + added > self.max_snapshot_bytes:
+        origins = await sql.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.length(WorkspaceGeneratedTreeUndoRow.proposal_id)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.source_plan_id)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.scope_id)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.workspace_key)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.resource_fingerprint)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.tree_fingerprint)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.approved_fingerprint)
+                        + func.length(WorkspaceGeneratedTreeUndoRow.proof_hash)
+                        + func.coalesce(
+                            func.length(
+                                WorkspaceGeneratedTreeUndoRow.previous_restore_operation_id
+                            ),
+                            0,
+                        )
+                    ),
+                    0,
+                )
+            )
+        )
+        if (
+            int(before or 0) + int(operations or 0) + int(origins or 0) + added
+            > self.max_snapshot_bytes
+        ):
             raise ServiceError(
                 "workspace_tree_move_snapshot_limit", "原树移动私有材料总容量已达上限", 413
             )
@@ -281,6 +510,7 @@ class WorkspaceTreeMoveStore:
         await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
         self._proposal_value(row)
         await self._stored_source(sql, row)
+        await self._generated_origin(sql, row)
         pending = {"applying", "undoing", "keeping", "uncertain"}
         if (row.active_operation_id is not None) != (row.status in pending):
             raise _corrupt()
@@ -309,8 +539,11 @@ class WorkspaceTreeMoveStore:
         prepared: PreparedTreeMove | None,
         *,
         model_source: TreeMoveModelSource | None = None,
+        generated_origin: GeneratedTreeUndoSource | None = None,
     ) -> tuple[StoredTreeMove, bool]:
         request = TreeMovePreviewRequest.model_validate(request.model_dump())
+        if generated_origin is not None:
+            self._generated_source_valid(generated_origin)
         wanted = self._wanted(request, binding.fingerprint)
         async with self.database.write_lock, self.database.sessions.begin() as sql:
             await self.files._writer(sql)
@@ -328,6 +561,18 @@ class WorkspaceTreeMoveStore:
                         "workspace_tree_move_idempotency_conflict", "原树移动键参数/资源已变化", 409
                     )
                 await self._retry_source(sql, previous, model_source)
+                await self._generated_origin(sql, previous)
+                if generated_origin is not None:
+                    origin = await sql.get(WorkspaceGeneratedTreeUndoRow, previous.proposal_id)
+                    if origin is None or (
+                        origin.source_plan_id,
+                        origin.previous_restore_operation_id,
+                    ) != (generated_origin.plan_id, generated_origin.previous_restore_operation_id):
+                        raise ServiceError(
+                            "workspace_generated_undo_source_conflict",
+                            "原键已经绑定其他生成根来源",
+                            409,
+                        )
                 return self._proposal_value(previous), False
             await self._new_source(sql, scope, model_source)
             if prepared is None or (
@@ -341,6 +586,13 @@ class WorkspaceTreeMoveStore:
                 )
             if not binding.require().writable:
                 raise ServiceError("workspace_read_only", "未授权原树移动写能力", 403)
+            sealed = (
+                await self._generated_candidate(
+                    sql, scope, binding.key, binding.fingerprint, generated_origin, prepared
+                )
+                if generated_origin is not None
+                else None
+            )
             metadata, payload = encode_move(prepared)
             count = int(
                 await sql.scalar(select(func.count()).select_from(WorkspaceTreeMoveProposalRow))
@@ -350,7 +602,20 @@ class WorkspaceTreeMoveStore:
                 raise ServiceError("workspace_tree_move_limit", "原树移动提案历史已达上限", 429)
             raw_request = request.model_dump(mode="json")
             await self._bytes(
-                sql, len(payload) + len(json.dumps(metadata)) + len(json.dumps(raw_request))
+                sql,
+                len(payload)
+                + len(json.dumps(metadata))
+                + len(json.dumps(raw_request))
+                + (
+                    36
+                    + len(sealed.origin.view.plan_id)
+                    + len(scope)
+                    + len(binding.key)
+                    + 256
+                    + len(generated_origin.previous_restore_operation_id or "")
+                    if sealed is not None and generated_origin is not None
+                    else 0
+                ),
             )
             now = utc_now()
             row = WorkspaceTreeMoveProposalRow(
@@ -366,6 +631,9 @@ class WorkspaceTreeMoveStore:
                 target_path=request.target_path,
                 prepared=cast(dict[str, JsonValue], metadata),
                 payload=payload,
+                generated_plan_id=generated_origin.plan_id
+                if generated_origin is not None
+                else None,
                 status="proposed",
                 revision=0,
                 expires_at=time.time() + request.ttl_seconds,
@@ -376,6 +644,23 @@ class WorkspaceTreeMoveStore:
             sql.add(row)
             await sql.flush()
             await self._bind_source(sql, row, "preview", model_source)
+            if sealed is not None and generated_origin is not None:
+                sql.add(
+                    WorkspaceGeneratedTreeUndoRow(
+                        proposal_id=row.proposal_id,
+                        source_plan_id=generated_origin.plan_id,
+                        scope_id=scope,
+                        workspace_key=binding.key,
+                        resource_fingerprint=binding.fingerprint,
+                        tree_fingerprint=sealed.origin.snapshot.fingerprint,
+                        approved_fingerprint=prepared.before.fingerprint,
+                        proof_hash=sealed.origin.view.proof_hash,
+                        previous_restore_operation_id=generated_origin.previous_restore_operation_id,
+                        created_at=now,
+                    )
+                )
+                await sql.flush()
+            await self._generated_origin(sql, row)
             return self._proposal_value(row), True
 
     async def proposal(self, scope: str, identifier: str) -> StoredTreeMove:

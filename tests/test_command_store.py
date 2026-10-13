@@ -273,7 +273,7 @@ async def test_migration_refuses_loss_and_events_and_listing_are_bounded(ledger)
     async with store.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0046_tree_exchange_origins"
+        ).scalar_one() == "0047_generated_tree_root_undos"
         assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     assert len(await store.list_commands(scope)) == 3
 

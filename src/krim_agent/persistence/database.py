@@ -675,6 +675,10 @@ class WorkspaceTreeMoveProposalRow(Base):
     target_path: Mapped[str] = mapped_column(String(512))
     prepared: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     payload: Mapped[bytes] = mapped_column(LargeBinary)
+    generated_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_tree_completed_seals.plan_id", name="fk_move_generated_plan"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(16), default="proposed")
     revision: Mapped[int] = mapped_column(Integer, default=0)
     expires_at: Mapped[float] = mapped_column(Float)
@@ -688,6 +692,33 @@ class WorkspaceTreeMoveProposalRow(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceGeneratedTreeUndoRow(Base):
+    __tablename__ = "workspace_generated_tree_undos"
+    __table_args__ = (
+        CheckConstraint("length(tree_fingerprint) = 64", name="ck_generated_undo_tree_hash"),
+        CheckConstraint(
+            "length(approved_fingerprint) = 64", name="ck_generated_undo_approved_hash"
+        ),
+        CheckConstraint("length(proof_hash) = 64", name="ck_generated_undo_proof_hash"),
+    )
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_move_proposals.proposal_id"), primary_key=True
+    )
+    source_plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_completed_seals.plan_id"), index=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    tree_fingerprint: Mapped[str] = mapped_column(String(64))
+    approved_fingerprint: Mapped[str] = mapped_column(String(64))
+    proof_hash: Mapped[str] = mapped_column(String(64))
+    previous_restore_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_tree_move_attempts.operation_id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 class WorkspaceTreeMoveAttemptRow(Base):
