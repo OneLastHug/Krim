@@ -58,11 +58,39 @@ class CompletedTreeSealStore:
     async def _stored(
         self, sql: AsyncSession, scope: str, binding: WorkspaceBinding, row: WorkspaceTreeSealRow
     ) -> SealedTreeOrigin:
+        return await self._stored_material(
+            sql,
+            scope,
+            row,
+            workspace_key=binding.key,
+            resource_fingerprint=binding.fingerprint,
+            workspace_manifest=binding.manifest(),
+            workspace_fingerprint=binding.require().fingerprint,
+        )
+
+    async def _stored_material(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        row: WorkspaceTreeSealRow,
+        *,
+        workspace_key: str,
+        resource_fingerprint: str,
+        workspace_manifest: dict[str, JsonValue] | None = None,
+        workspace_fingerprint: str | None = None,
+    ) -> SealedTreeOrigin:
         if row.scope_id != scope:
             raise ServiceError("workspace_tree_seal_not_found", "封存不在此作用域", 404)
         snapshot = decode_snapshot(row.metadata_value, row.payload)
-        origin = await self.verifier.verify_in_transaction(
-            sql, scope, binding, row.plan_id, snapshot
+        origin = await self.verifier.verify_material_in_transaction(
+            sql,
+            scope,
+            row.plan_id,
+            snapshot,
+            workspace_key=workspace_key,
+            resource_fingerprint=resource_fingerprint,
+            workspace_manifest=workspace_manifest,
+            workspace_fingerprint=workspace_fingerprint,
         )
         expected = {
             "view": origin.view.model_dump(mode="json"),
@@ -74,8 +102,8 @@ class CompletedTreeSealStore:
             or row.source_hash != origin.view.source_hash
             or row.snapshot_revision != origin.view.snapshot_revision
             or row.tree_fingerprint != snapshot.fingerprint
-            or row.workspace_key != binding.key
-            or row.resource_fingerprint != binding.fingerprint
+            or row.workspace_key != workspace_key
+            or row.resource_fingerprint != resource_fingerprint
             or row.topic_id != await self.trees.files._scope(sql, scope, writing=False)
             or (row.run_id is None) != (row.call_id is None)
         ):
@@ -91,6 +119,31 @@ class CompletedTreeSealStore:
             else row.created_at.astimezone(UTC)
         )
         return SealedTreeOrigin(origin, created, source)
+
+    async def get_material_in_transaction(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        identifier: str,
+        *,
+        workspace_key: str,
+        resource_fingerprint: str,
+    ) -> SealedTreeOrigin | None:
+        """供原账本同事务冷核实；不读取物理路径或宣称绑定当前可用。"""
+        await self.trees.files._scope(sql, scope, writing=False)
+        await self.trees.files._resource(sql, scope, workspace_key, resource_fingerprint)
+        row = await sql.get(WorkspaceTreeSealRow, identifier)
+        return (
+            await self._stored_material(
+                sql,
+                scope,
+                row,
+                workspace_key=workspace_key,
+                resource_fingerprint=resource_fingerprint,
+            )
+            if row is not None
+            else None
+        )
 
     async def get(
         self, scope: str, binding: WorkspaceBinding, identifier: str

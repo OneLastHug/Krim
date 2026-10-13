@@ -441,7 +441,7 @@ async def test_migration_backfills_old_topic_and_rejects_loss_of_audit(tmp_path)
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0045_completed_tree_seals"
+            ).scalar() == "0046_tree_exchange_origins"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await database.close()
