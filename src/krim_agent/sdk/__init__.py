@@ -94,6 +94,21 @@ from krim_agent.workspace_tree import (
     TreePlanStepPage,
     TreePlanView,
 )
+from krim_agent.workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptPage,
+    TreeMoveAttemptView,
+    TreeMoveInspectRequest,
+    TreeMoveInspectView,
+    TreeMoveOperationRequest,
+    TreeMovePage,
+    TreeMovePreviewRequest,
+    TreeMovePreviewView,
+    TreeMoveQueryKind,
+    TreeMoveQueryRequest,
+    TreeMoveQueryResult,
+    TreeMoveReceiptView,
+)
 
 from .agents import AgentSession
 from .text import PythonAI, SDKOutputError, StreamTextResult
@@ -123,6 +138,19 @@ from .types import (
 )
 
 __all__ = [
+    "TreeMoveAction",
+    "TreeMoveAttemptPage",
+    "TreeMoveAttemptView",
+    "TreeMoveInspectRequest",
+    "TreeMoveInspectView",
+    "TreeMoveOperationRequest",
+    "TreeMovePage",
+    "TreeMovePreviewRequest",
+    "TreeMovePreviewView",
+    "TreeMoveQueryKind",
+    "TreeMoveQueryRequest",
+    "TreeMoveQueryResult",
+    "TreeMoveReceiptView",
     "CommandDirectoryChangesPage",
     "CommandDirectoryChangesRequest",
     "CommandDirectoryEntry",

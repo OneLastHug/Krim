@@ -133,6 +133,17 @@ from .workspace_restore import (
     CheckpointRestoreView,
 )
 from .workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from .workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptView,
+    TreeMoveInspectRequest,
+    TreeMoveInspectView,
+    TreeMoveOperationRequest,
+    TreeMovePreviewRequest,
+    TreeMovePreviewView,
+    TreeMoveQueryRequest,
+    TreeMoveQueryResult,
+)
 
 
 class ClientError(Exception):
@@ -799,6 +810,170 @@ class KrimClient:
         )
         self._check(response)
         return WorkspaceChangeView.model_validate_json(response.content)
+
+    @staticmethod
+    def _tree_move_match(matched: bool) -> None:
+        if not matched:
+            raise ClientError(
+                "树移动回程与原请求/作用域不一致", code="workspace_tree_move_response", status=502
+            )
+
+    def agent_tree_move_inspect(
+        self, agent_id: str, path: str, *, confirmed: bool = False
+    ) -> TreeMoveInspectView:
+        selection = TreeMoveInspectRequest(path=path)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-state",
+            params={"path": selection.path, "confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        value = TreeMoveInspectView.model_validate_json(response.content)
+        self._tree_move_match(value.path == selection.path)
+        return value
+
+    def agent_tree_move_preview(
+        self, agent_id: str, request: TreeMovePreviewRequest, *, confirmed: bool = False
+    ) -> TreeMovePreviewView:
+        request = TreeMovePreviewRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-moves/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeMovePreviewView.model_validate_json(response.content)
+        self._tree_move_match(
+            value.source_path == request.source_path
+            and value.target_path == request.target_path
+            and value.before_fingerprint == request.expected_fingerprint
+            and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_move_change(
+        self, agent_id: str, request: TreeMoveAction, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        request = TreeMoveAction.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-moves/change",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeMoveAttemptView.model_validate_json(response.content)
+        self._tree_move_match(
+            value.proposal_id == request.proposal_id
+            and value.action == request.action
+            and value.expected_revision == request.expected_revision
+            and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_move_query(
+        self, agent_id: str, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> TreeMoveQueryResult:
+        request = TreeMoveQueryRequest.model_validate(request.model_dump())
+        parameters = {"confirmed": str(confirmed).lower(), "kind": request.kind}
+        for key, selected in (
+            ("identifier", request.identifier),
+            ("request_key", request.request_key),
+            ("after", request.after),
+        ):
+            if selected is not None:
+                parameters[key] = selected
+        if request.kind in {"history", "proposals"}:
+            parameters["limit"] = str(request.limit)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-moves/query",
+            params=parameters,
+        )
+        self._check(response)
+        value = TreeMoveQueryResult.model_validate_json(response.content)
+        expected = {
+            "proposal": "proposal",
+            "by_key": "proposal",
+            "operation": "operation",
+            "operation_by_key": "operation",
+            "history": "history",
+            "proposals": "proposals",
+        }[request.kind]
+        self._tree_move_match(
+            value.kind == request.kind
+            and all(
+                getattr(value, field) is None
+                for field in ("proposal", "operation", "history", "proposals")
+                if field != expected
+            )
+        )
+        if request.kind in {"proposal", "operation", "history", "proposals"}:
+            self._tree_move_match(getattr(value, expected) is not None)
+        if value.proposal is not None:
+            self._tree_move_match(
+                value.proposal.scope_id == "session:" + agent_id
+                and (request.kind != "proposal" or value.proposal.proposal_id == request.identifier)
+            )
+        if value.operation is not None:
+            self._tree_move_match(
+                value.operation.scope_id == "session:" + agent_id
+                and (
+                    request.kind != "operation"
+                    or value.operation.operation_id == request.identifier
+                )
+            )
+        page = value.history or value.proposals
+        if page is not None:
+            identifiers = (
+                [item.operation_id for item in value.history.items]
+                if value.history is not None
+                else [item.proposal_id for item in value.proposals.items]
+                if value.proposals is not None
+                else []
+            )
+            self._tree_move_match(
+                len(page.items) <= request.limit
+                and identifiers == sorted(set(identifiers))
+                and all(item.scope_id == "session:" + agent_id for item in page.items)
+            )
+            after = request.after
+            if after is not None:
+                self._tree_move_match(all(identifier > after for identifier in identifiers))
+            self._tree_move_match(
+                page.next_after is None
+                or len(identifiers) == request.limit
+                and page.next_after == identifiers[-1]
+            )
+            if value.history is not None:
+                self._tree_move_match(
+                    all(item.proposal_id == request.identifier for item in value.history.items)
+                )
+        return value
+
+    def agent_tree_move_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        request = TreeMoveOperationRequest(operation_id=operation_id)
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-move-operations/{_workspace_identifier(request.operation_id)}/reconcile",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = TreeMoveAttemptView.model_validate_json(response.content)
+        self._tree_move_match(
+            value.operation_id == operation_id and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_tree_move_cancel(self, agent_id: str, proposal_id: str) -> TreeMovePreviewView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/tree-moves/{_workspace_identifier(proposal_id)}/cancel"
+        )
+        self._check(response)
+        value = TreeMovePreviewView.model_validate_json(response.content)
+        self._tree_move_match(
+            value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
+        )
+        return value
 
     def agent_directory_inspect(
         self, agent_id: str, path: str, *, confirmed: bool = False
