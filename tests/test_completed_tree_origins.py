@@ -33,9 +33,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def complete(runtime, root, *, persistent=False, extra_names=()):
+async def complete(runtime, root, *, persistent=False, extra_names=(), usage_budget=None):
     service, agent, scope, store, execution = await tree(
-        runtime, root, persistent=persistent, extra_names=extra_names
+        runtime,
+        root,
+        persistent=persistent,
+        extra_names=extra_names,
+        usage_budget=usage_budget,
     )
     outputs = [
         await publish(service, agent, scope, store, execution, position) for position in range(3)

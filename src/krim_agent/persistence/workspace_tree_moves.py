@@ -12,10 +12,15 @@ from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue, TypeAdapter
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from krim_agent.generated_tree_undo import GeneratedTreeUndoSource
+from krim_agent.generated_tree_undo import (
+    GeneratedTreeRootState,
+    GeneratedTreeUndoPage,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoSource,
+)
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
@@ -671,6 +676,90 @@ class WorkspaceTreeMoveStore:
                 operation, _ = await self._operation(sql, scope, row.active_operation_id)
                 await self._expire(sql, operation, row)
             return self._proposal_value(row)
+
+    async def _generated_view(
+        self, sql: AsyncSession, row: WorkspaceTreeMoveProposalRow
+    ) -> GeneratedTreeUndoPreviewView:
+        link = await sql.get(WorkspaceGeneratedTreeUndoRow, row.proposal_id)
+        if row.generated_plan_id is None or link is None:
+            raise ServiceError("workspace_generated_undo_required", "原提案不是生成根撤销", 409)
+        sealed = await self._generated_seal(
+            sql, row.scope_id, row.workspace_key, row.resource_fingerprint, row.generated_plan_id
+        )
+        source = sealed.origin.view
+        states: dict[str, GeneratedTreeRootState] = {
+            "proposed": "awaiting_approval",
+            "applying": "removing",
+            "applied": "preserved",
+            "undoing": "restoring",
+            "undone": "restored",
+            "keeping": "keeping",
+            "kept": "kept",
+            "rejected": "rejected",
+            "uncertain": "uncertain",
+            "cancelled": "cancelled",
+        }
+        return GeneratedTreeUndoPreviewView(
+            source_plan_id=source.plan_id,
+            source_command_id=source.command_id,
+            source_hash=source.source_hash,
+            command_outcome=source.outcome,
+            accept_failed=source.accept_failed,
+            snapshot_revision=source.snapshot_revision,
+            sealed_fingerprint=source.tree_fingerprint,
+            proof_hash=source.proof_hash,
+            previous_restore_operation_id=link.previous_restore_operation_id,
+            root_state=states[row.status],
+            move=self._proposal_value(row).view,
+        )
+
+    async def generated_proposal(self, scope: str, identifier: str) -> GeneratedTreeUndoPreviewView:
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            row = await self._proposal(sql, scope, identifier)
+            if row.active_operation_id is not None:
+                operation, _ = await self._operation(sql, scope, row.active_operation_id)
+                await self._expire(sql, operation, row)
+            return await self._generated_view(sql, row)
+
+    async def generated_list(
+        self, scope: str, *, after: str | None = None, limit: int = 32
+    ) -> GeneratedTreeUndoPage:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ServiceError("workspace_tree_move_page", "原生成根历史页大小无效", 422)
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            await self.files._scope(sql, scope, writing=False)
+            linked = (
+                select(WorkspaceGeneratedTreeUndoRow.proposal_id)
+                .where(
+                    WorkspaceGeneratedTreeUndoRow.proposal_id
+                    == WorkspaceTreeMoveProposalRow.proposal_id
+                )
+                .exists()
+            )
+            query = select(WorkspaceTreeMoveProposalRow).where(
+                WorkspaceTreeMoveProposalRow.scope_id == scope,
+                or_(WorkspaceTreeMoveProposalRow.generated_plan_id.is_not(None), linked),
+            )
+            if after is not None:
+                await self._generated_view(sql, await self._proposal(sql, scope, after))
+                query = query.where(WorkspaceTreeMoveProposalRow.proposal_id > after)
+            rows = list(
+                await sql.scalars(
+                    query.order_by(WorkspaceTreeMoveProposalRow.proposal_id).limit(limit + 1)
+                )
+            )
+            items = []
+            for selected in rows[:limit]:
+                row = await self._proposal(sql, scope, selected.proposal_id)
+                if row.active_operation_id is not None:
+                    operation, _ = await self._operation(sql, scope, row.active_operation_id)
+                    await self._expire(sql, operation, row)
+                items.append(await self._generated_view(sql, row))
+            return GeneratedTreeUndoPage(
+                items=items, next_after=rows[limit - 1].proposal_id if len(rows) > limit else None
+            )
 
     async def proposal_by_key(self, scope: str, key: str) -> StoredTreeMove | None:
         self.files._key(key)

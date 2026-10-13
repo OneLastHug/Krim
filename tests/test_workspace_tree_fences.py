@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def tree(runtime, root, *, claim=True, persistent=False, extra_names=()):
+async def tree(runtime, root, *, claim=True, persistent=False, extra_names=(), usage_budget=None):
     names = [
         "command_execute",
         "command_get",
@@ -52,7 +52,12 @@ async def tree(runtime, root, *, claim=True, persistent=False, extra_names=()):
         *extra_names,
     ]
     service, agent = await setup(
-        runtime, root, names=names, persistent=persistent, max_steps=16 if extra_names else 8
+        runtime,
+        root,
+        names=names,
+        persistent=persistent,
+        max_steps=16 if extra_names else 8,
+        usage_budget=usage_budget,
     )
     command = await execute(
         agent,

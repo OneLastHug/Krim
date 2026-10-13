@@ -15,7 +15,11 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.observability import scope
 from krim_agent.protocol.models import check_json
-from krim_agent.workspace import WORKSPACE_TREE_EXCHANGE_TOOL_NAMES, WORKSPACE_TREE_MOVE_TOOL_NAMES
+from krim_agent.workspace import (
+    WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES,
+    WORKSPACE_TREE_EXCHANGE_TOOL_NAMES,
+    WORKSPACE_TREE_MOVE_TOOL_NAMES,
+)
 
 from .core import (
     Decision,
@@ -224,7 +228,10 @@ class ToolRegistry:
             if name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES and parent.tree_exchanges is not None:
                 async with parent.tree_exchanges.call_scope():
                     return await self._execute_observed(name, arguments, parent, consume)
-            if name in WORKSPACE_TREE_MOVE_TOOL_NAMES and parent.tree_moves is not None:
+            if (
+                name in (WORKSPACE_TREE_MOVE_TOOL_NAMES | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES)
+                and parent.tree_moves is not None
+            ):
                 async with parent.tree_moves.call_scope():
                     return await self._execute_observed(name, arguments, parent, consume)
             return await self._execute_observed(name, arguments, parent, consume)
@@ -241,7 +248,8 @@ class ToolRegistry:
         tree_prepare = name == "workspace_tree_prepare"
         tree_query = name == "workspace_tree_query"
         tree_model = name in {"workspace_tree_model_prepare", "workspace_tree_start"}
-        tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES
+        generated_undo = name in WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
+        tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         tree_scope = (
             parent.run_id,
@@ -358,6 +366,7 @@ class ToolRegistry:
                     code = "approval_required" if decision == "ask" else "permission_denied"
                     raise ToolError(code, f"工具没有执行许可: {name}")
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
+                original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
                 short: ShortCircuit | None = None
                 for hook in tuple(self._global_pre):
                     short = await hook(definition, child)
@@ -382,6 +391,8 @@ class ToolRegistry:
                 if tree_move and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_move_binding
+                    or generated_undo
+                    and _tree_exchange_budget(child) != original_generated_budget
                 ):
                     raise ToolError(
                         "workspace_tree_move_context", "Hook不能替换原树移动参数或调用上下文"
@@ -507,6 +518,8 @@ class ToolRegistry:
                 if tree_move and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_move_binding
+                    or generated_undo
+                    and _tree_exchange_budget(child) != original_generated_budget
                 ):
                     raise ToolError(
                         "workspace_tree_move_context", "Hook不能替换原树移动参数或调用上下文"

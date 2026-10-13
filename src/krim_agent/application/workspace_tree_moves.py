@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
+from krim_agent.generated_tree_undo import GeneratedTreeUndoSource
 from krim_agent.persistence.workspace_tree_moves import WorkspaceTreeMoveStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
@@ -159,6 +160,12 @@ class TreeMoveService:
     async def _execute(
         self, operation: str, payload: dict[str, Any], context: ToolContext, abort: Event
     ) -> dict[str, JsonValue]:
+        if operation.startswith("generated_undo_"):
+            from .generated_tree_undo import GeneratedTreeUndoOperations
+
+            return await GeneratedTreeUndoOperations(self).execute(
+                operation, payload, context, abort
+            )
         if operation == "query":
             return (
                 await self._query(TreeMoveQueryRequest.model_validate(payload), context)
@@ -172,6 +179,10 @@ class TreeMoveService:
             return (await self._reconcile(lookup.operation_id, context, abort)).model_dump(
                 mode="json"
             )
+        if operation == "preview":
+            return (
+                await self._preview(TreeMovePreviewRequest.model_validate(payload), context, abort)
+            ).model_dump(mode="json")
         scope, binding = await self._guard(context, writing=operation != "inspect")
         writer = WorkspaceTreeWriter(binding.require())
         authorize = self._bridge(
@@ -209,9 +220,27 @@ class TreeMoveService:
                 byte_size=snapshot.total_bytes if snapshot else 0,
                 mode=root.mode if root else None,
             ).model_dump(mode="json")
-        if operation != "preview":
-            raise ServiceError("workspace_tree_move_operation", "树移动操作无效", 422)
-        request = TreeMovePreviewRequest.model_validate(payload)
+        raise ServiceError("workspace_tree_move_operation", "树移动操作无效", 422)
+
+    async def _preview(
+        self,
+        request: TreeMovePreviewRequest,
+        context: ToolContext,
+        abort: Event,
+        *,
+        generated_origin: GeneratedTreeUndoSource | None = None,
+        qualify: Callable[[], None] | None = None,
+    ) -> TreeMovePreviewView:
+        scope, binding = await self._guard(context)
+        if qualify is not None:
+            qualify()
+        writer = WorkspaceTreeWriter(binding.require())
+        authorize = self._bridge(
+            asyncio.get_running_loop(),
+            writer.lock_timeout,
+            lambda: self._read_authority(context, qualify=qualify),
+            "workspace_tree_move_authority",
+        )
         prepared = None
         if await self.store.proposal_by_key(scope, request.request_key) is None:
             prepared = await workspace_io(
@@ -222,15 +251,30 @@ class TreeMoveService:
                 authorize=authorize,
             )
         await self._guard(context)
+        if qualify is not None:
+            qualify()
         if abort.is_set():
             raise ServiceError("workspace_write_cancelled", "原树准备已取消", 409)
         stored, _ = await self.store.preview(
-            scope, binding, request, prepared, model_source=self._source(context)
+            scope,
+            binding,
+            request,
+            prepared,
+            model_source=self._source(context),
+            generated_origin=generated_origin,
         )
-        return stored.view.model_dump(mode="json")
+        return stored.view
 
-    async def _read_authority(self, context: ToolContext, *, writing: bool = True) -> None:
+    async def _read_authority(
+        self,
+        context: ToolContext,
+        *,
+        writing: bool = True,
+        qualify: Callable[[], None] | None = None,
+    ) -> None:
         await self._guard(context, writing=writing)
+        if qualify is not None:
+            qualify()
 
     @staticmethod
     def _bound(view: TreeMovePreviewView, binding: WorkspaceBinding) -> None:
@@ -302,21 +346,40 @@ class TreeMoveService:
             )
         )
 
-    async def _renew(self, scope: str, identifier: str, context: ToolContext, abort: Event) -> None:
+    async def _renew(
+        self,
+        scope: str,
+        identifier: str,
+        context: ToolContext,
+        abort: Event,
+        *,
+        qualify: Callable[[], None] | None = None,
+    ) -> None:
         try:
             while True:
                 await asyncio.sleep(min(0.2, self.store.lease_seconds / 4))
                 await self._guard(context)
+                if qualify is not None:
+                    qualify()
                 await self.store.renew(scope, identifier)
+                if qualify is not None:
+                    qualify()
         except asyncio.CancelledError:
             raise
         except Exception:
             abort.set()
 
     async def _change(
-        self, request: TreeMoveAction, context: ToolContext, abort: Event
+        self,
+        request: TreeMoveAction,
+        context: ToolContext,
+        abort: Event,
+        *,
+        qualify: Callable[[], None] | None = None,
     ) -> TreeMoveAttemptView:
         scope, binding = await self._guard(context)
+        if qualify is not None:
+            qualify()
         source = self._source(context)
         previous = await self.store.find_action(
             scope, request, binding.fingerprint, model_source=source
@@ -334,6 +397,8 @@ class TreeMoveService:
             assert applied is not None
             prepared = await workspace_io(writer.prepare_undo, prepared, applied)
         await self._guard(context)
+        if qualify is not None:
+            qualify()
         if abort.is_set():
             raise ServiceError("workspace_write_cancelled", "原树动作在准入前取消", 409)
         attempt, created = await self.store.reserve(
@@ -345,12 +410,21 @@ class TreeMoveService:
         task = asyncio.current_task()
         assert task is not None
         self._active[request.proposal_id] = (scope, task, abort)
-        heartbeat = asyncio.create_task(self._renew(scope, identifier, context, abort))
+        renewal = (
+            self._renew(scope, identifier, context, abort)
+            if qualify is None
+            else self._renew(scope, identifier, context, abort, qualify=qualify)
+        )
+        heartbeat = asyncio.create_task(renewal)
         loop = asyncio.get_running_loop()
 
         async def allowed() -> None:
             await self._guard(context)
+            if qualify is not None:
+                qualify()
             await self.store.assert_execution(scope, identifier)
+            if qualify is not None:
+                qualify()
 
         authorize = self._bridge(
             loop, writer.lock_timeout, allowed, "workspace_tree_move_authority"
@@ -397,9 +471,16 @@ class TreeMoveService:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _reconcile(
-        self, identifier: str, context: ToolContext, abort: Event
+        self,
+        identifier: str,
+        context: ToolContext,
+        abort: Event,
+        *,
+        qualify: Callable[[], None] | None = None,
     ) -> TreeMoveAttemptView:
         scope, binding = await self._guard(context)
+        if qualify is not None:
+            qualify()
         attempt = await self.store.operation(scope, identifier)
         proposal_id = attempt.view.proposal_id
         if proposal_id in self._active or attempt.view.status == "running":
@@ -418,6 +499,8 @@ class TreeMoveService:
             if effect.receipt.status == "done" and not attempt.intent_recorded:
                 effect = self._unknown(attempt.prepared, "workspace_tree_move_intent_missing")
         await self._guard(context)
+        if qualify is not None:
+            qualify()
         if abort.is_set():
             return attempt.view
         return (await self.store.settle(scope, identifier, effect, resolving=True)).view

@@ -66,6 +66,14 @@ from krim_agent.execution.publication import (
     CommandProposalView,
 )
 from krim_agent.execution.records import CommandView
+from krim_agent.generated_tree_undo import (
+    GeneratedTreeUndoAction,
+    GeneratedTreeUndoAttemptView,
+    GeneratedTreeUndoCancelRequest,
+    GeneratedTreeUndoPreviewRequest,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoQueryResult,
+)
 from krim_agent.persistence.agent_profiles import AgentProfileStore
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.completed_tree_origins import (
@@ -87,6 +95,7 @@ from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, Tas
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
+from krim_agent.tools.generated_tree_undo import generated_tree_undo_tools
 from krim_agent.tools.tree_exchanges import tree_exchange_tools
 from krim_agent.tools.tree_moves import tree_move_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
@@ -690,6 +699,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_generated_tree_undos(self) -> None:
+        """显式登记原根撤销；整组冲突先拒绝，不扩大原冻结Agent工具。"""
+        definitions = generated_tree_undo_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("原生成根撤销工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_execution(
         self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
     ) -> ExecutionBinding:
@@ -825,6 +844,7 @@ class AgentService:
                     "tree_move_query",
                     "tree_exchange_query",
                     "tree_exchange_seal_query",
+                    "generated_tree_undo_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -938,6 +958,16 @@ class AgentService:
                 "workspace_tree_exchange_state": 409,
                 "workspace_tree_exchange_active": 409,
                 "workspace_tree_move_context": 403,
+                "workspace_generated_undo_backend_missing": 503,
+                "workspace_generated_undo_context": 403,
+                "workspace_generated_undo_source": 403,
+                "workspace_generated_undo_deadline": 409,
+                "workspace_generated_undo_required": 409,
+                "workspace_generated_undo_seal_required": 409,
+                "workspace_generated_undo_source_conflict": 409,
+                "workspace_generated_undo_version_conflict": 409,
+                "workspace_generated_undo_restore_conflict": 409,
+                "workspace_generated_undo_operation": 422,
                 "workspace_tree_move_model_context": 403,
                 "workspace_tree_move_source_conflict": 403,
                 "workspace_tree_move_closed": 503,
@@ -1199,6 +1229,73 @@ class AgentService:
     async def tree_move_cancel(self, agent_id: str, proposal_id: str) -> TreeMovePreviewView:
         session = await self.session(agent_id)
         return await self.manager.tree_moves.cancel(f"session:{session.session_id}", proposal_id)
+
+    async def generated_tree_undo_preview(
+        self, agent_id: str, request: GeneratedTreeUndoPreviewRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        return GeneratedTreeUndoPreviewView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "generated_tree_undo_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def generated_tree_undo_change(
+        self, agent_id: str, request: GeneratedTreeUndoAction, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        return GeneratedTreeUndoAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "generated_tree_undo_change",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def generated_tree_undo_query(
+        self, agent_id: str, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoQueryResult:
+        return GeneratedTreeUndoQueryResult.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "generated_tree_undo_query", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def generated_tree_undo_reconcile(
+        self, agent_id: str, request: TreeMoveOperationRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        return GeneratedTreeUndoAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "generated_tree_undo_reconcile",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def generated_tree_undo_cancel(
+        self, agent_id: str, request: GeneratedTreeUndoCancelRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        return GeneratedTreeUndoPreviewView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "generated_tree_undo_cancel",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
 
     async def tree_exchange_inspect(
         self, agent_id: str, request: TreeExchangeInspectRequest, *, confirmed: bool = False
