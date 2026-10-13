@@ -33,6 +33,14 @@ from krim_agent.execution.publication import (
     CommandProposalView,
 )
 from krim_agent.execution.records import CommandView
+from krim_agent.generated_tree_undo import (
+    GeneratedTreeUndoAction,
+    GeneratedTreeUndoAttemptView,
+    GeneratedTreeUndoCancelRequest,
+    GeneratedTreeUndoPreviewRequest,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoQueryResult,
+)
 from krim_agent.persistence.completed_tree_origins import (
     CompletedTreeOriginLookupView,
     CompletedTreeOriginView,
@@ -231,6 +239,43 @@ class AgentSession:
 
     async def cancel_tree_move(self, proposal_id: str) -> TreeMovePreviewView:
         return await self.service.tree_move_cancel(self.agent_id, proposal_id)
+
+    async def preview_generated_tree_undo(
+        self, request: GeneratedTreeUndoPreviewRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        return await self.service.generated_tree_undo_preview(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def change_generated_tree_undo(
+        self, request: GeneratedTreeUndoAction, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        return await self.service.generated_tree_undo_change(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def query_generated_tree_undo(
+        self, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoQueryResult:
+        return await self.service.generated_tree_undo_query(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def reconcile_generated_tree_undo(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        return await self.service.generated_tree_undo_reconcile(
+            self.agent_id, TreeMoveOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def cancel_generated_tree_undo(
+        self, proposal_id: str, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        return await self.service.generated_tree_undo_cancel(
+            self.agent_id,
+            GeneratedTreeUndoCancelRequest(proposal_id=proposal_id),
+            confirmed=confirmed,
+        )
 
     async def inspect_exchange_tree(
         self, path: str, *, confirmed: bool = False

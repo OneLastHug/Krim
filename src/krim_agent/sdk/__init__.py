@@ -30,6 +30,18 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.generated_tree_undo import (
+    GeneratedTreeRootState,
+    GeneratedTreeUndoAction,
+    GeneratedTreeUndoActionKind,
+    GeneratedTreeUndoAttemptPage,
+    GeneratedTreeUndoAttemptView,
+    GeneratedTreeUndoCancelRequest,
+    GeneratedTreeUndoPage,
+    GeneratedTreeUndoPreviewRequest,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoQueryResult,
+)
 from krim_agent.persistence.completed_tree_origins import (
     CompletedTreeOriginLookupView,
     CompletedTreeOriginView,
@@ -159,6 +171,16 @@ from .types import (
 )
 
 __all__ = [
+    "GeneratedTreeRootState",
+    "GeneratedTreeUndoAction",
+    "GeneratedTreeUndoActionKind",
+    "GeneratedTreeUndoAttemptPage",
+    "GeneratedTreeUndoAttemptView",
+    "GeneratedTreeUndoCancelRequest",
+    "GeneratedTreeUndoPage",
+    "GeneratedTreeUndoPreviewRequest",
+    "GeneratedTreeUndoPreviewView",
+    "GeneratedTreeUndoQueryResult",
     "CompletedTreeOriginLookupView",
     "TreeExchangeSealLookupRequest",
     "TreeMoveAction",
