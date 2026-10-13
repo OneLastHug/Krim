@@ -70,6 +70,13 @@ from .execution.publication import (
     CommandProposalView,
 )
 from .execution.records import CommandView
+from .generated_tree_undo import (
+    GeneratedTreeUndoAction,
+    GeneratedTreeUndoAttemptView,
+    GeneratedTreeUndoPreviewRequest,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoQueryResult,
+)
 from .interactions import InteractionReply, InteractionView
 from .locale import LocaleChange, LocaleView
 from .mcp.management import MCPControlRequest, MCPResourceView, MCPSelectionRequest
@@ -989,6 +996,181 @@ class KrimClient:
         value = TreeMovePreviewView.model_validate_json(response.content)
         self._tree_move_match(
             value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
+        )
+        return value
+
+    @staticmethod
+    def _generated_tree_undo_match(matched: bool) -> None:
+        if not matched:
+            raise ClientError(
+                "原生成根回程与请求/作用域不一致",
+                code="workspace_generated_undo_response",
+                status=502,
+            )
+
+    def agent_generated_tree_undo_preview(
+        self, agent_id: str, request: GeneratedTreeUndoPreviewRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        request = GeneratedTreeUndoPreviewRequest.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/generated-tree-undos/preview",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = GeneratedTreeUndoPreviewView.model_validate_json(response.content)
+        self._generated_tree_undo_match(
+            value.source_plan_id == request.plan_id
+            and value.previous_restore_operation_id == request.previous_restore_operation_id
+            and value.move.target_path == request.preserve_path
+            and value.move.before_fingerprint == request.expected_fingerprint
+            and value.move.scope_id == "session:" + agent_id
+            and (
+                request.previous_restore_operation_id is not None
+                or value.sealed_fingerprint == request.expected_fingerprint
+            )
+        )
+        return value
+
+    def agent_generated_tree_undo_change(
+        self, agent_id: str, request: GeneratedTreeUndoAction, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        request = GeneratedTreeUndoAction.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/generated-tree-undos/change",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = GeneratedTreeUndoAttemptView.model_validate_json(response.content)
+        self._generated_tree_undo_match(
+            value.action == request.action
+            and value.operation.proposal_id == request.proposal_id
+            and value.operation.expected_revision == request.expected_revision
+            and value.operation.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_generated_tree_undo_query(
+        self, agent_id: str, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoQueryResult:
+        request = TreeMoveQueryRequest.model_validate(request.model_dump())
+        parameters = {"kind": request.kind, "confirmed": str(confirmed).lower()}
+        for key, selected in (
+            ("identifier", request.identifier),
+            ("request_key", request.request_key),
+            ("after", request.after),
+        ):
+            if selected is not None:
+                parameters[key] = selected
+        if request.kind in {"history", "proposals"}:
+            parameters["limit"] = str(request.limit)
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/generated-tree-undos/query",
+            params=parameters,
+        )
+        self._check(response)
+        value = GeneratedTreeUndoQueryResult.model_validate_json(response.content)
+        expected = {
+            "proposal": "proposal",
+            "by_key": "proposal",
+            "operation": "operation",
+            "operation_by_key": "operation",
+            "history": "history",
+            "proposals": "proposals",
+        }[request.kind]
+        self._generated_tree_undo_match(
+            value.kind == request.kind
+            and all(
+                getattr(value, field) is None
+                for field in ("proposal", "operation", "history", "proposals")
+                if field != expected
+            )
+        )
+        if request.kind not in {"by_key", "operation_by_key"}:
+            self._generated_tree_undo_match(getattr(value, expected) is not None)
+        if value.proposal is not None:
+            self._generated_tree_undo_match(
+                value.proposal.move.scope_id == "session:" + agent_id
+                and (
+                    request.kind != "proposal"
+                    or value.proposal.move.proposal_id == request.identifier
+                )
+            )
+        if value.operation is not None:
+            self._generated_tree_undo_match(
+                value.operation.operation.scope_id == "session:" + agent_id
+                and (
+                    request.kind != "operation"
+                    or value.operation.operation.operation_id == request.identifier
+                )
+            )
+        if value.history is not None:
+            entries = value.history.items
+            self._generated_tree_undo_match(
+                all(
+                    item.operation.scope_id == "session:" + agent_id
+                    and item.operation.proposal_id == request.identifier
+                    for item in entries
+                )
+                and len({item.source_plan_id for item in entries}) <= 1
+            )
+            self._generated_tree_undo_page(
+                [item.operation.operation_id for item in entries], value.history.next_after, request
+            )
+        if value.proposals is not None:
+            proposals = value.proposals.items
+            self._generated_tree_undo_match(
+                all(item.move.scope_id == "session:" + agent_id for item in proposals)
+            )
+            self._generated_tree_undo_page(
+                [item.move.proposal_id for item in proposals], value.proposals.next_after, request
+            )
+        return value
+
+    def _generated_tree_undo_page(
+        self, identifiers: list[str], next_after: str | None, request: TreeMoveQueryRequest
+    ) -> None:
+        after = request.after
+        self._generated_tree_undo_match(
+            len(identifiers) <= request.limit
+            and identifiers == sorted(set(identifiers))
+            and (after is None or all(identifier > after for identifier in identifiers))
+            and (
+                next_after is None
+                or len(identifiers) == request.limit
+                and next_after == identifiers[-1]
+            )
+        )
+
+    def agent_generated_tree_undo_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoAttemptView:
+        request = TreeMoveOperationRequest(operation_id=operation_id)
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/generated-tree-undo-operations/{_workspace_identifier(operation_id)}/reconcile",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = GeneratedTreeUndoAttemptView.model_validate_json(response.content)
+        self._generated_tree_undo_match(
+            value.operation.operation_id == operation_id
+            and value.operation.scope_id == "session:" + agent_id
+        )
+        return value
+
+    def agent_generated_tree_undo_cancel(
+        self, agent_id: str, proposal_id: str, *, confirmed: bool = False
+    ) -> GeneratedTreeUndoPreviewView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/generated-tree-undos/{_workspace_identifier(proposal_id)}/cancel",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        value = GeneratedTreeUndoPreviewView.model_validate_json(response.content)
+        self._generated_tree_undo_match(
+            value.move.proposal_id == proposal_id and value.move.scope_id == "session:" + agent_id
         )
         return value
 

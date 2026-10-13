@@ -123,6 +123,14 @@ from krim_agent.execution.publication import (
     CommandProposalView,
 )
 from krim_agent.execution.records import CommandView
+from krim_agent.generated_tree_undo import (
+    GeneratedTreeUndoAction,
+    GeneratedTreeUndoAttemptView,
+    GeneratedTreeUndoCancelRequest,
+    GeneratedTreeUndoPreviewRequest,
+    GeneratedTreeUndoPreviewView,
+    GeneratedTreeUndoQueryResult,
+)
 from krim_agent.host import HostCommand, HostSessionView, HostSide
 from krim_agent.interactions import InteractionReply, InteractionView
 from krim_agent.link import LinkResolve, LinkTarget, link_origin, normalize_link
@@ -311,6 +319,7 @@ def create_app(
     workspace_writable: bool = False,
     tree_moves_enabled: bool = False,
     tree_exchanges_enabled: bool = False,
+    generated_tree_undos_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
     execution_version: str = "local-v1",
     execution_owned: bool = False,
@@ -348,6 +357,8 @@ def create_app(
         agent_service.register_tree_moves()
     if tree_exchanges_enabled:
         agent_service.register_tree_exchanges()
+    if generated_tree_undos_enabled:
+        agent_service.register_generated_tree_undos()
 
     def mcp_ready(names: list[str], resource_hash: str) -> None:
         for name in names:
@@ -1159,6 +1170,91 @@ def create_app(
         if operation.operation_id != operation_id:
             raise ServiceError("invalid_request", "路径与原树操作标识不一致", 422)
         return await agent_service.tree_move_reconcile(agent_id, operation, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/generated-tree-undos/preview")
+    async def agent_generated_tree_undo_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: GeneratedTreeUndoPreviewRequest,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> GeneratedTreeUndoPreviewView:
+        _tree_move_parameters(request, {"confirmed"})
+        return await agent_service.generated_tree_undo_preview(
+            agent_id, payload, confirmed=confirmed
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/generated-tree-undos/change")
+    async def agent_generated_tree_undo_change(
+        agent_id: WorkspaceIdentifier,
+        payload: GeneratedTreeUndoAction,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> GeneratedTreeUndoAttemptView:
+        _tree_move_parameters(request, {"confirmed"})
+        return await agent_service.generated_tree_undo_change(
+            agent_id, payload, confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/generated-tree-undos/query")
+    async def agent_generated_tree_undo_query(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        kind: TreeMoveQueryKind,
+        identifier: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        request_key: str | None = Query(
+            default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+        ),
+        after: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> GeneratedTreeUndoQueryResult:
+        _tree_move_parameters(
+            request, {"kind", "identifier", "request_key", "after", "limit", "confirmed"}
+        )
+        try:
+            selection = TreeMoveQueryRequest(
+                kind=kind, identifier=identifier, request_key=request_key, after=after, limit=limit
+            )
+        except ValidationError:
+            raise ServiceError("invalid_request", "原生成根查询选择器无效", 422) from None
+        return await agent_service.generated_tree_undo_query(
+            agent_id, selection, confirmed=confirmed
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/generated-tree-undos/{proposal_id}/cancel")
+    async def agent_generated_tree_undo_cancel(
+        agent_id: WorkspaceIdentifier,
+        proposal_id: WorkspaceIdentifier,
+        request: Request,
+        payload: StrictModel | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> GeneratedTreeUndoPreviewView:
+        _tree_move_parameters(request, {"confirmed"})
+        return await agent_service.generated_tree_undo_cancel(
+            agent_id, GeneratedTreeUndoCancelRequest(proposal_id=proposal_id), confirmed=confirmed
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/workspace/generated-tree-undo-operations/{operation_id}/reconcile"
+    )
+    async def agent_generated_tree_undo_reconcile(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        payload: TreeMoveOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> GeneratedTreeUndoAttemptView:
+        _tree_move_parameters(request, {"confirmed"})
+        operation = payload or TreeMoveOperationRequest(operation_id=operation_id)
+        if operation.operation_id != operation_id:
+            raise ServiceError("invalid_request", "路径与原生成根操作标识不一致", 422)
+        return await agent_service.generated_tree_undo_reconcile(
+            agent_id, operation, confirmed=confirmed
+        )
 
     @app.get("/v1/agents/{agent_id}/workspace/tree-exchange-state")
     async def agent_tree_exchange_inspect(
