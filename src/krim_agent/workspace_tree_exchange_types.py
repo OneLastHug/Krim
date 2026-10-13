@@ -83,6 +83,11 @@ class TreeExchangeOperationRequest(StrictModel):
     operation_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+class TreeExchangeSealRequest(StrictModel):
+    plan_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    expected_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class TreeExchangePreviewView(StrictModel):
     proposal_id: str
     scope_id: str

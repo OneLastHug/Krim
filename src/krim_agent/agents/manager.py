@@ -19,6 +19,7 @@ from krim_agent.application.workspace_directories import DirectoryChangeService
 from krim_agent.application.workspace_mixed_queries import MixedBatchQueryService
 from krim_agent.application.workspace_model_batches import ModelMixedBatchService
 from krim_agent.application.workspace_model_trees import ModelTreeService
+from krim_agent.application.workspace_tree_exchanges import TreeExchangeService
 from krim_agent.application.workspace_tree_moves import TreeMoveService
 from krim_agent.application.workspace_tree_queries import TreePlanQueryService
 from krim_agent.config import Settings
@@ -472,6 +473,7 @@ class AgentManager:
         self.tree_queries = TreePlanQueryService(self.workspace_changes, self.directory_changes)
         self.tree_models = ModelTreeService(self.workspace_changes, self.directory_changes)
         self.tree_moves = TreeMoveService(self.workspace_changes, self.directory_changes)
+        self.tree_exchanges = TreeExchangeService(self.workspace_changes, self.directory_changes)
         self.mixed_batch_writer = ModelMixedBatchService(
             self.workspace_changes, self.directory_changes
         )
@@ -771,6 +773,7 @@ class AgentManager:
             workspace_tree_queries=self.tree_queries,
             workspace_tree_models=self.tree_models,
             tree_moves=self.tree_moves,
+            tree_exchanges=self.tree_exchanges,
             workspace_mixed_batches=self.mixed_batch_writer,
             workspace=definition.workspace,
             execution=definition.execution,
@@ -926,6 +929,7 @@ class AgentManager:
                 await handle.destroy()
 
     async def close(self) -> None:
+        self.tree_exchanges.assert_external_close()
         self.tree_moves.assert_external_close()
         self.commands.assert_external_close()
         self.directory_changes.assert_external_close()
@@ -937,6 +941,7 @@ class AgentManager:
         await self.mixed_batch_writer.close()
         await self.tree_models.close()
         await self.tree_moves.close()
+        await self.tree_exchanges.close()
         await self.directory_changes.close()
         await self.workspace_changes.close()
         for handle in list(self._handles.values()):

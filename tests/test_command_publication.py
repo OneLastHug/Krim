@@ -50,7 +50,9 @@ NAMES = [
 ]
 
 
-async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None, persistent=False):
+async def setup(
+    runtime, root, *, policy=None, names=None, max_file_bytes=None, persistent=False, max_steps=8
+):
     async def allow(*_args):
         return "allow"
 
@@ -78,6 +80,7 @@ async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None, 
                 execution_key="sandbox",
                 tool_names=names or NAMES,
                 tool_timeout_seconds=30,
+                max_steps=max_steps,
             ),
         )
     )
