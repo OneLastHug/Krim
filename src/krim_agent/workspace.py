@@ -70,11 +70,21 @@ WORKSPACE_TREE_EXCHANGE_TOOL_NAMES = frozenset(
         "tree_exchange_reconcile",
     }
 )
+WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES = frozenset(
+    {
+        "generated_tree_undo_preview",
+        "generated_tree_undo_query",
+        "generated_tree_undo_change",
+        "generated_tree_undo_reconcile",
+        "generated_tree_undo_cancel",
+    }
+)
 WORKSPACE_WRITE_TOOL_NAMES = (
     WORKSPACE_CHANGE_TOOL_NAMES
     | WORKSPACE_TREE_MODEL_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})
+    | (WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES - {"generated_tree_undo_query"})
     | (
         WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         - {"tree_exchange_inspect", "tree_exchange_query", "tree_exchange_seal_query"}
@@ -92,6 +102,7 @@ WORKSPACE_TOOL_NAMES = (
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
     | WORKSPACE_TREE_MOVE_TOOL_NAMES
     | WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
+    | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
 )
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000

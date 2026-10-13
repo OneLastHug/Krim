@@ -12,6 +12,7 @@ from sqlalchemy import delete, text, update
 
 from krim_agent.agents import AgentProfile, AgentProfileUpdate
 from krim_agent.application.agents import AgentService
+from krim_agent.context_engine import ContextRunConfig
 from krim_agent.execution import CommandSpec, LinuxSandboxRunner
 from krim_agent.persistence.command_models import CommandFileRow
 from krim_agent.persistence.command_proposals import CommandProposalRow
@@ -51,7 +52,15 @@ NAMES = [
 
 
 async def setup(
-    runtime, root, *, policy=None, names=None, max_file_bytes=None, persistent=False, max_steps=8
+    runtime,
+    root,
+    *,
+    policy=None,
+    names=None,
+    max_file_bytes=None,
+    persistent=False,
+    max_steps=8,
+    usage_budget=None,
 ):
     async def allow(*_args):
         return "allow"
@@ -81,6 +90,10 @@ async def setup(
                 tool_names=names or NAMES,
                 tool_timeout_seconds=30,
                 max_steps=max_steps,
+                usage_budget=usage_budget,
+                context_config=ContextRunConfig(tokenizer="cl100k_base", reserved_output_tokens=128)
+                if usage_budget is not None
+                else ContextRunConfig(),
             ),
         )
     )
