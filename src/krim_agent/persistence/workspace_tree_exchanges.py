@@ -36,10 +36,12 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangeStatus,
 )
 
+from .completed_tree_seals import CompletedTreeSealStore, SealedTreeOrigin
 from .database import (
     WorkspaceTreeExchangeAttemptRow,
     WorkspaceTreeExchangeLockRow,
     WorkspaceTreeExchangeModelSourceRow,
+    WorkspaceTreeExchangeOriginRow,
     WorkspaceTreeExchangeProposalRow,
 )
 from .tree_exchange_codec import (
@@ -50,7 +52,9 @@ from .tree_exchange_codec import (
 )
 from .tree_exchange_fences import assert_exchange_namespace_available, exchange_keys
 from .tree_model_sources import run_scope
+from .workspace_directories import WorkspaceDirectoryStore
 from .workspace_edits import WorkspaceEditStore, digest
+from .workspace_tree_plans import WorkspaceTreePlanStore
 
 
 def _corrupt() -> ServiceError:
@@ -96,6 +100,11 @@ class WorkspaceTreeExchangeStore:
         ):
             raise ValueError("双树交换租约无效")
         self.files, self.database, self.owner_id = files, files.database, files.owner_id
+        self.seals = CompletedTreeSealStore(
+            WorkspaceTreePlanStore(
+                files, WorkspaceDirectoryStore(files.database, owner_id=files.owner_id)
+            )
+        )
         self.max_proposals, self.max_snapshot_bytes, self.lease_seconds = (
             max_proposals,
             max_snapshot_bytes,
@@ -104,7 +113,9 @@ class WorkspaceTreeExchangeStore:
 
     @staticmethod
     def _wanted(request: TreeExchangePreviewRequest | TreeExchangeAction, fingerprint: str) -> str:
-        return digest({"request": request.model_dump(mode="json"), "resource": fingerprint})
+        return digest(
+            {"request": request.model_dump(mode="json", exclude_none=True), "resource": fingerprint}
+        )
 
     @staticmethod
     def _source_valid(source: TreeExchangeModelSource) -> None:
@@ -211,6 +222,64 @@ class WorkspaceTreeExchangeStore:
                     409,
                 )
 
+    async def _origin_candidate(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        workspace_key: str,
+        resource_fingerprint: str,
+        source_plan_id: str | None,
+        prepared: PreparedTreeExchange,
+    ) -> SealedTreeOrigin | None:
+        if source_plan_id is None:
+            return None
+        sealed = await self.seals.get_material_in_transaction(
+            sql,
+            scope,
+            source_plan_id,
+            workspace_key=workspace_key,
+            resource_fingerprint=resource_fingerprint,
+        )
+        if sealed is None:
+            raise ServiceError(
+                "workspace_tree_exchange_origin_required", "生成树交换须原首次封存", 409
+            )
+        if sealed.origin.snapshot != prepared.right:
+            raise ServiceError(
+                "workspace_tree_exchange_origin_conflict", "原右before不是已封存完整生成树", 409
+            )
+        return sealed
+
+    async def _origin(self, sql: AsyncSession, proposal: WorkspaceTreeExchangeProposalRow) -> None:
+        original = self._proposal_value(proposal)
+        request = TreeExchangePreviewRequest.model_validate_json(json.dumps(proposal.request))
+        link = await sql.get(WorkspaceTreeExchangeOriginRow, proposal.proposal_id)
+        if request.source_plan_id is None:
+            if link is not None:
+                raise _corrupt()
+            return
+        if link is None or (
+            link.source_plan_id != request.source_plan_id
+            or link.scope_id != proposal.scope_id
+            or link.workspace_key != proposal.workspace_key
+            or link.resource_fingerprint != proposal.resource_fingerprint
+        ):
+            raise _corrupt()
+        sealed = await self._origin_candidate(
+            sql,
+            proposal.scope_id,
+            proposal.workspace_key,
+            proposal.resource_fingerprint,
+            request.source_plan_id,
+            original.prepared,
+        )
+        if (
+            sealed is None
+            or link.tree_fingerprint != sealed.origin.snapshot.fingerprint
+            or link.proof_hash != sealed.origin.view.proof_hash
+        ):
+            raise _corrupt()
+
     async def _bytes(self, sql: AsyncSession, added: int) -> None:
         before = await sql.scalar(
             select(
@@ -243,7 +312,26 @@ class WorkspaceTreeExchangeStore:
                 )
             )
         )
-        if int(before or 0) + int(operations or 0) + added > self.max_snapshot_bytes:
+        origins = await sql.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.length(WorkspaceTreeExchangeOriginRow.proposal_id)
+                        + func.length(WorkspaceTreeExchangeOriginRow.source_plan_id)
+                        + func.length(WorkspaceTreeExchangeOriginRow.scope_id)
+                        + func.length(WorkspaceTreeExchangeOriginRow.workspace_key)
+                        + func.length(WorkspaceTreeExchangeOriginRow.resource_fingerprint)
+                        + func.length(WorkspaceTreeExchangeOriginRow.tree_fingerprint)
+                        + func.length(WorkspaceTreeExchangeOriginRow.proof_hash)
+                    ),
+                    0,
+                )
+            )
+        )
+        if (
+            int(before or 0) + int(operations or 0) + int(origins or 0) + added
+            > self.max_snapshot_bytes
+        ):
             raise ServiceError(
                 "workspace_tree_exchange_snapshot_limit", "原双树交换私有材料总容量已达上限", 413
             )
@@ -279,6 +367,10 @@ class WorkspaceTreeExchangeStore:
                     right_entry_count=len(prepared.right.entries),
                     left_byte_size=prepared.left.total_bytes,
                     right_byte_size=prepared.right.total_bytes,
+                    origin="completed_tree"
+                    if request.source_plan_id is not None
+                    else "existing_trees",
+                    source_plan_id=request.source_plan_id,
                     revision=row.revision,
                     status=cast(TreeExchangeStatus, row.status),
                     expires_at=row.expires_at,
@@ -305,6 +397,7 @@ class WorkspaceTreeExchangeStore:
         await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
         self._proposal_value(row)
         await self._stored_source(sql, row)
+        await self._origin(sql, row)
         pending = {"applying", "undoing", "keeping", "uncertain"}
         if (row.active_operation_id is not None) != (row.status in pending):
             raise _corrupt()
@@ -354,6 +447,7 @@ class WorkspaceTreeExchangeStore:
                         409,
                     )
                 await self._retry_source(sql, previous, model_source)
+                await self._origin(sql, previous)
                 return self._proposal_value(previous), False
             await self._new_source(sql, scope, model_source)
             if prepared is None or (
@@ -380,9 +474,20 @@ class WorkspaceTreeExchangeStore:
                 raise ServiceError(
                     "workspace_tree_exchange_limit", "原双树交换提案历史已达上限", 429
                 )
-            raw_request = request.model_dump(mode="json")
+            sealed = await self._origin_candidate(
+                sql, scope, binding.key, binding.fingerprint, request.source_plan_id, prepared
+            )
+            raw_request = request.model_dump(mode="json", exclude_none=True)
             await self._bytes(
-                sql, len(payload) + len(json.dumps(metadata)) + len(json.dumps(raw_request))
+                sql,
+                len(payload)
+                + len(json.dumps(metadata))
+                + len(json.dumps(raw_request))
+                + (
+                    36 + len(sealed.origin.view.plan_id) + len(scope) + len(binding.key) + 192
+                    if sealed is not None
+                    else 0
+                ),
             )
             now = utc_now()
             row = WorkspaceTreeExchangeProposalRow(
@@ -410,6 +515,21 @@ class WorkspaceTreeExchangeStore:
             sql.add(row)
             await sql.flush()
             await self._bind_source(sql, row, "preview", model_source)
+            if sealed is not None:
+                sql.add(
+                    WorkspaceTreeExchangeOriginRow(
+                        proposal_id=row.proposal_id,
+                        source_plan_id=sealed.origin.view.plan_id,
+                        scope_id=scope,
+                        workspace_key=binding.key,
+                        resource_fingerprint=binding.fingerprint,
+                        tree_fingerprint=sealed.origin.snapshot.fingerprint,
+                        proof_hash=sealed.origin.view.proof_hash,
+                        created_at=now,
+                    )
+                )
+                await sql.flush()
+            await self._origin(sql, row)
             return self._proposal_value(row), True
 
     async def proposal(self, scope: str, identifier: str) -> StoredTreeExchange:

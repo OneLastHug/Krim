@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,9 +83,33 @@ class CompletedTreeOriginVerifier:
         identifier: str,
         snapshot: WorkspaceTreeSnapshot,
     ) -> VerifiedTreeOrigin:
+        return await self.verify_material_in_transaction(
+            sql,
+            scope,
+            identifier,
+            snapshot,
+            workspace_key=binding.key,
+            resource_fingerprint=binding.fingerprint,
+            workspace_manifest=binding.manifest(),
+            workspace_fingerprint=binding.require().fingerprint,
+        )
+
+    async def verify_material_in_transaction(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        identifier: str,
+        snapshot: WorkspaceTreeSnapshot,
+        *,
+        workspace_key: str,
+        resource_fingerprint: str,
+        workspace_manifest: dict[str, JsonValue] | None = None,
+        workspace_fingerprint: str | None = None,
+    ) -> VerifiedTreeOrigin:
+        """仅核实原持久来源/材料关联；不构造Workspace，也不授予当前物理资格。"""
         try:
             row = await self.trees._row(sql, scope, identifier)
-            await self.trees.files._resource(sql, scope, binding.key, binding.fingerprint)
+            await self.trees.files._resource(sql, scope, workspace_key, resource_fingerprint)
             await assert_source(sql, row)
             view = await self.trees._view(sql, row)
             if view.producer_status != "finished" or view.status != "done":
@@ -95,13 +119,17 @@ class CompletedTreeOriginVerifier:
             root_material = row.frozen["root_prepared"]
             if not isinstance(root_material, dict):
                 raise _corrupt()
+            prepared_root = decode(root_material)
             if (
-                row.workspace_key != binding.key
-                or row.resource_fingerprint != binding.fingerprint
-                or row.frozen["workspace"] != binding.manifest()
+                row.workspace_key != workspace_key
+                or row.resource_fingerprint != resource_fingerprint
+                or workspace_manifest is not None
+                and row.frozen["workspace"] != workspace_manifest
+                or workspace_fingerprint is not None
+                and snapshot.workspace_fingerprint != workspace_fingerprint
                 or snapshot.root_path != row.root_path
-                or snapshot.workspace_fingerprint != binding.require().fingerprint
-                or snapshot.parent_identity != decode(root_material).parent_identity
+                or snapshot.workspace_fingerprint != prepared_root.workspace_fingerprint
+                or snapshot.parent_identity != prepared_root.parent_identity
             ):
                 raise _corrupt()
             source = await load_source(sql, scope, row.command_id)
@@ -164,7 +192,7 @@ class CompletedTreeOriginVerifier:
                         node is None
                         or effect.action != "apply"
                         or effect.scope_id != scope
-                        or effect.resource_fingerprint != binding.fingerprint
+                        or effect.resource_fingerprint != resource_fingerprint
                         or expected_bytes is None
                         or entry.file.data != expected_bytes
                         or observed_state(entry.file) != node.observed

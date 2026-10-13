@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def tree(runtime, root, *, claim=True):
+async def tree(runtime, root, *, claim=True, persistent=False):
     names = [
         "command_execute",
         "command_get",
@@ -50,7 +50,7 @@ async def tree(runtime, root, *, claim=True):
         "workspace_reconcile",
         "directory_reconcile",
     ]
-    service, agent = await setup(runtime, root, names=names)
+    service, agent = await setup(runtime, root, names=names, persistent=persistent)
     command = await execute(
         agent,
         "import os;os.makedirs('tree/sub');os.chmod('tree',0o750);"

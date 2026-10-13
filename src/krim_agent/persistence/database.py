@@ -975,6 +975,22 @@ class WorkspaceTreeExchangeModelSourceRow(Base):
     operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
+class WorkspaceTreeExchangeOriginRow(Base):
+    __tablename__ = "workspace_tree_exchange_origins"
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_exchange_proposals.proposal_id"), primary_key=True
+    )
+    source_plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_completed_seals.plan_id"), index=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    tree_fingerprint: Mapped[str] = mapped_column(String(64))
+    proof_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class CommandDirectoryProposalRow(Base):
     __tablename__ = "command_directory_proposals"
     __table_args__ = (

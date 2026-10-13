@@ -36,6 +36,9 @@ class TreeExchangePreviewRequest(StrictModel):
     expected_right: str = Field(pattern=r"^[0-9a-f]{64}$")
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
     ttl_seconds: float = Field(default=1800, gt=0, le=86400, allow_inf_nan=False)
+    source_plan_id: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
 
     @model_validator(mode="after")
     def paths(self) -> TreeExchangePreviewRequest:
@@ -93,7 +96,8 @@ class TreeExchangePreviewView(StrictModel):
     right_entry_count: int = Field(ge=1, le=16384)
     left_byte_size: int = Field(ge=0, le=134217728)
     right_byte_size: int = Field(ge=0, le=134217728)
-    origin: Literal["existing_trees"] = "existing_trees"
+    origin: Literal["existing_trees", "completed_tree"] = "existing_trees"
+    source_plan_id: str | None = None
     revision: int = Field(ge=0, le=9007199254740991)
     status: TreeExchangeStatus
     expires_at: float = Field(allow_inf_nan=False)

@@ -50,7 +50,7 @@ NAMES = [
 ]
 
 
-async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None):
+async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None, persistent=False):
     async def allow(*_args):
         return "allow"
 
@@ -81,7 +81,7 @@ async def setup(runtime, root, *, policy=None, names=None, max_file_bytes=None):
             ),
         )
     )
-    view = await service.spawn("publisher")
+    view = await service.spawn("publisher", persistent=persistent)
     return service, AgentSession(service, view.agent_id)
 
 
@@ -590,7 +590,7 @@ async def test_same_proposal_race_and_nonempty_migration_refuses_loss(runtime, t
         async with runtime.repository.database.engine.connect() as sql:
             assert (
                 await sql.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0045_completed_tree_seals"
+            ).scalar_one() == "0046_tree_exchange_origins"
             assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()
