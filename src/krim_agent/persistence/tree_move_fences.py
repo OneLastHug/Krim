@@ -105,10 +105,17 @@ async def assert_no_move_lock(
 async def assert_namespace_available(
     sql: AsyncSession, change: PreparedTreeMove, *, exclude_operation_id: str | None = None
 ) -> NamespaceKeys:
+    keys = move_keys(change)
+    await assert_namespace_keys_available(sql, keys, exclude_operation_id=exclude_operation_id)
+    return keys
+
+
+async def assert_namespace_keys_available(
+    sql: AsyncSession, keys: NamespaceKeys, *, exclude_operation_id: str | None = None
+) -> None:
     from .workspace_directories import decode
     from .workspace_edits import decode_prepared
 
-    keys = move_keys(change)
     await assert_no_move_lock(sql, keys, exclude_operation_id=exclude_operation_id)
     files = await sql.scalars(
         select(WorkspaceEditAttemptRow).join(
@@ -129,4 +136,3 @@ async def assert_namespace_available(
     for directory_row in directories:
         if keys.intersection(directory_keys(decode(directory_row.prepared))):
             raise ServiceError("workspace_directory_busy", "原全树命名空间有未收束目录操作", 409)
-    return keys

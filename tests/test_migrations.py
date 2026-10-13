@@ -58,7 +58,7 @@ async def test_legacy_m1_database_is_upgraded_without_changing_history(tmp_path)
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0044_tree_exchange_ledger"
+            ).scalar() == "0045_completed_tree_seals"
             assert (
                 await connection.execute(
                     text("SELECT payload FROM tool_audits WHERE call_id='call'")
