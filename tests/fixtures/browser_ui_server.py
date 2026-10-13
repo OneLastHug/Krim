@@ -34,6 +34,9 @@ from krim_agent.persistence.database import (
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryProposalRow,
     WorkspaceTreeModelSourceRow,
+    WorkspaceTreeMoveAttemptRow,
+    WorkspaceTreeMoveModelSourceRow,
+    WorkspaceTreeMoveProposalRow,
 )
 from krim_agent.protocol.domain import ChatRequest, ServiceError
 from krim_agent.protocol.models import StrictModel
@@ -243,6 +246,227 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     )
     app.state.agents.register_tree_models()
     app.state.agents.register_tree_queries()
+    app.state.agents.register_tree_moves()
+
+    class TestTreeMoveControl(StrictModel):
+        action: Literal[
+            "seed", "html", "catalog", "stat", "counts", "fail_save", "pause", "release", "gate"
+        ]
+        path: str = Field(default="tree", pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        agent_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+
+    tree_move_fail_save = False
+    tree_move_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+    tree_move_model_calls: dict[str, int] = {}
+    original_tree_move_settle = app.state.agents.manager.tree_moves.store.settle
+    original_tree_move_authority = app.state.agents.manager.tree_moves.store.assert_execution
+
+    async def controlled_tree_move_settle(*args, **kwargs):
+        global tree_move_fail_save
+        if tree_move_fail_save:
+            tree_move_fail_save = False
+            raise OSError("synthetic browser tree move receipt failure")
+        return await original_tree_move_settle(*args, **kwargs)
+
+    async def controlled_tree_move_authority(scope, identifier):
+        gate = tree_move_gates.get(scope.removeprefix("session:"))
+        if gate is not None and not gate[1].is_set():
+            gate[0].set()
+            await gate[1].wait()
+        await original_tree_move_authority(scope, identifier)
+
+    app.state.agents.manager.tree_moves.store.settle = controlled_tree_move_settle
+    app.state.agents.manager.tree_moves.store.assert_execution = controlled_tree_move_authority
+
+    @app.post("/_test/tree-move")
+    async def configure_tree_move(payload: TestTreeMoveControl) -> dict:
+        # 隔离合成浏览器fixture；这些控制路由不在产品API或分发包。
+        global tree_move_fail_save
+        target = write_root / payload.path
+        if payload.action == "html":
+            name = "<img src=x onerror=window.treeInjected=1>"
+            target = write_root / name
+        if payload.action in {"seed", "html"}:
+            (target / "sub/empty").mkdir(parents=True)
+            (target / "sub/data.bin").write_bytes(b"\0\xff\x80")
+            target.chmod(0o750)
+            if payload.action == "html":
+                return {"path": name}
+        elif payload.action == "catalog":
+            from krim_agent.sdk import TreeMovePreviewRequest
+
+            agent = AgentSession(app.state.agents, payload.agent_id or "")
+            inspected = await agent.inspect_tree(payload.path)
+            identifiers = []
+            for position in range(21):
+                proposal = await agent.preview_tree_move(
+                    TreeMovePreviewRequest(
+                        source_path=payload.path,
+                        target_path=f"{payload.path}-page-{position}",
+                        expected_fingerprint=inspected.fingerprint,
+                        request_key=str(uuid4()),
+                    )
+                )
+                identifiers.append(proposal.proposal_id)
+            return {"proposal_ids": identifiers}
+        elif payload.action == "fail_save":
+            tree_move_fail_save = True
+        elif payload.action == "pause":
+            tree_move_gates[payload.agent_id or ""] = (asyncio.Event(), asyncio.Event())
+        elif payload.action == "release":
+            gate = tree_move_gates.get(payload.agent_id or "")
+            if gate is not None:
+                gate[1].set()
+        if payload.action == "gate":
+            gate = tree_move_gates.get(payload.agent_id or "")
+            return {"entered": bool(gate and gate[0].is_set())}
+        if payload.action == "counts":
+            scope = "session:" + (payload.agent_id or "")
+            async with runtime.repository.database.sessions() as sql:
+                proposals = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeMoveProposalRow)
+                    .where(WorkspaceTreeMoveProposalRow.scope_id == scope)
+                )
+                operations = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeMoveAttemptRow)
+                    .where(WorkspaceTreeMoveAttemptRow.scope_id == scope)
+                )
+                cancelled = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeMoveAttemptRow)
+                    .where(
+                        WorkspaceTreeMoveAttemptRow.scope_id == scope,
+                        WorkspaceTreeMoveAttemptRow.cancelled.is_(True),
+                    )
+                )
+                sources = await sql.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceTreeMoveModelSourceRow)
+                    .join(
+                        WorkspaceTreeMoveProposalRow,
+                        WorkspaceTreeMoveModelSourceRow.proposal_id
+                        == WorkspaceTreeMoveProposalRow.proposal_id,
+                    )
+                    .where(WorkspaceTreeMoveProposalRow.scope_id == scope)
+                )
+            return {
+                "proposals": proposals,
+                "operations": operations,
+                "cancelled": cancelled,
+                "sources": sources,
+                "provider_calls": tree_move_model_calls.get(payload.agent_id or "", 0),
+            }
+        found = target.exists()
+        binary = target / "sub/data.bin"
+        return {
+            "found": found,
+            "inode": target.stat().st_ino if found else None,
+            "binary_inode": binary.stat().st_ino if binary.exists() else None,
+            "binary_hex": binary.read_bytes().hex() if binary.exists() else None,
+        }
+
+    class TestModelTreeMove(StrictModel):
+        agent_id: str = Field(pattern=r"^[a-f0-9-]{36}$")
+        source_path: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+        target_path: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+
+    @app.post("/_test/model-tree-move")
+    async def create_model_tree_move(payload: TestModelTreeMove) -> dict:
+        from krim_agent.sdk import TreeMoveQueryRequest
+
+        agents = app.state.agents
+        handle = agents._handle(payload.agent_id)
+        previous_provider, previous_policy = handle.runtime.provider, handle.runtime.tool_policy
+        preview_key, change_key = str(uuid4()), str(uuid4())
+
+        class Provider:
+            name = "offline-browser-nonempty-tree-move"
+            calls = 0
+            proposal_id = ""
+
+            async def stream(self, messages, tools):
+                self.calls += 1
+                previous = json.loads(messages[-1].content) if self.calls > 1 else None
+                if self.calls == 1:
+                    name, arguments = "tree_move_inspect", {"path": payload.source_path}
+                elif self.calls == 2:
+                    name, arguments = (
+                        "tree_move_preview",
+                        {
+                            "source_path": payload.source_path,
+                            "target_path": payload.target_path,
+                            "expected_fingerprint": previous["fingerprint"],
+                            "request_key": preview_key,
+                        },
+                    )
+                elif self.calls == 3:
+                    self.proposal_id = previous["proposal_id"]
+                    name, arguments = (
+                        "tree_move_change",
+                        {
+                            "proposal_id": self.proposal_id,
+                            "action": "apply",
+                            "expected_revision": previous["revision"],
+                            "request_key": change_key,
+                        },
+                    )
+                elif self.calls == 4:
+                    assert previous["status"] == "done", previous
+                    name, arguments = (
+                        "tree_move_query",
+                        {"kind": "proposal", "identifier": self.proposal_id},
+                    )
+                else:
+                    assert previous["proposal"]["status"] == "applied", previous
+                    yield ModelText(text="浏览器原模型树移动完成")
+                    yield ModelUsage(
+                        usage=TokenUsage(input_tokens=10, output_tokens=1, total_tokens=11)
+                    )
+                    return
+                yield ModelToolCall(
+                    id=f"browser-tree-move-{self.calls}", name=name, arguments=arguments
+                )
+                yield ModelUsage(
+                    usage=TokenUsage(input_tokens=10, output_tokens=1, total_tokens=11)
+                )
+
+        async def allow(_definition, _context):
+            return "allow"
+
+        provider = Provider()
+        handle.runtime.provider = provider
+        handle.runtime.tool_policy = profile_policy(handle.definition.mode, allow)
+        try:
+            agent = AgentSession(agents, payload.agent_id)
+            result = await agent.execute("浏览器原模型整树移动", idempotency_key=str(uuid4()))
+            assert result.status == "completed", result
+            tree_move_model_calls[payload.agent_id] = provider.calls
+            fact = await agent.query_tree_move(
+                TreeMoveQueryRequest(kind="proposal", identifier=provider.proposal_id)
+            )
+            async with runtime.repository.database.sessions() as sql:
+                sources = [
+                    (row.run_id, row.call_id)
+                    for row in await sql.scalars(
+                        select(WorkspaceTreeMoveModelSourceRow).where(
+                            WorkspaceTreeMoveModelSourceRow.proposal_id == provider.proposal_id
+                        )
+                    )
+                ]
+            assert set(sources) == {
+                (result.run_id, "browser-tree-move-2"),
+                (result.run_id, "browser-tree-move-3"),
+            }
+            return {
+                "proposal": fact.proposal.model_dump(mode="json"),
+                "provider_calls": provider.calls,
+                "preview_key": preview_key,
+                "change_key": change_key,
+            }
+        finally:
+            handle.runtime.provider, handle.runtime.tool_policy = previous_provider, previous_policy
 
     class TestWorkspaceControl(StrictModel):
         action: Literal["seed", "fail_save", "large"]

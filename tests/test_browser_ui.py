@@ -93,6 +93,16 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
             and "DirectoryChangesUI" in directories_script.text
         )
         assert command_script.headers["x-content-type-options"] == "nosniff"
+        moves_script = await client.get("/ui/tree-moves-ui.js")
+        assert moves_script.status_code == 200 and "TreeMovesUI" in moves_script.text
+        assert moves_script.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'self'" in moves_script.headers["content-security-policy"]
+        head = await client.head("/ui/tree-moves-ui.js")
+        assert head.status_code == 200 and head.content == b""
+        assert (await client.post("/ui/tree-moves-ui.js")).status_code == 401
+        assert (
+            await client.get("/v1/agents/example/workspace/tree-moves/query?kind=proposals")
+        ).status_code == 401
         assert (await client.get("/v1/agents/example/commands")).status_code == 401
         assert (
             await client.get("/v1/agents/example/workspace/tree-plans/by-key?request_key=original")

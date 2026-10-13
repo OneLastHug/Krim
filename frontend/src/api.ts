@@ -200,6 +200,35 @@ export interface DirectoryPage {
 export interface DirectoryInspectView {
   path: string; found: boolean; fingerprint: string | null; mode: number | null; empty: boolean | null;
 }
+export interface TreeMoveInspectView {
+  path: string; found: boolean; fingerprint: string | null; entry_count: number;
+  directory_count: number; file_count: number; byte_size: number; mode: number | null;
+}
+export interface TreeMovePreviewRequest {
+  source_path: string; target_path: string; expected_fingerprint: string;
+  request_key: string; ttl_seconds?: number;
+}
+export interface TreeMovePreviewView {
+  proposal_id: string; scope_id: string; workspace_key: string; resource_fingerprint: string;
+  source_path: string; target_path: string; before_fingerprint: string; entry_count: number;
+  byte_size: number; revision: number; status: WorkspaceChangeView["status"];
+  expires_at: number; active_operation_id: string | null; created_at: string; updated_at: string;
+}
+export type TreeMoveAction = DirectoryAction;
+export interface TreeMoveAttemptView {
+  operation_id: string; proposal_id: string; scope_id: string; action: WorkspaceAction;
+  expected_revision: number; status: "running" | "done" | "rejected" | "uncertain";
+  receipt: { source_path: string; target_path: string; status: "done" | "rejected" | "uncertain";
+    before_fingerprint: string; after_fingerprint: string | null; changed: boolean;
+    error_code: string | null; recovery_required: boolean } | null;
+  cancelled: boolean; recovery_required: boolean; created_at: string; updated_at: string;
+}
+export type TreeMoveQueryKind = "proposal" | "operation" | "by_key" | "operation_by_key" | "history" | "proposals";
+export interface TreeMoveQueryResult {
+  kind: TreeMoveQueryKind; proposal: TreeMovePreviewView | null; operation: TreeMoveAttemptView | null;
+  history: { items: TreeMoveAttemptView[]; next_after: string | null } | null;
+  proposals: { items: TreeMovePreviewView[]; next_after: string | null } | null;
+}
 export interface CommandDirectoryDelta {
   path: string; mode: number; empty: boolean; creatable: boolean; proposal_id: string | null;
 }
