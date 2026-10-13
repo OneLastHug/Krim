@@ -7,7 +7,7 @@ import inspect
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints
 from uuid import uuid4
@@ -100,6 +100,15 @@ class TreePlanModelBackend(Protocol):
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]: ...
     async def validate_result(self, kind: str, value: Any, context: ToolContext) -> None: ...
+
+
+class TreeMoveBackend(Protocol):
+    def call_scope(self) -> AbstractAsyncContextManager[None]: ...
+    async def tool_operation(
+        self, operation: str, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, JsonValue]: ...
+    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
+    def assert_external_close(self) -> None: ...
 
 
 class CommandBackend(Protocol):
@@ -195,6 +204,8 @@ class ToolContext:
     _tree_query_response: str | None = field(default=None, repr=False)
     workspace_tree_models: TreePlanModelBackend | None = None
     _tree_model_response: tuple[str, str] | None = field(default=None, repr=False)
+    tree_moves: TreeMoveBackend | None = None
+    _tree_move_response: tuple[str, str] | None = field(default=None, repr=False)
     # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
@@ -243,6 +254,7 @@ class ToolContext:
             workspace_trees=self.workspace_trees,
             workspace_tree_queries=self.workspace_tree_queries,
             workspace_tree_models=self.workspace_tree_models,
+            tree_moves=self.tree_moves,
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
