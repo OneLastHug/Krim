@@ -5,7 +5,10 @@ from typing import Any
 
 from pydantic import BaseModel, JsonValue
 
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.workspace_tree_exchange_types import (
     TreeExchangeAction,
     TreeExchangeAttemptView,
@@ -16,6 +19,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangePreviewView,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 
@@ -61,6 +65,14 @@ def tree_exchange_tools() -> tuple[ToolDefinition, ...]:
         )
 
     specifications: tuple[tuple[str, str, str, type[BaseModel], type[BaseModel], Risk], ...] = (
+        (
+            "tree_exchange_seal_query",
+            "seal_query",
+            "只读原plan已封存完整生成来源；不观察当前路径、封存或生成",
+            TreeExchangeSealLookupRequest,
+            CompletedTreeOriginLookupView,
+            "read",
+        ),
         (
             "tree_exchange_inspect",
             "inspect",

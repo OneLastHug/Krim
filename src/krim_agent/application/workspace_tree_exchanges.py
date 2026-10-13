@@ -12,7 +12,10 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.persistence.workspace_tree_exchanges import WorkspaceTreeExchangeStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
@@ -35,6 +38,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangePreviewView,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_snapshot import WorkspaceTreeSnapshotReader
@@ -166,6 +170,24 @@ class TreeExchangeService:
     async def _execute(
         self, operation: str, payload: dict[str, Any], context: ToolContext, abort: Event
     ) -> dict[str, JsonValue]:
+        if operation == "seal_query":
+            seal_lookup = TreeExchangeSealLookupRequest.model_validate(payload)
+            self._source(context)
+            scope, binding = await self.directories._query_guard(context)
+            async with self.store.database.write_lock, self.store.database.sessions() as sql:
+                sealed = await self.store.seals.get_material_in_transaction(
+                    sql,
+                    scope,
+                    seal_lookup.plan_id,
+                    workspace_key=binding.key,
+                    resource_fingerprint=binding.fingerprint,
+                )
+            _, current = await self.directories._query_guard(context)
+            if current.manifest() != binding.manifest():
+                raise ServiceError("workspace_binding_changed", "封存查询期间原资源已变化", 403)
+            return CompletedTreeOriginLookupView(
+                plan_id=seal_lookup.plan_id, origin=sealed.origin.view if sealed else None
+            ).model_dump(mode="json")
         if operation == "seal":
             return (
                 await self._seal(TreeExchangeSealRequest.model_validate(payload), context, abort)

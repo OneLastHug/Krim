@@ -49,6 +49,12 @@ class CompletedTreeOriginView(StrictModel):
     proof_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class CompletedTreeOriginLookupView(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    plan_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    origin: CompletedTreeOriginView | None
+
+
 @dataclass(frozen=True)
 class VerifiedTreeOrigin:
     view: CompletedTreeOriginView

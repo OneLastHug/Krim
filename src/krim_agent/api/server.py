@@ -134,7 +134,10 @@ from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.attachments import AttachmentRepository
 from krim_agent.persistence.change_lists import ChangeListRepository
 from krim_agent.persistence.checkpoints import CheckpointRepository
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.prompt_context import ContextTagInput, MentionInput, MentionRef, PromptContext
 from krim_agent.protocol.domain import (
     BranchRequest,
@@ -222,6 +225,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangeQueryKind,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_move import (
@@ -1249,6 +1253,18 @@ def create_app(
     ) -> CompletedTreeOriginView:
         _directory_parameters(request, set())
         return await agent_service.tree_exchange_seal(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-exchanges/seals/{plan_id}")
+    async def agent_tree_exchange_seal_query(
+        agent_id: WorkspaceIdentifier,
+        plan_id: WorkspaceIdentifier,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> CompletedTreeOriginLookupView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_exchange_seal_query(
+            agent_id, TreeExchangeSealLookupRequest(plan_id=plan_id), confirmed=confirmed
+        )
 
     @app.get("/v1/agents/{agent_id}/workspace/directory-state")
     async def agent_directory_inspect(

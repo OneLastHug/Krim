@@ -33,7 +33,10 @@ from krim_agent.execution.publication import (
     CommandProposalView,
 )
 from krim_agent.execution.records import CommandView
-from krim_agent.persistence.completed_tree_origins import CompletedTreeOriginView
+from krim_agent.persistence.completed_tree_origins import (
+    CompletedTreeOriginLookupView,
+    CompletedTreeOriginView,
+)
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StreamFrame
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
@@ -89,6 +92,7 @@ from krim_agent.workspace_tree_exchange_types import (
     TreeExchangePreviewView,
     TreeExchangeQueryRequest,
     TreeExchangeQueryResult,
+    TreeExchangeSealLookupRequest,
     TreeExchangeSealRequest,
 )
 from krim_agent.workspace_tree_move import (
@@ -266,6 +270,13 @@ class AgentSession:
         self, request: TreeExchangeSealRequest, *, confirmed: bool = False
     ) -> CompletedTreeOriginView:
         return await self.service.tree_exchange_seal(self.agent_id, request, confirmed=confirmed)
+
+    async def query_tree_exchange_seal(
+        self, plan_id: str, *, confirmed: bool = False
+    ) -> CompletedTreeOriginLookupView:
+        return await self.service.tree_exchange_seal_query(
+            self.agent_id, TreeExchangeSealLookupRequest(plan_id=plan_id), confirmed=confirmed
+        )
 
     async def inspect_directory(
         self, path: str, *, confirmed: bool = False

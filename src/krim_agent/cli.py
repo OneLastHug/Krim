@@ -289,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "inspect",
             "seal",
+            "seal-query",
             "preview",
             "get",
             "list",
@@ -1052,6 +1053,10 @@ def _tree_exchange_command(
     result: BaseModel
     if args.action == "inspect":
         result = client.agent_tree_exchange_inspect(
+            args.agent_id, args.value, confirmed=args.confirm
+        )
+    elif args.action == "seal-query":
+        result = client.agent_tree_exchange_seal_query(
             args.agent_id, args.value, confirmed=args.confirm
         )
     elif args.action == "seal":
