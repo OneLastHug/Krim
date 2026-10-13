@@ -4,6 +4,71 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "原生成根撤销与历史": "Generated root undo and history",
+    "审阅原生成根与保留位置": "Review generated root and preservation path",
+    "原完成生成计划标识": "Original completed generation plan ID",
+    "生成根保留相对路径": "Generated root preservation relative path",
+    "上次实际还原操作标识（再次撤销时填写）": (
+        "Actual previous restore operation ID (for another undo)"
+    ),
+    "查询原完成生成树": "Read original completed generation tree",
+    "封存待撤销的完整树": "Seal complete tree before root undo",
+    "预览生成根撤销": "Preview generated root undo",
+    "生成根原请求键": "Original generated root request key",
+    "按键查看生成根提案": "Read generated root proposal by key",
+    "按键查看生成根操作": "Read generated root operation by key",
+    "刷新生成根历史": "Refresh generated root history",
+    "上一页生成根提案": "Previous generated root proposals",
+    "下一页生成根提案": "Next generated root proposals",
+    "上一页生成根操作": "Previous generated root operations",
+    "下一页生成根操作": "Next generated root operations",
+    "取消进行中的生成根操作": "Cancel active generated root operation",
+    "生成根撤销待确认": "Generated root undo awaiting approval",
+    "生成根移除中": "Generated root removal running",
+    "生成根已移至保留位置": "Generated root moved to preservation path",
+    "生成根还原中": "Generated root restore running",
+    "生成根已还原": "Generated root restored",
+    "生成根保留核实中": "Generated root preservation verification running",
+    "生成根保留已确认": "Generated root preservation confirmed",
+    "生成根操作已拒绝": "Generated root operation rejected",
+    "生成根结果待核实": "Generated root result requires verification",
+    "生成根操作已取消": "Generated root operation cancelled",
+    "已请求取消生成根操作": "Cancellation requested for generated root operation",
+    "移除原生成根": "Remove original generated root",
+    "还原原生成根": "Restore original generated root",
+    "确认保留生成根": "Confirm generated root preservation",
+    "生成根回程与原事实不一致": "Generated root response does not match original facts",
+    "原生成状态": "Original generation status",
+    "原生成根路径": "Original generated root path",
+    "当前生成根尚未检查": "Current generated root not inspected",
+    "首次封存指纹": "First sealed fingerprint",
+    "原完整指纹": "Original complete fingerprint",
+    "快照版本": "Snapshot revision",
+    "来源证明": "Origin proof",
+    "树已完成": "Generation completed",
+    "结果完整指纹": "Result complete fingerprint",
+    "生成根提案已保存，请审阅后确认": "Generated root proposal saved; review before confirming",
+    "当前会话未授权生成根查询": "This session has no permission to query generated root undos",
+    "确认按原生成根条件执行此操作？": (
+        "Confirm this action under the original generated root conditions?"
+    ),
+    "确认取消原生成根操作？": "Confirm cancellation of the original generated root operation?",
+    "原生成根取消已请求，请读取原操作": (
+        "Original generated root cancellation requested; read the original operation"
+    ),
+    "确认核实原生成根结果？": "Confirm verification of the original generated root result?",
+    "暂无生成根撤销提案": "No generated root undo proposals",
+    "查看生成根撤销提案": "View generated root undo proposal",
+    "取消生成根操作": "Cancel generated root operation",
+    "查看原生成根操作": "View original generated root operation",
+    "核实原生成根结果": "Verify original generated root result",
+    "生成根恢复记录不可用，写操作已停用": (
+        "Generated root recovery record unavailable; writes disabled"
+    ),
+    "生成根响应尚未确认，仅查询原请求": (
+        "Generated root response unconfirmed; only query the original request"
+    ),
+    "查询待确认生成根请求": "Query unconfirmed generated root request",
     "双完整目录树交换与历史": "Complete tree exchanges and history",
     "当前会话未授权双树交换查询": "This session has no permission to query tree exchanges",
     "准备双完整树交换": "Prepare a complete tree exchange",

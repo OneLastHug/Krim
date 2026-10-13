@@ -178,6 +178,17 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .tree-exchange-list, .tree-exchange-history { display: grid; gap: 6px; padding-left: 20px; }
 .tree-exchange-detail { display: grid; gap: 6px; margin-top: 8px; }
 .tree-exchange-pending { border-left: 3px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
+.generated-tree-undos { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.generated-tree-undos summary { cursor: pointer; font-weight: 700; }
+.generated-root-editor { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); min-width: 0; }
+.generated-tree-undos label { display: grid; gap: 4px; font-size: 0.8rem; }
+.generated-tree-undos input { width: 100%; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--canvas); }
+.generated-tree-undos [hidden] { display: none; }
+.generated-tree-undos .actions { flex-wrap: wrap; }
+.generated-root-summary, .generated-root-condition, .generated-root-receipt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.8rem; }
+.generated-root-list, .generated-root-history { display: grid; gap: 6px; padding-left: 20px; }
+.generated-root-detail { display: grid; gap: 6px; margin-top: 8px; min-width: 0; }
+.generated-root-pending { border-left: 3px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
 .directory-changes summary { cursor: pointer; font-weight: 700; }
 .directory-editor { display: grid; gap: 7px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); }
 .directory-editor label { display: grid; gap: 4px; font-size: 0.8rem; }

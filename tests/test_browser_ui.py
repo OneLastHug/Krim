@@ -106,6 +106,17 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert "script-src 'self'" in exchange_script.headers["content-security-policy"]
         assert (await client.head("/ui/tree-exchanges-ui.js")).content == b""
         assert (await client.post("/ui/tree-exchanges-ui.js")).status_code == 401
+        root_script = await client.get("/ui/generated-tree-undos-ui.js")
+        assert root_script.status_code == 200 and "GeneratedTreeUndosUI" in root_script.text
+        assert root_script.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'self'" in root_script.headers["content-security-policy"]
+        assert (await client.head("/ui/generated-tree-undos-ui.js")).content == b""
+        assert (await client.post("/ui/generated-tree-undos-ui.js")).status_code == 401
+        assert (
+            await client.get(
+                "/v1/agents/example/workspace/generated-tree-undos/query?kind=proposals"
+            )
+        ).status_code == 401
         assert (
             await client.get("/v1/agents/example/workspace/tree-moves/query?kind=proposals")
         ).status_code == 401
