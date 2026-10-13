@@ -333,3 +333,76 @@ class WorkspaceTreeExchangeWriter:
                 "workspace_tree_exchange_conflict", "原两树撤销身份或版本已变化", 409
             )
         return reverse
+
+    def verify_keep(
+        self,
+        change: PreparedTreeExchange,
+        effect: TreeExchangeEffect,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        authorize: Callable[[], None] | None = None,
+    ) -> TreeExchangeEffect:
+        """锁内核实原双实际after；原物理effect由账本另投影逻辑keep回执。"""
+        self._validate(change)
+        abort = cancelled or (lambda: False)
+        deadline = time.monotonic() + self.lock_timeout
+
+        def check() -> None:
+            self.trees._check(deadline, abort)
+
+        try:
+            receipt = effect.receipt
+            if (
+                receipt.status != "done"
+                or not receipt.changed
+                or receipt.error_code is not None
+                or receipt.recovery_required
+                or receipt.operation_token != change.token
+                or receipt.left_path != change.left.root_path
+                or receipt.right_path != change.right.root_path
+                or receipt.left_before_fingerprint != change.left.fingerprint
+                or receipt.right_before_fingerprint != change.right.fingerprint
+                or effect.observed_left is None
+                or effect.observed_right is None
+                or receipt.left_after_fingerprint != effect.observed_left.fingerprint
+                or receipt.right_after_fingerprint != effect.observed_right.fingerprint
+                or not self._swapped(change, effect.observed_left, effect.observed_right)
+            ):
+                raise ServiceError(
+                    "workspace_tree_exchange_receipt", "保留须绑定原成功交换双完整实际after", 409
+                )
+            with self.trees.directories._locked_parents(
+                (change.left.root_path, change.right.root_path), abort
+            ) as parents:
+                self._parents(change, parents)
+                if authorize is not None:
+                    authorize()
+                left, right = self._capture(
+                    change.left.root_path, change.right.root_path, parents, check
+                )
+                if left != effect.observed_left or right != effect.observed_right:
+                    raise ServiceError(
+                        "workspace_tree_exchange_conflict", "原保留双树身份、内容或版本已变化", 409
+                    )
+                if authorize is not None:
+                    authorize()
+                if self._capture(change.left.root_path, change.right.root_path, parents, check) != (
+                    left,
+                    right,
+                ):
+                    raise ServiceError(
+                        "workspace_tree_exchange_conflict",
+                        "最后资格核实期间原双实际版本已变化",
+                        409,
+                    )
+                check()
+                self._parents(change, parents)
+                return effect
+        except (OSError, ServiceError) as error:
+            return self._effect(
+                change,
+                "rejected",
+                code=error.code
+                if isinstance(error, ServiceError)
+                else "workspace_tree_exchange_io",
+            )
