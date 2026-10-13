@@ -78,6 +78,17 @@ from krim_agent.workspace_restore import (
     CheckpointRestoreView,
 )
 from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from krim_agent.workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptView,
+    TreeMoveInspectRequest,
+    TreeMoveInspectView,
+    TreeMoveOperationRequest,
+    TreeMovePreviewRequest,
+    TreeMovePreviewView,
+    TreeMoveQueryRequest,
+    TreeMoveQueryResult,
+)
 
 if TYPE_CHECKING:
     from .text import StreamTextResult
@@ -173,6 +184,36 @@ class AgentSession:
 
     async def view(self) -> AgentView:
         return await self.service.get(self.agent_id)
+
+    async def inspect_tree(self, path: str, *, confirmed: bool = False) -> TreeMoveInspectView:
+        return await self.service.tree_move_inspect(
+            self.agent_id, TreeMoveInspectRequest(path=path), confirmed=confirmed
+        )
+
+    async def preview_tree_move(
+        self, request: TreeMovePreviewRequest, *, confirmed: bool = False
+    ) -> TreeMovePreviewView:
+        return await self.service.tree_move_preview(self.agent_id, request, confirmed=confirmed)
+
+    async def change_tree_move(
+        self, request: TreeMoveAction, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        return await self.service.tree_move_change(self.agent_id, request, confirmed=confirmed)
+
+    async def query_tree_move(
+        self, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> TreeMoveQueryResult:
+        return await self.service.tree_move_query(self.agent_id, request, confirmed=confirmed)
+
+    async def reconcile_tree_move(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        return await self.service.tree_move_reconcile(
+            self.agent_id, TreeMoveOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def cancel_tree_move(self, proposal_id: str) -> TreeMovePreviewView:
+        return await self.service.tree_move_cancel(self.agent_id, proposal_id)
 
     async def inspect_directory(
         self, path: str, *, confirmed: bool = False

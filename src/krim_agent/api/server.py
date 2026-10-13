@@ -148,7 +148,7 @@ from krim_agent.protocol.domain import (
     TopicCreate,
     TopicView,
 )
-from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope
+from krim_agent.protocol.models import ChannelResult, ProtocolEnvelope, StrictModel
 from krim_agent.providers import ModelProvider, create_provider
 from krim_agent.providers.factory import OwnedProvider
 from krim_agent.runtime import ChatRuntime
@@ -210,6 +210,18 @@ from krim_agent.workspace_restore import (
     CheckpointRestoreView,
 )
 from krim_agent.workspace_tree import TreePlanRequest, TreePlanStepPage, TreePlanView
+from krim_agent.workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptView,
+    TreeMoveInspectRequest,
+    TreeMoveInspectView,
+    TreeMoveOperationRequest,
+    TreeMovePreviewRequest,
+    TreeMovePreviewView,
+    TreeMoveQueryKind,
+    TreeMoveQueryRequest,
+    TreeMoveQueryResult,
+)
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -232,6 +244,13 @@ def _directory_parameters(request: Request, allowed: set[str]) -> None:
     names = {name for name, _ in items}
     if not names <= allowed | {"confirmed"} or len(items) != len(names):
         raise ServiceError("invalid_request", "目录查询参数未知或重复", 422)
+
+
+def _tree_move_parameters(request: Request, allowed: set[str]) -> None:
+    items = request.query_params.multi_items()
+    names = {name for name, _ in items}
+    if not names <= allowed or len(items) != len(names):
+        raise ServiceError("invalid_request", "树查询参数未知或重复", 422)
 
 
 class TopicsResponse(BaseModel):
@@ -272,6 +291,7 @@ def create_app(
     workspace_root: str | Path | None = None,
     workspace_version: str = "local-v1",
     workspace_writable: bool = False,
+    tree_moves_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
     execution_version: str = "local-v1",
     execution_owned: bool = False,
@@ -305,6 +325,8 @@ def create_app(
         max_active_runs=config.max_active_runs,
     )
     agent_service = AgentService(service, config, providers=agent_providers)
+    if tree_moves_enabled:
+        agent_service.register_tree_moves()
 
     def mcp_ready(names: list[str], resource_hash: str) -> None:
         for name in names:
@@ -1032,6 +1054,90 @@ def create_app(
     @app.post("/v1/agents/{agent_id}/workspace/search")
     async def agent_workspace_search(agent_id: str, payload: SearchFilesInput) -> WorkspaceSearch:
         return await agent_service.workspace_search(agent_id, payload)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-state")
+    async def agent_tree_move_inspect(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        path: str = Query(min_length=1, max_length=512),
+        confirmed: bool = Query(default=False),
+    ) -> TreeMoveInspectView:
+        _directory_parameters(request, {"path"})
+        try:
+            selection = TreeMoveInspectRequest(path=path)
+        except ValidationError:
+            raise ServiceError("invalid_request", "树相对路径无效", 422) from None
+        return await agent_service.tree_move_inspect(agent_id, selection, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-moves/preview")
+    async def agent_tree_move_preview(
+        agent_id: WorkspaceIdentifier,
+        payload: TreeMovePreviewRequest,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> TreeMovePreviewView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_move_preview(agent_id, payload, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-moves/change")
+    async def agent_tree_move_change(
+        agent_id: WorkspaceIdentifier,
+        payload: TreeMoveAction,
+        request: Request,
+        confirmed: bool = Query(default=False),
+    ) -> TreeMoveAttemptView:
+        _directory_parameters(request, set())
+        return await agent_service.tree_move_change(agent_id, payload, confirmed=confirmed)
+
+    @app.get("/v1/agents/{agent_id}/workspace/tree-moves/query")
+    async def agent_tree_move_query(
+        agent_id: WorkspaceIdentifier,
+        request: Request,
+        kind: TreeMoveQueryKind,
+        identifier: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        request_key: str | None = Query(
+            default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+        ),
+        after: str | None = Query(
+            default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        ),
+        limit: int = Query(default=32, ge=1, le=32),
+        confirmed: bool = Query(default=False),
+    ) -> TreeMoveQueryResult:
+        _directory_parameters(request, {"kind", "identifier", "request_key", "after", "limit"})
+        try:
+            selection = TreeMoveQueryRequest(
+                kind=kind, identifier=identifier, request_key=request_key, after=after, limit=limit
+            )
+        except ValidationError:
+            raise ServiceError("invalid_request", "树查询选择器无效", 422) from None
+        return await agent_service.tree_move_query(agent_id, selection, confirmed=confirmed)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-moves/{proposal_id}/cancel")
+    async def agent_tree_move_cancel(
+        agent_id: WorkspaceIdentifier,
+        proposal_id: WorkspaceIdentifier,
+        request: Request,
+        payload: StrictModel | None = None,
+    ) -> TreeMovePreviewView:
+        _tree_move_parameters(request, set())
+        return await agent_service.tree_move_cancel(agent_id, proposal_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/tree-move-operations/{operation_id}/reconcile")
+    async def agent_tree_move_reconcile(
+        agent_id: WorkspaceIdentifier,
+        operation_id: WorkspaceIdentifier,
+        request: Request,
+        payload: TreeMoveOperationRequest | None = None,
+        confirmed: bool = Query(default=False),
+    ) -> TreeMoveAttemptView:
+        _directory_parameters(request, set())
+        operation = payload or TreeMoveOperationRequest(operation_id=operation_id)
+        if operation.operation_id != operation_id:
+            raise ServiceError("invalid_request", "路径与原树操作标识不一致", 422)
+        return await agent_service.tree_move_reconcile(agent_id, operation, confirmed=confirmed)
 
     @app.get("/v1/agents/{agent_id}/workspace/directory-state")
     async def agent_directory_inspect(

@@ -39,6 +39,13 @@ from .workspace_restore import (
     CheckpointRestoreView,
 )
 from .workspace_tree import TreePlanRequest, TreePlanView
+from .workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptView,
+    TreeMovePreviewRequest,
+    TreeMoveQueryKind,
+    TreeMoveQueryRequest,
+)
 
 _CHECKPOINT_ACTIONS = (
     "create-checkpoint",
@@ -64,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
     serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
     serve.add_argument("--workspace", help="workspace（工作区）：宿主明确授权的根目录，默认只读")
+    serve.add_argument(
+        "--tree-moves",
+        action="store_true",
+        help="tree moves（树移动）：显式登记非空树工具，写入仍需授权",
+    )
     serve.add_argument(
         "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
     )
@@ -224,6 +236,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
     )
     directories.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
+    moves = subparsers.add_parser(
+        "tree-moves", help="tree moves（树移动）：完整目录树条件事务及原历史"
+    )
+    moves.add_argument(
+        "action",
+        choices=[
+            "inspect",
+            "preview",
+            "get",
+            "list",
+            "by-key",
+            "operation",
+            "operation-by-key",
+            "history",
+            "apply",
+            "undo",
+            "keep",
+            "reconcile",
+            "cancel",
+        ],
+    )
+    moves.add_argument("agent_id", help="Agent实例标识")
+    moves.add_argument("value", nargs="?", help="相对树路径、原proposal/operation标识或请求键")
+    moves.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
+    moves.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
+    moves.add_argument("--request-key", help="request key（请求键）：明确原幂等键")
+    moves.add_argument("--after", help="after（游标）：上一页末项原标识")
+    moves.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
+    moves.add_argument(
+        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
+    )
+    moves.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
     tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
     tasks.add_argument("action", choices=["get", "history", "update"])
     tasks.add_argument("agent_id", help="Agent实例标识")
@@ -868,6 +912,77 @@ def _directory_command(
         parser.exit(1)
 
 
+def _tree_move_command(
+    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
+        parser.error("树分页参数只适用于list/history")
+    if args.action in {"list", "preview"} and args.value is not None:
+        parser.error("树list/preview不接受位置标识")
+    if args.action != "preview" and args.request is not None:
+        parser.error("--request仅用于树preview")
+    if args.action not in {"apply", "undo", "keep"} and (
+        args.revision is not None or args.request_key is not None
+    ):
+        parser.error("--revision/--request-key仅用于树apply/undo/keep")
+    if args.action != "list" and args.action != "preview" and not args.value:
+        parser.error("树操作需要原路径、标识或请求键")
+    result: BaseModel
+    if args.action == "inspect":
+        result = client.agent_tree_move_inspect(args.agent_id, args.value, confirmed=args.confirm)
+    elif args.action == "preview":
+        if not args.request:
+            parser.error("tree-moves preview需要--request本地JSON文件")
+        try:
+            with Path(args.request).open("rb") as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                parser.error("树意图不能超过64KiB")
+            request = TreeMovePreviewRequest.model_validate_json(raw)
+        except (OSError, ValueError):
+            parser.error("树预览请求无效")
+        result = client.agent_tree_move_preview(args.agent_id, request, confirmed=args.confirm)
+    elif args.action in {"apply", "undo", "keep"}:
+        if args.revision is None or not args.request_key:
+            parser.error("树apply/undo/keep需要原提案ID、--revision和--request-key")
+        result = client.agent_tree_move_change(
+            args.agent_id,
+            TreeMoveAction(
+                proposal_id=args.value,
+                action=args.action,
+                expected_revision=args.revision,
+                request_key=args.request_key,
+            ),
+            confirmed=args.confirm,
+        )
+    elif args.action == "reconcile":
+        result = client.agent_tree_move_reconcile(args.agent_id, args.value, confirmed=args.confirm)
+    elif args.action == "cancel":
+        if args.confirm:
+            parser.error("树cancel不需要--confirm")
+        result = client.agent_tree_move_cancel(args.agent_id, args.value)
+    else:
+        kinds: dict[str, TreeMoveQueryKind] = {
+            "get": "proposal",
+            "list": "proposals",
+            "by-key": "by_key",
+            "operation": "operation",
+            "operation-by-key": "operation_by_key",
+            "history": "history",
+        }
+        selection = TreeMoveQueryRequest(
+            kind=kinds[args.action],
+            identifier=args.value if args.action in {"get", "operation", "history"} else None,
+            request_key=args.value if args.action in {"by-key", "operation-by-key"} else None,
+            after=args.after,
+            limit=args.limit,
+        )
+        result = client.agent_tree_move_query(args.agent_id, selection, confirmed=args.confirm)
+    print(result.model_dump_json(indent=2))
+    if isinstance(result, TreeMoveAttemptView) and result.status != "done":
+        parser.exit(1)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -915,6 +1030,8 @@ def main() -> None:
 
         if not 1 <= args.port <= 65535:
             parser.error("端口必须在 1–65535 之间")
+        if args.tree_moves and not args.workspace:
+            parser.error("serve --tree-moves需要已授权--workspace")
         settings = Settings.from_env()
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
@@ -949,6 +1066,7 @@ def main() -> None:
                 workspace_root=args.workspace,
                 workspace_version=args.workspace_version,
                 workspace_writable=args.workspace_write,
+                tree_moves_enabled=args.tree_moves,
                 execution_runner=execution_runner,
                 execution_version=args.execution_version,
                 execution_owned=execution_runner is not None,
@@ -1009,6 +1127,9 @@ def main() -> None:
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)
+                return
+            if args.command == "tree-moves":
+                _tree_move_command(client, args, parser)
                 return
             if args.command == "tasks":
                 if args.action == "get":
