@@ -77,8 +77,7 @@ def _corrupt() -> ServiceError:
     return ServiceError("workspace_tree_move_corrupt", "原树移动私有材料损坏或不完整", 409)
 
 
-def encode_move(change: PreparedTreeMove) -> tuple[dict[str, object], bytes]:
-    snapshot = change.before
+def _encode_tree(snapshot: WorkspaceTreeSnapshot) -> tuple[dict[str, object], bytes]:
     if not 1 <= len(snapshot.entries) <= MAX_NODES:
         raise ServiceError("workspace_tree_move_metadata_limit", "原树节点超过容量", 413)
     chunks = []
@@ -94,6 +93,90 @@ def encode_move(change: PreparedTreeMove) -> tuple[dict[str, object], bytes]:
             chunks.append(entry.file.data)
         nodes.append(node)
     payload = b"".join(chunks)
+    tree: dict[str, object] = {
+        "root_path": snapshot.root_path,
+        "workspace_fingerprint": snapshot.workspace_fingerprint,
+        "parent": {"device": snapshot.parent_identity[0], "inode": snapshot.parent_identity[1]},
+        "fingerprint": snapshot.fingerprint,
+        "entries": nodes,
+    }
+    return tree, payload
+
+
+def _decode_tree(value: _Tree, payload: bytes) -> WorkspaceTreeSnapshot:
+    entries = []
+    offset = 0
+    for node in value.entries:
+        if node.kind == "directory":
+            if node.empty is None or any(
+                item is not None for item in (node.sha256, node.byte_size, node.offset)
+            ):
+                raise ValueError()
+            directory = DirectorySnapshot(
+                node.mode,
+                node.device,
+                node.inode,
+                node.mtime_ns,
+                node.ctime_ns,
+                node.uid,
+                node.gid,
+                node.nlink,
+                node.empty,
+            )
+            entries.append(TreeSnapshotEntry(node.path, directory=directory))
+        else:
+            if (
+                node.empty is not None
+                or node.sha256 is None
+                or node.byte_size is None
+                or node.offset != offset
+                or node.nlink != 1
+                or offset + node.byte_size > len(payload)
+            ):
+                raise ValueError()
+            data = payload[offset : offset + node.byte_size]
+            offset += node.byte_size
+            if node.sha256 != hashlib.sha256(data).hexdigest():
+                raise ValueError()
+            file = FileSnapshot(
+                data,
+                node.mode,
+                node.device,
+                node.inode,
+                node.mtime_ns,
+                node.ctime_ns,
+                node.uid,
+                node.gid,
+            )
+            entries.append(TreeSnapshotEntry(node.path, file=file))
+    if offset != len(payload):
+        raise ValueError()
+    snapshot = WorkspaceTreeSnapshot(
+        value.root_path,
+        value.workspace_fingerprint,
+        (value.parent.device, value.parent.inode),
+        tuple(entries),
+    )
+    paths = [entry.path for entry in snapshot.entries]
+    if paths != sorted(paths, key=lambda path: tuple(path.split("/"))):
+        raise ValueError()
+    parent_paths = {path.rpartition("/")[0] for path in paths[1:]}
+    for entry in snapshot.entries:
+        observed = entry.directory or entry.file
+        assert observed is not None
+        if observed.device != snapshot.parent_identity[0]:
+            raise ValueError()
+        if entry.directory is not None and entry.directory.empty != (
+            entry.path not in parent_paths
+        ):
+            raise ValueError()
+    if snapshot.fingerprint != value.fingerprint:
+        raise ValueError()
+    return snapshot
+
+
+def encode_move(change: PreparedTreeMove) -> tuple[dict[str, object], bytes]:
+    tree, payload = _encode_tree(change.before)
     metadata = {
         "version": 1,
         "target_path": change.target_path,
@@ -102,13 +185,7 @@ def encode_move(change: PreparedTreeMove) -> tuple[dict[str, object], bytes]:
             "inode": change.target_parent_identity[1],
         },
         "token": change.token,
-        "tree": {
-            "root_path": snapshot.root_path,
-            "workspace_fingerprint": snapshot.workspace_fingerprint,
-            "parent": {"device": snapshot.parent_identity[0], "inode": snapshot.parent_identity[1]},
-            "fingerprint": snapshot.fingerprint,
-            "entries": nodes,
-        },
+        "tree": tree,
         "payload_size": len(payload),
         "payload_sha256": hashlib.sha256(payload).hexdigest(),
     }
@@ -146,74 +223,7 @@ def decode_move(metadata: object, payload: bytes) -> PreparedTreeMove:
             or value.payload_sha256 != hashlib.sha256(payload).hexdigest()
         ):
             raise ValueError()
-        entries = []
-        offset = 0
-        for node in value.tree.entries:
-            if node.kind == "directory":
-                if node.empty is None or any(
-                    item is not None for item in (node.sha256, node.byte_size, node.offset)
-                ):
-                    raise ValueError()
-                directory = DirectorySnapshot(
-                    node.mode,
-                    node.device,
-                    node.inode,
-                    node.mtime_ns,
-                    node.ctime_ns,
-                    node.uid,
-                    node.gid,
-                    node.nlink,
-                    node.empty,
-                )
-                entries.append(TreeSnapshotEntry(node.path, directory=directory))
-            else:
-                if (
-                    node.empty is not None
-                    or node.sha256 is None
-                    or node.byte_size is None
-                    or node.offset != offset
-                    or node.nlink != 1
-                    or offset + node.byte_size > len(payload)
-                ):
-                    raise ValueError()
-                data = payload[offset : offset + node.byte_size]
-                offset += node.byte_size
-                if node.sha256 != hashlib.sha256(data).hexdigest():
-                    raise ValueError()
-                file = FileSnapshot(
-                    data,
-                    node.mode,
-                    node.device,
-                    node.inode,
-                    node.mtime_ns,
-                    node.ctime_ns,
-                    node.uid,
-                    node.gid,
-                )
-                entries.append(TreeSnapshotEntry(node.path, file=file))
-        if offset != len(payload):
-            raise ValueError()
-        snapshot = WorkspaceTreeSnapshot(
-            value.tree.root_path,
-            value.tree.workspace_fingerprint,
-            (value.tree.parent.device, value.tree.parent.inode),
-            tuple(entries),
-        )
-        paths = [entry.path for entry in snapshot.entries]
-        if paths != sorted(paths, key=lambda path: tuple(path.split("/"))):
-            raise ValueError()
-        parent_paths = {path.rpartition("/")[0] for path in paths[1:]}
-        for entry in snapshot.entries:
-            observed = entry.directory or entry.file
-            assert observed is not None
-            if observed.device != snapshot.parent_identity[0]:
-                raise ValueError()
-            if entry.directory is not None and entry.directory.empty != (
-                entry.path not in parent_paths
-            ):
-                raise ValueError()
-        if snapshot.fingerprint != value.tree.fingerprint:
-            raise ValueError()
+        snapshot = _decode_tree(value.tree, payload)
         WorkspaceTreeWriter._paths(snapshot.root_path, value.target_path)
         if snapshot.parent_identity[0] != value.target_parent.device:
             raise ValueError()

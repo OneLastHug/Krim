@@ -161,7 +161,8 @@ async def main():
         assert await service.restore_persistent() == 1
         agent = AgentSession(service, metadata["agent_id"])
         assert "session:" + agent.session_id == metadata["scope"]
-        assert await store.recover_interrupted() == 1
+        # 已发布Agent restore先收束原move；再次恢复应为0，不能第二次接纳。
+        assert await store.recover_interrupted() == 0
         operation = await store.operation(metadata["scope"], metadata["operation_id"])
         assert operation.view.status == "uncertain" and operation.intent_recorded
         assert operation.prepared.before.fingerprint == metadata["before"]
