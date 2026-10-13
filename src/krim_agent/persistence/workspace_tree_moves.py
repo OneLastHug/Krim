@@ -20,6 +20,7 @@ from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveActionKind,
+    TreeMoveAttemptPage,
     TreeMoveAttemptView,
     TreeMoveModelKind,
     TreeMoveModelSource,
@@ -721,6 +722,55 @@ class WorkspaceTreeMoveStore:
             await self._expire(sql, row, proposal)
             return await self._attempt_value(sql, row, proposal)
 
+    async def operation_by_key(self, scope: str, key: str) -> StoredTreeMoveAttempt | None:
+        self.files._key(key)
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            await self.files._scope(sql, scope, writing=False)
+            row = await sql.scalar(
+                select(WorkspaceTreeMoveAttemptRow).where(
+                    WorkspaceTreeMoveAttemptRow.scope_id == scope,
+                    WorkspaceTreeMoveAttemptRow.request_key == key,
+                )
+            )
+            if row is None:
+                return None
+            row, proposal = await self._operation(sql, scope, row.operation_id)
+            await self._expire(sql, row, proposal)
+            return await self._attempt_value(sql, row, proposal)
+
+    async def find_action(
+        self,
+        scope: str,
+        request: TreeMoveAction,
+        fingerprint: str,
+        *,
+        model_source: TreeMoveModelSource | None = None,
+    ) -> StoredTreeMoveAttempt | None:
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            proposal = await self._proposal(sql, scope, request.proposal_id)
+            if proposal.resource_fingerprint != fingerprint:
+                raise ServiceError("workspace_binding_changed", "原树动作资源版本不匹配", 403)
+            row = await sql.scalar(
+                select(WorkspaceTreeMoveAttemptRow).where(
+                    WorkspaceTreeMoveAttemptRow.scope_id == scope,
+                    WorkspaceTreeMoveAttemptRow.request_key == request.request_key,
+                )
+            )
+            if row is None:
+                return None
+            if (
+                row.request_hash != self._wanted(request, fingerprint)
+                or row.proposal_id != proposal.proposal_id
+            ):
+                raise ServiceError(
+                    "workspace_tree_move_idempotency_conflict", "原树动作键已绑定其他请求", 409
+                )
+            await self._retry_source(sql, proposal, model_source, row)
+            await self._expire(sql, row, proposal)
+            return await self._attempt_value(sql, row, proposal)
+
     async def assert_execution(self, scope: str, identifier: str) -> None:
         async with self.database.write_lock, self.database.sessions() as sql:
             row, proposal = await self._operation(sql, scope, identifier)
@@ -813,7 +863,7 @@ class WorkspaceTreeMoveStore:
                 len(json.dumps(row.after_prepared)) if row.after_prepared else 0
             )
             await self._bytes(sql, added)
-            if row.action == "keep" and effect.receipt.status == "done":
+            if row.action == "keep" and effect.receipt.status == "done" and not resolving:
                 await self._live(sql, row, proposal)
             row.status, row.receipt, row.receipt_history = (
                 effect.receipt.status,
@@ -872,10 +922,58 @@ class WorkspaceTreeMoveStore:
             )
             return [(await self._attempt_value(sql, row, proposal)).view for row in rows]
 
+    async def history_page(
+        self,
+        scope: str,
+        identifier: str,
+        *,
+        after: str | None = None,
+        limit: int = 32,
+    ) -> TreeMoveAttemptPage:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ServiceError("workspace_tree_move_page", "原树历史页大小无效", 422)
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            proposal = await self._proposal(sql, scope, identifier)
+            query = select(WorkspaceTreeMoveAttemptRow).where(
+                WorkspaceTreeMoveAttemptRow.proposal_id == identifier
+            )
+            if after is not None:
+                cursor, _ = await self._operation(sql, scope, after)
+                if cursor.proposal_id != identifier:
+                    raise ServiceError("workspace_tree_move_page", "原树历史游标不属于该提案", 422)
+                query = query.where(WorkspaceTreeMoveAttemptRow.operation_id > after)
+            rows = list(
+                await sql.scalars(
+                    query.order_by(WorkspaceTreeMoveAttemptRow.operation_id).limit(limit + 1)
+                )
+            )
+            values = []
+            for row in rows[:limit]:
+                await self._expire(sql, row, proposal)
+                values.append((await self._attempt_value(sql, row, proposal)).view)
+            return TreeMoveAttemptPage(
+                items=values, next_after=rows[limit - 1].operation_id if len(rows) > limit else None
+            )
+
+    async def mark_uncertain(self, scope: str, identifier: str) -> StoredTreeMoveAttempt:
+        """回执持久失败时关闭原producer，保留材料/锁供同operation核实。"""
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
+            row, proposal = await self._operation(sql, scope, identifier)
+            if row.status != "running":
+                return await self._attempt_value(sql, row, proposal)
+            if row.owner_id != self.owner_id:
+                raise ServiceError("workspace_tree_move_fenced", "未知收束不属于原owner", 409)
+            row.lease_expires_at = time.time() - 1
+            await self._expire(sql, row, proposal)
+            return await self._attempt_value(sql, row, proposal)
+
     async def list(self, scope: str, *, after: str | None = None, limit: int = 32) -> TreeMovePage:
         if type(limit) is not int or not 1 <= limit <= 32:
             raise ServiceError("workspace_tree_move_page", "原树历史页大小无效", 422)
-        async with self.database.write_lock, self.database.sessions() as sql:
+        async with self.database.write_lock, self.database.sessions.begin() as sql:
+            await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=False)
             query = select(WorkspaceTreeMoveProposalRow).where(
                 WorkspaceTreeMoveProposalRow.scope_id == scope
@@ -888,10 +986,13 @@ class WorkspaceTreeMoveStore:
                     query.order_by(WorkspaceTreeMoveProposalRow.proposal_id).limit(limit + 1)
                 )
             )
-            items = [
-                self._proposal_value(await self._proposal(sql, scope, row.proposal_id)).view
-                for row in rows[:limit]
-            ]
+            items = []
+            for row in rows[:limit]:
+                row = await self._proposal(sql, scope, row.proposal_id)
+                if row.active_operation_id is not None:
+                    operation, _ = await self._operation(sql, scope, row.active_operation_id)
+                    await self._expire(sql, operation, row)
+                items.append(self._proposal_value(row).view)
             return TreeMovePage(
                 items=items, next_after=rows[limit - 1].proposal_id if len(rows) > limit else None
             )

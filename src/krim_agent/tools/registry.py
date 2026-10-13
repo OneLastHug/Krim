@@ -15,6 +15,7 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.observability import scope
 from krim_agent.protocol.models import check_json
+from krim_agent.workspace import WORKSPACE_TREE_MOVE_TOOL_NAMES
 
 from .core import (
     Decision,
@@ -67,6 +68,7 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.directory_changes),
         id(context.workspace_tree_queries),
         id(context.workspace_tree_models),
+        id(context.tree_moves),
         id(context.model_tools),
         id(context.policy),
         id(context.approval_handler),
@@ -80,6 +82,20 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.checkpoint_capture),
         id(context.checkpoint_restore),
         id(context.command_capture),
+    )
+
+
+def _tree_move_binding(context: ToolContext) -> tuple[object, ...]:
+    return (
+        _tree_query_binding(context),
+        id(context.skill_snapshot),
+        id(context.context_config),
+        context.registry.max_depth,
+        context.registry.default_timeout,
+        tuple((item.name, id(item)) for item in context.registry.definitions),
+        tuple(sorted((name, id(item)) for name, item in context.model_tools.items()))
+        if context.model_tools is not None
+        else None,
     )
 
 
@@ -197,6 +213,9 @@ class ToolRegistry:
             {"depth": parent.depth + 1},
             tracer=parent.tracer,
         ):
+            if name in WORKSPACE_TREE_MOVE_TOOL_NAMES and parent.tree_moves is not None:
+                async with parent.tree_moves.call_scope():
+                    return await self._execute_observed(name, arguments, parent, consume)
             return await self._execute_observed(name, arguments, parent, consume)
 
     async def _execute_observed[Result](
@@ -211,6 +230,7 @@ class ToolRegistry:
         tree_prepare = name == "workspace_tree_prepare"
         tree_query = name == "workspace_tree_query"
         tree_model = name in {"workspace_tree_model_prepare", "workspace_tree_start"}
+        tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES
         tree_scope = (
             parent.run_id,
             parent.topic_id,
@@ -306,6 +326,7 @@ class ToolRegistry:
                 original_arguments = copy.deepcopy(child.arguments)
                 original_query_binding = _tree_query_binding(child) if tree_query else None
                 original_model_binding = _tree_query_binding(child) if tree_model else None
+                original_move_binding = _tree_move_binding(child) if tree_move else None
                 original_tree_binding = (
                     _tree_query_binding(child) if tree_fence is not None else None
                 )
@@ -331,6 +352,15 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if tree_move and (
+                    child.arguments != original_arguments
+                    or _tree_move_binding(child) != original_move_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_move_context", "Hook不能替换原树移动参数或调用上下文"
+                    )
+                if tree_move and short is not None:
+                    raise ToolError("workspace_tree_move_unverified", "树移动须保留真实原后端事实")
                 if tree_model and (
                     child.arguments != original_arguments
                     or _tree_query_binding(child) != original_model_binding
@@ -428,10 +458,22 @@ class ToolRegistry:
                 )
                 query_response = child._tree_query_response
                 model_response = child._tree_model_response
+                move_response = child._tree_move_response
                 if definition.post_execute is not None:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if tree_move and (
+                    child.arguments != original_arguments
+                    or _tree_move_binding(child) != original_move_binding
+                ):
+                    raise ToolError(
+                        "workspace_tree_move_context", "Hook不能替换原树移动参数或调用上下文"
+                    )
+                if tree_move and child._tree_move_response != move_response:
+                    raise ToolError(
+                        "workspace_tree_move_unverified", "Hook不能替换原树移动回程标记"
+                    )
                 if tree_model and (
                     child.arguments != original_arguments
                     or _tree_query_binding(child) != original_model_binding
@@ -484,16 +526,16 @@ class ToolRegistry:
             self._observe(
                 ToolAudit(
                     call_id=query_audit[0]
-                    if tree_query or tree_model or tree_fence is not None
+                    if tree_query or tree_model or tree_move or tree_fence is not None
                     else child.call_id,
                     run_id=query_audit[1]
-                    if tree_query or tree_model or tree_fence is not None
+                    if tree_query or tree_model or tree_move or tree_fence is not None
                     else child.run_id,
                     name=name,
                     risk=definition.risk,
                     decision=decision,
                     depth=query_audit[2]
-                    if tree_query or tree_model or tree_fence is not None
+                    if tree_query or tree_model or tree_move or tree_fence is not None
                     else child.depth,
                     ok=code is None,
                     code=code,

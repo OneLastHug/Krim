@@ -734,6 +734,7 @@ class PythonAI:
             return
         # 在批次回调链内先拒绝重入，不能先把SDK标记关闭或释放数据库。
         if self._agent_service is not None:
+            self._agent_service.manager.tree_moves.assert_external_close()
             self._agent_service.assert_external_command_control()
             self._agent_service.manager.commands.assert_external_close()
             self._agent_service.workspace_trees.assert_external_close()

@@ -50,10 +50,20 @@ WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
         "directory_inspect",
     }
 )
+WORKSPACE_TREE_MOVE_TOOL_NAMES = frozenset(
+    {
+        "tree_move_inspect",
+        "tree_move_preview",
+        "tree_move_query",
+        "tree_move_change",
+        "tree_move_reconcile",
+    }
+)
 WORKSPACE_WRITE_TOOL_NAMES = (
     WORKSPACE_CHANGE_TOOL_NAMES
     | WORKSPACE_TREE_MODEL_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
+    | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})
     | (
         WORKSPACE_DIRECTORY_TOOL_NAMES
         - {"directory_query", "directory_inspect", "directory_source_query"}
@@ -65,6 +75,7 @@ WORKSPACE_TOOL_NAMES = (
     | WORKSPACE_CHANGE_TOOL_NAMES
     | WORKSPACE_DIRECTORY_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
+    | WORKSPACE_TREE_MOVE_TOOL_NAMES
 )
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000

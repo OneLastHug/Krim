@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
+from krim_agent.workspace_tree_snapshot import _path
 from krim_agent.workspace_tree_writer import WorkspaceTreeWriter
 
 TreeMoveStatus = Literal[
@@ -49,6 +50,33 @@ class TreeMoveAction(StrictModel):
     action: TreeMoveActionKind
     expected_revision: int = Field(ge=0, le=9007199254740989)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
+
+
+class TreeMoveInspectRequest(StrictModel):
+    path: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def canonical(self) -> TreeMoveInspectRequest:
+        try:
+            _path(self.path)
+        except ServiceError as error:
+            raise ValueError(str(error)) from error
+        return self
+
+
+class TreeMoveInspectView(StrictModel):
+    path: str
+    found: bool
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    entry_count: int = Field(default=0, ge=0, le=16384)
+    directory_count: int = Field(default=0, ge=0, le=16384)
+    file_count: int = Field(default=0, ge=0, le=16384)
+    byte_size: int = Field(default=0, ge=0, le=134217728)
+    mode: int | None = Field(default=None, ge=0, le=511)
+
+
+class TreeMoveOperationRequest(StrictModel):
+    operation_id: str = Field(min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class TreeMovePreviewView(StrictModel):
@@ -97,6 +125,54 @@ class TreeMoveAttemptView(StrictModel):
 class TreeMovePage(StrictModel):
     items: list[TreeMovePreviewView] = Field(max_length=32)
     next_after: str | None
+
+
+class TreeMoveAttemptPage(StrictModel):
+    items: list[TreeMoveAttemptView] = Field(max_length=32)
+    next_after: str | None
+
+
+TreeMoveQueryKind = Literal[
+    "proposal", "operation", "by_key", "operation_by_key", "history", "proposals"
+]
+
+
+class TreeMoveQueryRequest(StrictModel):
+    kind: TreeMoveQueryKind
+    identifier: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    request_key: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
+    after: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    limit: int = Field(default=32, ge=1, le=32)
+
+    @model_validator(mode="after")
+    def selection(self) -> TreeMoveQueryRequest:
+        if self.kind in {"proposal", "operation", "history"}:
+            if self.identifier is None or self.request_key is not None:
+                raise ValueError("原树查询须只提供原identifier")
+        elif self.kind in {"by_key", "operation_by_key"}:
+            if self.request_key is None or self.identifier is not None:
+                raise ValueError("原键查询须只提供request_key")
+        elif self.identifier is not None or self.request_key is not None:
+            raise ValueError("原树列表只接受分页")
+        if self.kind not in {"history", "proposals"} and (
+            self.after is not None or self.limit != 32
+        ):
+            raise ValueError("原树单项查询不接受分页参数")
+        return self
+
+
+class TreeMoveQueryResult(StrictModel):
+    kind: TreeMoveQueryKind
+    proposal: TreeMovePreviewView | None = None
+    operation: TreeMoveAttemptView | None = None
+    history: TreeMoveAttemptPage | None = None
+    proposals: TreeMovePage | None = None
 
 
 @dataclass(frozen=True)

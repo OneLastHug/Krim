@@ -341,3 +341,57 @@ class WorkspaceTreeWriter:
         ):
             raise ServiceError("workspace_parent_changed", "原树撤销双父身份变化", 409)
         return reverse
+
+    def verify_keep(
+        self,
+        change: PreparedTreeMove,
+        effect: TreeMoveEffect,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        authorize: Callable[[], None] | None = None,
+    ) -> TreeMoveEffect:
+        source_parent, source_name, target_parent, target_name = self._validate(change)
+        abort = cancelled or (lambda: False)
+        deadline = time.monotonic() + self.lock_timeout
+
+        def check() -> None:
+            self._check(deadline, abort)
+
+        try:
+            if (
+                effect.receipt.status != "done"
+                or effect.receipt.operation_token != change.token
+                or effect.receipt.source_path != change.before.root_path
+                or effect.receipt.target_path != change.target_path
+                or effect.observed_after is None
+                or effect.receipt.after_fingerprint != effect.observed_after.fingerprint
+                or effect.receipt.before_fingerprint != change.before.fingerprint
+                or not self._moved(change, effect.observed_after)
+            ):
+                raise ServiceError("workspace_tree_move_receipt", "保留须绑定原真实完整after", 409)
+            with self.directories._locked_parents(
+                (change.before.root_path, change.target_path), abort
+            ) as parents:
+                self._parents(change, parents)
+                if authorize is not None:
+                    authorize()
+                after = self._capture(
+                    parents[target_parent], target_name, change.target_path, check
+                )
+                if after != effect.observed_after or not self._missing(
+                    parents[source_parent], source_name
+                ):
+                    raise ServiceError(
+                        "workspace_tree_move_conflict", "原保留目标或源条件已变化", 409
+                    )
+                if authorize is not None:
+                    authorize()
+                check()
+                self._parents(change, parents)
+                return self._effect(change, "done", after=after, changed=False)
+        except (OSError, ServiceError) as error:
+            return self._effect(
+                change,
+                "rejected",
+                code=error.code if isinstance(error, ServiceError) else "workspace_tree_move_io",
+            )

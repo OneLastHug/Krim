@@ -83,6 +83,7 @@ from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, Tas
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
+from krim_agent.tools.tree_moves import tree_move_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
 from krim_agent.tools.workspace_changes import workspace_change_tools
 from krim_agent.tools.workspace_mixed_batches import mixed_batch_start_tool
@@ -153,6 +154,17 @@ from krim_agent.workspace_tree import (
     TreePlanRequest,
     TreePlanStepPage,
     TreePlanView,
+)
+from krim_agent.workspace_tree_move import (
+    TreeMoveAction,
+    TreeMoveAttemptView,
+    TreeMoveInspectRequest,
+    TreeMoveInspectView,
+    TreeMoveOperationRequest,
+    TreeMovePreviewRequest,
+    TreeMovePreviewView,
+    TreeMoveQueryRequest,
+    TreeMoveQueryResult,
 )
 
 _command_launching: ContextVar[asyncio.Task[object] | None] = ContextVar(
@@ -640,6 +652,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_tree_moves(self) -> None:
+        """显式启用非空树工具；全量冲突检查，不扩大既有Agent冻结集合。"""
+        definitions = tree_move_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("非空树移动工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_execution(
         self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
     ) -> ExecutionBinding:
@@ -731,6 +753,7 @@ class AgentService:
         recovered += await self.workspace_batch_store.recover_interrupted()
         recovered += await self.workspace_mixed_batch_store.recover_interrupted()
         recovered += await self.workspace_restore_store.recover_interrupted()
+        recovered += await self.manager.tree_moves.store.recover_interrupted()
         self._workspace_recovered = True
         return recovered
 
@@ -770,6 +793,7 @@ class AgentService:
                     "command_inspect",
                     "directory_query",
                     "directory_source_query",
+                    "tree_move_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -827,6 +851,7 @@ class AgentService:
                     workspace_mixed_queries=self.manager.mixed_queries,
                     workspace_tree_queries=self.manager.tree_queries,
                     workspace_tree_models=self.manager.tree_models,
+                    tree_moves=self.manager.tree_moves,
                     workspace_mixed_batches=self.manager.mixed_batch_writer,
                     workspace_batch=batch_fence,
                     mixed_batch=mixed_fence,
@@ -858,6 +883,29 @@ class AgentService:
                 "permission_denied": 403,
                 "approval_required": 409,
                 "workspace_unbound": 409,
+                "workspace_tree_move_context": 403,
+                "workspace_tree_move_model_context": 403,
+                "workspace_tree_move_source_conflict": 403,
+                "workspace_tree_move_closed": 503,
+                "workspace_tree_move_backend_missing": 503,
+                "workspace_tree_move_busy": 429,
+                "workspace_tree_move_limit": 429,
+                "workspace_tree_move_operation_limit": 429,
+                "workspace_tree_move_bytes": 429,
+                "workspace_tree_move_not_found": 404,
+                "workspace_tree_move_operation_not_found": 404,
+                "workspace_tree_move_unverified": 409,
+                "workspace_tree_move_self_close": 409,
+                "workspace_tree_snapshot_device": 403,
+                "workspace_tree_snapshot_depth": 413,
+                "workspace_tree_snapshot_limit": 413,
+                "workspace_tree_snapshot_bytes": 413,
+                "workspace_tree_move_page": 422,
+                "workspace_tree_move_path": 422,
+                "workspace_tree_move_conflict": 409,
+                "workspace_tree_move_idempotency_conflict": 409,
+                "workspace_tree_move_state": 409,
+                "workspace_tree_move_active": 409,
                 "workspace_unavailable": 403,
                 "invalid_input": 422,
                 "workspace_path": 422,
@@ -1023,6 +1071,80 @@ class AgentService:
         return WorkspaceFile.model_validate(
             await self._workspace_call(agent_id, "workspace_read", request.model_dump())
         )
+
+    async def tree_move_inspect(
+        self, agent_id: str, request: TreeMoveInspectRequest, *, confirmed: bool = False
+    ) -> TreeMoveInspectView:
+        return TreeMoveInspectView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_move_inspect",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_move_preview(
+        self, agent_id: str, request: TreeMovePreviewRequest, *, confirmed: bool = False
+    ) -> TreeMovePreviewView:
+        return TreeMovePreviewView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_move_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_move_change(
+        self, agent_id: str, request: TreeMoveAction, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        return TreeMoveAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_move_change",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_move_query(
+        self, agent_id: str, request: TreeMoveQueryRequest, *, confirmed: bool = False
+    ) -> TreeMoveQueryResult:
+        return TreeMoveQueryResult.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_move_query",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_move_reconcile(
+        self, agent_id: str, request: TreeMoveOperationRequest, *, confirmed: bool = False
+    ) -> TreeMoveAttemptView:
+        return TreeMoveAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "tree_move_reconcile",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def tree_move_cancel(self, agent_id: str, proposal_id: str) -> TreeMovePreviewView:
+        session = await self.session(agent_id)
+        return await self.manager.tree_moves.cancel(f"session:{session.session_id}", proposal_id)
 
     async def directory_inspect(
         self, agent_id: str, request: DirectoryInspectRequest, *, confirmed: bool = False
@@ -2169,6 +2291,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.manager.tree_moves.assert_external_close()
         self.assert_external_command_control()
         self.workspace_trees.assert_external_close()
         self.manager.tree_models.assert_external_close()
