@@ -481,7 +481,7 @@ async def test_empty_oauth_table_can_downgrade_then_upgrade(tmp_path):
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0046_tree_exchange_origins"
+            ).scalar() == "0047_generated_tree_root_undos"
     finally:
         await database.close()
 

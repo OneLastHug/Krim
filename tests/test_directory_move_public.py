@@ -355,7 +355,7 @@ async def test_move_target_lock_refuses_lossy_downgrade(repository, tmp_path):
         async with repository.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0046_tree_exchange_origins"
+            ).scalar_one() == "0047_generated_tree_root_undos"
             assert (
                 await connection.execute(
                     text(
