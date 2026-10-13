@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import httpx
 import uvicorn
+from browser_generated_roots import configure_generated_roots
 from cryptography.fernet import Fernet
 from mcp.types import CallToolResult, ListToolsResult, Tool
 from pydantic import Field, SecretStr
@@ -253,6 +254,8 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     app.state.agents.register_tree_queries()
     app.state.agents.register_tree_moves()
     app.state.agents.register_tree_exchanges()
+    app.state.agents.register_generated_tree_undos()
+    configure_generated_roots(app, runtime, write_root)
 
     class TestTreeMoveControl(StrictModel):
         action: Literal[
@@ -290,7 +293,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
         global tree_move_fail_save
         target = write_root / payload.path
         if payload.action == "html":
-            name = "<img src=x onerror=window.treeInjected=1>"
+            name = f"<img src=x onerror=window.treeInjected=1 data-fixture={uuid4()}>"
             target = write_root / name
         if payload.action in {"seed", "html"}:
             (target / "sub/empty").mkdir(parents=True)

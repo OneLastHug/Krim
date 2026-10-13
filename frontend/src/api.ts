@@ -265,6 +265,30 @@ export interface CompletedTreeOriginView {
   tree_fingerprint: string; entry_count: number; byte_size: number; proof_hash: string;
 }
 export interface CompletedTreeOriginLookupView { plan_id: string; origin: CompletedTreeOriginView | null; }
+export type GeneratedTreeUndoActionKind = "remove_root" | "restore_root" | "keep";
+export type GeneratedTreeRootState = "awaiting_approval" | "removing" | "preserved" | "restoring" | "restored" | "keeping" | "kept" | "rejected" | "uncertain" | "cancelled";
+export interface GeneratedTreeUndoPreviewRequest {
+  plan_id: string; preserve_path: string; expected_fingerprint: string; request_key: string;
+  ttl_seconds?: number; previous_restore_operation_id?: string | null;
+}
+export interface GeneratedTreeUndoAction {
+  proposal_id: string; action: GeneratedTreeUndoActionKind; expected_revision: number; request_key: string;
+}
+export interface GeneratedTreeUndoPreviewView {
+  source_plan_id: string; source_command_id: string; source_hash: string;
+  command_outcome: "completed" | "failed" | "output_limit"; accept_failed: boolean;
+  snapshot_revision: string; sealed_fingerprint: string; proof_hash: string;
+  previous_restore_operation_id: string | null; generation_status: "done"; root_state: GeneratedTreeRootState;
+  move: Omit<TreeMovePreviewView, "status"> & { status: TreeMovePreviewView["status"] | "cancelled" };
+}
+export interface GeneratedTreeUndoAttemptView {
+  source_plan_id: string; action: GeneratedTreeUndoActionKind; operation: TreeMoveAttemptView;
+}
+export interface GeneratedTreeUndoQueryResult {
+  kind: TreeMoveQueryKind; proposal: GeneratedTreeUndoPreviewView | null; operation: GeneratedTreeUndoAttemptView | null;
+  history: { items: GeneratedTreeUndoAttemptView[]; next_after: string | null } | null;
+  proposals: { items: GeneratedTreeUndoPreviewView[]; next_after: string | null } | null;
+}
 export interface CommandDirectoryDelta {
   path: string; mode: number; empty: boolean; creatable: boolean; proposal_id: string | null;
 }
