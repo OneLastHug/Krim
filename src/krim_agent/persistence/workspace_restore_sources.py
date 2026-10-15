@@ -12,6 +12,7 @@ from krim_agent.workspace_checkpoint import CheckpointModelSource
 
 from .database import (
     NativeCheckpointModelSourceRow,
+    WorkspaceDirectoryCaptureModelSourceRow,
     WorkspaceRestoreModelSourceRow,
     WorkspaceRestorePlanRow,
 )
@@ -75,5 +76,11 @@ async def admit_restore_source(
             NativeCheckpointModelSourceRow.call_id == source.call_id,
         )
     )
-    if prior is not None or capture is not None:
+    directory = await session.scalar(
+        select(WorkspaceDirectoryCaptureModelSourceRow).where(
+            WorkspaceDirectoryCaptureModelSourceRow.run_id == source.run_id,
+            WorkspaceDirectoryCaptureModelSourceRow.call_id == source.call_id,
+        )
+    )
+    if prior is not None or capture is not None or directory is not None:
         raise ServiceError("workspace_restore_model_call_conflict", "原调用已绑定其他操作", 409)

@@ -67,6 +67,7 @@ from krim_agent.tools.core import (
     CommandBackend,
     Decision,
     DirectoryChangeBackend,
+    DirectoryCheckpointBackend,
     InteractionPublisher,
     MixedBatchQueryBackend,
     MixedBatchWriteBackend,
@@ -173,6 +174,7 @@ class ChatRuntime:
         tree_exchanges: TreeExchangeBackend | None = None,
         workspace_checkpoints: WorkspaceCheckpointBackend | None = None,
         workspace_checkpoint_controls: CheckpointControlBackend | None = None,
+        workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None,
         workspace_mixed_batches: MixedBatchWriteBackend | None = None,
         workspace: WorkspaceBinding | None = None,
         execution: ExecutionBinding | None = None,
@@ -230,6 +232,7 @@ class ChatRuntime:
         self.tree_exchanges = tree_exchanges
         self.workspace_checkpoints = workspace_checkpoints
         self.workspace_checkpoint_controls = workspace_checkpoint_controls
+        self.workspace_directory_checkpoints = workspace_directory_checkpoints
         self.workspace_mixed_batches = workspace_mixed_batches
         self.workspace = workspace
         self.execution, self.commands = execution, commands
@@ -1125,6 +1128,7 @@ class ChatRuntime:
                         tree_exchanges=self.tree_exchanges,
                         workspace_checkpoints=self.workspace_checkpoints,
                         workspace_checkpoint_controls=self.workspace_checkpoint_controls,
+                        workspace_directory_checkpoints=self.workspace_directory_checkpoints,
                         workspace_mixed_batches=self.workspace_mixed_batches,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,

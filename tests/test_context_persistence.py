@@ -451,7 +451,7 @@ async def test_summary_migration_downgrade_preserves_existing_data(repository):
     async with repository.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar() == "0053_directory_captures"
+        ).scalar() == "0054_directory_capture_models"
     assert (await summaries(repository))[0].summary == before
 
 

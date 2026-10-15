@@ -1,0 +1,13 @@
+{
+  "source_commit": "c09a54b3d751f3c061adff55bce7bb217feb3f91",
+  "source_wheel_sha256": "53f5a073c4d1dce8cc08587195bfb34442c97a3408332eb34e327f32d418777a",
+  "request": {
+    "title": "目录检查点",
+    "root_path": "tree",
+    "request_key": "legacy-host-vector"
+  },
+  "workspace_key": "files",
+  "resource_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "workspace_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "request_hash": "a6b1618d5b19bb907db8000fe62e55c37244d0c4340ec5a70594fef60f727587"
+}

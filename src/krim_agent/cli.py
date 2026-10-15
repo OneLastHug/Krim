@@ -110,6 +110,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory checkpoints（目录检查点）：显式启用完整目录捕获，仍需原工作区授权",
     )
     serve.add_argument(
+        "--directory-checkpoint-controls",
+        action="store_true",
+        help=(
+            "directory checkpoint controls（目录检查点控制）：显式登记原模型同调用创建、查询与取消"
+        ),
+    )
+    serve.add_argument(
         "--checkpoint-controls",
         action="store_true",
         help="checkpoint controls（检查点控制）：显式登记模型同调用创建、查询与取消",
@@ -1328,6 +1335,8 @@ def main() -> None:
             parser.error("serve --checkpoint-bytes需要已授权--workspace")
         if args.directory_checkpoints and not args.workspace:
             parser.error("serve --directory-checkpoints需要已授权--workspace")
+        if args.directory_checkpoint_controls and not args.workspace:
+            parser.error("serve --directory-checkpoint-controls需要已授权--workspace")
         if args.checkpoint_controls and not args.workspace:
             parser.error("serve --checkpoint-controls需要已授权--workspace")
         if args.checkpoint_restore_controls and not args.workspace:
@@ -1373,6 +1382,7 @@ def main() -> None:
                 generated_tree_undos_enabled=args.generated_tree_undos,
                 checkpoint_bytes_enabled=args.checkpoint_bytes,
                 directory_checkpoints_enabled=args.directory_checkpoints,
+                directory_checkpoint_controls_enabled=args.directory_checkpoint_controls,
                 checkpoint_controls_enabled=args.checkpoint_controls,
                 checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,
                 execution_runner=execution_runner,

@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from krim_agent.observability import scope
+from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import check_json
 from krim_agent.workspace import (
     WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES,
@@ -22,7 +23,10 @@ from krim_agent.workspace import (
     WORKSPACE_TREE_MOVE_TOOL_NAMES,
 )
 from krim_agent.workspace_checkpoint import CheckpointCaptureFence
-from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
+from krim_agent.workspace_directory_checkpoint import (
+    DirectoryCheckpointCaptureFence,
+    directory_checkpoint_model_source,
+)
 from krim_agent.workspace_restore import CheckpointRestoreFence
 
 from .core import (
@@ -93,6 +97,7 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.workspace_batch),
         id(context.checkpoint_capture),
         id(context.directory_checkpoint_capture),
+        id(context.directory_checkpoint_qualify),
         id(context.workspace_directory_checkpoints),
         id(context.checkpoint_restore),
         id(context.command_capture),
@@ -126,11 +131,25 @@ def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
     directory = context.directory_checkpoint_capture
     if directory is not None and type(directory) is not DirectoryCheckpointCaptureFence:
         raise ToolError("workspace_directory_capture_context", "目录围栏类型无效")
+    try:
+        source = (
+            directory_checkpoint_model_source(directory.model_source)
+            if directory is not None
+            else None
+        )
+    except ServiceError as error:
+        raise ToolError(error.code, str(error)) from error
     return (
         _tree_move_binding(context),
         id(context.workspace_checkpoints),
         id(context.workspace_checkpoint_controls),
-        (directory.checkpoint_id, directory.token) if directory is not None else None,
+        (
+            directory.checkpoint_id,
+            directory.token,
+            (source.run_id, source.call_id) if source is not None else None,
+        )
+        if directory is not None
+        else None,
         (
             fence.checkpoint_id,
             fence.position,
@@ -376,6 +395,13 @@ class ToolRegistry:
                     else checkpoint_context_code,
                     "检查点围栏类型无效，不能进入工具执行",
                 )
+            if (
+                parent.directory_checkpoint_qualify is not None
+                and parent.directory_checkpoint_capture is None
+            ):
+                raise ToolError(
+                    "workspace_directory_capture_context", "父资格回调须与原目录围栏同时存在"
+                )
             if parent.directory_checkpoint_capture is not None and (
                 not directory_capture
                 or any(
@@ -393,14 +419,33 @@ class ToolRegistry:
                 raise ToolError(
                     "workspace_directory_capture_context", "目录围栏仅供原捕获叶工具，不能混用"
                 )
+            if parent.directory_checkpoint_capture is not None:
+                try:
+                    directory_source = directory_checkpoint_model_source(
+                        parent.directory_checkpoint_capture.model_source
+                    )
+                except ServiceError as error:
+                    raise ToolError(error.code, str(error)) from error
+                identity = (
+                    parent.origin == "host"
+                    and parent.run_id == "local"
+                    and parent.source_call_id is None
+                    and parent.directory_checkpoint_qualify is None
+                    if directory_source is None
+                    else parent.origin == "model"
+                    and parent.run_id == directory_source.run_id
+                    and parent.source_call_id == directory_source.call_id
+                    and callable(parent.directory_checkpoint_qualify)
+                )
+                if not identity:
+                    raise ToolError(
+                        "workspace_directory_capture_context", "目录捕获未保留原父调用来源和资格"
+                    )
             if directory_capture and (
-                parent.origin != "host"
-                or parent.run_id != "local"
-                or parent.agent_id is None
+                parent.agent_id is None
                 or parent.session_id is None
                 or parent.directory_checkpoint_capture is None
                 or parent.workspace_directory_checkpoints is None
-                or parent.source_call_id is not None
             ):
                 raise ToolError("workspace_directory_capture_context", "目录捕获需要原私有Host围栏")
             if restore_model and (
@@ -423,6 +468,7 @@ class ToolRegistry:
                         parent.checkpoint_capture,
                         parent.checkpoint_restore,
                         parent.directory_checkpoint_capture,
+                        parent.directory_checkpoint_qualify,
                         parent.tree_fence,
                         parent.workspace_batch,
                         parent.mixed_batch,

@@ -44,6 +44,7 @@ from .workspace_execution import (
 )
 
 if TYPE_CHECKING:
+    from .workspace_model_directory_checkpoints import ModelDirectoryCheckpointService
     from .workspace_model_restores import ModelRestoreService
 
 
@@ -58,6 +59,7 @@ class ModelCheckpointService:
         self._calls: WorkspaceTasks = {}
         self._closed = False
         self.restores: ModelRestoreService | None = None
+        self.directories: ModelDirectoryCheckpointService | None = None
 
     @asynccontextmanager
     async def call_scope(self) -> AsyncIterator[None]:
@@ -98,6 +100,8 @@ class ModelCheckpointService:
                 item is not None
                 for item in (
                     context.checkpoint_capture,
+                    context.directory_checkpoint_capture,
+                    context.directory_checkpoint_qualify,
                     context.checkpoint_restore,
                     context.tree_fence,
                     context.workspace_batch,
@@ -162,6 +166,14 @@ class ModelCheckpointService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if operation.startswith("directory_"):
+                if self.directories is None:
+                    raise ServiceError(
+                        "workspace_directory_capture_backend", "缺少目录模型控制后端", 503
+                    )
+                return await self.directories.tool_operation(
+                    operation.removeprefix("directory_"), payload, context
+                )
             if operation.startswith("restore_"):
                 if self.restores is None:
                     raise ServiceError("workspace_restore_model_backend", "缺少模型恢复后端", 503)

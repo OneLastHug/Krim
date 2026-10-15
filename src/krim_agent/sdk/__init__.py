@@ -89,6 +89,7 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointSummary,
     DirectoryCheckpointView,
 )
+from krim_agent.workspace_directory_checkpoint_control import DirectoryCheckpointQueryResult
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchItemView,
@@ -184,6 +185,7 @@ from .types import (
 __all__ = [
     "DirectoryCheckpointCreate",
     "DirectoryCheckpointSummary",
+    "DirectoryCheckpointQueryResult",
     "DirectoryCheckpointView",
     "GeneratedTreeRootState",
     "GeneratedTreeUndoAction",
