@@ -81,6 +81,8 @@ async def test_original_bound_source_sql_sigkill_unknown_new_process_same_origin
             and result["origin"] == "completed_tree"
             and result["replay_calls"] == 0
             and result["old_owner_fenced"]
+            and result["startup_recovered"]
+            and result["idempotent_recovery"] == 0
         )
         print(json.dumps({"produced": metadata, "recovered": result}))
     finally:

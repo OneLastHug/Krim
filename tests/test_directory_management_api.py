@@ -61,24 +61,29 @@ async def directory_server(tmp_path):
         workspace_writable=True,
     )
     app.state.runtime.tool_policy = policy
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(128)
-    listener.setblocking(False)
-    url = f"http://127.0.0.1:{listener.getsockname()[1]}"
-    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
-    task = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
-        async with asyncio.timeout(10):
-            while not server.started:
-                if task.done():
-                    await task
-                await asyncio.sleep(0.01)
-        yield url, root, app
-    finally:
-        server.should_exit = True
-        await asyncio.wait_for(task, 20)
-        listener.close()
+    # 完整迁移/恢复先沿真实生命周期完成；原10秒只等待测试TCP服务就绪。
+    async with app.router.lifespan_context(app):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        listener.setblocking(False)
+        url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(10):
+                while not server.started:
+                    if task.done():
+                        await task
+                        raise AssertionError("测试HTTP服务在就绪前退出")
+                    await asyncio.sleep(0.01)
+            yield url, root, app
+        finally:
+            server.should_exit = True
+            try:
+                await asyncio.wait_for(task, 20)
+            finally:
+                listener.close()
 
 
 def configure(client, *, name="directories", mode="agent", tool_names=None):
