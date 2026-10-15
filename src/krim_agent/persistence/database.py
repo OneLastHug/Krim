@@ -1318,6 +1318,43 @@ class NativeWorkspaceBatchChildRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
+class WorkspaceDirectoryCheckpointRow(Base):
+    __tablename__ = "workspace_directory_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key", name="uq_directory_checkpoint_key"),
+        CheckConstraint(
+            "length(root_path) BETWEEN 1 AND 512 AND length(title) BETWEEN 1 AND 120 "
+            "AND length(request_key) BETWEEN 1 AND 128",
+            name="ck_directory_checkpoint_input",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64 AND length(resource_fingerprint) = 64 "
+            "AND length(workspace_fingerprint) = 64 AND length(snapshot_fingerprint) = 64",
+            name="ck_directory_checkpoint_hashes",
+        ),
+        CheckConstraint(
+            "length(payload) <= 33554432 AND length(metadata) <= 2097152",
+            name="ck_directory_checkpoint_material",
+        ),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(120))
+    root_path: Mapped[str] = mapped_column(String(512))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_fingerprint: Mapped[str] = mapped_column(String(64))
+    snapshot_fingerprint: Mapped[str] = mapped_column(String(64))
+    metadata_value: Mapped[dict[str, JsonValue]] = mapped_column(
+        "metadata", JSON(none_as_null=True)
+    )
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class NativeWorkspaceCheckpointRow(Base):
     __tablename__ = "native_workspace_checkpoints"
     __table_args__ = (

@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -9,7 +10,7 @@ const test = base.extend({
   },
 });
 function pythonHost(baseURL: string, sessionId: string, topicId: string, mode = "success") {
-  const process = spawn("../.venv/bin/python", ["../tests/fixtures/browser_change_host.py", baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
+  const process = spawn(pythonExecutable, [...pythonFixtureArgs("browser_change_host.py"), baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
   let output = "", errors = "";
   process.stdout.on("data", (data) => { output += data.toString(); }); process.stderr.on("data", (data) => { errors += data.toString(); });
   const ready = new Promise<{ directory: string; revision: number }>((resolve, reject) => {

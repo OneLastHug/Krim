@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
@@ -38,7 +39,7 @@ test("宿主可回滚检查尚未返回时切换话题，不继续回滚旧话�
 });
 function pythonHost(baseURL: string, sessionId: string, topicId: string, mode = "success") {
   if (!sessionId) throw new Error("Checkpoint Host 需要已就绪的控制会话");
-  const process = spawn("../.venv/bin/python", ["../tests/fixtures/browser_checkpoint_host.py", baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
+  const process = spawn(pythonExecutable, [...pythonFixtureArgs("browser_checkpoint_host.py"), baseURL, sessionId, topicId, mode], { env: { ...globalThis.process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
   let output = "", errors = "";
   process.stdout.on("data", (data) => { output += data.toString(); }); process.stderr.on("data", (data) => { errors += data.toString(); });
   const ready = new Promise<{ directory: string }>((resolve, reject) => {

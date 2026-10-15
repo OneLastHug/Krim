@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 
@@ -35,7 +36,7 @@ test("真实 Python Host 从 SSE 消费一次 iframe 导航点击和消息关联
   const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click();
   await frame.locator("#prompt").fill("链接 http://example.invalid/docs?x=1#section"); await frame.locator("#send").click(); await expect(frame.locator("#send")).toBeEnabled();
   const session = await page.locator("#host-session").textContent();
-  const child = spawn("../.venv/bin/python", ["../tests/fixtures/host_link_listener.py", baseURL!, session!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
+  const child = spawn(pythonExecutable, [...pythonFixtureArgs("host_link_listener.py"), baseURL!, session!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" } });
   let stdout = "", stderr = "";
   child.stdout.on("data", (value: Buffer) => { stdout += value.toString(); }); child.stderr.on("data", (value: Buffer) => { stderr += value.toString(); });
   const closed = new Promise<number | null>((resolve, reject) => { child.on("error", reject); child.on("close", resolve); });

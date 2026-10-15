@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -75,7 +76,7 @@ test("Python Host 经 HTTP/SSE/iframe 注入查询并读取技能资源", async 
   await frame.locator(".topic-button").filter({ hasText: title }).click();
   await expect(frame.locator("#topic-heading")).toHaveText(title);
   const sid = await page.locator("#host-session").textContent();
-  const result = await promisify(execFile)("../.venv/bin/python", ["../tests/fixtures/host_skills_client.py", baseURL!, sid!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  const result = await promisify(execFile)(pythonExecutable, [...pythonFixtureArgs("host_skills_client.py"), baseURL!, sid!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
   expect(JSON.parse(result.stdout)).toMatchObject({ topic_id: topicId, name: "host-review", count: 1 });
   await frame.locator(".skill-panel summary").click(); await expect(frame.locator('[data-skill-name="host-review"]')).toContainText("Python 宿主注入的检查技能");
   expect((await (await request.get(`/v1/topics/${topicId}/skills/host-review`)).json()).content).toBe("Python 技能正文");

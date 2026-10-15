@@ -1,3 +1,4 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
@@ -8,7 +9,7 @@ async function connect(page: Page, topicId = new URL(page.url()).searchParams.ge
   await page.goto(topicId ? `/ui/?topic=${encodeURIComponent(topicId)}` : "/ui/");
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await ensureChineseUi(page);
 }
 
 async function agent(page: Page, name: string, mode = "agent", selectedTools = tools): Promise<{ id: string; card: Locator; panel: Locator }> {

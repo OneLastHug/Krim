@@ -1,8 +1,9 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { expect,test,type Page } from "@playwright/test";
 const headers={ Authorization:"Bearer browser-test-key" };
 async function open(page:Page):Promise<void> {
   await page.goto("/ui/");await page.getByLabel("服务访问密钥",{exact:true}).fill("browser-test-key");
-  await page.getByRole("button",{name:"连接",exact:true}).click();await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await page.getByRole("button",{name:"连接",exact:true}).click();await ensureChineseUi(page);
 }
 async function enabled(page:Page):Promise<void> {
   const view=await (await page.request.get("/v1/mcp/servers/browser_oauth",{headers})).json();

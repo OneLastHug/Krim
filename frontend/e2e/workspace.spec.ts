@@ -1,3 +1,4 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { expect, test } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
@@ -6,7 +7,7 @@ async function connect(page: import("@playwright/test").Page, topicId: string): 
   await page.goto(`/ui/?topic=${encodeURIComponent(topicId)}`);
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await ensureChineseUi(page);
 }
 
 test("工作区目录、文件、检索、敏感拒绝与会话关闭在浏览器实际生效", async ({ page }) => {

@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 
@@ -38,7 +39,7 @@ test("原bytes目标自动保全混合当前字节，真实备份整组回退与
     await page.locator("#locale-select").selectOption("en-US"); await expect(detail(page)).toContainText("Backup capture format before restore");
     await page.setViewportSize({ width: 420, height: 860 }); await detail(page).scrollIntoViewIfNeeded(); await page.screenshot({ path: test.info().outputPath("byte-restore-narrow.png") });
     expect(await page.locator("#checkpoint-native").evaluate(node => node.scrollWidth <= node.clientWidth + 2)).toBe(true);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("旧text目标到当前binary须明确bytes基线，完整备份可恢复原字节", async ({ page }) => {
@@ -50,7 +51,7 @@ test("旧text目标到当前binary须明确bytes基线，完整备份可恢复�
     expect((await inspect(page, path)).sha256).toBe(createHash("sha256").update("target\n").digest("hex"));
     await detail(page).getByRole("button", { name: "查看恢复前备份", exact: true }).click(); await expect(page.locator("#native-checkpoint-detail")).toContainText("恢复前备份");
     await preview(page); await execute(page); expect((await inspect(page, path)).sha256).toBe(bytesHash);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("预览及执行丢POST回复后刷新仅GET原预览键，不再次捕获或执行", async ({ page }) => {
@@ -74,7 +75,7 @@ test("预览及执行丢POST回复后刷新仅GET原预览键，不再次捕获�
     await connect(page, topic); blocked = false; await open(page, id); await expect(detail(page)).toHaveAttribute("data-restore-status", "done", { timeout: 30_000 });
     expect(await detail(page).getAttribute("data-plan-id")).toBe(planId); expect(previews).toBe(1); expect(executions).toBe(1); expect((await inspect(page, path)).sha256).toBe(bytesHash);
     expect(await page.evaluate(id => localStorage.getItem(`krim-native-capture-recovery:${id}`), id)).toBeNull();
-  } finally { await page.unrouteAll({ behavior: "wait" }); await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await page.unrouteAll({ behavior: "wait" }); await destroyAgent(page, id); }
 });
 
 test("错误基线回程保留原意图，恢复存储失败在POST前停用写", async ({ page }) => {
@@ -88,11 +89,11 @@ test("错误基线回程保留原意图，恢复存储失败在POST前停用写"
     await page.locator("#native-checkpoint-preview").click(); await expect(page.locator("#native-checkpoint-status")).toContainText("请求结果尚未确认"); await expect.poll(() => replied).toBe(true);
     expect(posts).toBe(1); expect(await page.evaluate(id => localStorage.getItem(`krim-native-capture-recovery:${id}`), first.id)).not.toBeNull();
     await expect(page.locator("#native-restore-execute")).toBeDisabled();
-  } finally { await page.unrouteAll({ behavior: "wait" }); await page.request.post(`/v1/agents/${first.id}/destroy`, { headers }); }
+  } finally { await page.unrouteAll({ behavior: "wait" }); await destroyAgent(page, first.id); }
   const second = await actor(page, "byte-restore-storage"); posts = 0;
   try {
     await capture(page, path); await page.route("**/workspace/native-restores/preview?**", async route => { posts++; await route.continue(); });
     await page.evaluate(() => { Storage.prototype.setItem = function() { throw new DOMException("synthetic storage failure", "QuotaExceededError"); }; });
     await page.locator("#native-checkpoint-preview").click(); await expect(page.locator("#native-checkpoint-status")).toContainText("检查点恢复记录不可用"); expect(posts).toBe(0); await expect(page.locator("#native-checkpoint-preview")).toBeDisabled();
-  } finally { await page.request.post(`/v1/agents/${second.id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, second.id); }
 });

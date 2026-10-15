@@ -22,7 +22,7 @@ async def test_empty_0043_downgrade_upgrade_keeps_original_directory_history(run
         async with store.database.engine.begin() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0051_checkpoint_restore_models"
+            ).scalar_one() == "0052_directory_checkpoints"
             await connection.run_sync(
                 lambda sync: command.downgrade(
                     migration_config(sync), "0042_workspace_tree_model_sources"
@@ -37,7 +37,7 @@ async def test_empty_0043_downgrade_upgrade_keeps_original_directory_history(run
             await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0051_checkpoint_restore_models"
+            ).scalar_one() == "0052_directory_checkpoints"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert (
             await service.manager.directory_changes.store.get(scope, previous.view.proposal_id)
@@ -64,7 +64,7 @@ async def test_nonempty_0043_downgrade_refuses_loss_and_keeps_current_root_mater
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0051_checkpoint_restore_models"
+            ).scalar_one() == "0052_directory_checkpoints"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()

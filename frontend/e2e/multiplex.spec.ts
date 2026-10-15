@@ -1,3 +1,4 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { test, expect } from "@playwright/test";
 
 test("公开多路 SSE 保持各 Run 的序号和话题关联", async ({ playwright, baseURL }) => {
@@ -51,7 +52,7 @@ test("版本化配置保存后可从目录创建并执行 Agent", async ({ page 
   await page.goto("/ui/");
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await ensureChineseUi(page);
   await page.locator("#agent-config-panel summary").click();
   const name = `worker_${Date.now()}`;
   await page.locator("#agent-config-name").fill(name);

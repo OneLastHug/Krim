@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -61,19 +62,30 @@ test("BPE 预算事件与公开快照不影响工具回复和刷新", async ({ p
   await expect(page.locator(".message.tool").last()).toContainText('"sum": 5.0');
 });
 
-test("通过 Agent 目录创建并执行默认 Agent", async ({ page }) => {
+test("通过 Agent 目录创建并执行默认 Agent", async ({ page, request }) => {
   await expect(page.getByRole("status").filter({ hasText: "本地服务已连接" })).toBeVisible();
   await page.getByLabel("Agent 任务").fill("/echo 浏览器 Agent");
+  const created = page.waitForResponse(response => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/v1/agents");
   await page.getByRole("button", { name: "创建 Agent" }).click();
-  await expect(page.locator(".agent-card").last()).toContainText("已完成");
-  await expect(page.locator("#notice")).toContainText("Agent 已完成");
-  const card = page.locator(".agent-card").last();
-  await page.getByLabel("Agent 任务").fill("/echo 继续任务");
-  await card.getByRole("button", { name: "继续任务" }).click();
-  await expect(card).toContainText("继续任务");
-  const previousCount = await page.locator(".agent-card").count();
-  await card.getByRole("button", { name: "销毁" }).click();
-  await expect(page.locator(".agent-card")).toHaveCount(previousCount - 1);
+  const response = await created; expect(response.status()).toBe(201);
+  const actor = await response.json();
+  const card = page.locator(`article.agent-card[data-agent-id="${actor.agent_id}"]`);
+  let destroyed = false;
+  try {
+    await expect(card.locator(":scope > strong")).toContainText("已完成");
+    await expect(card.locator(".agent-result")).toContainText("浏览器 Agent");
+    await expect(page.locator("#notice")).toContainText("Agent 已完成");
+    await card.getByLabel("default 后续任务", { exact: true }).fill("/echo 继续任务");
+    await card.getByRole("button", { name: "继续任务" }).click();
+    await expect(card.locator(".agent-result")).toContainText("继续任务");
+    const turns = await (await request.get(`/v1/agents/${actor.agent_id}/turns`)).json();
+    expect(turns).toHaveLength(2);
+    const previousCount = await page.locator("article.agent-card[data-agent-id]").count();
+    await card.getByRole("button", { name: "销毁" }).click();
+    await expect(page.locator("article.agent-card[data-agent-id]")).toHaveCount(previousCount - 1);
+    destroyed = true;
+  } finally { if (!destroyed) await request.delete(`/v1/agents/${actor.agent_id}`); }
 });
 
 test("编辑、活动分支和重新生成保留原始消息树", async ({ page, request }) => {
@@ -393,7 +405,7 @@ test("Python Host SDK 经真实 HTTP/SSE 和 iframe 回执完成控制", async (
   await expect(page.locator("#host-session")).not.toBeEmpty();
   const sessionId = await page.locator("#host-session").textContent();
   const execute = promisify(execFile);
-  const result = await execute("../.venv/bin/python", ["../tests/fixtures/host_sdk_client.py", baseURL!, sessionId!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  const result = await execute(pythonExecutable, [...pythonFixtureArgs("host_sdk_client.py"), baseURL!, sessionId!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
   expect(JSON.parse(result.stdout)).toEqual({ connected: true, width: 840, theme: "dark" });
   const frame = page.frameLocator("#agent-frame");
   await expect(frame.locator("#prompt")).toHaveValue("由 Python Host SDK 插入");
@@ -425,7 +437,10 @@ test("iframe 来源/版本/大小校验拒绝伪造调用，隐藏后状态仍�
   await expect(page.locator("#agent-frame")).toHaveCount(1);
   await page.getByRole("button", { name: "打开侧栏" }).click();
   await expect(frame.locator("#prompt")).toHaveValue("保留当前 Prompt");
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  // 只允许既有MCP/OAuth公开恢复键；逐个检查内容，凭据或正文仍不得落盘。
+  expect(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))).toEqual({
+    local: {}, session: { "krim-mcp-pending": "[]", "krim-oauth-pending": "[]" },
+  });
 });
 
 test("引用 chip 与背景标签发送真实 Unicode 位置快照并在刷新后保留目录", async ({ page, request }) => {
@@ -505,7 +520,7 @@ test("Python Host 通过 iframe 回程保存引用和背景目录", async ({ pag
   await expect(page.locator("#host-status")).toContainText("iframe 已连接");
   await expect(page.locator("#host-session")).not.toBeEmpty();
   const sessionId = await page.locator("#host-session").textContent();
-  const result = await promisify(execFile)("../.venv/bin/python", ["../tests/fixtures/host_sdk_client.py", baseURL!, sessionId!, "prompt-context"], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  const result = await promisify(execFile)(pythonExecutable, [...pythonFixtureArgs("host_sdk_client.py"), baseURL!, sessionId!, "prompt-context"], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
   const value = JSON.parse(result.stdout);
   const context = await (await request.get(`/v1/topics/${value.topic_id}/prompt-context`)).json();
   expect(context.mentions.find((item: { id: string }) => item.id === value.mention_id).content).toBe("Python 提供的引用");

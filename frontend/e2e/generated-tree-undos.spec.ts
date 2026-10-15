@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
@@ -37,7 +38,7 @@ async function actor(page: Page, name: string, mode = "agent", selectedTools = t
   const view = await spawned.json(); await connect(page, view.topic_id);
   return { id: view.agent_id, topic: view.topic_id, panel: await open(page, view.agent_id) };
 }
-async function destroy(page: Page, id: string) { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+async function destroy(page: Page, id: string) { await destroyAgent(page, id); }
 async function generate(page: Page, id: string, root: string) {
   const base = `/v1/agents/${id}`;
   const command = await page.request.post(`${base}/commands?confirmed=true`, { headers, data: {

@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 
@@ -32,7 +33,7 @@ test("真实混合bytes种类摘要、Locale与窄视口，刷新不再次捕获
     await page.locator("#locale-select").selectOption("en-US"); await expect(page.locator("#native-checkpoint-detail")).toContainText("Binary bytes"); await expect(page.locator("#native-checkpoint-format")).toHaveValue("bytes");
     await page.setViewportSize({ width: 420, height: 860 }); await page.locator("#native-checkpoint-detail").scrollIntoViewIfNeeded(); await page.screenshot({ path: test.info().outputPath("native-bytes-narrow.png") });
     expect(await page.locator("#checkpoint-native").evaluate(node => node.scrollWidth <= node.clientWidth + 2)).toBe(true);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("捕获POST丢回复与网络中断后重载只GET原key，模式与原结果保持", async ({ page }) => {
@@ -48,14 +49,14 @@ test("捕获POST丢回复与网络中断后重载只GET原key，模式与原结�
     await connect(page, topic); offline = false; await open(page, id);
     await expect(page.locator("#native-checkpoint-detail")).toHaveAttribute("data-checkpoint-status", "available"); await expect(page.locator("#native-checkpoint-detail")).toContainText(key);
     await expect(page.locator("#native-checkpoint-format")).toHaveValue("bytes"); expect(creates).toBe(1); expect(await original(page, id)).toHaveLength(1);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("未冻结新工具与存储故障均停止byte POST", async ({ page }) => {
   const denied = await actor(page, "byte-ui-missing", ["workspace_read"]);
   try {
     await fill(page); await expect(page.locator("#native-checkpoint-create")).toBeDisabled(); expect(await original(page, denied.id)).toHaveLength(0);
-  } finally { await page.request.post(`/v1/agents/${denied.id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, denied.id); }
   const { id } = await actor(page, "byte-ui-storage"); let creates = 0;
   try {
     await page.route("**/workspace/native-checkpoints?**", async route => { if (route.request().method() === "POST") creates++; await route.continue(); });
@@ -63,7 +64,7 @@ test("未冻结新工具与存储故障均停止byte POST", async ({ page }) => 
     await page.evaluate(() => { const before = Storage.prototype.setItem; Storage.prototype.setItem = function(key, value) { if (key.startsWith("krim-native-capture-recovery:")) throw new DOMException("synthetic quota", "QuotaExceededError"); before.call(this, key, value); }; });
     await page.locator("#native-checkpoint-create").click(); await expect(page.locator("#native-checkpoint-status")).toContainText("检查点恢复记录不可用"); expect(creates).toBe(0);
     await expect(page.locator("#native-checkpoint-create")).toBeDisabled(); expect(await original(page, id)).toHaveLength(0);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("合法结构的错误Scope或捕获格式回复保留原意图，不接受假结果", async ({ page }) => {
@@ -78,5 +79,5 @@ test("合法结构的错误Scope或捕获格式回复保留原意图，不接受
     await expect.poll(() => responseFinished).toBe(true);
     await expect(page.locator("#native-checkpoint-detail")).not.toHaveAttribute("data-checkpoint-status", "available"); expect(creates).toBe(1);
     expect(await page.evaluate(id => localStorage.getItem(`krim-native-capture-recovery:${id}`), id)).not.toBeNull();
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });

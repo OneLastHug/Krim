@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,7 +22,7 @@ test("Python Host 经真实 HTTP/SSE/iframe 查询并确认持久提案", async 
     await frame.locator(".topic-button").filter({ hasText: topic.title }).click();
     await expect(frame.locator("#topic-heading")).toHaveText(topic.title);
     const sessionId = await page.locator("#host-session").textContent();
-    const result = await promisify(execFile)("../.venv/bin/python", ["../tests/fixtures/host_context_proposal_client.py", baseURL!, sessionId!, topic.id, preview.proposal_id], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+    const result = await promisify(execFile)(pythonExecutable, [...pythonFixtureArgs("host_context_proposal_client.py"), baseURL!, sessionId!, topic.id, preview.proposal_id], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
     expect(JSON.parse(result.stdout)).toEqual({ topic_id: topic.id, proposal_id: preview.proposal_id, status: "completed" });
     await expect(frame.locator("#compact-title")).toContainText("摘要已保存");
     await expect(frame.locator("#compact-summary")).toHaveText(preview.summary);

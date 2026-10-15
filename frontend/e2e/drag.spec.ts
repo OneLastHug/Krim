@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -83,7 +84,7 @@ test("Python Host 经 iframe 预览/离开/drop 获得实际持久 MentionRef", 
   await page.goto("/ui/host.html"); await page.locator("#host-key").fill("browser-test-key"); await page.locator("#host-connect").click(); await expect(page.locator("#host-status")).toContainText("iframe 已连接");
   const frame = page.frameLocator("#agent-frame"); await frame.locator(".topic-button").filter({ hasText: topic.title }).click(); await expect(frame.locator("#topic-heading")).toHaveText(topic.title);
   const sid = await page.locator("#host-session").textContent();
-  const result = await promisify(execFile)("../.venv/bin/python", ["../tests/fixtures/host_drag_client.py", baseURL!, sid!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  const result = await promisify(execFile)(pythonExecutable, [...pythonFixtureArgs("host_drag_client.py"), baseURL!, sid!], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
   const value = JSON.parse(result.stdout); expect(value.topic_id).toBe(topic.id);
   const context = (await (await request.get(`/v1/topics/${topic.id}/prompt-context`)).json()).mentions;
   expect(context[0]).toMatchObject({ id: value.mention_id, content: "Python 明确提供的拖放正文" });
