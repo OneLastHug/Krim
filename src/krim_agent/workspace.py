@@ -21,6 +21,7 @@ WORKSPACE_READ_TOOL_NAMES = frozenset(
     {
         "workspace_read",
         "workspace_checkpoint_capture",
+        "workspace_directory_checkpoint_capture",
         "workspace_list",
         "workspace_search",
         "workspace_mixed_query",

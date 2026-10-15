@@ -205,6 +205,10 @@ from krim_agent.workspace_directory import (
     DirectoryQueryRequest,
     DirectoryQueryResult,
 )
+from krim_agent.workspace_directory_checkpoint import (
+    DirectoryCheckpointCreate,
+    DirectoryCheckpointView,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -322,6 +326,7 @@ def create_app(
     tree_exchanges_enabled: bool = False,
     generated_tree_undos_enabled: bool = False,
     checkpoint_bytes_enabled: bool = False,
+    directory_checkpoints_enabled: bool = False,
     checkpoint_controls_enabled: bool = False,
     checkpoint_restore_controls_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
@@ -365,6 +370,8 @@ def create_app(
         agent_service.register_generated_tree_undos()
     if checkpoint_bytes_enabled:
         agent_service.register_checkpoint_bytes()
+    if directory_checkpoints_enabled:
+        agent_service.register_directory_checkpoints()
     if checkpoint_controls_enabled:
         agent_service.register_checkpoint_controls()
     if checkpoint_restore_controls_enabled:
@@ -1803,6 +1810,69 @@ def create_app(
     ) -> MixedBatchView:
         _mixed_batch_parameters(request, set())
         return await agent_service.workspace_cancel_mixed_batch(agent_id, batch_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-checkpoints", status_code=202)
+    async def agent_workspace_directory_checkpoint_create(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        payload: DirectoryCheckpointCreate,
+        confirmed: bool = Query(default=False),
+    ) -> DirectoryCheckpointView:
+        _directory_parameters(request, {"confirmed"})
+        return await agent_service.workspace_create_directory_checkpoint(
+            agent_id, payload, confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-checkpoints")
+    async def agent_workspace_directory_checkpoints(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        offset: int = Query(default=0, ge=0, le=9007199254740991),
+        limit: int = Query(default=32, ge=1, le=32),
+    ) -> list[DirectoryCheckpointView]:
+        _directory_parameters(request, {"offset", "limit"})
+        return await agent_service.workspace_directory_checkpoint_list(
+            agent_id, offset=offset, limit=limit
+        )
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-checkpoints/by-key")
+    async def agent_workspace_directory_checkpoint_by_key(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        request_key: str = Query(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$"),
+    ) -> DirectoryCheckpointView | None:
+        _directory_parameters(request, {"request_key"})
+        return await agent_service.workspace_directory_checkpoint_by_key(agent_id, request_key)
+
+    @app.get("/v1/agents/{agent_id}/workspace/directory-checkpoints/{checkpoint_id}")
+    async def agent_workspace_directory_checkpoint(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+    ) -> DirectoryCheckpointView:
+        _directory_parameters(request, set())
+        return await agent_service.workspace_directory_checkpoint(agent_id, checkpoint_id)
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-checkpoints/{checkpoint_id}/wait")
+    async def agent_workspace_directory_checkpoint_wait(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+        timeout_seconds: float = Query(default=30, ge=0, le=300, allow_inf_nan=False),
+    ) -> DirectoryCheckpointView:
+        _directory_parameters(request, {"timeout_seconds"})
+        return await agent_service.workspace_directory_checkpoint_wait(
+            agent_id, checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    @app.post("/v1/agents/{agent_id}/workspace/directory-checkpoints/{checkpoint_id}/cancel")
+    async def agent_workspace_directory_checkpoint_cancel(
+        request: Request,
+        agent_id: WorkspaceIdentifier,
+        checkpoint_id: WorkspaceIdentifier,
+    ) -> DirectoryCheckpointView:
+        _directory_parameters(request, set())
+        return await agent_service.workspace_directory_checkpoint_cancel(agent_id, checkpoint_id)
 
     @app.post("/v1/agents/{agent_id}/workspace/native-checkpoints", status_code=202)
     async def agent_workspace_checkpoint_create(

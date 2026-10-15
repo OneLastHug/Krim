@@ -320,7 +320,7 @@ async def test_restart_cancels_pending_and_preserves_reply_history_and_downgrade
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0052_directory_checkpoints"
+            ).scalar() == "0053_directory_captures"
         assert (await repository.get_interaction(run.id, request.id)).status == "cancelled"
     finally:
         await reopened.close()

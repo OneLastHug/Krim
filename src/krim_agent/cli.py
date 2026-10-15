@@ -105,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="checkpoint bytes（检查点字节）：显式启用元数据捕获，仍需原工作区授权",
     )
     serve.add_argument(
+        "--directory-checkpoints",
+        action="store_true",
+        help="directory checkpoints（目录检查点）：显式启用完整目录捕获，仍需原工作区授权",
+    )
+    serve.add_argument(
         "--checkpoint-controls",
         action="store_true",
         help="checkpoint controls（检查点控制）：显式登记模型同调用创建、查询与取消",
@@ -162,6 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .evaluation.cli import add_parser as add_eval_parser
 
     add_eval_parser(subparsers)
+    from .directory_checkpoint_cli import add_parser as add_directory_checkpoint_parser
+
+    add_directory_checkpoint_parser(subparsers)
     workspace = subparsers.add_parser(
         "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
     )
@@ -1318,6 +1326,8 @@ def main() -> None:
             parser.error("serve --generated-tree-undos需要已授权--workspace")
         if args.checkpoint_bytes and not args.workspace:
             parser.error("serve --checkpoint-bytes需要已授权--workspace")
+        if args.directory_checkpoints and not args.workspace:
+            parser.error("serve --directory-checkpoints需要已授权--workspace")
         if args.checkpoint_controls and not args.workspace:
             parser.error("serve --checkpoint-controls需要已授权--workspace")
         if args.checkpoint_restore_controls and not args.workspace:
@@ -1362,6 +1372,7 @@ def main() -> None:
                 tree_exchanges_enabled=args.tree_exchanges,
                 generated_tree_undos_enabled=args.generated_tree_undos,
                 checkpoint_bytes_enabled=args.checkpoint_bytes,
+                directory_checkpoints_enabled=args.directory_checkpoints,
                 checkpoint_controls_enabled=args.checkpoint_controls,
                 checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,
                 execution_runner=execution_runner,
@@ -1421,6 +1432,11 @@ def main() -> None:
                 return
             if args.command == "workspace":
                 _workspace_command(client, args, parser)
+                return
+            if args.command == "directory-checkpoints":
+                from .directory_checkpoint_cli import run_command as directory_checkpoint_command
+
+                directory_checkpoint_command(client, args, parser)
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)

@@ -135,6 +135,7 @@ from .workspace_directory import (
     DirectoryQueryRequest,
     DirectoryQueryResult,
 )
+from .workspace_directory_checkpoint import DirectoryCheckpointCreate, DirectoryCheckpointView
 from .workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -1883,6 +1884,127 @@ class KrimClient:
         )
         self._check(response)
         return MixedBatchView.model_validate_json(response.content)
+
+    def agent_workspace_create_directory_checkpoint(
+        self, agent_id: str, request: DirectoryCheckpointCreate, *, confirmed: bool = False
+    ) -> DirectoryCheckpointView:
+        request = DirectoryCheckpointCreate.model_validate(request.model_dump())
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints",
+            params={"confirmed": str(confirmed).lower()},
+            json=request.model_dump(mode="json"),
+        )
+        self._check(response)
+        value = DirectoryCheckpointView.model_validate_json(response.content)
+        self._directory_checkpoint_match(value, agent_id)
+        if (
+            value.request_key != request.request_key
+            or value.title != request.title
+            or value.root_path != request.root_path
+        ):
+            raise ClientError(
+                "检查点回程未保留原目录请求",
+                code="workspace_directory_capture_response",
+                status=502,
+            )
+        return value
+
+    @staticmethod
+    def _directory_checkpoint_match(value: DirectoryCheckpointView, agent_id: str) -> None:
+        if value.scope_id != "session:" + agent_id:
+            raise ClientError(
+                "检查点回程作用域不匹配", code="workspace_directory_capture_response", status=502
+            )
+
+    def agent_workspace_directory_checkpoints(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[DirectoryCheckpointView]:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints",
+            params={"offset": offset, "limit": limit},
+        )
+        self._check(response)
+        values = TypeAdapter(list[DirectoryCheckpointView]).validate_json(response.content)
+        for value in values:
+            self._directory_checkpoint_match(value, agent_id)
+        if len(values) > limit or len({value.checkpoint_id for value in values}) != len(values):
+            raise ClientError(
+                "检查点分页回程不一致", code="workspace_directory_capture_response", status=502
+            )
+        return values
+
+    def agent_workspace_directory_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> DirectoryCheckpointView:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints/{_workspace_identifier(checkpoint_id)}"
+        )
+        self._check(response)
+        value = DirectoryCheckpointView.model_validate_json(response.content)
+        self._directory_checkpoint_match(value, agent_id)
+        if value.checkpoint_id != checkpoint_id:
+            raise ClientError(
+                "检查点回程原标识不匹配", code="workspace_directory_capture_response", status=502
+            )
+        return value
+
+    def agent_workspace_directory_checkpoint_by_key(
+        self, agent_id: str, request_key: str
+    ) -> DirectoryCheckpointView | None:
+        response = self._http.get(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints/by-key",
+            params={"request_key": _checkpoint_key(request_key)},
+        )
+        self._check(response)
+        value: DirectoryCheckpointView | None = TypeAdapter(
+            DirectoryCheckpointView | None
+        ).validate_json(response.content)
+        if value is not None:
+            self._directory_checkpoint_match(value, agent_id)
+            if value.request_key != request_key:
+                raise ClientError(
+                    "检查点回程原键不匹配", code="workspace_directory_capture_response", status=502
+                )
+        return value
+
+    def agent_workspace_wait_directory_checkpoint(
+        self, agent_id: str, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> DirectoryCheckpointView:
+        timeout = _checkpoint_wait(timeout_seconds, "workspace_directory_capture_timeout")
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints/"
+            f"{_workspace_identifier(checkpoint_id)}/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=timeout,
+        )
+        self._check(response)
+        value = DirectoryCheckpointView.model_validate_json(response.content)
+        self._directory_checkpoint_match(value, agent_id)
+        if value.checkpoint_id != checkpoint_id:
+            raise ClientError(
+                "检查点等待回程原标识不匹配",
+                code="workspace_directory_capture_response",
+                status=502,
+            )
+        return value
+
+    def agent_workspace_cancel_directory_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> DirectoryCheckpointView:
+        response = self._http.post(
+            f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/directory-checkpoints/"
+            f"{_workspace_identifier(checkpoint_id)}/cancel"
+        )
+        self._check(response)
+        value = DirectoryCheckpointView.model_validate_json(response.content)
+        self._directory_checkpoint_match(value, agent_id)
+        if value.checkpoint_id != checkpoint_id:
+            raise ClientError(
+                "检查点取消回程原标识不匹配",
+                code="workspace_directory_capture_response",
+                status=502,
+            )
+        return value
 
     def agent_workspace_create_checkpoint(
         self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False

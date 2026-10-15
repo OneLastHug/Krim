@@ -326,7 +326,7 @@ async def test_0042_constraints_foreign_keys_and_nonempty_downgrade_preserve_his
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0052_directory_checkpoints"
+            ).scalar_one() == "0053_directory_captures"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()

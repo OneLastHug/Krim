@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from krim_agent.skills import SkillSnapshot
     from krim_agent.workspace import WorkspaceBinding
     from krim_agent.workspace_checkpoint import CheckpointCaptureFence
+    from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
     from krim_agent.workspace_list import NativeBatchFence
     from krim_agent.workspace_mixed_batch import MixedBatchFence
     from krim_agent.workspace_restore import CheckpointRestoreFence
@@ -65,6 +66,13 @@ class WorkspaceCheckpointBackend(Protocol):
     async def capture_read(
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, object]: ...
+    async def capture_metadata(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]: ...
+    async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None: ...
+
+
+class DirectoryCheckpointBackend(Protocol):
     async def capture_metadata(
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, object]: ...
@@ -277,6 +285,9 @@ class ToolContext:
     # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
+    directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None
+    workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
+    _directory_checkpoint_capture_response: str | None = field(default=None, repr=False)
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
     workspace_checkpoint_controls: CheckpointControlBackend | None = None
@@ -327,6 +338,8 @@ class ToolContext:
             tree_moves=self.tree_moves,
             tree_exchanges=self.tree_exchanges,
             checkpoint_capture=self.checkpoint_capture,
+            directory_checkpoint_capture=self.directory_checkpoint_capture,
+            workspace_directory_checkpoints=self.workspace_directory_checkpoints,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
             workspace_checkpoint_controls=self.workspace_checkpoint_controls,

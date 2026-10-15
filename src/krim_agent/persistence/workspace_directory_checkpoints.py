@@ -150,6 +150,17 @@ class WorkspaceDirectoryCheckpointStore:
         request: DirectoryCheckpointMaterialCreate,
         snapshot: WorkspaceTreeSnapshot | None = None,
     ) -> tuple[StoredDirectoryCheckpoint, bool]:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
+            return await self._save_captured(sql, scope, binding, request, snapshot)
+
+    async def _save_captured(
+        self,
+        sql: AsyncSession,
+        scope: str,
+        binding: WorkspaceBinding,
+        request: DirectoryCheckpointMaterialCreate,
+        snapshot: WorkspaceTreeSnapshot | None = None,
+    ) -> tuple[StoredDirectoryCheckpoint, bool]:
         if (
             type(request) is not DirectoryCheckpointMaterialCreate
             or type(binding) is not WorkspaceBinding
@@ -159,100 +170,98 @@ class WorkspaceDirectoryCheckpointStore:
             )
         request = DirectoryCheckpointMaterialCreate.model_validate(request.model_dump(mode="json"))
         checksum = digest(request.model_dump(mode="json"))
-        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
-            await self.edits._writer(sql)
-            await self.edits._scope(sql, scope, writing=False)
-            await self.edits._resource(sql, scope, binding.key, binding.fingerprint)
-            previous = await sql.scalar(
-                select(WorkspaceDirectoryCheckpointRow).where(
-                    WorkspaceDirectoryCheckpointRow.scope_id == scope,
-                    WorkspaceDirectoryCheckpointRow.request_key == request.request_key,
-                )
+        await self.edits._writer(sql)
+        await self.edits._scope(sql, scope, writing=False)
+        await self.edits._resource(sql, scope, binding.key, binding.fingerprint)
+        previous = await sql.scalar(
+            select(WorkspaceDirectoryCheckpointRow).where(
+                WorkspaceDirectoryCheckpointRow.scope_id == scope,
+                WorkspaceDirectoryCheckpointRow.request_key == request.request_key,
             )
-            if previous is not None:
-                if previous.request_hash != checksum:
-                    raise ServiceError(
-                        "workspace_directory_checkpoint_key_conflict",
-                        "原目录材料键已绑定其他请求",
-                        409,
-                    )
-                return (
-                    await self._stored(sql, scope, previous, binding.key, binding.fingerprint),
-                    False,
-                )
-            topic = await self.edits._scope(sql, scope, writing=True)
-            workspace = binding.require()
-            if type(snapshot) is not WorkspaceTreeSnapshot:
+        )
+        if previous is not None:
+            if previous.request_hash != checksum:
                 raise ServiceError(
-                    "workspace_directory_checkpoint_material", "须提供完整私有目录快照", 422
+                    "workspace_directory_checkpoint_key_conflict",
+                    "原目录材料键已绑定其他请求",
+                    409,
                 )
-            try:
-                self._bounds(snapshot, workspace.max_file_bytes)
-                if (
-                    snapshot.root_path != request.root_path
-                    or snapshot.workspace_fingerprint != workspace.fingerprint
-                ):
-                    raise ServiceError(
-                        "workspace_directory_checkpoint_binding",
-                        "目录快照与原请求或授权根不符",
-                        409,
-                    )
-                metadata, payload = encode_snapshot(snapshot)
-            except (ValueError, TypeError, AttributeError):
-                raise ServiceError(
-                    "workspace_directory_checkpoint_material", "完整私有目录快照无效", 422
-                ) from None
-            metadata_bytes = len(json.dumps(metadata, ensure_ascii=True).encode("utf-8"))
-            if metadata_bytes > 2097152:
-                raise ServiceError(
-                    "workspace_directory_checkpoint_limit", "目录材料元数据超过限额", 413
-                )
-            count = int(
-                await sql.scalar(select(func.count()).select_from(WorkspaceDirectoryCheckpointRow))
-                or 0
+            return (
+                await self._stored(sql, scope, previous, binding.key, binding.fingerprint),
+                False,
             )
-            used = int(
-                await sql.scalar(
-                    select(
-                        func.coalesce(
-                            func.sum(
-                                func.length(WorkspaceDirectoryCheckpointRow.payload)
-                                + func.length(
-                                    sql_cast(
-                                        WorkspaceDirectoryCheckpointRow.metadata_value, LargeBinary
-                                    )
+        topic = await self.edits._scope(sql, scope, writing=True)
+        workspace = binding.require()
+        if type(snapshot) is not WorkspaceTreeSnapshot:
+            raise ServiceError(
+                "workspace_directory_checkpoint_material", "须提供完整私有目录快照", 422
+            )
+        try:
+            self._bounds(snapshot, workspace.max_file_bytes)
+            if (
+                snapshot.root_path != request.root_path
+                or snapshot.workspace_fingerprint != workspace.fingerprint
+            ):
+                raise ServiceError(
+                    "workspace_directory_checkpoint_binding",
+                    "目录快照与原请求或授权根不符",
+                    409,
+                )
+            metadata, payload = encode_snapshot(snapshot)
+        except (ValueError, TypeError, AttributeError):
+            raise ServiceError(
+                "workspace_directory_checkpoint_material", "完整私有目录快照无效", 422
+            ) from None
+        metadata_bytes = len(json.dumps(metadata, ensure_ascii=True).encode("utf-8"))
+        if metadata_bytes > 2097152:
+            raise ServiceError(
+                "workspace_directory_checkpoint_limit", "目录材料元数据超过限额", 413
+            )
+        count = int(
+            await sql.scalar(select(func.count()).select_from(WorkspaceDirectoryCheckpointRow)) or 0
+        )
+        used = int(
+            await sql.scalar(
+                select(
+                    func.coalesce(
+                        func.sum(
+                            func.length(WorkspaceDirectoryCheckpointRow.payload)
+                            + func.length(
+                                sql_cast(
+                                    WorkspaceDirectoryCheckpointRow.metadata_value, LargeBinary
                                 )
-                            ),
-                            0,
-                        )
+                            )
+                        ),
+                        0,
                     )
                 )
-                or 0
             )
-            added = len(payload) + metadata_bytes
-            if count >= self.max_checkpoints or used + added > self.max_snapshot_bytes:
-                raise ServiceError(
-                    "workspace_directory_checkpoint_capacity", "目录材料历史或总容量已满", 429
-                )
-            binding.require()
-            await self.edits._scope(sql, scope, writing=True)
-            await self.edits._resource(sql, scope, binding.key, binding.fingerprint)
-            row = WorkspaceDirectoryCheckpointRow(
-                checkpoint_id=str(uuid4()),
-                scope_id=scope,
-                topic_id=topic,
-                request_key=request.request_key,
-                request_hash=checksum,
-                title=request.title,
-                root_path=request.root_path,
-                workspace_key=binding.key,
-                resource_fingerprint=binding.fingerprint,
-                workspace_fingerprint=snapshot.workspace_fingerprint,
-                snapshot_fingerprint=snapshot.fingerprint,
-                metadata_value=cast(dict[str, JsonValue], metadata),
-                payload=payload,
-                created_at=utc_now(),
+            or 0
+        )
+        added = len(payload) + metadata_bytes
+        if count >= self.max_checkpoints or used + added > self.max_snapshot_bytes:
+            raise ServiceError(
+                "workspace_directory_checkpoint_capacity", "目录材料历史或总容量已满", 429
             )
-            sql.add(row)
-            await sql.flush()
-            return await self._stored(sql, scope, row, binding.key, binding.fingerprint), True
+        binding.require()
+        await self.edits._scope(sql, scope, writing=True)
+        await self.edits._resource(sql, scope, binding.key, binding.fingerprint)
+        row = WorkspaceDirectoryCheckpointRow(
+            checkpoint_id=str(uuid4()),
+            scope_id=scope,
+            topic_id=topic,
+            request_key=request.request_key,
+            request_hash=checksum,
+            title=request.title,
+            root_path=request.root_path,
+            workspace_key=binding.key,
+            resource_fingerprint=binding.fingerprint,
+            workspace_fingerprint=snapshot.workspace_fingerprint,
+            snapshot_fingerprint=snapshot.fingerprint,
+            metadata_value=cast(dict[str, JsonValue], metadata),
+            payload=payload,
+            created_at=utc_now(),
+        )
+        sql.add(row)
+        await sql.flush()
+        return await self._stored(sql, scope, row, binding.key, binding.fingerprint), True
