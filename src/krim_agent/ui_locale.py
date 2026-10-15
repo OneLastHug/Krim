@@ -4,6 +4,12 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "检查点捕获格式": "Checkpoint capture format",
+    "UTF-8文本（原默认）": "UTF-8 text (original default)",
+    "完整文件字节（含二进制）": "Complete file bytes (including binary)",
+    "二进制字节": "Binary bytes",
+    "检查点回程与原事实不一致": "Checkpoint response does not match original facts",
+    "检查点恢复记录不可用，写操作已停用": "Checkpoint recovery unavailable; writes disabled",
     "原生成根撤销与历史": "Generated root undo and history",
     "审阅原生成根与保留位置": "Review generated root and preservation path",
     "原完成生成计划标识": "Original completed generation plan ID",

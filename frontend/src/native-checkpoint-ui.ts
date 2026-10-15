@@ -15,10 +15,18 @@ type State = {
   captureOffset: number; planOffset: number; moreCaptures: boolean; morePlans: boolean;
   pending: Pending | null; message: string; stale: boolean; loading: boolean; sending: boolean; stopping: boolean; querying: boolean;
   loadVersion: number; queryVersion: number; querySerial: number;
+  captureFormat: "text" | "bytes"; recoveryError: boolean;
 };
 const node = (id: string): HTMLElement => document.getElementById(id)!;
 const button = (id: string): HTMLButtonElement => node(id) as HTMLButtonElement;
 const PAGE_SIZE = 8;
+const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/, SHA = /^[0-9a-f]{64}$/;
+function relative(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && new TextEncoder().encode(value).length <= 512
+    && !/[\\:\x00-\x1f\x7f]/.test(value) && value.split("/").every(part => part !== "" && part !== "." && part !== "..");
+}
+function requestKey(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 128 && !/[\x00-\x1f\x7f]/.test(value); }
+function keys(value: unknown, allowed: string[]): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).every(name => allowed.includes(name)); }
 const labels: Record<string, string> = {
   capturing: "文件捕获中", available: "检查点可用", failed: "检查点或恢复失败", cancelled: "检查点或恢复已取消",
   interrupted: "检查点或恢复已中断", preparing: "正在准备恢复", ready: "恢复待审阅", executing: "正在恢复文件",
@@ -49,6 +57,7 @@ export class NativeCheckpointUI {
     (node("native-checkpoint-query-kind") as HTMLSelectElement).onchange = () => {
       const state = this.current(); if (state) state.queryKind = (node("native-checkpoint-query-kind") as HTMLSelectElement).value as Kind;
     };
+    (node("native-checkpoint-format") as HTMLSelectElement).onchange = () => { const state = this.current(); if (state) state.captureFormat = (node("native-checkpoint-format") as HTMLSelectElement).value === "bytes" ? "bytes" : "text"; this.controls(); };
     node("native-checkpoint-create").onclick = () => void this.capture();
     node("native-checkpoint-preview").onclick = () => void this.preview();
     node("native-restore-execute").onclick = () => void this.execute();
@@ -69,8 +78,11 @@ export class NativeCheckpointUI {
     let changed = false;
     for (const agent of agents) {
       const old = this.states.get(agent.agent_id);
-      if (!old) this.states.set(agent.agent_id, { agent, title: "", paths: "", query: "", queryKind: "checkpoint", captures: [], plans: [], capture: null, plan: null,
-        captureOffset: 0, planOffset: 0, moreCaptures: false, morePlans: false, pending: null, message: "", stale: true, loading: false, sending: false, stopping: false, querying: false, loadVersion: 0, queryVersion: 0, querySerial: 0 });
+      if (!old) {
+        const state: State = { agent, title: "", paths: "", query: "", queryKind: "checkpoint", captures: [], plans: [], capture: null, plan: null, captureFormat: "text", recoveryError: false,
+        captureOffset: 0, planOffset: 0, moreCaptures: false, morePlans: false, pending: null, message: "", stale: true, loading: false, sending: false, stopping: false, querying: false, loadVersion: 0, queryVersion: 0, querySerial: 0 };
+        this.readRecovery(state); this.states.set(agent.agent_id, state);
+      }
       else if (old.agent.session_id !== agent.session_id || old.agent.session.status !== agent.session.status
         || JSON.stringify(old.agent.session.permissions) !== JSON.stringify(agent.session.permissions)) {
         const sameSession = old.agent.session_id === agent.session_id;
@@ -100,7 +112,7 @@ export class NativeCheckpointUI {
   private resource(state: State, kind: Kind): string { return `${this.base(state)}/${kind === "checkpoint" ? "native-checkpoints" : "native-restores"}`; }
   private readable(state: State): boolean {
     return !state.stale && state.agent.session.status === "open" && state.agent.session.permissions.mode !== "ask"
-      && state.grant?.available === true && state.grant.writable && state.grant.tool_names.includes("workspace_read");
+      && state.grant?.available === true && state.grant.writable && state.grant.tool_names.some(name => name === "workspace_read" || name === "workspace_checkpoint_capture");
   }
   private writable(state: State): boolean {
     return this.readable(state) && state.agent.session.permissions.mode !== "plan" && state.grant!.tool_names.includes("workspace_change");
@@ -109,16 +121,54 @@ export class NativeCheckpointUI {
     return state.capture?.status === "capturing" || activePlan(state.plan)
       || state.captures.some(item => item.status === "capturing") || state.plans.some(item => activePlan(item));
   }
-  private canStart(state: State): boolean { return !state.loading && !state.sending && !state.stopping && !state.querying && !state.pending && !this.producing(state); }
+  private canStart(state: State): boolean { return !state.recoveryError && !state.loading && !state.sending && !state.stopping && !state.querying && !state.pending && !this.producing(state); }
   private acceptCapture(state: State, value: NativeCheckpointView, select = true): void {
+    this.verifyCapture(state, value);
+    if (state.pending?.kind === "capture" && state.pending.request.request_key === value.request_key) {
+      const request = state.pending.request;
+      if (value.title !== request.title || (value.capture_format || "text") !== (request.capture_format || "text") || JSON.stringify(value.files.map(file => file.path)) !== JSON.stringify(request.paths)) throw new Error(t("检查点回程与原事实不一致"));
+      state.pending = null; this.persistRecovery(state);
+    }
     if (select) state.capture = value;
-    if (state.pending?.kind === "capture" && state.pending.request.request_key === value.request_key) state.pending = null;
   }
   private acceptPlan(state: State, value: NativeRestoreView, select = true): void {
     if (select) state.plan = value;
     if (state.pending?.kind === "preview" && state.pending.request.request_key === value.request_key
       || state.pending?.kind === "execute" && state.pending.request.plan_id === value.plan_id
         && (value.execute_key !== null || !["preparing", "ready"].includes(value.phase))) state.pending = null;
+  }
+  private verifyCapture(state: State, value: NativeCheckpointView): void {
+    const format = value?.capture_format || "text";
+    if (!value || value.source !== "workspace" || value.scope_id !== `session:${state.agent.agent_id}` || !ID.test(value.checkpoint_id) || !requestKey(value.request_key)
+      || !["text", "bytes"].includes(format) || !["capturing", "available", "failed", "cancelled", "interrupted"].includes(value.status)
+      || !Array.isArray(value.files) || value.files.length < 1 || value.files.length > 32 || new Set(value.files.map(file => file.path)).size !== value.files.length
+      || state.grant && (value.workspace_key !== state.grant.key || value.resource_fingerprint !== state.grant.fingerprint)) throw new Error(t("检查点回程与原事实不一致"));
+    for (const file of value.files) {
+      if (!relative(file.path) || typeof file.captured !== "boolean"
+        || !file.captured && [file.exists, file.sha256, file.byte_size, file.mode, file.content_kind ?? null].some(field => field !== null)
+        || file.captured && (file.exists === true ? !SHA.test(file.sha256 || "") || !Number.isSafeInteger(file.byte_size) || file.byte_size! < 0 || file.byte_size! > 8388608 || !Number.isSafeInteger(file.mode) || file.mode! < 0 || file.mode! > 4095 : file.exists !== false || file.sha256 !== null || file.byte_size !== 0 || file.mode !== null)
+        || file.captured && (format === "bytes" ? !["text", "binary", "absent"].includes(file.content_kind || "") || (file.content_kind === "absent") !== (file.exists === false) : file.content_kind !== undefined)
+        || value.status === "available" && !file.captured) throw new Error(t("检查点回程与原事实不一致"));
+    }
+  }
+  private storageKey(state: State): string { return `krim-native-capture-recovery:${state.agent.session_id}`; }
+  private persistRecovery(state: State): void {
+    if (state.recoveryError) throw new Error(t("检查点恢复记录不可用，写操作已停用"));
+    try {
+      if (state.pending?.kind === "capture") localStorage.setItem(this.storageKey(state), JSON.stringify({ version: 1, pending: state.pending }));
+      else localStorage.removeItem(this.storageKey(state));
+    } catch { state.recoveryError = true; throw new Error(t("检查点恢复记录不可用，写操作已停用")); }
+  }
+  private readRecovery(state: State): void {
+    try {
+      const raw = localStorage.getItem(this.storageKey(state)); if (!raw) return; if (raw.length > 24576) throw new Error();
+      const value: unknown = JSON.parse(raw);
+      if (!keys(value, ["version", "pending"]) || value.version !== 1 || !keys(value.pending, ["kind", "request"]) || value.pending.kind !== "capture") throw new Error();
+      const request = value.pending.request;
+      if (!keys(request, ["title", "paths", "request_key", "capture_format"]) || typeof request.title !== "string" || !request.title.trim() || request.title.length > 120 || !requestKey(request.request_key)
+        || request.capture_format !== undefined && !["text", "bytes"].includes(String(request.capture_format)) || !Array.isArray(request.paths) || request.paths.length < 1 || request.paths.length > 32 || !request.paths.every(relative) || new Set(request.paths).size !== request.paths.length) throw new Error();
+      state.pending = value.pending as Pending; state.query = request.request_key; state.title = request.title; state.paths = request.paths.join("\n"); state.captureFormat = request.capture_format === "bytes" ? "bytes" : "text";
+    } catch { state.recoveryError = true; state.message = t("检查点恢复记录不可用，写操作已停用"); }
   }
 
   async refresh(reset = false): Promise<void> {
@@ -133,7 +183,9 @@ export class NativeCheckpointUI {
         state.agent.session.status === "open" ? requestJson<WorkspaceView>(this.base(state)).catch(() => undefined) : Promise.resolve(undefined),
       ]);
       if (!this.valid(state, generation) || state.loadVersion !== version) return;
+      state.grant = grant;
       state.captures = captures.slice(0, PAGE_SIZE); state.plans = plans.slice(0, PAGE_SIZE);
+      for (const capture of state.captures) this.verifyCapture(state, capture);
       state.moreCaptures = captures.length > PAGE_SIZE; state.morePlans = plans.length > PAGE_SIZE; state.grant = grant;
       const captureId = state.capture?.checkpoint_id || captures[0]?.checkpoint_id, planId = state.plan?.plan_id || plans[0]?.plan_id;
       const [capture, plan] = await Promise.all([
@@ -210,9 +262,10 @@ export class NativeCheckpointUI {
 
   private async capture(): Promise<void> {
     const state = this.current(); if (!state || !this.readable(state) || !this.canStart(state)) return;
+    if (!state.grant!.tool_names.includes(state.captureFormat === "bytes" ? "workspace_checkpoint_capture" : "workspace_read")) return;
     const paths = state.paths.split(/\r?\n/).filter(value => value.length > 0);
     if (!paths.length || paths.length > 32 || new Set(paths).size !== paths.length) { this.notice(t("请填写1至32个不重复的文件路径"), true); return; }
-    await this.send({ kind: "capture", request: { title: state.title.trim() || t("文件检查点"), paths, request_key: crypto.randomUUID() } });
+    await this.send({ kind: "capture", request: { title: state.title.trim() || t("文件检查点"), paths, request_key: crypto.randomUUID(), ...(state.captureFormat === "bytes" ? { capture_format: "bytes" as const } : {}) } });
   }
   private async preview(): Promise<void> {
     const state = this.current(); if (!state || !this.readable(state) || !this.canStart(state) || state.capture?.status !== "available") return;
@@ -235,6 +288,10 @@ export class NativeCheckpointUI {
     // 恢复by-key查的是预览键；执行键仅用于同一计划的执行幂等，不能互换。
     state.query = pending.kind === "execute" ? state.plan!.request_key : pending.request.request_key;
     state.queryKind = pending.kind === "capture" ? "checkpoint" : "restore";
+    if (pending.kind === "capture") {
+      try { this.persistRecovery(state); }
+      catch (error) { state.sending = false; state.message = errorText(error); this.notice(state.message, true); this.render(); return; }
+    }
     this.render();
     const path = pending.kind === "capture" ? this.resource(state, "checkpoint") : pending.kind === "preview" ? `${this.resource(state, "restore")}/preview` : `${this.resource(state, "restore")}/${encodeURIComponent(pending.request.plan_id)}/execute`;
     const controller = new AbortController(), timer = window.setTimeout(() => controller.abort(), 15_000);
@@ -249,7 +306,7 @@ export class NativeCheckpointUI {
     } catch (error) {
       if (!this.valid(state, generation)) return;
       // 明确拒绝请求没有接受生产者；网络/5xx继续按原键查找，绝不自动POST。
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500) state.pending = null;
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) { state.pending = null; if (pending.kind === "capture") this.persistRecovery(state); }
       state.message = state.pending ? t("请求结果尚未确认，请继续查询原请求") : errorText(error);
       this.notice(state.message, true);
     } finally {
@@ -281,8 +338,9 @@ export class NativeCheckpointUI {
   private controls(): void {
     const state = this.current(); if (!state) return;
     const ready = this.canStart(state), readable = this.readable(state), plan = state.plan;
-    button("native-checkpoint-create").disabled = !ready || !readable || !state.paths.replace(/\r?\n/g, "");
-    button("native-checkpoint-preview").disabled = !ready || !readable || state.capture?.status !== "available";
+    button("native-checkpoint-create").disabled = !ready || !readable || !state.paths.replace(/\r?\n/g, "") || !state.grant?.tool_names.includes(state.captureFormat === "bytes" ? "workspace_checkpoint_capture" : "workspace_read");
+    (node("native-checkpoint-format") as HTMLSelectElement).disabled = !ready || !readable;
+    button("native-checkpoint-preview").disabled = !ready || !readable || !state.grant?.tool_names.includes("workspace_read") || state.capture?.status !== "available";
     button("native-restore-execute").disabled = !ready || !this.writable(state) || plan?.phase !== "ready" || plan.expires_at <= Date.now() / 1000;
     button("native-checkpoint-refresh").disabled = state.loading;
     for (const id of ["native-checkpoint-query-id", "native-checkpoint-query-key"]) button(id).disabled = state.querying || !state.query;
@@ -305,11 +363,11 @@ export class NativeCheckpointUI {
   }
   private render(): void {
     const state = this.current(); if (!state) return;
-    for (const [id, value] of [["native-checkpoint-title", state.title], ["native-checkpoint-paths", state.paths], ["native-checkpoint-query", state.query], ["native-checkpoint-query-kind", state.queryKind]]) {
+    for (const [id, value] of [["native-checkpoint-title", state.title], ["native-checkpoint-paths", state.paths], ["native-checkpoint-query", state.query], ["native-checkpoint-query-kind", state.queryKind], ["native-checkpoint-format", state.captureFormat]]) {
       const input = node(id!) as HTMLInputElement; if (input.value !== value) input.value = value!;
     }
     node("native-checkpoint-status").textContent = state.message || (state.stale ? t("正在读取检查点与恢复历史") : !this.readable(state) ? t("当前会话只能查询文件检查点历史") : "");
-    if (state.pending) node("native-checkpoint-status").textContent += `\n${t("未确认请求键")}: ${state.pending.request.request_key}`;
+    if (state.pending && !state.recoveryError) node("native-checkpoint-status").textContent += `\n${t("请求结果尚未确认，请继续查询原请求")}\n${t("未确认请求键")}: ${state.pending.request.request_key}`;
     for (const [kind, offset, count] of [["checkpoint", state.captureOffset, state.captures.length], ["restore", state.planOffset, state.plans.length]] as const) {
       node(`native-${kind}-page`).textContent = t("第{page}页 · 本页{count}项", { page: offset / PAGE_SIZE + 1, count });
     }
@@ -338,9 +396,10 @@ export class NativeCheckpointUI {
       root.dataset.checkpointId = value.checkpoint_id; root.dataset.checkpointStatus = value.status;
       const title = document.createElement("h3"); title.textContent = `${value.title} · ${statusText(value.status)}`; root.append(title);
       line(root, "检查点标识", value.checkpoint_id); line(root, "原请求键", value.request_key);
+      line(root, "检查点捕获格式", t(value.capture_format === "bytes" ? "完整文件字节（含二进制）" : "UTF-8文本（原默认）"));
       if (value.error_code) line(root, "错误代码", value.error_code);
       for (const file of value.files) {
-        const row = document.createElement("p"); row.textContent = `${file.path} · ${t(!file.captured ? "尚未捕获" : file.exists ? "文件存在" : "文件不存在")} · ${file.byte_size ?? "—"} B · ${file.captured ? modeText(file.mode) : "—"}\n${file.sha256 || "—"}`; root.append(row);
+        const row = document.createElement("p"); row.textContent = `${file.path} · ${t(!file.captured ? "尚未捕获" : file.exists ? "文件存在" : "文件不存在")}${file.content_kind === "binary" ? ` · ${t("二进制字节")}` : ""} · ${file.byte_size ?? "—"} B · ${file.captured ? modeText(file.mode) : "—"}\n${file.sha256 || "—"}`; root.append(row);
       }
     });
     this.replace("native-restore-detail", [state.agent.agent_id, state.plan], root => {

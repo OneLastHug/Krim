@@ -60,9 +60,13 @@ def test_legacy_public_json_and_text_entry_points_stay_closed_to_bytes():
         path="file.bin", captured=True, exists=True, sha256="b" * 64, byte_size=2, mode=0o640
     )
     assert "content_kind" not in file.model_dump(mode="json")
+    enabled = WorkspaceCheckpointCreate.model_validate(
+        {"paths": ["file.bin"], "request_key": "public-explicit", "capture_format": "bytes"}
+    )
+    assert enabled.capture_format == "bytes"
     with pytest.raises(ValidationError):
         WorkspaceCheckpointCreate.model_validate(
-            {"paths": ["file.bin"], "request_key": "public-not-enabled", "capture_format": "bytes"}
+            {"paths": ["file.bin"], "request_key": "wrong-format", "capture_format": "binary"}
         )
     for data in (b"\0\xff", b"\xff"):
         with pytest.raises(ServiceError):

@@ -100,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="generated tree undos（生成树根撤销）：显式登记原生成根工具，写入仍需授权",
     )
     serve.add_argument(
+        "--checkpoint-bytes",
+        action="store_true",
+        help="checkpoint bytes（检查点字节）：显式启用元数据捕获，仍需原工作区授权",
+    )
+    serve.add_argument(
         "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
     )
     serve.add_argument(
@@ -1293,6 +1298,8 @@ def main() -> None:
             parser.error("serve --tree-exchanges需要已授权--workspace")
         if args.generated_tree_undos and not args.workspace:
             parser.error("serve --generated-tree-undos需要已授权--workspace")
+        if args.checkpoint_bytes and not args.workspace:
+            parser.error("serve --checkpoint-bytes需要已授权--workspace")
         settings = Settings.from_env()
         if not settings.api_key.get_secret_value() and not local_host(args.host):
             parser.error("无 API Key 时不能监听非本机地址")
@@ -1330,6 +1337,7 @@ def main() -> None:
                 tree_moves_enabled=args.tree_moves,
                 tree_exchanges_enabled=args.tree_exchanges,
                 generated_tree_undos_enabled=args.generated_tree_undos,
+                checkpoint_bytes_enabled=args.checkpoint_bytes,
                 execution_runner=execution_runner,
                 execution_version=args.execution_version,
                 execution_owned=execution_runner is not None,

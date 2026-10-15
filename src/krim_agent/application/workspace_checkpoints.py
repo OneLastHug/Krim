@@ -13,10 +13,13 @@ from krim_agent.tools.workspace import ReadFileInput, workspace_io
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_checkpoint import (
     CheckpointCaptureFence,
+    CheckpointCaptureInput,
+    CheckpointCaptureView,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointView,
+    checkpoint_content_kind,
 )
-from krim_agent.workspace_writer import WorkspaceWriter
+from krim_agent.workspace_writer import CapturedFile, WorkspaceWriter
 
 from .workspace_changes import WorkspaceChangeService, _wait
 from .workspace_execution import (
@@ -27,6 +30,7 @@ from .workspace_execution import (
 
 CaptureGuard = Callable[[str], Awaitable[tuple[str, WorkspaceBinding]]]
 CaptureRead = Callable[[str, str, CheckpointCaptureFence, bool], Awaitable[object]]
+CaptureBytesGuard = Callable[[str], Awaitable[None]]
 
 
 class WorkspaceCheckpointService:
@@ -38,6 +42,7 @@ class WorkspaceCheckpointService:
         read: CaptureRead,
         *,
         max_active: int = 16,
+        require_bytes: CaptureBytesGuard | None = None,
     ) -> None:
         if not 1 <= max_active <= 64:
             raise ValueError("检查点并发上限无效")
@@ -46,6 +51,7 @@ class WorkspaceCheckpointService:
         self._tasks: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._start_lock = asyncio.Lock()
         self._closed = False
+        self.require_bytes = require_bytes
 
     async def create(
         self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
@@ -59,6 +65,12 @@ class WorkspaceCheckpointService:
         self, agent_id: str, request: WorkspaceCheckpointCreate, confirmed: bool
     ) -> WorkspaceCheckpointView:
         scope, binding = await self.authorize(agent_id)
+        if request.capture_format == "bytes":
+            if self.require_bytes is None:
+                raise ServiceError(
+                    "workspace_checkpoint_bytes_unavailable", "字节捕获未显式启用", 403
+                )
+            await self.require_bytes(agent_id)
         async with self._start_lock:
             if self._closed:
                 raise ServiceError("workspace_checkpoint_closed", "检查点服务已关闭", 503)
@@ -130,6 +142,10 @@ class WorkspaceCheckpointService:
         try:
             if self._closed or context.checkpoint_capture is None:
                 raise ServiceError("workspace_checkpoint_closed", "捕获上下文不可用", 503)
+            if context.checkpoint_capture.capture_format != "text":
+                raise ServiceError(
+                    "workspace_checkpoint_context", "字节捕获不能使用UTF-8读取工具", 403
+                )
             request = ReadFileInput.model_validate(payload)
             if request.start_line != 1 or request.max_lines != 200:
                 raise ServiceError("workspace_checkpoint_target", "捕获读取参数已改变", 403)
@@ -153,6 +169,88 @@ class WorkspaceCheckpointService:
             return binding.workspace.file_view(
                 capture.path, capture.snapshot.data, capture.snapshot.data.decode("utf-8")
             ).model_dump(mode="json")
+        except ServiceError as error:
+            raise ToolError(error.code, str(error)) from error
+
+    @staticmethod
+    def _capture_view(capture: CapturedFile) -> CheckpointCaptureView:
+        snapshot = capture.snapshot
+        return CheckpointCaptureView(
+            path=capture.path,
+            exists=snapshot is not None,
+            sha256=snapshot.sha256 if snapshot else None,
+            byte_size=len(snapshot.data) if snapshot else 0,
+            mode=snapshot.mode if snapshot else None,
+            content_kind=checkpoint_content_kind(snapshot.data if snapshot else None),
+        )
+
+    async def _bytes_context(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> tuple[str, WorkspaceBinding, CheckpointCaptureFence, CheckpointCaptureInput]:
+        fence = context.checkpoint_capture
+        if (
+            self._closed
+            or fence is None
+            or fence.capture_format != "bytes"
+            or context.origin != "host"
+            or context.run_id != "local"
+            or context.command_capture is not None
+            or context.checkpoint_restore is not None
+            or context.workspace_checkpoints is not self
+        ):
+            raise ServiceError("workspace_checkpoint_context", "字节捕获需要原私有捕获上下文", 403)
+        request = CheckpointCaptureInput.model_validate(payload)
+        scope, binding = await self.changes._guard(context)
+        await self.store.assert_capture(scope, fence, request.path)
+        if any(
+            budget.active is False or budget.deadline.expired()
+            for budget in context.execution_timeouts
+        ):
+            raise ServiceError("tool_timeout", "字节捕获原工具预算已结束", 408)
+        return scope, binding, fence, request
+
+    async def capture_metadata(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]:
+        try:
+            scope, binding, fence, request = await self._bytes_context(payload, context)
+
+            async def check() -> None:
+                current, actual, same, selected = await self._bytes_context(payload, context)
+                if (
+                    current != scope
+                    or actual.manifest() != binding.manifest()
+                    or same != fence
+                    or selected != request
+                ):
+                    raise ServiceError("workspace_checkpoint_context", "捕获期间原资格改变", 403)
+
+            capture = await workspace_io(
+                WorkspaceWriter(binding.workspace).capture_file,
+                request.path,
+                allow_binary=True,
+                authorize=self._callback(check),
+            )
+            await check()
+            if capture.snapshot is not None and capture.snapshot.mode & ~0o777:
+                raise ServiceError("workspace_checkpoint_mode", "字节捕获不支持特殊权限位", 409)
+            await self.store.record(scope, fence, capture)
+            return self._capture_view(capture).model_dump(mode="json")
+        except ServiceError as error:
+            raise ToolError(error.code, str(error)) from error
+
+    async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None:
+        try:
+            scope, _, fence, request = await self._bytes_context(context.arguments, context)
+            capture = await self.store.captured(scope, fence)
+            if (
+                capture is None
+                or capture.path != request.path
+                or value != self._capture_view(capture).model_dump(mode="json")
+            ):
+                raise ServiceError(
+                    "workspace_checkpoint_unverified", "字节回程与原保存事实不一致", 409
+                )
         except ServiceError as error:
             raise ToolError(error.code, str(error)) from error
 
@@ -199,6 +297,7 @@ class WorkspaceCheckpointService:
                 WorkspaceWriter(binding.workspace).verify_captured,
                 captures,
                 authorize=self._callback(check),
+                allow_binary=view.capture_format == "bytes",
             )
             await self.store.finish(scope, fences[0])
         except asyncio.CancelledError:

@@ -111,6 +111,15 @@ def _tree_exchange_budget(context: ToolContext) -> tuple[object, ...]:
     )
 
 
+def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
+    fence = context.checkpoint_capture
+    return (
+        _tree_move_binding(context),
+        id(context.workspace_checkpoints),
+        (fence.checkpoint_id, fence.position, fence.token, fence.capture_format) if fence else None,
+    )
+
+
 class ToolRegistry:
     def __init__(self, *, max_depth: int = 8, default_timeout: float = 10) -> None:
         self.max_depth = max_depth
@@ -251,6 +260,7 @@ class ToolRegistry:
         generated_undo = name in WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
         tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
+        byte_capture = name == "workspace_checkpoint_capture"
         tree_scope = (
             parent.run_id,
             parent.topic_id,
@@ -260,6 +270,18 @@ class ToolRegistry:
             parent.source_call_id,
         )
         try:
+            if byte_capture and (
+                parent.origin != "host"
+                or parent.run_id != "local"
+                or parent.agent_id is None
+                or parent.session_id is None
+                or parent.checkpoint_capture is None
+                or parent.checkpoint_capture.capture_format != "bytes"
+                or parent.workspace_checkpoints is None
+                or parent.command_capture is not None
+                or parent.checkpoint_restore is not None
+            ):
+                raise ToolError("workspace_checkpoint_context", "字节元数据工具需要原私有捕获Fence")
             if tree_prepare and (parent.origin != "host" or parent.run_id != "local"):
                 raise ToolError("workspace_tree_model_unbound", "树准备尚未绑定原模型Run/call")
             if tree_model and (
@@ -347,6 +369,9 @@ class ToolRegistry:
                 original_query_binding = _tree_query_binding(child) if tree_query else None
                 original_model_binding = _tree_query_binding(child) if tree_model else None
                 original_move_binding = _tree_move_binding(child) if tree_move else None
+                original_capture_binding = (
+                    _checkpoint_capture_binding(child) if byte_capture else None
+                )
                 original_exchange_binding = _tree_move_binding(child) if tree_exchange else None
                 original_tree_binding = (
                     _tree_query_binding(child) if tree_fence is not None else None
@@ -367,6 +392,7 @@ class ToolRegistry:
                     raise ToolError(code, f"工具没有执行许可: {name}")
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
                 original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
+                original_capture_budget = _tree_exchange_budget(child) if byte_capture else None
                 short: ShortCircuit | None = None
                 for hook in tuple(self._global_pre):
                     short = await hook(definition, child)
@@ -375,6 +401,18 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if byte_capture and (
+                    child.arguments != original_arguments
+                    or _checkpoint_capture_binding(child) != original_capture_binding
+                    or _tree_exchange_budget(child) != original_capture_budget
+                ):
+                    raise ToolError(
+                        "workspace_checkpoint_context", "Hook不能替换原字节捕获参数、上下文或预算"
+                    )
+                if byte_capture and short is not None:
+                    raise ToolError(
+                        "workspace_checkpoint_unverified", "字节捕获须保存原真实私有快照"
+                    )
                 if tree_exchange and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_exchange_binding
@@ -498,10 +536,23 @@ class ToolRegistry:
                 model_response = child._tree_model_response
                 move_response = child._tree_move_response
                 exchange_response = child._tree_exchange_response
+                capture_response = child._checkpoint_capture_response
                 if definition.post_execute is not None:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if byte_capture and (
+                    child.arguments != original_arguments
+                    or _checkpoint_capture_binding(child) != original_capture_binding
+                    or _tree_exchange_budget(child) != original_capture_budget
+                ):
+                    raise ToolError(
+                        "workspace_checkpoint_context", "Hook不能替换原字节捕获参数、上下文或预算"
+                    )
+                if byte_capture and child._checkpoint_capture_response != capture_response:
+                    raise ToolError(
+                        "workspace_checkpoint_unverified", "Hook不能替换原字节捕获回程标记"
+                    )
                 if tree_exchange and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_exchange_binding

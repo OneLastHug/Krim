@@ -94,6 +94,7 @@
           <section id="checkpoint-native" hidden aria-label="文件检查点" data-i18n-aria-label="文件检查点">
             <div class="workspace-editor"><label for="native-checkpoint-title" data-i18n="快照名称">快照名称</label><input id="native-checkpoint-title" maxlength="120" />
               <label for="native-checkpoint-paths" data-i18n="检查点文件路径（每行一个，最多32个）">检查点文件路径（每行一个，最多32个）</label><textarea id="native-checkpoint-paths" rows="3" maxlength="16416"></textarea>
+              <label for="native-checkpoint-format" data-i18n="检查点捕获格式">检查点捕获格式</label><select id="native-checkpoint-format"><option value="text" data-i18n="UTF-8文本（原默认）">UTF-8文本（原默认）</option><option value="bytes" data-i18n="完整文件字节（含二进制）">完整文件字节（含二进制）</option></select>
               <div class="actions"><button id="native-checkpoint-create" type="button" data-i18n="保存文件检查点">保存文件检查点</button><button id="native-checkpoint-refresh" type="button" class="secondary" data-i18n="刷新检查点与恢复历史">刷新检查点与恢复历史</button></div></div>
             <p id="native-checkpoint-status" role="status"></p>
             <div class="checkpoint-histories"><section><h3 data-i18n="文件检查点历史">文件检查点历史</h3><p id="native-checkpoint-page"></p><div id="native-checkpoint-items" class="stack"></div><div class="actions"><button id="native-checkpoint-prev" type="button" data-i18n="较新检查点">较新检查点</button><button id="native-checkpoint-next" type="button" data-i18n="较早检查点">较早检查点</button></div></section>

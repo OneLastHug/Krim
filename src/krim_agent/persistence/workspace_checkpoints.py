@@ -223,13 +223,19 @@ class WorkspaceCheckpointStore:
         resource_fingerprint: str,
         workspace_fingerprint: str,
         *,
-        capture_format: CheckpointCaptureFormat = "text",
+        capture_format: CheckpointCaptureFormat | None = None,
     ) -> tuple[WorkspaceCheckpointView, bool]:
         request = WorkspaceCheckpointCreate.model_validate(request.model_dump())
+        if capture_format is None:
+            capture_format = request.capture_format
+        elif request.capture_format != "text" and request.capture_format != capture_format:
+            raise ServiceError("workspace_checkpoint_format", "公开与可信捕获格式不一致", 422)
         if capture_format not in {"text", "bytes"}:
             raise ServiceError("workspace_checkpoint_format", "检查点捕获格式无效", 422)
+        original_request = request.model_dump(mode="json")
+        original_request.pop("capture_format", None)
         original: dict[str, JsonValue] = {
-            "request": request.model_dump(mode="json"),
+            "request": original_request,
             "key": workspace_key,
             "resource": resource_fingerprint,
             "workspace": workspace_fingerprint,
