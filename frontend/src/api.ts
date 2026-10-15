@@ -381,7 +381,7 @@ export interface NativeBatchSummary {
 export interface NativeBatchHistoryPage {
   source: "workspace"; scope_id: string; total: number; items: NativeBatchSummary[]; next_cursor: string | null;
 }
-export interface NativeCheckpointCreate { title: string; paths: string[]; request_key: string; }
+export interface NativeCheckpointCreate { title: string; paths: string[]; request_key: string; capture_format?: "text" | "bytes"; }
 export interface MixedBatchItemView {
   source: "file" | "directory"; position: number; proposal_id: string; expected_revision: number;
   path: string; target_path: string | null; status: NativeBatchItemView["status"];
@@ -407,8 +407,9 @@ export interface MixedBatchHistoryPage {
 export interface NativeCheckpointView {
   source: "workspace"; checkpoint_id: string; scope_id: string; title: string; request_key: string;
   workspace_key: string; resource_fingerprint: string;
+  capture_format?: "text" | "bytes";
   status: "capturing" | "available" | "failed" | "cancelled" | "interrupted";
-  files: Array<{ path: string; captured: boolean; exists: boolean | null; sha256: string | null; byte_size: number | null; mode: number | null }>;
+  files: Array<{ path: string; captured: boolean; exists: boolean | null; sha256: string | null; byte_size: number | null; mode: number | null; content_kind?: "text" | "binary" | "absent" }>;
   error_code: string | null; created_at: string; updated_at: string;
 }
 export interface NativeRestorePreview { checkpoint_id: string; request_key: string; ttl_seconds?: number; }

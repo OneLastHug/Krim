@@ -255,6 +255,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     app.state.agents.register_tree_moves()
     app.state.agents.register_tree_exchanges()
     app.state.agents.register_generated_tree_undos()
+    app.state.agents.register_checkpoint_bytes()
     configure_generated_roots(app, runtime, write_root)
 
     class TestTreeMoveControl(StrictModel):
@@ -739,7 +740,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
             handle.runtime.provider, handle.runtime.tool_policy = previous_provider, previous_policy
 
     class TestWorkspaceControl(StrictModel):
-        action: Literal["seed", "fail_save", "large"]
+        action: Literal["seed", "fail_save", "large", "bytes"]
         path: str = Field(default="file.txt", pattern=r"^[A-Za-z0-9_-]+\.txt$")
         content: str = Field(default="old\n", max_length=24000)
 
@@ -854,6 +855,8 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
         global fail_next_save
         if payload.action == "fail_save":
             fail_next_save = True
+        elif payload.action == "bytes":
+            await asyncio.to_thread((write_root / payload.path).write_bytes, b"\0\xff")
         else:
             content = "x" * 50000 if payload.action == "large" else payload.content
             await asyncio.to_thread(

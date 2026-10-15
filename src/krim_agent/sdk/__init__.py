@@ -62,6 +62,10 @@ from krim_agent.workspace_change import (
     WorkspacePreviewRequest,
 )
 from krim_agent.workspace_checkpoint import (
+    CheckpointCaptureFormat,
+    CheckpointCaptureInput,
+    CheckpointCaptureView,
+    CheckpointContentKind,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointFileView,
     WorkspaceCheckpointView,
@@ -248,6 +252,10 @@ __all__ = [
     "CheckpointRestorePreview",
     "CheckpointRestoreView",
     "WorkspaceCheckpointCreate",
+    "CheckpointCaptureInput",
+    "CheckpointCaptureView",
+    "CheckpointCaptureFormat",
+    "CheckpointContentKind",
     "WorkspaceCheckpointFileView",
     "WorkspaceCheckpointView",
     "NativeBatchHistoryPage",

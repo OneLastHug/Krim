@@ -65,6 +65,10 @@ class WorkspaceCheckpointBackend(Protocol):
     async def capture_read(
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, object]: ...
+    async def capture_metadata(
+        self, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]: ...
+    async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None: ...
 
 
 class MixedBatchQueryBackend(Protocol):
@@ -204,6 +208,7 @@ class ToolContext:
     tree_fence: TreePlanFence | None = None
     workspace_trees: WorkspaceTreeBackend | None = None
     _tree_prepare_response: str | None = field(default=None, repr=False)
+    _checkpoint_capture_response: str | None = field(default=None, repr=False)
     workspace_tree_queries: TreePlanQueryBackend | None = None
     _tree_query_response: str | None = field(default=None, repr=False)
     workspace_tree_models: TreePlanModelBackend | None = None

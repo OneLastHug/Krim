@@ -93,6 +93,7 @@ from krim_agent.runtime import ChatRuntime
 from krim_agent.runtime.chat import RunState
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 from krim_agent.tools import ToolContext, ToolError
+from krim_agent.tools.checkpoint_capture import checkpoint_capture_tool
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.generated_tree_undo import generated_tree_undo_tools
@@ -312,6 +313,7 @@ class AgentService:
             self.manager.workspace_changes,
             self._workspace_checkpoint_authorize,
             self._workspace_checkpoint_read,
+            require_bytes=self._workspace_checkpoint_bytes_authorize,
         )
         self.workspace_restore_store = WorkspaceRestoreStore(self.workspace_edits)
         self.workspace_restores = WorkspaceRestoreService(
@@ -641,6 +643,17 @@ class AgentService:
         )
         if existing is not None and existing is not definition:
             raise ValueError("混合查询工具名称已由其它定义占用")
+        if existing is None:
+            self.runtime.tools.register(definition)
+
+    def register_checkpoint_bytes(self) -> None:
+        """显式登记字节元数据工具；旧冻结Agent不自动提升能力。"""
+        definition = checkpoint_capture_tool()
+        existing = next(
+            (item for item in self.runtime.tools.definitions if item.name == definition.name), None
+        )
+        if existing is not None and existing is not definition:
+            raise ValueError("字节捕获工具名称已由其它定义占用")
         if existing is None:
             self.runtime.tools.register(definition)
 
@@ -1813,11 +1826,22 @@ class AgentService:
     ) -> object:
         return await self._workspace_call(
             agent_id,
-            "workspace_read",
-            ReadFileInput(path=path).model_dump(),
+            "workspace_checkpoint_capture" if fence.capture_format == "bytes" else "workspace_read",
+            {"path": path}
+            if fence.capture_format == "bytes"
+            else ReadFileInput(path=path).model_dump(),
             confirmed=confirmed,
             checkpoint_capture=fence,
         )
+
+    async def _workspace_checkpoint_bytes_authorize(self, agent_id: str) -> None:
+        handle = self._handle(agent_id)
+        if "workspace_checkpoint_capture" not in {
+            item.name for item in handle.runtime.tools.definitions
+        }:
+            raise ServiceError(
+                "workspace_checkpoint_bytes_unavailable", "原冻结Agent未授字节捕获工具", 403
+            )
 
     async def workspace_create_checkpoint(
         self, agent_id: str, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
