@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
 from krim_agent.protocol.models import StrictModel
 from krim_agent.workspace_change import (
@@ -14,6 +14,7 @@ from krim_agent.workspace_change import (
     WorkspaceChangeAction,
     WorkspaceChangeView,
 )
+from krim_agent.workspace_checkpoint import CheckpointCaptureFormat
 
 
 class CheckpointRestorePreview(StrictModel):
@@ -22,6 +23,14 @@ class CheckpointRestorePreview(StrictModel):
     )
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f]+$")
     ttl_seconds: float = Field(default=3600.0, gt=0, le=86400)
+    baseline_capture_format: CheckpointCaptureFormat = "text"
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.baseline_capture_format == "text":
+            value.pop("baseline_capture_format", None)
+        return value
 
 
 class CheckpointRestoreExecute(StrictModel):
@@ -47,6 +56,7 @@ class CheckpointRestoreView(StrictModel):
     scope_id: str
     checkpoint_id: str
     baseline_checkpoint_id: str | None
+    baseline_capture_format: CheckpointCaptureFormat = "text"
     request_key: str
     execute_key: str | None
     revision: int
@@ -77,6 +87,13 @@ class CheckpointRestoreView(StrictModel):
     error_code: str | None
     created_at: datetime
     updated_at: datetime
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.baseline_capture_format == "text":
+            value.pop("baseline_capture_format", None)
+        return value
 
 
 @dataclass(frozen=True)

@@ -75,6 +75,13 @@ class WorkspaceRestoreService:
         self, agent_id: str, request: CheckpointRestorePreview, confirmed: bool
     ) -> CheckpointRestoreView:
         scope, binding = await self.authorize(agent_id)
+        target = await self.checkpoints.store.get(scope, request.checkpoint_id)
+        if request.baseline_capture_format == "bytes" or target.capture_format == "bytes":
+            if self.checkpoints.require_bytes is None:
+                raise ServiceError(
+                    "workspace_checkpoint_bytes_unavailable", "字节基线未显式启用", 403
+                )
+            await self.checkpoints.require_bytes(agent_id)
         async with self._start_lock:
             if self._closed:
                 raise ServiceError("workspace_restore_closed", "恢复服务已关闭", 503)
@@ -162,6 +169,7 @@ class WorkspaceRestoreService:
                     title="恢复前备份",
                     paths=[item.path for item in preparation.view.items],
                     request_key=preparation.baseline_key,
+                    capture_format=preparation.view.baseline_capture_format,
                 ),
                 confirmed=confirmed,
             )

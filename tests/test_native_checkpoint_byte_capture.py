@@ -24,7 +24,15 @@ DATA = {"utf": b"hello\n", "nul": b"\0\xff", "invalid": b"\xff", "empty": b"", "
 
 
 async def setup(
-    runtime, root, *, policy=None, writable=True, names=None, persistent=False, tool_timeout=10
+    runtime,
+    root,
+    *,
+    policy=None,
+    writable=True,
+    names=None,
+    persistent=False,
+    tool_timeout=10,
+    mode="agent",
 ):
     async def allow(_definition, _context):
         return "allow"
@@ -46,6 +54,7 @@ async def setup(
                 tool_names=names if names is not None else ["workspace_read", NAME],
                 persistent=persistent,
                 tool_timeout_seconds=tool_timeout,
+                mode=mode,
             ),
         )
     )

@@ -4,6 +4,12 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "恢复前备份格式": "Backup capture format before restore",
+    "字节目标自动使用字节备份；文本目标当前含二进制时请明确选择字节备份。": (
+        "Byte targets use byte backups; explicitly select a byte backup when restoring "
+        "text over current binary files."
+    ),
+    "恢复回程与原事实不一致": "Restore response does not match original facts",
     "检查点捕获格式": "Checkpoint capture format",
     "UTF-8文本（原默认）": "UTF-8 text (original default)",
     "完整文件字节（含二进制）": "Complete file bytes (including binary)",

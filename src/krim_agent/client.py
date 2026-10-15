@@ -1983,17 +1983,64 @@ class KrimClient:
     def agent_workspace_preview_restore(
         self, agent_id: str, request: CheckpointRestorePreview, *, confirmed: bool = False
     ) -> CheckpointRestoreView:
+        request = CheckpointRestorePreview.model_validate(request.model_dump())
         response = self._http.post(
             f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/preview",
             params={"confirmed": str(confirmed).lower()},
             json=request.model_dump(mode="json"),
         )
         self._check(response)
-        return CheckpointRestoreView.model_validate_json(response.content)
+        value = CheckpointRestoreView.model_validate_json(response.content)
+        self._restore_match(value, agent_id, request_key=request.request_key)
+        if value.checkpoint_id != request.checkpoint_id or (
+            request.baseline_capture_format == "bytes" and value.baseline_capture_format != "bytes"
+        ):
+            raise ClientError(
+                "恢复回程未保留原目标与字节基线", code="workspace_restore_response", status=502
+            )
+        return value
+
+    @staticmethod
+    def _restore_match(
+        value: CheckpointRestoreView,
+        agent_id: str,
+        *,
+        plan_id: str | None = None,
+        request_key: str | None = None,
+    ) -> None:
+        scope = "session:" + agent_id
+        if (
+            value.scope_id != scope
+            or plan_id is not None
+            and value.plan_id != plan_id
+            or request_key is not None
+            and value.request_key != request_key
+            or len({item.path for item in value.items}) != len(value.items)
+            or any(
+                item.position != position
+                or item.proposal is not None
+                and (item.proposal.scope_id != scope or item.proposal.preview.path != item.path)
+                or item.operation is not None
+                and (
+                    item.proposal is None
+                    or item.operation.scope_id != scope
+                    or item.operation.proposal_id != item.proposal.proposal_id
+                    or item.operation.receipt is not None
+                    and item.operation.receipt.path != item.path
+                )
+                for position, item in enumerate(value.items)
+            )
+        ):
+            raise ClientError(
+                "恢复回程与原作用域、计划或文件集不匹配",
+                code="workspace_restore_response",
+                status=502,
+            )
 
     def agent_workspace_execute_restore(
         self, agent_id: str, request: CheckpointRestoreExecute, *, confirmed: bool = False
     ) -> CheckpointRestoreView:
+        request = CheckpointRestoreExecute.model_validate(request.model_dump())
         response = self._http.post(
             f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/"
             f"{_workspace_identifier(request.plan_id)}/execute",
@@ -2001,7 +2048,13 @@ class KrimClient:
             json=request.model_dump(mode="json"),
         )
         self._check(response)
-        return CheckpointRestoreView.model_validate_json(response.content)
+        value = CheckpointRestoreView.model_validate_json(response.content)
+        self._restore_match(value, agent_id, plan_id=request.plan_id)
+        if value.execute_key != request.request_key or value.revision <= request.expected_revision:
+            raise ClientError(
+                "恢复回程未保留原执行键", code="workspace_restore_response", status=502
+            )
+        return value
 
     def agent_workspace_restores(
         self, agent_id: str, *, offset: int = 0, limit: int = 32
@@ -2011,14 +2064,21 @@ class KrimClient:
             params={"offset": offset, "limit": limit},
         )
         self._check(response)
-        return TypeAdapter(list[CheckpointRestoreView]).validate_json(response.content)
+        values = TypeAdapter(list[CheckpointRestoreView]).validate_json(response.content)
+        for value in values:
+            self._restore_match(value, agent_id)
+        if len(values) > limit or len({value.plan_id for value in values}) != len(values):
+            raise ClientError("恢复分页回程不一致", code="workspace_restore_response", status=502)
+        return values
 
     def agent_workspace_restore(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
         response = self._http.get(
             f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/{_workspace_identifier(plan_id)}"
         )
         self._check(response)
-        return CheckpointRestoreView.model_validate_json(response.content)
+        value = CheckpointRestoreView.model_validate_json(response.content)
+        self._restore_match(value, agent_id, plan_id=plan_id)
+        return value
 
     def agent_workspace_restore_by_key(
         self, agent_id: str, request_key: str
@@ -2028,7 +2088,12 @@ class KrimClient:
             params={"request_key": _checkpoint_key(request_key)},
         )
         self._check(response)
-        return TypeAdapter(CheckpointRestoreView | None).validate_json(response.content)
+        value: CheckpointRestoreView | None = TypeAdapter(
+            CheckpointRestoreView | None
+        ).validate_json(response.content)
+        if value is not None:
+            self._restore_match(value, agent_id, request_key=request_key)
+        return value
 
     def agent_workspace_wait_restore(
         self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
@@ -2040,14 +2105,18 @@ class KrimClient:
             timeout=timeout,
         )
         self._check(response)
-        return CheckpointRestoreView.model_validate_json(response.content)
+        value = CheckpointRestoreView.model_validate_json(response.content)
+        self._restore_match(value, agent_id, plan_id=plan_id)
+        return value
 
     def agent_workspace_cancel_restore(self, agent_id: str, plan_id: str) -> CheckpointRestoreView:
         response = self._http.post(
             f"/v1/agents/{_workspace_identifier(agent_id)}/workspace/native-restores/{_workspace_identifier(plan_id)}/cancel"
         )
         self._check(response)
-        return CheckpointRestoreView.model_validate_json(response.content)
+        value = CheckpointRestoreView.model_validate_json(response.content)
+        self._restore_match(value, agent_id, plan_id=plan_id)
+        return value
 
     def agent_tasks(self, agent_id: str, kind: TaskKind) -> TaskSnapshot:
         response = self._http.get(f"/v1/agents/{agent_id}/tasks/{kind}")

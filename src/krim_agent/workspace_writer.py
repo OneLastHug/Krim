@@ -455,14 +455,16 @@ class WorkspaceWriter:
         try:
             self._check_parent(parent, original.parent_identity)
             before = self._snapshot(fd, name, missing=True)
-            if before is not None and not isinstance(original.spec, ArtifactFileSpec):
+            if before is not None and not isinstance(
+                original.spec, (ArtifactFileSpec, RestoreFileSpec)
+            ):
                 self._text(before.data)
             if (before.data if before is not None else None) != original.after:
                 raise ServiceError("workspace_conflict", "撤销目标已偏离原应用后版本", 409)
             after = original.before.data if original.before is not None else None
             if after is not None:
                 self._bounded_bytes(after)
-                if not isinstance(original.spec, ArtifactFileSpec):
+                if not isinstance(original.spec, (ArtifactFileSpec, RestoreFileSpec)):
                     self._text(after)
             spec = RestoreFileSpec(
                 path=original.spec.path,
