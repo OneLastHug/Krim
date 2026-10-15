@@ -2423,39 +2423,49 @@ class KrimRepository:
         self, run: RunView, role: str, content: str, details: dict[str, JsonValue] | None = None
     ) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            topic = await session.get(TopicRow, run.topic_id)
-            if topic is None:
-                raise ServiceError("topic_not_found", "话题不存在", 404)
-            highest = await session.scalar(
-                select(func.max(MessageRow.sequence)).where(MessageRow.topic_id == run.topic_id)
+            await self._add_message(session, run, role, content, details)
+
+    async def _add_message(
+        self,
+        session: AsyncSession,
+        run: RunView,
+        role: str,
+        content: str,
+        details: dict[str, JsonValue] | None = None,
+    ) -> None:
+        topic = await session.get(TopicRow, run.topic_id)
+        if topic is None:
+            raise ServiceError("topic_not_found", "话题不存在", 404)
+        highest = await session.scalar(
+            select(func.max(MessageRow.sequence)).where(MessageRow.topic_id == run.topic_id)
+        )
+        parent_id = (
+            await session.scalar(
+                select(MessageRow.id)
+                .where(MessageRow.run_id == run.id)
+                .order_by(MessageRow.sequence.desc())
+                .limit(1)
             )
-            parent_id = (
-                await session.scalar(
-                    select(MessageRow.id)
-                    .where(MessageRow.run_id == run.id)
-                    .order_by(MessageRow.sequence.desc())
-                    .limit(1)
-                )
-                or run.input_message_id
+            or run.input_message_id
+        )
+        message_id = str(uuid4())
+        payload = dict(details or {})
+        if run.action == "regenerate":
+            payload["regenerated_from"] = run.source_message_id
+        session.add(
+            MessageRow(
+                id=message_id,
+                topic_id=run.topic_id,
+                run_id=run.id,
+                sequence=(highest or 0) + 1,
+                role=role,
+                content=content,
+                details=payload,
+                parent_id=parent_id,
             )
-            message_id = str(uuid4())
-            payload = dict(details or {})
-            if run.action == "regenerate":
-                payload["regenerated_from"] = run.source_message_id
-            session.add(
-                MessageRow(
-                    id=message_id,
-                    topic_id=run.topic_id,
-                    run_id=run.id,
-                    sequence=(highest or 0) + 1,
-                    role=role,
-                    content=content,
-                    details=payload,
-                    parent_id=parent_id,
-                )
-            )
-            topic.active_branches = {**topic.active_branches, parent_id: message_id}
-            topic.updated_at = utc_now()
+        )
+        topic.active_branches = {**topic.active_branches, parent_id: message_id}
+        topic.updated_at = utc_now()
 
     async def get_run(self, run_id: str) -> RunView:
         async with self.database.write_lock, self.database.sessions() as session:
@@ -2483,55 +2493,201 @@ class KrimRepository:
 
     async def append_event(self, frame: StreamFrame) -> StreamFrame:
         async with self.database.write_lock, self.database.sessions.begin() as session:
-            run = await session.get(RunRow, frame.stream_id)
-            if run is None:
-                raise ServiceError("run_not_found", "运行不存在", 404)
-            existing = await session.get(RunEventRow, (frame.stream_id, frame.seq))
-            if existing is not None:
-                current = StreamFrame(
-                    stream_id=existing.run_id,
-                    seq=existing.seq,
-                    kind=existing.kind,
-                    data=existing.data,
-                    created_at=existing.created_at,
+            return await self._append_event(session, frame)
+
+    async def _append_event(self, session: AsyncSession, frame: StreamFrame) -> StreamFrame:
+        run = await session.get(RunRow, frame.stream_id)
+        if run is None:
+            raise ServiceError("run_not_found", "运行不存在", 404)
+        existing = await session.get(RunEventRow, (frame.stream_id, frame.seq))
+        if existing is not None:
+            current = StreamFrame(
+                stream_id=existing.run_id,
+                seq=existing.seq,
+                kind=existing.kind,
+                data=existing.data,
+                created_at=existing.created_at,
+            )
+            same = current.model_dump(mode="json") == frame.model_dump(mode="json")
+            if frame.kind == "end":
+                current_data = current.data if isinstance(current.data, dict) else {}
+                frame_data = frame.data if isinstance(frame.data, dict) else {}
+                same = current.kind == frame.kind and {
+                    key: value for key, value in current_data.items() if value is not None
+                } == {key: value for key, value in frame_data.items() if value is not None}
+            if not same:
+                raise ServiceError("event_conflict", "流事件序号已经写入不同内容", 409)
+            return current
+        highest = await session.scalar(
+            select(func.max(RunEventRow.seq)).where(RunEventRow.run_id == frame.stream_id)
+        )
+        if highest is not None and frame.seq != highest + 1:
+            raise ServiceError("event_gap", "流事件序号不连续", 409)
+        if highest is None and frame.seq != 0:
+            raise ServiceError("event_gap", "流事件必须从序号 0 开始", 409)
+        last_kind = await session.scalar(
+            select(RunEventRow.kind)
+            .where(RunEventRow.run_id == frame.stream_id)
+            .order_by(RunEventRow.seq.desc())
+            .limit(1)
+        )
+        if last_kind in {"end", "error"}:
+            raise ServiceError("event_after_terminal", "终态帧之后不能追加流事件", 409)
+        if frame.kind in {"end", "error"} and run.status not in TERMINAL_STATUSES:
+            raise ServiceError("run_not_terminal", "必须先保存运行终态再发布终帧", 409)
+        session.add(
+            RunEventRow(
+                run_id=frame.stream_id,
+                seq=frame.seq,
+                kind=frame.kind,
+                data=frame.data,
+                created_at=frame.created_at,
+            )
+        )
+        return frame
+
+    @staticmethod
+    def _message_event_key(
+        run: RunView, role: str, content: str, details: dict[str, JsonValue], frame: StreamFrame
+    ) -> tuple[str, str | int]:
+        data = frame.data
+        if frame.stream_id != run.id or frame.kind != "chunk" or not isinstance(data, dict):
+            raise ServiceError("message_event_context", "消息与原运行流帧不匹配", 409)
+        if role == "tool":
+            call = details.get("call_id")
+            blocks = data.get("content")
+            if (
+                not isinstance(call, str)
+                or len(call) > 128
+                or not isinstance(details.get("name"), str)
+                or "type" in details
+                or json.dumps(data, sort_keys=True, allow_nan=False)
+                != json.dumps({"type": "tool_result", **details}, sort_keys=True, allow_nan=False)
+                or not isinstance(blocks, list)
+                or not blocks
+                or not isinstance(blocks[0], dict)
+                or blocks[0].get("type") != "text"
+                or blocks[0].get("text") != content
+            ):
+                raise ServiceError("message_event_context", "工具回复与原call/结果帧不一致", 409)
+            return "call", call
+        step = details.get("step")
+        if (
+            role != "assistant"
+            or type(step) is not int
+            or step < 0
+            or details.get("partial") is not False
+            or details != {"step": step, "partial": False}
+            or json.dumps(data, sort_keys=True, allow_nan=False)
+            != json.dumps(
+                {"type": "step_finish", "step": step, "finish_reason": "stop"},
+                sort_keys=True,
+                allow_nan=False,
+            )
+        ):
+            raise ServiceError("message_event_context", "最终消息与原步骤结束帧不一致", 409)
+        return "step", step
+
+    @staticmethod
+    async def _message_event_run(session: AsyncSession, run: RunView) -> RunRow:
+        row = await session.get(RunRow, run.id)
+        if row is None:
+            raise ServiceError("run_not_found", "运行不存在", 404)
+        if (row.topic_id, row.input_message_id, row.action, row.source_message_id) != (
+            run.topic_id,
+            run.input_message_id,
+            run.action,
+            run.source_message_id,
+        ):
+            raise ServiceError("message_event_context", "消息未保留原运行及分支身份", 409)
+        return row
+
+    async def _read_message_event(
+        self,
+        session: AsyncSession,
+        run: RunView,
+        role: str,
+        content: str,
+        details: dict[str, JsonValue],
+        frame: StreamFrame,
+        key: tuple[str, str | int],
+    ) -> StreamFrame | None:
+        await self._message_event_run(session, run)
+        condition = (
+            MessageRow.details["call_id"].as_string() == key[1]
+            if key[0] == "call"
+            else (
+                (MessageRow.details["step"].as_integer() == key[1])
+                & MessageRow.details["partial"].as_boolean().is_(False)
+            )
+        )
+        messages = list(
+            await session.scalars(
+                select(MessageRow).where(
+                    MessageRow.run_id == run.id,
+                    MessageRow.role == role,
+                    condition,
                 )
-                same = current.model_dump(mode="json") == frame.model_dump(mode="json")
-                if frame.kind == "end":
-                    current_data = current.data if isinstance(current.data, dict) else {}
-                    frame_data = frame.data if isinstance(frame.data, dict) else {}
-                    same = current.kind == frame.kind and {
-                        key: value for key, value in current_data.items() if value is not None
-                    } == {key: value for key, value in frame_data.items() if value is not None}
-                if not same:
-                    raise ServiceError("event_conflict", "流事件序号已经写入不同内容", 409)
-                return current
-            highest = await session.scalar(
-                select(func.max(RunEventRow.seq)).where(RunEventRow.run_id == frame.stream_id)
             )
-            if highest is not None and frame.seq != highest + 1:
-                raise ServiceError("event_gap", "流事件序号不连续", 409)
-            if highest is None and frame.seq != 0:
-                raise ServiceError("event_gap", "流事件必须从序号 0 开始", 409)
-            last_kind = await session.scalar(
-                select(RunEventRow.kind)
-                .where(RunEventRow.run_id == frame.stream_id)
-                .order_by(RunEventRow.seq.desc())
-                .limit(1)
+        )
+        event_row = await session.get(RunEventRow, (run.id, frame.seq))
+        if event_row is None and not messages:
+            return None
+        payload = dict(details)
+        if run.action == "regenerate":
+            payload["regenerated_from"] = run.source_message_id
+        if event_row is None or len(messages) != 1:
+            raise ServiceError("message_event_incomplete", "原消息与流帧没有唯一成对材料", 409)
+        stored = StreamFrame(
+            stream_id=event_row.run_id,
+            seq=event_row.seq,
+            kind=event_row.kind,
+            data=event_row.data,
+            created_at=event_row.created_at,
+        )
+        if (
+            json.dumps(stored.model_dump(mode="json"), sort_keys=True, allow_nan=False)
+            != json.dumps(frame.model_dump(mode="json"), sort_keys=True, allow_nan=False)
+            or messages[0].topic_id != run.topic_id
+            or messages[0].content != content
+            or json.dumps(messages[0].details, sort_keys=True, allow_nan=False)
+            != json.dumps(payload, sort_keys=True, allow_nan=False)
+        ):
+            raise ServiceError("message_event_conflict", "原消息或流帧已绑定其他内容", 409)
+        return stored
+
+    async def read_message_event(
+        self,
+        run: RunView,
+        role: str,
+        content: str,
+        details: dict[str, JsonValue],
+        frame: StreamFrame,
+    ) -> StreamFrame | None:
+        key = self._message_event_key(run, role, content, details, frame)
+        async with self.database.write_lock, self.database.sessions() as session:
+            return await self._read_message_event(session, run, role, content, details, frame, key)
+
+    async def append_message_event(
+        self,
+        run: RunView,
+        role: str,
+        content: str,
+        details: dict[str, JsonValue],
+        frame: StreamFrame,
+    ) -> StreamFrame:
+        key = self._message_event_key(run, role, content, details, frame)
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            previous = await self._read_message_event(
+                session, run, role, content, details, frame, key
             )
-            if last_kind in {"end", "error"}:
-                raise ServiceError("event_after_terminal", "终态帧之后不能追加流事件", 409)
-            if frame.kind in {"end", "error"} and run.status not in TERMINAL_STATUSES:
-                raise ServiceError("run_not_terminal", "必须先保存运行终态再发布终帧", 409)
-            session.add(
-                RunEventRow(
-                    run_id=frame.stream_id,
-                    seq=frame.seq,
-                    kind=frame.kind,
-                    data=frame.data,
-                    created_at=frame.created_at,
-                )
-            )
-            return frame
+            if previous is not None:
+                return previous
+            row = await self._message_event_run(session, run)
+            if row.status in TERMINAL_STATUSES:
+                raise ServiceError("message_event_closed", "已结束运行不能追加新消息与流帧", 409)
+            await self._add_message(session, run, role, content, details)
+            return await self._append_event(session, frame)
 
     async def list_events(self, run_id: str) -> list[StreamFrame]:
         await self.get_run(run_id)
