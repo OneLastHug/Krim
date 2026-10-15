@@ -1355,6 +1355,62 @@ class WorkspaceDirectoryCheckpointRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WorkspaceDirectoryCaptureRow(Base):
+    __tablename__ = "workspace_directory_captures"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key", name="uq_directory_capture_key"),
+        UniqueConstraint("material_id", name="uq_directory_capture_material"),
+        CheckConstraint(
+            "status IN ('capturing','available','failed','cancelled','interrupted')",
+            name="ck_directory_capture_status",
+        ),
+        CheckConstraint(
+            "(status = 'capturing' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status != 'capturing' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_directory_capture_owner",
+        ),
+        CheckConstraint(
+            "status != 'available' OR material_id IS NOT NULL",
+            name="ck_directory_capture_available",
+        ),
+        CheckConstraint(
+            "(status IN ('capturing','available') AND error_code IS NULL) OR "
+            "(status IN ('failed','cancelled','interrupted') AND error_code IS NOT NULL)",
+            name="ck_directory_capture_error",
+        ),
+        CheckConstraint(
+            "length(root_path) BETWEEN 1 AND 512 AND length(title) BETWEEN 1 AND 120 "
+            "AND length(request_key) BETWEEN 1 AND 128",
+            name="ck_directory_capture_input",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64 AND length(resource_fingerprint) = 64 "
+            "AND length(workspace_fingerprint) = 64 AND length(token) = 64",
+            name="ck_directory_capture_hashes",
+        ),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(120))
+    root_path: Mapped[str] = mapped_column(String(512))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_fingerprint: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="capturing")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    material_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_checkpoints.checkpoint_id"), nullable=True
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class NativeWorkspaceCheckpointRow(Base):
     __tablename__ = "native_workspace_checkpoints"
     __table_args__ = (

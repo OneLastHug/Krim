@@ -397,7 +397,7 @@ async def test_nonempty_source_migration_refuses_loss_and_retains_directory_ledg
     async with database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0052_directory_checkpoints"
+        ).scalar_one() == "0053_directory_captures"
         assert (
             await connection.execute(text("SELECT proposal_id FROM command_directory_proposals"))
         ).scalar_one() == view.proposal.proposal_id

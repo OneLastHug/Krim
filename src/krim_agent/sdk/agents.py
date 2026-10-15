@@ -73,6 +73,10 @@ from krim_agent.workspace_directory import (
     DirectoryQueryRequest,
     DirectoryQueryResult,
 )
+from krim_agent.workspace_directory_checkpoint import (
+    DirectoryCheckpointCreate,
+    DirectoryCheckpointView,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -511,6 +515,38 @@ class AgentSession:
     ) -> NativeChangePage:
         return await self.service.workspace_change_list(
             self.agent_id, filter=filter, cursor=cursor, limit=limit
+        )
+
+    async def create_directory_checkpoint(
+        self, request: DirectoryCheckpointCreate, *, confirmed: bool = False
+    ) -> DirectoryCheckpointView:
+        return await self.service.workspace_create_directory_checkpoint(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def directory_checkpoint(self, checkpoint_id: str) -> DirectoryCheckpointView:
+        return await self.service.workspace_directory_checkpoint(self.agent_id, checkpoint_id)
+
+    async def directory_checkpoint_by_key(self, request_key: str) -> DirectoryCheckpointView | None:
+        return await self.service.workspace_directory_checkpoint_by_key(self.agent_id, request_key)
+
+    async def directory_checkpoints(
+        self, *, offset: int = 0, limit: int = 32
+    ) -> list[DirectoryCheckpointView]:
+        return await self.service.workspace_directory_checkpoint_list(
+            self.agent_id, offset=offset, limit=limit
+        )
+
+    async def wait_directory_checkpoint(
+        self, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> DirectoryCheckpointView:
+        return await self.service.workspace_directory_checkpoint_wait(
+            self.agent_id, checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_directory_checkpoint(self, checkpoint_id: str) -> DirectoryCheckpointView:
+        return await self.service.workspace_directory_checkpoint_cancel(
+            self.agent_id, checkpoint_id
         )
 
     async def create_file_checkpoint(

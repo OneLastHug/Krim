@@ -34,6 +34,9 @@ from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
+from krim_agent.application.workspace_directory_checkpoints import (
+    WorkspaceDirectoryCheckpointService,
+)
 from krim_agent.application.workspace_mixed_batches import MixedBatchService
 from krim_agent.application.workspace_model_checkpoints import ModelCheckpointService
 from krim_agent.application.workspace_model_restores import ModelRestoreService
@@ -85,6 +88,8 @@ from krim_agent.persistence.completed_tree_origins import (
 )
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
+from krim_agent.persistence.workspace_directory_captures import WorkspaceDirectoryCaptureStore
+from krim_agent.persistence.workspace_directory_checkpoints import WorkspaceDirectoryCheckpointStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
 from krim_agent.persistence.workspace_mixed_batches import MixedBatchStore
 from krim_agent.persistence.workspace_restores import WorkspaceRestoreStore
@@ -99,6 +104,7 @@ from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.checkpoint_capture import checkpoint_capture_tool
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
+from krim_agent.tools.directory_checkpoint_capture import directory_checkpoint_capture_tool
 from krim_agent.tools.generated_tree_undo import generated_tree_undo_tools
 from krim_agent.tools.tree_exchanges import tree_exchange_tools
 from krim_agent.tools.tree_moves import tree_move_tools
@@ -143,6 +149,11 @@ from krim_agent.workspace_directory import (
     DirectoryQueryRequest,
     DirectoryQueryResult,
     WorkspaceDirectoryWriter,
+)
+from krim_agent.workspace_directory_checkpoint import (
+    DirectoryCheckpointCaptureFence,
+    DirectoryCheckpointMaterialCreate,
+    DirectoryCheckpointView,
 )
 from krim_agent.workspace_list import (
     NativeBatchFence,
@@ -311,6 +322,18 @@ class AgentService:
         )
         self.manager.tree_models.prepare = self._prepare_tree
         self.workspace_checkpoint_store = WorkspaceCheckpointStore(self.workspace_edits)
+        self.directory_checkpoint_materials = WorkspaceDirectoryCheckpointStore(
+            self.workspace_edits
+        )
+        self.directory_checkpoint_store = WorkspaceDirectoryCaptureStore(
+            self.directory_checkpoint_materials
+        )
+        self.directory_checkpoints = WorkspaceDirectoryCheckpointService(
+            self.directory_checkpoint_store,
+            self.manager.workspace_changes,
+            self._directory_checkpoint_authorize,
+            self._directory_checkpoint_read,
+        )
         self.workspace_checkpoints = WorkspaceCheckpointService(
             self.workspace_checkpoint_store,
             self.manager.workspace_changes,
@@ -667,6 +690,17 @@ class AgentService:
         if existing is None:
             self.runtime.tools.register(definition)
 
+    def register_directory_checkpoints(self) -> None:
+        """显式启用目录完整捕获；旧Agent的冻结工具集合不自动提升。"""
+        definition = directory_checkpoint_capture_tool()
+        existing = next(
+            (item for item in self.runtime.tools.definitions if item.name == definition.name), None
+        )
+        if existing is not None and existing is not definition:
+            raise ValueError("目录捕获工具名称已由其它定义占用")
+        if existing is None:
+            self.runtime.tools.register(definition)
+
     def register_mixed_batch_writes(self) -> None:
         """可信宿主显式启用模型混合批次写工具；权限仍由原ToolRegistry裁决。"""
         definition = mixed_batch_start_tool()
@@ -849,6 +883,7 @@ class AgentService:
         recovered += await self.workspace_batch_store.recover_interrupted()
         recovered += await self.workspace_mixed_batch_store.recover_interrupted()
         recovered += await self.workspace_restore_store.recover_interrupted()
+        recovered += await self.directory_checkpoint_store.recover_interrupted()
         recovered += await self.manager.tree_moves.store.recover_interrupted()
         recovered += await self.manager.tree_exchanges.store.recover_interrupted()
         self._workspace_recovered = True
@@ -865,6 +900,7 @@ class AgentService:
         mixed_fence: MixedBatchFence | None = None,
         tree_fence: TreePlanFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
+        directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
         command_admitted: Callable[[str], None] | None = None,
     ) -> object:
@@ -960,6 +996,8 @@ class AgentService:
                     tree_fence=tree_fence,
                     workspace_trees=self.workspace_trees,
                     checkpoint_capture=checkpoint_capture,
+                    directory_checkpoint_capture=directory_checkpoint_capture,
+                    workspace_directory_checkpoints=self.directory_checkpoints,
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
                     call_id=call_id,
@@ -1869,6 +1907,73 @@ class AgentService:
         )
         return scope, binding
 
+    async def _directory_checkpoint_authorize(self, agent_id: str) -> tuple[str, WorkspaceBinding]:
+        scope, binding = await self._workspace_checkpoint_authorize(agent_id)
+        handle = self._handle(agent_id)
+        if "workspace_directory_checkpoint_capture" not in {
+            item.name for item in handle.runtime.tools.definitions
+        }:
+            raise ServiceError(
+                "workspace_directory_capture_unavailable", "原冻结Agent未授目录捕获工具", 403
+            )
+        return scope, binding
+
+    async def _directory_checkpoint_read(
+        self, agent_id: str, root_path: str, fence: DirectoryCheckpointCaptureFence, confirmed: bool
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            "workspace_directory_checkpoint_capture",
+            {"root_path": root_path},
+            confirmed=confirmed,
+            directory_checkpoint_capture=fence,
+        )
+
+    async def workspace_create_directory_checkpoint(
+        self, agent_id: str, request: DirectoryCheckpointMaterialCreate, *, confirmed: bool = False
+    ) -> DirectoryCheckpointView:
+        return await self.directory_checkpoints.create(agent_id, request, confirmed=confirmed)
+
+    async def workspace_directory_checkpoint(
+        self, agent_id: str, checkpoint_id: str
+    ) -> DirectoryCheckpointView:
+        session = await self.session(agent_id)
+        return await self.directory_checkpoint_store.get(
+            f"session:{session.session_id}", checkpoint_id
+        )
+
+    async def workspace_directory_checkpoint_by_key(
+        self, agent_id: str, request_key: str
+    ) -> DirectoryCheckpointView | None:
+        session = await self.session(agent_id)
+        return await self.directory_checkpoint_store.by_key(
+            f"session:{session.session_id}", request_key
+        )
+
+    async def workspace_directory_checkpoint_list(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[DirectoryCheckpointView]:
+        session = await self.session(agent_id)
+        return await self.directory_checkpoint_store.list(
+            f"session:{session.session_id}", offset=offset, limit=limit
+        )
+
+    async def workspace_directory_checkpoint_wait(
+        self, agent_id: str, checkpoint_id: str, *, timeout_seconds: float = 30
+    ) -> DirectoryCheckpointView:
+        session = await self.session(agent_id)
+        return await self.directory_checkpoints.wait(
+            f"session:{session.session_id}", checkpoint_id, timeout_seconds=timeout_seconds
+        )
+
+    async def workspace_directory_checkpoint_cancel(
+        self, agent_id: str, checkpoint_id: str
+    ) -> DirectoryCheckpointView:
+        session = await self.session(agent_id)
+        return await self.directory_checkpoints.cancel(
+            f"session:{session.session_id}", checkpoint_id
+        )
+
     async def _workspace_checkpoint_read(
         self, agent_id: str, path: str, fence: CheckpointCaptureFence, confirmed: bool
     ) -> object:
@@ -2620,6 +2725,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.directory_checkpoints.assert_external_close()
         self.model_checkpoints.assert_external_close()
         self.manager.tree_exchanges.assert_external_close()
         self.manager.tree_moves.assert_external_close()
@@ -2641,6 +2747,7 @@ class AgentService:
             await self.workspace_restores.close()
             await self.model_checkpoints.close()
             await self.workspace_checkpoints.close()
+            await self.directory_checkpoints.close()
             await self.workspace_batches.close()
             await self.workspace_mixed_batches.close()
             await self.workspace_trees.close()

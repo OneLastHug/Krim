@@ -22,6 +22,7 @@ from krim_agent.workspace import (
     WORKSPACE_TREE_MOVE_TOOL_NAMES,
 )
 from krim_agent.workspace_checkpoint import CheckpointCaptureFence
+from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
 from krim_agent.workspace_restore import CheckpointRestoreFence
 
 from .core import (
@@ -91,6 +92,8 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.mixed_batch),
         id(context.workspace_batch),
         id(context.checkpoint_capture),
+        id(context.directory_checkpoint_capture),
+        id(context.workspace_directory_checkpoints),
         id(context.checkpoint_restore),
         id(context.command_capture),
     )
@@ -120,10 +123,14 @@ def _tree_exchange_budget(context: ToolContext) -> tuple[object, ...]:
 def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
     fence = context.checkpoint_capture
     restore = context.checkpoint_restore
+    directory = context.directory_checkpoint_capture
+    if directory is not None and type(directory) is not DirectoryCheckpointCaptureFence:
+        raise ToolError("workspace_directory_capture_context", "目录围栏类型无效")
     return (
         _tree_move_binding(context),
         id(context.workspace_checkpoints),
         id(context.workspace_checkpoint_controls),
+        (directory.checkpoint_id, directory.token) if directory is not None else None,
         (
             fence.checkpoint_id,
             fence.position,
@@ -303,6 +310,7 @@ class ToolRegistry:
         tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
+        directory_capture = name == "workspace_directory_checkpoint_capture"
         checkpoint_control = name in WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
         restore_model = (
             isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
@@ -312,6 +320,7 @@ class ToolRegistry:
         checkpoint_capture = (
             restore_leaf
             or byte_capture
+            or directory_capture
             or (
                 name == "workspace_read"
                 and isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
@@ -327,12 +336,16 @@ class ToolRegistry:
             )
         )
         checkpoint_context_code = (
-            "workspace_checkpoint_model_context"
+            "workspace_directory_capture_context"
+            if directory_capture
+            else "workspace_checkpoint_model_context"
             if checkpoint_model
             else "workspace_checkpoint_context"
         )
         checkpoint_unverified_code = (
-            "workspace_checkpoint_model_unverified"
+            "workspace_directory_capture_unverified"
+            if directory_capture
+            else "workspace_checkpoint_model_unverified"
             if checkpoint_model
             else "workspace_checkpoint_unverified"
         )
@@ -351,6 +364,8 @@ class ToolRegistry:
                 and not isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
                 or parent.checkpoint_restore is not None
                 and not isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
+                or parent.directory_checkpoint_capture is not None
+                and type(parent.directory_checkpoint_capture) is not DirectoryCheckpointCaptureFence
             ):
                 # 先拒绝坏围栏，再读取来源；不能把缺属性的对象降成Host调用。
                 raise ToolError(
@@ -361,6 +376,33 @@ class ToolRegistry:
                     else checkpoint_context_code,
                     "检查点围栏类型无效，不能进入工具执行",
                 )
+            if parent.directory_checkpoint_capture is not None and (
+                not directory_capture
+                or any(
+                    item is not None
+                    for item in (
+                        parent.checkpoint_capture,
+                        parent.checkpoint_restore,
+                        parent.command_capture,
+                        parent.workspace_batch,
+                        parent.mixed_batch,
+                        parent.tree_fence,
+                    )
+                )
+            ):
+                raise ToolError(
+                    "workspace_directory_capture_context", "目录围栏仅供原捕获叶工具，不能混用"
+                )
+            if directory_capture and (
+                parent.origin != "host"
+                or parent.run_id != "local"
+                or parent.agent_id is None
+                or parent.session_id is None
+                or parent.directory_checkpoint_capture is None
+                or parent.workspace_directory_checkpoints is None
+                or parent.source_call_id is not None
+            ):
+                raise ToolError("workspace_directory_capture_context", "目录捕获需要原私有Host围栏")
             if restore_model and (
                 not restore_leaf
                 or parent.checkpoint_capture is not None
@@ -380,6 +422,7 @@ class ToolRegistry:
                     for value in (
                         parent.checkpoint_capture,
                         parent.checkpoint_restore,
+                        parent.directory_checkpoint_capture,
                         parent.tree_fence,
                         parent.workspace_batch,
                         parent.mixed_batch,
@@ -399,7 +442,7 @@ class ToolRegistry:
                 or parent.checkpoint_restore is not None
             ):
                 raise ToolError("workspace_checkpoint_context", "字节元数据工具需要原私有捕获Fence")
-            if checkpoint_capture:
+            if checkpoint_capture and not directory_capture:
                 fence = parent.checkpoint_restore if restore_leaf else parent.checkpoint_capture
                 assert fence is not None
                 source = fence.model_source
@@ -529,7 +572,9 @@ class ToolRegistry:
                     raise ToolError(code, f"工具没有执行许可: {name}")
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
                 original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
-                original_capture_budget = _tree_exchange_budget(child) if byte_capture else None
+                original_capture_budget = (
+                    _tree_exchange_budget(child) if byte_capture or directory_capture else None
+                )
                 original_checkpoint_budget = execution_budget_snapshot(child.execution_timeouts)
                 original_resource_budget = (
                     _tree_exchange_budget(child) if command_resources else None
@@ -568,18 +613,14 @@ class ToolRegistry:
                     )
                 if command_resources and short is not None:
                     raise ToolError("execution_receipt_unverified", "资源查询须保留原账本事实")
-                if byte_capture and (
+                if (byte_capture or directory_capture) and (
                     child.arguments != original_arguments
                     or _checkpoint_capture_binding(child) != original_capture_binding
                     or _tree_exchange_budget(child) != original_capture_budget
                 ):
-                    raise ToolError(
-                        "workspace_checkpoint_context", "Hook不能替换原字节捕获参数、上下文或预算"
-                    )
-                if byte_capture and short is not None:
-                    raise ToolError(
-                        "workspace_checkpoint_unverified", "字节捕获须保存原真实私有快照"
-                    )
+                    raise ToolError(checkpoint_context_code, "Hook不能替换原捕获参数、上下文或预算")
+                if (byte_capture or directory_capture) and short is not None:
+                    raise ToolError(checkpoint_unverified_code, "捕获须保存原真实私有快照")
                 if tree_exchange and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_exchange_binding
@@ -703,7 +744,11 @@ class ToolRegistry:
                 model_response = child._tree_model_response
                 move_response = child._tree_move_response
                 exchange_response = child._tree_exchange_response
-                capture_response = child._checkpoint_capture_response
+                capture_response = (
+                    child._directory_checkpoint_capture_response
+                    if directory_capture
+                    else child._checkpoint_capture_response
+                )
                 resource_response = child._command_response
                 checkpoint_response = child._checkpoint_control_response
                 checkpoint_capture_result = (
@@ -751,18 +796,18 @@ class ToolRegistry:
                     )
                 if command_resources and child._command_response != resource_response:
                     raise ToolError("execution_receipt_unverified", "Hook不能替换原资源回程标记")
-                if byte_capture and (
+                if (byte_capture or directory_capture) and (
                     child.arguments != original_arguments
                     or _checkpoint_capture_binding(child) != original_capture_binding
                     or _tree_exchange_budget(child) != original_capture_budget
                 ):
-                    raise ToolError(
-                        "workspace_checkpoint_context", "Hook不能替换原字节捕获参数、上下文或预算"
-                    )
-                if byte_capture and child._checkpoint_capture_response != capture_response:
-                    raise ToolError(
-                        "workspace_checkpoint_unverified", "Hook不能替换原字节捕获回程标记"
-                    )
+                    raise ToolError(checkpoint_context_code, "Hook不能替换原捕获参数、上下文或预算")
+                if (byte_capture or directory_capture) and (
+                    child._directory_checkpoint_capture_response
+                    if directory_capture
+                    else child._checkpoint_capture_response
+                ) != capture_response:
+                    raise ToolError(checkpoint_unverified_code, "Hook不能替换原捕获回程标记")
                 if tree_exchange and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_exchange_binding

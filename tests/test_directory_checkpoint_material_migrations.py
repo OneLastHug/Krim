@@ -54,7 +54,10 @@ async def test_real_0051_upgrade_empty_roundtrip_preserves_all_old_table_ddl_and
                     )
                 ).all()
             )
-        await database.initialize()
+        async with database.engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync: command.upgrade(migration_config(sync), "0052_directory_checkpoints")
+            )
         async with database.engine.begin() as connection:
             for phase in ("upgraded", "roundtrip"):
                 assert (
@@ -93,7 +96,9 @@ async def test_real_0051_upgrade_empty_roundtrip_preserves_all_old_table_ddl_and
                         await connection.execute(text("SELECT version_num FROM alembic_version"))
                     ).scalar_one() == "0051_checkpoint_restore_models"
                     await connection.run_sync(
-                        lambda sync: command.upgrade(migration_config(sync), "head")
+                        lambda sync: command.upgrade(
+                            migration_config(sync), "0052_directory_checkpoints"
+                        )
                     )
     finally:
         await database.close()
@@ -121,7 +126,7 @@ async def test_nonempty_0052_downgrade_refuses_loss_and_keeps_original_material(
     async with store.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0052_directory_checkpoints"
+        ).scalar_one() == "0053_directory_captures"
         assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
 
 

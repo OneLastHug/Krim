@@ -250,7 +250,7 @@ async def test_0050_model_sources_refuse_lossy_downgrade_with_original_material_
         async with database.engine.connect() as sql:
             assert (
                 await sql.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0052_directory_checkpoints"
+            ).scalar_one() == "0053_directory_captures"
             assert (await sql.execute(text("PRAGMA foreign_key_check"))).all() == []
         assert await agent.file_checkpoint(view.checkpoint_id) == view
     finally:
