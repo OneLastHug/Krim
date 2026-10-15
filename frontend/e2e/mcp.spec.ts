@@ -1,9 +1,10 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 const headers = { Authorization: "Bearer browser-test-key" };
 async function open(page: Page): Promise<void> {
   await page.goto("/ui/"); await page.getByLabel("服务访问密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await ensureChineseUi(page);
   await expect(page.locator("#mcp-resources .mcp-resource")).toHaveCount(4);
 }
 function card(page: Page, name = "browser_mcp"): Locator { return page.locator(`.mcp-resource[data-name="${name}"]`); }

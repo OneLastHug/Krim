@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" }, tools = ["workspace_read", "command_execute", "command_get", "command_inspect", "command_resources", "command_history", "command_read", "command_cancel"];
@@ -28,7 +29,7 @@ test("多子进程CPU合计限额、真实回执与资源统计跨刷新Locale�
     await page.locator("#locale-select").selectOption("en-US"); await expect(fresh.locator(".command-resources")).toContainText("Process tree CPU usage");
     await page.setViewportSize({ width: 420, height: 860 }); await fresh.locator(".command-resources").scrollIntoViewIfNeeded(); await page.screenshot({ path: test.info().outputPath("tree-usage-narrow.png") });
     expect(await fresh.evaluate(node => node.scrollWidth <= node.clientWidth + 2)).toBe(true); expect(topic).toBeTruthy();
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("内核整树PID上限拒绝和全部回收显示同一原计数", async ({ page }) => {
@@ -38,7 +39,7 @@ test("内核整树PID上限拒绝和全部回收显示同一原计数", async ({
     await expect(panel.locator(".command-resources")).toContainText("整树进程限额拒绝计数", { timeout: 30_000 }); await expect(panel.locator(".command-detail")).toContainText("execution_tree_process_limit");
     const commandId = await panel.locator(".command-detail").getAttribute("data-command-id"); const value = await (await page.request.get(`/v1/agents/${id}/commands/${commandId}/resources`, { headers })).json();
     expect(value.usage.task_limit_hits).toBeGreaterThan(0); expect(value.usage.tasks_peak).toBeLessThanOrEqual(8); expect(value.processes_reaped).toBe(true);
-  } finally { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, id); }
 });
 
 test("合法结构但错作用域的资源回复拒绝显示，原命令不受影响", async ({ page }) => {
@@ -46,5 +47,5 @@ test("合法结构但错作用域的资源回复拒绝显示，原命令不受�
   try {
     await page.route("**/commands/*/resources**", async route => { const response = await route.fetch(), value = await response.json(); value.scope_id = "session:another"; await route.fulfill({ response, json: value }); });
     await start(page, panel, "print('safe')"); await expect(panel).toContainText("命令资源回程与原事实不一致", { timeout: 30_000 }); expect(await panel.locator(".command-resources").count()).toBe(0);
-  } finally { await page.unrouteAll({ behavior: "wait" }); await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+  } finally { await page.unrouteAll({ behavior: "wait" }); await destroyAgent(page, id); }
 });

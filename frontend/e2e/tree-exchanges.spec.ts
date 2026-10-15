@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
@@ -29,7 +30,7 @@ async function actor(page: Page, name: string, mode = "agent", selectedTools = t
   await panel.getByText("双完整目录树交换与历史", { exact: true }).click();
   return { id: view.agent_id, topic: view.topic_id, panel };
 }
-async function destroy(page: Page, id: string) { await page.request.post(`/v1/agents/${id}/destroy`, { headers }); }
+async function destroy(page: Page, id: string) { await destroyAgent(page, id); }
 async function inspect(panel: Locator, left: string, right: string) {
   await panel.getByLabel("左目录树相对路径", { exact: true }).fill(left);
   await panel.getByRole("button", { name: "检查左完整目录树", exact: true }).click();

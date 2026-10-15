@@ -1,3 +1,4 @@
+import { destroyAgent } from "./session-fixtures.js";
 import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 
@@ -50,5 +51,5 @@ for (const format of ["text", "bytes"]) test(`原模型${format}创建与查询�
     expect(await (await page.request.get(`/_test/model-checkpoint-proof/${actor.agent_id}`, { headers })).json()).toEqual(proof); expect(posts).toBe(0);
     await page.locator("#locale-select").selectOption("en-US"); await page.setViewportSize({ width: 420, height: 860 }); await page.locator("#native-checkpoint-detail").scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath(`model-${format}-narrow.png`) }); expect(await page.locator("#checkpoint-native").evaluate(node => node.scrollWidth <= node.clientWidth + 2)).toBe(true);
-  } finally { await page.request.post(`/v1/agents/${actor.agent_id}/destroy`, { headers }); }
+  } finally { await destroyAgent(page, actor.agent_id); }
 });

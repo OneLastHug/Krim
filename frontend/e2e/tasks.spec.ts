@@ -1,3 +1,4 @@
+import { ensureChineseUi } from "./session-fixtures.js";
 import { expect, test } from "@playwright/test";
 
 const headers = { Authorization: "Bearer browser-test-key" };
@@ -5,7 +6,7 @@ async function connect(page: import("@playwright/test").Page): Promise<void> {
   await page.goto("/ui/");
   await page.getByLabel("服务访问密钥").fill("browser-test-key");
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.locator("#connection")).toContainText("本地服务已连接");
+  await ensureChineseUi(page);
 }
 
 test("持久任务在刷新后保留，各Agent隔离且关闭后只读", async ({ page }) => {

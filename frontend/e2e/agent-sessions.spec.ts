@@ -18,7 +18,7 @@ test("会话关闭重开保留草稿和历史轮次，专属话题只读", async
     const card = page.locator(`article.agent-card[data-agent-id="${agent.agent_id}"]`);
     await expect(card.locator(".agent-result")).toContainText('"sum": 5.0');
     await card.getByText("执行步骤与工具", { exact: true }).click();
-    await expect(card.locator("ol")).toContainText("工具 add：完成");
+    await expect(card.getByText("执行步骤与工具", { exact: true }).locator("..").locator("ol")).toContainText("工具 add：完成");
     const input = card.getByLabel("default 后续任务", { exact: true });
     await input.fill("保留草稿");
     await card.getByRole("button", { name: "关闭会话" }).click();
@@ -67,7 +67,7 @@ test("多个后台Agent独立显示部分文本和停止，刷新保留原Run", 
     const restored = page.locator(`article.agent-card[data-agent-id="${two.agent_id}"]`);
     await expect(restored.locator(".agent-result")).toContainText("乙");
     await restored.getByText("执行步骤与工具", { exact: true }).click();
-    await expect(restored.locator("ol")).toContainText("模型生成");
+    await expect(restored.getByText("执行步骤与工具", { exact: true }).locator("..").locator("ol")).toContainText("模型生成");
     const after = await (await page.request.get(`/v1/agents/${two.agent_id}`, { headers })).json();
     expect(after.current_run_id).toBe(before.current_run_id); expect(after.turn).toBe(1);
   } finally {

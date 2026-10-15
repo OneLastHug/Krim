@@ -1,3 +1,4 @@
+import { pythonExecutable, pythonFixtureArgs } from "./python-client.js";
 import { test as base, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -111,7 +112,7 @@ test("Python RemoteHostHandle 控制真实 iframe 并校验生效语言回执", 
   await expect(page.locator("#host-status")).toContainText("iframe 已连接");
   const sessionId = await page.locator("#host-session").textContent();
   const run = promisify(execFile);
-  const result = await run("../.venv/bin/python", ["../tests/fixtures/host_locale_client.py", baseURL!, sessionId!, "en-GB"], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
+  const result = await run(pythonExecutable, [...pythonFixtureArgs("host_locale_client.py"), baseURL!, sessionId!, "en-GB"], { env: { ...process.env, KRIM_AGENT_API_KEY: "browser-test-key" }, timeout: 20_000 });
   expect(JSON.parse(result.stdout)).toMatchObject({ requested: "en-GB", effective: "en-US" });
   const frame = page.frameLocator("#agent-frame");
   await expect(frame.locator("#send")).toHaveText("Send");
