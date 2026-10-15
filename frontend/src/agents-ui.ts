@@ -18,6 +18,7 @@ type Actions = {
   control: (agent: AgentView, action: "close" | "reopen") => Promise<void>;
   openTopic: (topicId: string) => Promise<void>;
   openCheckpoints: (agentId: string) => Promise<void>;
+  openDirectoryCheckpoints: (agentId: string) => Promise<void>;
   prompt: () => string;
   notice: (message: string, error?: boolean) => void;
   status: (status: string) => string;
@@ -37,6 +38,7 @@ type Card = {
   generatedTreeUndos: GeneratedTreeUndosUI;
   commands: CommandsUI;
   checkpoints: HTMLButtonElement;
+  directoryCheckpoints: HTMLButtonElement;
 };
 
 export class AgentsUI {
@@ -62,6 +64,8 @@ export class AgentsUI {
       card.view = agent;
       card.checkpoints.hidden = !agent.session.permissions.workspace;
       card.checkpoints.textContent = t("查看文件检查点");
+      card.directoryCheckpoints.hidden = !agent.session.permissions.workspace;
+      card.directoryCheckpoints.textContent = t("查看目录检查点");
       card.tasks.update();
       card.workspace.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open");
       card.changes.update(
@@ -112,7 +116,9 @@ export class AgentsUI {
     stop.textContent = t("停止"); destroy.textContent = t("销毁"); open.textContent = t("查看会话历史");
     const checkpoints = document.createElement("button"); checkpoints.type = "button"; checkpoints.className = "secondary";
     checkpoints.onclick = () => void this.actions.openCheckpoints(agent.agent_id).catch(error => this.actions.notice(String(error), true));
-    const controls = document.createElement("div"); controls.className = "actions"; controls.append(execute, stop, control, open, checkpoints, destroy);
+    const directoryCheckpoints = document.createElement("button"); directoryCheckpoints.type = "button"; directoryCheckpoints.className = "secondary";
+    directoryCheckpoints.onclick = () => void this.actions.openDirectoryCheckpoints(agent.agent_id).catch(error => this.actions.notice(String(error), true));
+    const controls = document.createElement("div"); controls.className = "actions"; controls.append(execute, stop, control, open, checkpoints, directoryCheckpoints, destroy);
     const history = document.createElement("details"), historyTitle = document.createElement("summary"), turns = document.createElement("select"), transcript = document.createElement("pre");
     historyTitle.textContent = t("轮次历史"); turns.setAttribute("aria-label", `${agent.name} ${t("历史轮次")}`); transcript.className = "agent-history"; history.append(historyTitle, turns, transcript);
     const tasks = new TasksUI(agent.agent_id, () => card.view.session.status, this.actions.notice);
@@ -124,7 +130,7 @@ export class AgentsUI {
     const generatedTreeUndos = new GeneratedTreeUndosUI(agent.agent_id, this.actions.notice);
     const commands = new CommandsUI(agent.agent_id, this.actions.notice, (proposalId, operationId) => changes.focusProposal(proposalId, operationId), (proposalId, operationId) => directories.focusProposal(proposalId, operationId));
     root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, generatedTreeUndos.root, commands.root);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, commands, checkpoints };
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, commands, checkpoints, directoryCheckpoints };
     execute.onclick = () => {
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }

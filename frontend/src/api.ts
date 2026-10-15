@@ -396,6 +396,14 @@ export interface NativeBatchHistoryPage {
   source: "workspace"; scope_id: string; total: number; items: NativeBatchSummary[]; next_cursor: string | null;
 }
 export interface NativeCheckpointCreate { title: string; paths: string[]; request_key: string; capture_format?: "text" | "bytes"; }
+export interface DirectoryCheckpointCreate { title: string; root_path: string; request_key: string; }
+export interface DirectoryCheckpointView {
+  source: "workspace_directory"; checkpoint_id: string; scope_id: string; title: string; root_path: string;
+  request_key: string; workspace_key: string; resource_fingerprint: string;
+  status: "capturing" | "available" | "failed" | "cancelled" | "interrupted";
+  snapshot: { snapshot_fingerprint: string; entry_count: number; file_count: number; directory_count: number; byte_size: number } | null;
+  error_code: string | null; created_at: string; updated_at: string;
+}
 export interface MixedBatchItemView {
   source: "file" | "directory"; position: number; proposal_id: string; expected_revision: number;
   path: string; target_path: string | null; status: NativeBatchItemView["status"];

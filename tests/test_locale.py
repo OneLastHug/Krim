@@ -71,7 +71,7 @@ def test_resources_and_default_preserve_placeholders_and_all_declared_ui_keys():
     assert english.strings["发送"] == "Send"
     declared = re.findall(
         r'data-i18n(?:-(?:placeholder|title|aria-label))?="([^"]+)"',
-        Path("frontend/index.html").read_text(),
+        (Path(__file__).resolve().parents[1] / "frontend/index.html").read_text(),
     )
     assert declared and not set(declared).difference(chinese.strings)
 

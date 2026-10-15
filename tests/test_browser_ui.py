@@ -3,6 +3,7 @@ from pathlib import Path
 import httpx
 from pydantic import SecretStr
 
+import krim_agent
 from krim_agent.api import create_app
 from krim_agent.config import Settings
 from krim_agent.persistence import Database, KrimRepository
@@ -81,6 +82,16 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
         assert (
             await client.get("/v1/agents/example/workspace/native-checkpoints")
         ).status_code == 401
+        directory_script = await client.get("/ui/directory-checkpoint-ui.js")
+        assert directory_script.status_code == 200
+        assert directory_script.headers["cache-control"] == "no-cache"
+        assert "script-src 'self'" in directory_script.headers["content-security-policy"]
+        assert (await client.head("/ui/directory-checkpoint-ui.js")).content == b""
+        assert (await client.post("/ui/directory-checkpoint-ui.js")).status_code == 401
+        assert (
+            await client.get("/v1/agents/example/workspace/directory-checkpoints")
+        ).status_code == 401
+        assert (await client.get("/_test/directory-checkpoint-agent")).status_code == 401
         change_script = await client.get("/ui/workspace-changes-ui.js")
         assert change_script.status_code == 200 and "WorkspaceChangesUI" in change_script.text
         command_script = await client.get("/ui/commands-ui.js")
@@ -132,11 +143,16 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
 
 
 def test_frontend_sources_and_built_assets_exist():
-    root = Path("frontend")
+    root = Path(__file__).resolve().parents[1] / "frontend"
     package = root / "package.json"
     assert package.exists() and (root / "package-lock.json").exists()
     assert (root / "src/app.ts").exists() and (root / "src/api.ts").exists()
-    assert (Path("src/krim_agent/web") / "index.html").exists()
-    assert (Path("src/krim_agent/web") / "app.js").exists()
-    assert (Path("src/krim_agent/web") / "directory-changes-ui.js").exists()
-    assert (Path("src/krim_agent/web") / "workspace-trees-ui.js").exists()
+    built = Path(krim_agent.__file__).resolve().parent / "web"
+    for name in (
+        "index.html",
+        "app.js",
+        "directory-changes-ui.js",
+        "workspace-trees-ui.js",
+        "directory-checkpoint-ui.js",
+    ):
+        assert (built / name).is_file()

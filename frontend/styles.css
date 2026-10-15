@@ -110,7 +110,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .checkpoint-card button { margin-top: 6px; }
 #checkpoint-panel > label { display: block; margin: 6px 14px; font-size: 0.8rem; }
 #checkpoint-source { margin: 0 14px 10px; width: calc(100% - 28px); min-width: 0; }
-#checkpoint-host, #checkpoint-native { padding: 0 14px 8px; min-width: 0; }
+#checkpoint-host, #checkpoint-native, #checkpoint-directory { padding: 0 14px 8px; min-width: 0; }
+#checkpoint-workspace-kind { padding: 0 14px; }
+#checkpoint-directory { overflow-wrap: anywhere; }
+#checkpoint-directory > label { display: block; margin-top: 10px; font-size: 0.8rem; }
+#checkpoint-directory button { border: 0; border-radius: 7px; padding: 7px 10px; color: var(--accent); background: var(--accent-soft); font-size: 0.78rem; font-weight: 600; }
+#checkpoint-directory input { max-width: 100%; box-sizing: border-box; }
 #checkpoint-panel .actions { flex-wrap: wrap; margin-top: 8px; }
 #checkpoint-panel input, #checkpoint-panel select { padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface); }
 #native-checkpoint-query { display: block; width: 100%; margin: 6px 0; }
