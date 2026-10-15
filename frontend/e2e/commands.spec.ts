@@ -226,10 +226,19 @@ test("失败产物明确接受、产物分页、原字节保留，二进制沿�
 test("二进制输入沿浏览器完整确认执行并精确撤销原字节", async ({ page }) => {
   const { id, card, panel } = await agent(page, "browser-binary-input");
   const files = card.locator(".workspace-changes");
+  async function completeOriginalCommand(action: () => Promise<void>): Promise<void> {
+    const response = page.waitForResponse(value => value.request().method() === "POST"
+      && new URL(value.url()).pathname === `/v1/agents/${id}/commands`);
+    await action();
+    const accepted = await response; expect(accepted.status()).toBe(202);
+    const original = await accepted.json(); expect(typeof original.command_id).toBe("string");
+    // 先关联本次命令，旧命令的完成标题不能结束新命令的等待。
+    await expect(panel.locator(".command-detail")).toHaveAttribute("data-command-id", original.command_id);
+    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
+  }
   try {
     await draft(panel, "open('browser-input.bin','wb').write(bytes([0,255,1]))");
-    await confirm(page, panel, "执行受控命令");
-    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
+    await completeOriginalCommand(() => confirm(page, panel, "执行受控命令"));
     await panel.getByRole("button", { name: "查看命令文件变化", exact: true }).click();
     await confirm(page, panel.locator('.command-change-row[data-path="browser-input.bin"]'), "生成产物文件提案");
     await panel.getByRole("button", { name: "审阅产物文件提案", exact: true }).click();
@@ -238,10 +247,11 @@ test("二进制输入沿浏览器完整确认执行并精确撤销原字节", as
 
     await draft(panel, "data=open('browser-input.bin','rb').read();print(data.hex());open('browser-input.bin','wb').write(bytes([255,128,0,2]))", "browser-input.bin");
     let confirmation = "";
-    page.once("dialog", dialog => { confirmation = dialog.message(); return dialog.accept(); });
-    await panel.getByRole("button", { name: "执行受控命令", exact: true }).click();
+    await completeOriginalCommand(async () => {
+      page.once("dialog", dialog => { confirmation = dialog.message(); return dialog.accept(); });
+      await panel.getByRole("button", { name: "执行受控命令", exact: true }).click();
+    });
     expect(confirmation).toContain('"input_paths"'); expect(confirmation).toContain("browser-input.bin");
-    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
     await panel.getByRole("button", { name: "读取标准输出", exact: true }).click();
     await expect(panel.locator(".command-output-text")).toHaveText("00ff01\n");
     await panel.getByRole("button", { name: "查看命令文件变化", exact: true }).click();
@@ -260,8 +270,7 @@ test("二进制输入沿浏览器完整确认执行并精确撤销原字节", as
     await expect(files.locator(".workspace-change-detail strong")).toContainText("文件已撤销");
 
     await draft(panel, "print(open('browser-input.bin','rb').read().hex())", "browser-input.bin");
-    await confirm(page, panel, "执行受控命令");
-    await expect(panel.locator(".command-detail > strong")).toContainText("命令已完成", { timeout: 25_000 });
+    await completeOriginalCommand(() => confirm(page, panel, "执行受控命令"));
     await panel.getByRole("button", { name: "读取标准输出", exact: true }).click();
     await expect(panel.locator(".command-output-text")).toHaveText("00ff01\n");
     const history = await (await page.request.get(`/v1/agents/${id}/commands`, { headers })).json();
