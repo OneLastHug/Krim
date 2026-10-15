@@ -90,6 +90,17 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointView,
 )
 from krim_agent.workspace_directory_checkpoint_control import DirectoryCheckpointQueryResult
+from krim_agent.workspace_directory_restore import (
+    DirectoryRestoreDiffEntry,
+    DirectoryRestoreExecute,
+    DirectoryRestoreNodeView,
+    DirectoryRestoreOperationView,
+    DirectoryRestorePreview,
+    DirectoryRestoreReceiptView,
+    DirectoryRestoreTarget,
+    DirectoryRestoreView,
+)
+from krim_agent.workspace_directory_restore_public import DirectoryRestoreDiffPage
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchItemView,
@@ -183,6 +194,15 @@ from .types import (
 )
 
 __all__ = [
+    "DirectoryRestoreDiffEntry",
+    "DirectoryRestoreDiffPage",
+    "DirectoryRestoreExecute",
+    "DirectoryRestoreNodeView",
+    "DirectoryRestoreOperationView",
+    "DirectoryRestorePreview",
+    "DirectoryRestoreReceiptView",
+    "DirectoryRestoreTarget",
+    "DirectoryRestoreView",
     "DirectoryCheckpointCreate",
     "DirectoryCheckpointSummary",
     "DirectoryCheckpointQueryResult",
