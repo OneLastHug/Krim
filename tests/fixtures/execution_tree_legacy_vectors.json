@@ -1,0 +1,1987 @@
+{
+  "package": "/data/tmp/root/krim-native-checkpoint-byte-restore-wheel-gate/venv/lib/python3.12/site-packages/krim_agent/__init__.py",
+  "wheel_sha256": "b3796eece20fbedf141adc1fee7e6a3b2855065c645cd01388c4c9c1ffa50d8a",
+  "limits_json": "{\"wall_seconds\":30.0,\"startup_seconds\":10.0,\"cpu_seconds\":10,\"memory_bytes\":268435456,\"process_count\":32,\"open_files\":128,\"file_bytes\":1048576,\"workspace_bytes\":33554432,\"temporary_bytes\":8388608,\"output_bytes\":65536,\"artifact_bytes\":16777216,\"artifact_files\":256}",
+  "fingerprint": "132ecfd14d6553b90e1bad04de0319ff220450ea26bbf26b1a339cb8c61907eb",
+  "snapshot": {
+    "request": {
+      "request_key": "legacy-command",
+      "command": {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "print(1)"
+        ],
+        "cwd": "."
+      }
+    },
+    "resource": {
+      "key": "local",
+      "version": "1",
+      "fingerprint": "132ecfd14d6553b90e1bad04de0319ff220450ea26bbf26b1a339cb8c61907eb"
+    },
+    "limits": {
+      "wall_seconds": 30.0,
+      "startup_seconds": 10.0,
+      "cpu_seconds": 10,
+      "memory_bytes": 268435456,
+      "process_count": 32,
+      "open_files": 128,
+      "file_bytes": 1048576,
+      "workspace_bytes": 33554432,
+      "temporary_bytes": 8388608,
+      "output_bytes": 65536,
+      "artifact_bytes": 16777216,
+      "artifact_files": 256
+    },
+    "directories": [],
+    "inputs": [],
+    "run_id": null,
+    "call_id": null,
+    "origin": null
+  },
+  "view": {
+    "command_id": "old-command",
+    "scope_id": "session:old-agent",
+    "topic_id": "old-topic",
+    "request": {
+      "request_key": "legacy-command",
+      "command": {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "print(1)"
+        ],
+        "cwd": "."
+      }
+    },
+    "resource": {
+      "key": "local",
+      "version": "1",
+      "fingerprint": "132ecfd14d6553b90e1bad04de0319ff220450ea26bbf26b1a339cb8c61907eb"
+    },
+    "run_id": null,
+    "call_id": null,
+    "phase": "finished",
+    "revision": 3,
+    "cancel_requested": false,
+    "dispatched": true,
+    "started": true,
+    "outcome": "completed",
+    "exit_code": 0,
+    "output_truncated": false,
+    "stdout_bytes": 2,
+    "stderr_bytes": 0,
+    "input_files": 0,
+    "artifact_files": 0,
+    "artifacts_complete": true,
+    "processes_reaped": true,
+    "error_code": null,
+    "created_at": "2026-10-15T00:00:00Z",
+    "updated_at": "2026-10-15T00:00:00Z",
+    "interrupted_at": null
+  },
+  "tools": [
+    {
+      "name": "command_execute",
+      "description": "在隔离副本执行命令，明确输入文件须经原读取授权；等待原结果，不修改原工作区",
+      "risk": "write",
+      "input_schema": {
+        "$defs": {
+          "CommandSpec": {
+            "additionalProperties": false,
+            "properties": {
+              "argv": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 128,
+                "minItems": 1,
+                "title": "Argv",
+                "type": "array"
+              },
+              "cwd": {
+                "default": ".",
+                "maxLength": 512,
+                "minLength": 1,
+                "title": "Cwd",
+                "type": "string"
+              }
+            },
+            "required": [
+              "argv"
+            ],
+            "title": "CommandSpec",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "request_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "title": "Request Key",
+            "type": "string"
+          },
+          "command": {
+            "$ref": "#/$defs/CommandSpec"
+          },
+          "input_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Input Paths",
+            "type": "array"
+          },
+          "directories": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Directories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_key",
+          "command"
+        ],
+        "title": "AgentCommandRequest",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandFile": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "byte_size": {
+                "minimum": 0,
+                "title": "Byte Size",
+                "type": "integer"
+              },
+              "mode": {
+                "maximum": 511,
+                "minimum": 0,
+                "title": "Mode",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "sha256",
+              "byte_size",
+              "mode"
+            ],
+            "title": "CommandFile",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "enum": [
+              "preparing",
+              "dispatched",
+              "running",
+              "finished",
+              "interrupted"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "timed_out",
+                  "cancelled",
+                  "output_limit",
+                  "setup_failed",
+                  "uncertain"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "boolean"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          },
+          "processes_reaped": {
+            "title": "Processes Reaped",
+            "type": "boolean"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "stdout_text": {
+            "title": "Stdout Text",
+            "type": "string"
+          },
+          "stderr_text": {
+            "title": "Stderr Text",
+            "type": "string"
+          },
+          "stdout_base64": {
+            "title": "Stdout Base64",
+            "type": "string"
+          },
+          "stderr_base64": {
+            "title": "Stderr Base64",
+            "type": "string"
+          },
+          "stdout_bytes": {
+            "title": "Stdout Bytes",
+            "type": "integer"
+          },
+          "stderr_bytes": {
+            "title": "Stderr Bytes",
+            "type": "integer"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "input_files": {
+            "title": "Input Files",
+            "type": "integer"
+          },
+          "artifact_files": {
+            "title": "Artifact Files",
+            "type": "integer"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/$defs/CommandFile"
+            },
+            "maxItems": 32,
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "artifacts_truncated": {
+            "title": "Artifacts Truncated",
+            "type": "boolean"
+          },
+          "artifacts_complete": {
+            "title": "Artifacts Complete",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command_id",
+          "revision",
+          "phase",
+          "outcome",
+          "dispatched",
+          "started",
+          "processes_reaped",
+          "exit_code",
+          "error_code",
+          "stdout_text",
+          "stderr_text",
+          "stdout_base64",
+          "stderr_base64",
+          "stdout_bytes",
+          "stderr_bytes",
+          "output_truncated",
+          "input_files",
+          "artifact_files",
+          "artifacts",
+          "artifacts_truncated",
+          "artifacts_complete"
+        ],
+        "title": "CommandSummary",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_get",
+      "description": "读取同一会话的原命令状态、有界输出与产物摘要，不重跑",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Command Id"
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Key"
+          }
+        },
+        "title": "CommandLookup",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandFile": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "byte_size": {
+                "minimum": 0,
+                "title": "Byte Size",
+                "type": "integer"
+              },
+              "mode": {
+                "maximum": 511,
+                "minimum": 0,
+                "title": "Mode",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "sha256",
+              "byte_size",
+              "mode"
+            ],
+            "title": "CommandFile",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "enum": [
+              "preparing",
+              "dispatched",
+              "running",
+              "finished",
+              "interrupted"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "timed_out",
+                  "cancelled",
+                  "output_limit",
+                  "setup_failed",
+                  "uncertain"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "boolean"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          },
+          "processes_reaped": {
+            "title": "Processes Reaped",
+            "type": "boolean"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "stdout_text": {
+            "title": "Stdout Text",
+            "type": "string"
+          },
+          "stderr_text": {
+            "title": "Stderr Text",
+            "type": "string"
+          },
+          "stdout_base64": {
+            "title": "Stdout Base64",
+            "type": "string"
+          },
+          "stderr_base64": {
+            "title": "Stderr Base64",
+            "type": "string"
+          },
+          "stdout_bytes": {
+            "title": "Stdout Bytes",
+            "type": "integer"
+          },
+          "stderr_bytes": {
+            "title": "Stderr Bytes",
+            "type": "integer"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "input_files": {
+            "title": "Input Files",
+            "type": "integer"
+          },
+          "artifact_files": {
+            "title": "Artifact Files",
+            "type": "integer"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/$defs/CommandFile"
+            },
+            "maxItems": 32,
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "artifacts_truncated": {
+            "title": "Artifacts Truncated",
+            "type": "boolean"
+          },
+          "artifacts_complete": {
+            "title": "Artifacts Complete",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command_id",
+          "revision",
+          "phase",
+          "outcome",
+          "dispatched",
+          "started",
+          "processes_reaped",
+          "exit_code",
+          "error_code",
+          "stdout_text",
+          "stderr_text",
+          "stdout_base64",
+          "stderr_base64",
+          "stdout_bytes",
+          "stderr_bytes",
+          "output_truncated",
+          "input_files",
+          "artifact_files",
+          "artifacts",
+          "artifacts_truncated",
+          "artifacts_complete"
+        ],
+        "title": "CommandSummary",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_read",
+      "description": "分页读取原命令输出或产物字节，base64保留原始值，文本仅为预览",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Command Id"
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Key"
+          },
+          "source": {
+            "default": "stdout",
+            "enum": [
+              "stdout",
+              "stderr",
+              "artifact"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 8388608,
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "limit": {
+            "default": 2048,
+            "maximum": 4096,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "CommandRead",
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "stdout",
+              "stderr",
+              "artifact"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "next_offset": {
+            "title": "Next Offset",
+            "type": "integer"
+          },
+          "byte_size": {
+            "title": "Byte Size",
+            "type": "integer"
+          },
+          "data_base64": {
+            "title": "Data Base64",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command_id",
+          "source",
+          "path",
+          "offset",
+          "next_offset",
+          "byte_size",
+          "data_base64",
+          "text",
+          "truncated"
+        ],
+        "title": "CommandSlice",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_cancel",
+      "description": "取消同一会话的原命令并等待本机执行收束，不重新执行",
+      "risk": "write",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Command Id"
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Key"
+          }
+        },
+        "title": "CommandLookup",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandFile": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "byte_size": {
+                "minimum": 0,
+                "title": "Byte Size",
+                "type": "integer"
+              },
+              "mode": {
+                "maximum": 511,
+                "minimum": 0,
+                "title": "Mode",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "sha256",
+              "byte_size",
+              "mode"
+            ],
+            "title": "CommandFile",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "enum": [
+              "preparing",
+              "dispatched",
+              "running",
+              "finished",
+              "interrupted"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "timed_out",
+                  "cancelled",
+                  "output_limit",
+                  "setup_failed",
+                  "uncertain"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "boolean"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          },
+          "processes_reaped": {
+            "title": "Processes Reaped",
+            "type": "boolean"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "stdout_text": {
+            "title": "Stdout Text",
+            "type": "string"
+          },
+          "stderr_text": {
+            "title": "Stderr Text",
+            "type": "string"
+          },
+          "stdout_base64": {
+            "title": "Stdout Base64",
+            "type": "string"
+          },
+          "stderr_base64": {
+            "title": "Stderr Base64",
+            "type": "string"
+          },
+          "stdout_bytes": {
+            "title": "Stdout Bytes",
+            "type": "integer"
+          },
+          "stderr_bytes": {
+            "title": "Stderr Bytes",
+            "type": "integer"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "input_files": {
+            "title": "Input Files",
+            "type": "integer"
+          },
+          "artifact_files": {
+            "title": "Artifact Files",
+            "type": "integer"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/$defs/CommandFile"
+            },
+            "maxItems": 32,
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "artifacts_truncated": {
+            "title": "Artifacts Truncated",
+            "type": "boolean"
+          },
+          "artifacts_complete": {
+            "title": "Artifacts Complete",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command_id",
+          "revision",
+          "phase",
+          "outcome",
+          "dispatched",
+          "started",
+          "processes_reaped",
+          "exit_code",
+          "error_code",
+          "stdout_text",
+          "stderr_text",
+          "stdout_base64",
+          "stderr_base64",
+          "stdout_bytes",
+          "stderr_bytes",
+          "output_truncated",
+          "input_files",
+          "artifact_files",
+          "artifacts",
+          "artifacts_truncated",
+          "artifacts_complete"
+        ],
+        "title": "CommandSummary",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_changes",
+      "description": "按原完整输入与产物列出新增、修改和删除，只读，不重新运行命令",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Command Id"
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Key"
+          },
+          "after": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "After"
+          },
+          "limit": {
+            "default": 32,
+            "maximum": 32,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "include_unchanged": {
+            "default": false,
+            "title": "Include Unchanged",
+            "type": "boolean"
+          }
+        },
+        "title": "CommandChangesRequest",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandDelta": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "unchanged"
+                ],
+                "title": "Kind",
+                "type": "string"
+              },
+              "before_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Sha256"
+              },
+              "after_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Sha256"
+              },
+              "before_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Bytes"
+              },
+              "after_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Bytes"
+              },
+              "before_mode": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Mode"
+              },
+              "after_mode": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Mode"
+              }
+            },
+            "required": [
+              "path",
+              "kind",
+              "before_sha256",
+              "after_sha256",
+              "before_bytes",
+              "after_bytes",
+              "before_mode",
+              "after_mode"
+            ],
+            "title": "CommandDelta",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "source_hash": {
+            "title": "Source Hash",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed",
+              "timed_out",
+              "cancelled",
+              "output_limit",
+              "setup_failed",
+              "uncertain"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "requires_failed_acceptance": {
+            "title": "Requires Failed Acceptance",
+            "type": "boolean"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/$defs/CommandDelta"
+            },
+            "maxItems": 32,
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "required": [
+          "command_id",
+          "source_hash",
+          "outcome",
+          "requires_failed_acceptance",
+          "entries",
+          "next_after"
+        ],
+        "title": "CommandChangesPage",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_propose",
+      "description": "把原命令的单个文本产物或删除生成带版本条件的文件提案；不发布，应用仍需workspace_change批准",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "maxLength": 36,
+            "minLength": 1,
+            "title": "Command Id",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "request_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Key",
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "default": 3600,
+            "exclusiveMinimum": 0,
+            "maximum": 86400,
+            "title": "Ttl Seconds",
+            "type": "number"
+          },
+          "accept_failed": {
+            "default": false,
+            "title": "Accept Failed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command_id",
+          "path",
+          "request_key"
+        ],
+        "title": "CommandProposalRequest",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandDelta": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "unchanged"
+                ],
+                "title": "Kind",
+                "type": "string"
+              },
+              "before_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Sha256"
+              },
+              "after_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Sha256"
+              },
+              "before_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Bytes"
+              },
+              "after_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Bytes"
+              },
+              "before_mode": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Mode"
+              },
+              "after_mode": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Mode"
+              }
+            },
+            "required": [
+              "path",
+              "kind",
+              "before_sha256",
+              "after_sha256",
+              "before_bytes",
+              "after_bytes",
+              "before_mode",
+              "after_mode"
+            ],
+            "title": "CommandDelta",
+            "type": "object"
+          },
+          "FileChangePreview": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "operation": {
+                "enum": [
+                  "write",
+                  "replace",
+                  "delete"
+                ],
+                "title": "Operation",
+                "type": "string"
+              },
+              "before_sha256": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Sha256"
+              },
+              "after_sha256": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "After Sha256"
+              },
+              "before_bytes": {
+                "minimum": 0,
+                "title": "Before Bytes",
+                "type": "integer"
+              },
+              "after_bytes": {
+                "minimum": 0,
+                "title": "After Bytes",
+                "type": "integer"
+              },
+              "diff": {
+                "title": "Diff",
+                "type": "string"
+              },
+              "truncated": {
+                "title": "Truncated",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "operation",
+              "before_sha256",
+              "after_sha256",
+              "before_bytes",
+              "after_bytes",
+              "diff",
+              "truncated"
+            ],
+            "title": "FileChangePreview",
+            "type": "object"
+          },
+          "WorkspaceChangeView": {
+            "additionalProperties": false,
+            "properties": {
+              "proposal_id": {
+                "title": "Proposal Id",
+                "type": "string"
+              },
+              "scope_id": {
+                "title": "Scope Id",
+                "type": "string"
+              },
+              "topic_id": {
+                "title": "Topic Id",
+                "type": "string"
+              },
+              "workspace_key": {
+                "title": "Workspace Key",
+                "type": "string"
+              },
+              "resource_fingerprint": {
+                "title": "Resource Fingerprint",
+                "type": "string"
+              },
+              "revision": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "title": "Revision",
+                "type": "integer"
+              },
+              "status": {
+                "enum": [
+                  "proposed",
+                  "applying",
+                  "applied",
+                  "undoing",
+                  "undone",
+                  "keeping",
+                  "kept",
+                  "rejected",
+                  "uncertain"
+                ],
+                "title": "Status",
+                "type": "string"
+              },
+              "preview": {
+                "$ref": "#/$defs/FileChangePreview"
+              },
+              "active_operation_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Active Operation Id"
+              },
+              "expires_at": {
+                "title": "Expires At",
+                "type": "number"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "proposal_id",
+              "scope_id",
+              "topic_id",
+              "workspace_key",
+              "resource_fingerprint",
+              "revision",
+              "status",
+              "preview",
+              "expires_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "WorkspaceChangeView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "source_hash": {
+            "title": "Source Hash",
+            "type": "string"
+          },
+          "change": {
+            "$ref": "#/$defs/CommandDelta"
+          },
+          "accept_failed": {
+            "title": "Accept Failed",
+            "type": "boolean"
+          },
+          "proposal": {
+            "$ref": "#/$defs/WorkspaceChangeView"
+          }
+        },
+        "required": [
+          "command_id",
+          "source_hash",
+          "change",
+          "accept_failed",
+          "proposal"
+        ],
+        "title": "CommandProposalView",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_history",
+      "description": "分页读取当前会话的原命令元数据和请求键，不启动命令",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "After"
+          },
+          "limit": {
+            "default": 32,
+            "maximum": 32,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "CommandHistoryRequest",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandHistoryEntry": {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "title": "Command Id",
+                "type": "string"
+              },
+              "request_key": {
+                "title": "Request Key",
+                "type": "string"
+              },
+              "command_preview": {
+                "title": "Command Preview",
+                "type": "string"
+              },
+              "phase": {
+                "enum": [
+                  "preparing",
+                  "dispatched",
+                  "running",
+                  "finished",
+                  "interrupted"
+                ],
+                "title": "Phase",
+                "type": "string"
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "completed",
+                      "failed",
+                      "timed_out",
+                      "cancelled",
+                      "output_limit",
+                      "setup_failed",
+                      "uncertain"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Outcome"
+              },
+              "started": {
+                "title": "Started",
+                "type": "boolean"
+              },
+              "processes_reaped": {
+                "title": "Processes Reaped",
+                "type": "boolean"
+              },
+              "error_code": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Error Code"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command_id",
+              "request_key",
+              "command_preview",
+              "phase",
+              "outcome",
+              "started",
+              "processes_reaped",
+              "error_code",
+              "created_at"
+            ],
+            "title": "CommandHistoryEntry",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/$defs/CommandHistoryEntry"
+            },
+            "maxItems": 32,
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After"
+          }
+        },
+        "required": [
+          "entries",
+          "next_after"
+        ],
+        "title": "CommandHistoryPage",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    },
+    {
+      "name": "command_inspect",
+      "description": "读取原命令请求、资源版本与持久状态，不包含私有文件字节或生产者令牌",
+      "risk": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Command Id"
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Key"
+          }
+        },
+        "title": "CommandLookup",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CommandRequest": {
+            "additionalProperties": false,
+            "properties": {
+              "request_key": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "title": "Request Key",
+                "type": "string"
+              },
+              "command": {
+                "$ref": "#/$defs/CommandSpec"
+              }
+            },
+            "required": [
+              "request_key",
+              "command"
+            ],
+            "title": "CommandRequest",
+            "type": "object"
+          },
+          "CommandResource": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+                "title": "Key",
+                "type": "string"
+              },
+              "version": {
+                "default": "1",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                "title": "Version",
+                "type": "string"
+              },
+              "fingerprint": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Fingerprint",
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "fingerprint"
+            ],
+            "title": "CommandResource",
+            "type": "object"
+          },
+          "CommandSpec": {
+            "additionalProperties": false,
+            "properties": {
+              "argv": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 128,
+                "minItems": 1,
+                "title": "Argv",
+                "type": "array"
+              },
+              "cwd": {
+                "default": ".",
+                "maxLength": 512,
+                "minLength": 1,
+                "title": "Cwd",
+                "type": "string"
+              }
+            },
+            "required": [
+              "argv"
+            ],
+            "title": "CommandSpec",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "scope_id": {
+            "title": "Scope Id",
+            "type": "string"
+          },
+          "topic_id": {
+            "title": "Topic Id",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/$defs/CommandRequest"
+          },
+          "resource": {
+            "$ref": "#/$defs/CommandResource"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Call Id"
+          },
+          "phase": {
+            "enum": [
+              "preparing",
+              "dispatched",
+              "running",
+              "finished",
+              "interrupted"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "title": "Cancel Requested",
+            "type": "boolean"
+          },
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "boolean"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "timed_out",
+                  "cancelled",
+                  "output_limit",
+                  "setup_failed",
+                  "uncertain"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "stdout_bytes": {
+            "title": "Stdout Bytes",
+            "type": "integer"
+          },
+          "stderr_bytes": {
+            "title": "Stderr Bytes",
+            "type": "integer"
+          },
+          "input_files": {
+            "title": "Input Files",
+            "type": "integer"
+          },
+          "artifact_files": {
+            "title": "Artifact Files",
+            "type": "integer"
+          },
+          "artifacts_complete": {
+            "title": "Artifacts Complete",
+            "type": "boolean"
+          },
+          "processes_reaped": {
+            "title": "Processes Reaped",
+            "type": "boolean"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "interrupted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interrupted At"
+          }
+        },
+        "required": [
+          "command_id",
+          "scope_id",
+          "topic_id",
+          "request",
+          "resource",
+          "run_id",
+          "call_id",
+          "phase",
+          "revision",
+          "cancel_requested",
+          "dispatched",
+          "started",
+          "outcome",
+          "exit_code",
+          "output_truncated",
+          "stdout_bytes",
+          "stderr_bytes",
+          "input_files",
+          "artifact_files",
+          "artifacts_complete",
+          "processes_reaped",
+          "error_code",
+          "created_at",
+          "updated_at",
+          "interrupted_at"
+        ],
+        "title": "CommandView",
+        "type": "object"
+      },
+      "should_defer": false,
+      "always_load": false
+    }
+  ]
+}

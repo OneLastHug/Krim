@@ -149,6 +149,20 @@ export interface CommandSummary extends CommandState {
   stdout_bytes: number; stderr_bytes: number; artifacts: Array<{ path: string; sha256: string; byte_size: number; mode: number }>;
   artifacts_truncated: boolean;
 }
+export interface CommandTreeLimits { cpu_seconds: number; memory_bytes: number; process_count: number; }
+export interface CommandTreeUsage {
+  scope: "process_tree"; backend: "cgroup_v2"; limits: CommandTreeLimits; membership_verified: boolean;
+  cpu_microseconds: number | null; memory_peak_bytes: number | null; tasks_peak: number | null;
+  oom_kills: number | null; task_limit_hits: number | null; populated: boolean | null; leader_reaped: boolean | null;
+}
+export interface CommandResourcesView {
+  command_id: string; revision: number; scope_id: string; topic_id: string; request_key: string;
+  resource: { key: string; version: string; fingerprint: string };
+  limits: { tree?: CommandTreeLimits; cpu_seconds: number; memory_bytes: number; process_count: number; [key: string]: unknown };
+  usage: CommandTreeUsage | null; run_id: string | null; call_id: string | null;
+  phase: CommandState["phase"]; outcome: CommandState["outcome"]; dispatched: boolean; started: boolean;
+  processes_reaped: boolean; error_code: string | null;
+}
 export interface CommandSlice {
   command_id: string; source: "stdout" | "stderr" | "artifact"; path: string | null;
   offset: number; next_offset: number; byte_size: number; data_base64: string; text: string; truncated: boolean;

@@ -65,6 +65,7 @@ export class CommandsUI {
     selected;
     summary;
     inspected;
+    resources;
     changes;
     directoryChanges;
     directoryPages = [null];
@@ -404,6 +405,7 @@ export class CommandsUI {
         this.slice = undefined;
         this.changes = undefined;
         this.proposal = undefined;
+        this.resources = undefined;
         this.sliceOffsets = [0];
         this.sliceIndex = 0;
         this.changePages = [null];
@@ -419,6 +421,15 @@ export class CommandsUI {
             this.summary = await this.request(this.commandPath());
         if (this.permitted("command_inspect"))
             this.inspected = await this.request(this.commandPath() + "/inspect");
+        if (this.permitted("command_resources")) {
+            const value = await this.request(this.commandPath() + "/resources");
+            if (value.command_id !== this.selected || value.scope_id !== `session:${this.agent?.agent_id}` || value.topic_id !== this.agent?.topic_id
+                || value.usage && (value.usage.scope !== "process_tree" || value.usage.backend !== "cgroup_v2" || !value.limits.tree
+                    || value.usage.limits.cpu_seconds !== value.limits.tree.cpu_seconds || value.usage.limits.memory_bytes !== value.limits.tree.memory_bytes || value.usage.limits.process_count !== value.limits.tree.process_count
+                    || value.processes_reaped && (value.usage.populated !== false || value.usage.leader_reaped !== true)))
+                throw new Error(t("命令资源回程与原事实不一致"));
+            this.resources = value;
+        }
         this.renderDetail();
         // 详情轮询收束后同步列表，避免同一持久命令在详情与历史中出现不同终态。
         if (this.state && terminal(this.state) && this.permitted("command_history"))
@@ -441,6 +452,31 @@ export class CommandsUI {
             + "\n" + t("命令已启动") + " " + t(view.started ? "是" : "否") + " · " + t("命令进程已回收") + " " + t(view.processes_reaped ? "是" : "否")
             + "\n" + t("完整输入数量") + " " + view.input_files + " · " + t("产物数量") + " " + view.artifact_files;
         this.detail.append(heading, metadata);
+        if (this.resources) {
+            const section = document.createElement("section");
+            section.className = "command-resources";
+            section.append(text("strong", "命令资源限额与用量"));
+            const limits = this.resources.limits.tree, usage = this.resources.usage;
+            if (!limits)
+                section.append(text("p", "原资源仅有逐进程与UID限额"));
+            else {
+                const settings = document.createElement("p");
+                settings.className = "command-meta";
+                settings.textContent = `${t("整树累计CPU预算（秒）")}: ${limits.cpu_seconds}\n${t("整树内存上限（字节）")}: ${limits.memory_bytes}\n${t("整树进程线程上限")}: ${limits.process_count}`;
+                section.append(settings);
+                section.append(text("p", "包含启动准备、监督器和全部后代；CPU预算按内核合计用量采样收束。"));
+                if (!usage)
+                    section.append(text("p", "整树用量尚未收束"));
+                else {
+                    const value = (data) => data === null ? t("用量未确认") : String(data);
+                    const actual = document.createElement("p");
+                    actual.className = "command-meta";
+                    actual.textContent = `${t("整树累计CPU用量（微秒）")}: ${value(usage.cpu_microseconds)}\n${t("整树内存峰值（字节）")}: ${value(usage.memory_peak_bytes)}\n${t("整树进程线程峰值")}: ${value(usage.tasks_peak)}\n${t("整树内存终止计数")}: ${value(usage.oom_kills)}\n${t("整树进程限额拒绝计数")}: ${value(usage.task_limit_hits)}\n${t("整树回收已确认")}: ${t(usage.populated === false && usage.leader_reaped === true ? "是" : "否")}`;
+                    section.append(actual);
+                }
+            }
+            this.detail.append(section);
+        }
         if (view.error_code) {
             const error = document.createElement("p");
             error.textContent = view.error_code;

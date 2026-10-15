@@ -1,5 +1,6 @@
 """可信宿主的隔离命令基础；模型和持久管理入口由后续编排接入。"""
 
+from .cgroups import CgroupRoot
 from .directories import CommandDirectoryCatalog
 from .directory_dependencies import (
     DirectoryDependencyEntry,
@@ -17,6 +18,7 @@ from .models import (
     SandboxFile,
     SandboxLimits,
 )
+from .tree_models import SandboxTreeLimits, SandboxTreeUsage
 
 __all__ = [
     "CommandSpec",
@@ -31,6 +33,9 @@ __all__ = [
     "ExecutionStatus",
     "SandboxFile",
     "SandboxLimits",
+    "SandboxTreeLimits",
+    "SandboxTreeUsage",
+    "CgroupRoot",
     "ExecutionHandle",
     "LinuxSandboxRunner",
 ]

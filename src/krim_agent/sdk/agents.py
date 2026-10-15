@@ -25,6 +25,7 @@ from krim_agent.execution.management import (
     CommandAccepted,
     CommandHistoryPage,
     CommandHistoryRequest,
+    CommandResourcesView,
 )
 from krim_agent.execution.publication import (
     CommandChangesPage,
@@ -165,6 +166,11 @@ class AgentSession:
         self, request: CommandLookup, *, confirmed: bool = False
     ) -> CommandView:
         return await self.service.command_inspect(self.agent_id, request, confirmed=confirmed)
+
+    async def command_resources(
+        self, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandResourcesView:
+        return await self.service.command_resources(self.agent_id, request, confirmed=confirmed)
 
     async def command(self, request: CommandLookup, *, confirmed: bool = False) -> CommandSummary:
         return await self.service.command_get(self.agent_id, request, confirmed=confirmed)

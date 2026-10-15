@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.workspace import Workspace
+
+from .tree_models import SandboxTreeLimits, SandboxTreeUsage
 
 ExecutionStatus = Literal[
     "completed", "failed", "timed_out", "cancelled", "output_limit", "setup_failed", "uncertain"
@@ -42,6 +50,14 @@ class SandboxLimits(StrictModel):
     output_bytes: int = Field(default=65536, ge=1024, le=1048576)
     artifact_bytes: int = Field(default=16777216, ge=1024, le=134217728)
     artifact_files: int = Field(default=256, ge=1, le=4096)
+    tree: SandboxTreeLimits | None = None
+
+    @model_serializer(mode="wrap")
+    def original_json(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.tree is None:
+            value.pop("tree", None)
+        return value
 
     @model_validator(mode="after")
     def allocation(self) -> SandboxLimits:
@@ -86,3 +102,4 @@ class ExecutionResult:
     elapsed_seconds: float
     # None表示没有目录观察；空tuple须同时完整才确认没有目录。
     directories: tuple[ExecutionDirectory, ...] | None = None
+    tree_usage: SandboxTreeUsage | None = None

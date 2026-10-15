@@ -184,7 +184,8 @@ class AgentCommandService:
                     )
                 else:
                     scope, binding, _ = await self._guard(
-                        context, history=operation in {"get", "read", "changes", "inspect"}
+                        context,
+                        history=operation in {"get", "read", "changes", "inspect", "resources"},
                     )
                     request = (
                         CommandRead.model_validate(payload)
@@ -202,7 +203,9 @@ class AgentCommandService:
                         data = result_slice.model_dump(mode="json")
                         context._command_response = (operation, json.dumps(data, sort_keys=True))
                         return data
-                    if operation == "inspect":
+                    if operation == "resources":
+                        result = await self.store.resources(scope, view.command_id)
+                    elif operation == "inspect":
                         result = view
                     elif operation == "changes":
                         assert isinstance(request, CommandChangesRequest)

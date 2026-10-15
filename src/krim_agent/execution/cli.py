@@ -96,6 +96,13 @@ def execute(client: KrimClient, args: argparse.Namespace, parser: argparse.Argum
         found = client.agent_command_by_key(args.agent_id, args.value, confirmed=args.confirm)
         print("null" if found is None else found.model_dump_json(indent=2))
         return 2 if found is None else result_code(found)
+    if args.action == "resources":
+        print(
+            client.agent_command_resources(
+                args.agent_id, args.value, confirmed=args.confirm
+            ).model_dump_json(indent=2)
+        )
+        return 0
     if args.action == "inspect":
         print(
             client.agent_command_inspect(

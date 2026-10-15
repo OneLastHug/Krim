@@ -74,7 +74,9 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 | Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
 | 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
 
-商业模型质量、真实账单、目录条件事务、完整二进制Checkpoint、生产多worker/租户、PostgreSQL/Redis与部署演练尚未完成。隔离执行当前仅有Linux本机证据，rlimit不代表cgroup整棵树总配额。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+目录事务/完整树交换、生成根撤销与原生二进制Checkpoint公共捕获/恢复已有后续分组证据，见[最新字节恢复报告](docs/testing/reports/2026-10-15-native-checkpoint-byte-restore.md)。命令资源现可显式配置独立cgroup v2进程树限额，并在模型工具、SDK、REST、CLI和浏览器读取同一原限额/用量，见[配置指南](docs/user-guide/process-tree-quotas.md)与[专项报告](docs/testing/reports/2026-10-15-process-tree-quotas.md)。默认rlimit仍只代表每进程/UID范围；树模式内存/进程线程由内核限制，累计CPU按内核用量采样收束。
+
+模型Checkpoint创建/恢复控制、原负载根因和P04完整审计、商业模型质量/真实账单、生产多worker/租户、PostgreSQL/Redis与部署演练仍未完成。隔离执行仅有Linux本机证据。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
 
 工作区的目录文件描述符边界与条件发布目前仅Linux实测；Windows不能使用该文件能力，普通Agent/SDK/eval入口仍可用。文件路径约束不等于操作系统进程沙箱。
 

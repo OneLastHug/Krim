@@ -22,6 +22,7 @@ from krim_agent.execution.management import (
     CommandHistoryEntry,
     CommandHistoryPage,
     CommandHistoryRequest,
+    CommandResourcesView,
 )
 from krim_agent.execution.publication import (
     CommandChangesPage,
@@ -30,6 +31,7 @@ from krim_agent.execution.publication import (
     CommandProposalRequest,
     CommandProposalView,
 )
+from krim_agent.execution.tree_models import SandboxTreeLimits, SandboxTreeUsage
 from krim_agent.generated_tree_undo import (
     GeneratedTreeRootState,
     GeneratedTreeUndoAction,
@@ -247,6 +249,9 @@ __all__ = [
     "CommandRead",
     "CommandSlice",
     "CommandSummary",
+    "CommandResourcesView",
+    "SandboxTreeLimits",
+    "SandboxTreeUsage",
     "CheckpointRestoreExecute",
     "CheckpointRestoreItem",
     "CheckpointRestorePreview",
