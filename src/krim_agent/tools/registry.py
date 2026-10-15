@@ -21,6 +21,8 @@ from krim_agent.workspace import (
     WORKSPACE_TREE_EXCHANGE_TOOL_NAMES,
     WORKSPACE_TREE_MOVE_TOOL_NAMES,
 )
+from krim_agent.workspace_checkpoint import CheckpointCaptureFence
+from krim_agent.workspace_restore import CheckpointRestoreFence
 
 from .core import (
     Decision,
@@ -303,7 +305,7 @@ class ToolRegistry:
         byte_capture = name == "workspace_checkpoint_capture"
         checkpoint_control = name in WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
         restore_model = (
-            parent.checkpoint_restore is not None
+            isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
             and parent.checkpoint_restore.model_source is not None
         )
         restore_leaf = name == "workspace_change" and restore_model
@@ -312,7 +314,7 @@ class ToolRegistry:
             or byte_capture
             or (
                 name == "workspace_read"
-                and parent.checkpoint_capture is not None
+                and isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
                 and parent.checkpoint_capture.model_source is not None
             )
         )
@@ -320,7 +322,7 @@ class ToolRegistry:
             checkpoint_control
             or restore_model
             or (
-                parent.checkpoint_capture is not None
+                isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
                 and parent.checkpoint_capture.model_source is not None
             )
         )
@@ -344,6 +346,21 @@ class ToolRegistry:
             parent.source_call_id,
         )
         try:
+            if (
+                parent.checkpoint_capture is not None
+                and not isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
+                or parent.checkpoint_restore is not None
+                and not isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
+            ):
+                # 先拒绝坏围栏，再读取来源；不能把缺属性的对象降成Host调用。
+                raise ToolError(
+                    "workspace_tree_move_context"
+                    if tree_move
+                    else "workspace_tree_exchange_context"
+                    if tree_exchange
+                    else checkpoint_context_code,
+                    "检查点围栏类型无效，不能进入工具执行",
+                )
             if restore_model and (
                 not restore_leaf
                 or parent.checkpoint_capture is not None
