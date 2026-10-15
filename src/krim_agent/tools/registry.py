@@ -27,6 +27,8 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointCaptureFence,
     directory_checkpoint_model_source,
 )
+from krim_agent.workspace_directory_restore import DirectoryRestoreFence
+from krim_agent.workspace_directory_restore_control import DIRECTORY_RESTORE_STEP_TOOLS
 from krim_agent.workspace_restore import CheckpointRestoreFence
 
 from .core import (
@@ -45,6 +47,7 @@ from .core import (
     execution_budget_snapshot,
     same_execution_budget,
 )
+from .directory_restore_guard import validate_directory_restore_parent
 
 Observer = Callable[[ToolAudit], object]
 ResultObserver = Callable[[ToolObservation], object]
@@ -99,6 +102,9 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.directory_checkpoint_capture),
         id(context.directory_checkpoint_qualify),
         id(context.workspace_directory_checkpoints),
+        id(context.directory_restore),
+        id(context.directory_restore_qualify),
+        id(context.workspace_directory_restores),
         id(context.checkpoint_restore),
         id(context.command_capture),
     )
@@ -129,6 +135,16 @@ def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
     fence = context.checkpoint_capture
     restore = context.checkpoint_restore
     directory = context.directory_checkpoint_capture
+    directory_restore = context.directory_restore
+    if directory_restore is not None:
+        if (
+            type(directory_restore) is not DirectoryRestoreFence
+            or type(directory_restore.kind) is not str
+        ):
+            raise ToolError("workspace_directory_restore_context", "目录恢复围栏类型无效")
+        validate_directory_restore_parent(
+            DIRECTORY_RESTORE_STEP_TOOLS.get(directory_restore.kind, ""), context
+        )
     if directory is not None and type(directory) is not DirectoryCheckpointCaptureFence:
         raise ToolError("workspace_directory_capture_context", "目录围栏类型无效")
     try:
@@ -149,6 +165,15 @@ def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
             (source.run_id, source.call_id) if source is not None else None,
         )
         if directory is not None
+        else None,
+        (
+            directory_restore.plan_id,
+            directory_restore.operation_id,
+            directory_restore.kind,
+            directory_restore.token,
+            directory_restore.model_source,
+        )
+        if directory_restore is not None
         else None,
         (
             fence.checkpoint_id,
@@ -330,6 +355,7 @@ class ToolRegistry:
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
         directory_capture = name == "workspace_directory_checkpoint_capture"
+        directory_restore = name in DIRECTORY_RESTORE_STEP_TOOLS.values()
         checkpoint_control = name in WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
         restore_model = (
             isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
@@ -340,6 +366,7 @@ class ToolRegistry:
             restore_leaf
             or byte_capture
             or directory_capture
+            or directory_restore
             or (
                 name == "workspace_read"
                 and isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
@@ -355,14 +382,18 @@ class ToolRegistry:
             )
         )
         checkpoint_context_code = (
-            "workspace_directory_capture_context"
+            "workspace_directory_restore_context"
+            if directory_restore
+            else "workspace_directory_capture_context"
             if directory_capture
             else "workspace_checkpoint_model_context"
             if checkpoint_model
             else "workspace_checkpoint_context"
         )
         checkpoint_unverified_code = (
-            "workspace_directory_capture_unverified"
+            "workspace_directory_restore_unverified"
+            if directory_restore
+            else "workspace_directory_capture_unverified"
             if directory_capture
             else "workspace_checkpoint_model_unverified"
             if checkpoint_model
@@ -378,6 +409,7 @@ class ToolRegistry:
             parent.source_call_id,
         )
         try:
+            validate_directory_restore_parent(name, parent)
             if (
                 parent.checkpoint_capture is not None
                 and not isinstance(parent.checkpoint_capture, CheckpointCaptureFence)
@@ -488,7 +520,7 @@ class ToolRegistry:
                 or parent.checkpoint_restore is not None
             ):
                 raise ToolError("workspace_checkpoint_context", "字节元数据工具需要原私有捕获Fence")
-            if checkpoint_capture and not directory_capture:
+            if checkpoint_capture and not directory_capture and not directory_restore:
                 fence = parent.checkpoint_restore if restore_leaf else parent.checkpoint_capture
                 assert fence is not None
                 source = fence.model_source
@@ -619,7 +651,9 @@ class ToolRegistry:
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
                 original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
                 original_capture_budget = (
-                    _tree_exchange_budget(child) if byte_capture or directory_capture else None
+                    _tree_exchange_budget(child)
+                    if byte_capture or directory_capture or directory_restore
+                    else None
                 )
                 original_checkpoint_budget = execution_budget_snapshot(child.execution_timeouts)
                 original_resource_budget = (
@@ -791,7 +825,9 @@ class ToolRegistry:
                 move_response = child._tree_move_response
                 exchange_response = child._tree_exchange_response
                 capture_response = (
-                    child._directory_checkpoint_capture_response
+                    child._directory_restore_response
+                    if directory_restore
+                    else child._directory_checkpoint_capture_response
                     if directory_capture
                     else child._checkpoint_capture_response
                 )
@@ -842,14 +878,16 @@ class ToolRegistry:
                     )
                 if command_resources and child._command_response != resource_response:
                     raise ToolError("execution_receipt_unverified", "Hook不能替换原资源回程标记")
-                if (byte_capture or directory_capture) and (
+                if (byte_capture or directory_capture or directory_restore) and (
                     child.arguments != original_arguments
                     or _checkpoint_capture_binding(child) != original_capture_binding
                     or _tree_exchange_budget(child) != original_capture_budget
                 ):
                     raise ToolError(checkpoint_context_code, "Hook不能替换原捕获参数、上下文或预算")
-                if (byte_capture or directory_capture) and (
-                    child._directory_checkpoint_capture_response
+                if (byte_capture or directory_capture or directory_restore) and (
+                    child._directory_restore_response
+                    if directory_restore
+                    else child._directory_checkpoint_capture_response
                     if directory_capture
                     else child._checkpoint_capture_response
                 ) != capture_response:

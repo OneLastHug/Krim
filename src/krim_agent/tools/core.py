@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from krim_agent.workspace import WorkspaceBinding
     from krim_agent.workspace_checkpoint import CheckpointCaptureFence
     from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
+    from krim_agent.workspace_directory_restore import DirectoryRestoreFence
     from krim_agent.workspace_list import NativeBatchFence
     from krim_agent.workspace_mixed_batch import MixedBatchFence
     from krim_agent.workspace_restore import CheckpointRestoreFence
@@ -77,6 +78,13 @@ class DirectoryCheckpointBackend(Protocol):
         self, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, object]: ...
     async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None: ...
+
+
+class DirectoryRestoreBackend(Protocol):
+    async def tool_step(
+        self, kind: str, payload: dict[str, Any], context: ToolContext
+    ) -> dict[str, object]: ...
+    async def validate_step(self, kind: str, value: Any, context: ToolContext) -> None: ...
 
 
 class MixedBatchQueryBackend(Protocol):
@@ -289,6 +297,10 @@ class ToolContext:
     directory_checkpoint_qualify: Callable[[], None] | None = field(default=None, repr=False)
     workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
     _directory_checkpoint_capture_response: str | None = field(default=None, repr=False)
+    directory_restore: DirectoryRestoreFence | None = None
+    directory_restore_qualify: Callable[[], None] | None = field(default=None, repr=False)
+    workspace_directory_restores: DirectoryRestoreBackend | None = None
+    _directory_restore_response: str | None = field(default=None, repr=False)
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
     workspace_checkpoint_controls: CheckpointControlBackend | None = None
@@ -342,6 +354,9 @@ class ToolContext:
             directory_checkpoint_capture=self.directory_checkpoint_capture,
             directory_checkpoint_qualify=self.directory_checkpoint_qualify,
             workspace_directory_checkpoints=self.workspace_directory_checkpoints,
+            directory_restore=self.directory_restore,
+            directory_restore_qualify=self.directory_restore_qualify,
+            workspace_directory_restores=self.workspace_directory_restores,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
             workspace_checkpoint_controls=self.workspace_checkpoint_controls,
