@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -43,6 +43,10 @@ from .workspace_execution import (
     leave_workspace_execution,
 )
 
+if TYPE_CHECKING:
+    from .workspace_model_restores import ModelRestoreService
+
+
 _current: ContextVar[tuple[object, str] | None] = ContextVar(
     "krim_model_checkpoint_control", default=None
 )
@@ -53,6 +57,7 @@ class ModelCheckpointService:
         self.checkpoints, self.store = checkpoints, checkpoints.store
         self._calls: WorkspaceTasks = {}
         self._closed = False
+        self.restores: ModelRestoreService | None = None
 
     @asynccontextmanager
     async def call_scope(self) -> AsyncIterator[None]:
@@ -157,6 +162,10 @@ class ModelCheckpointService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if operation.startswith("restore_"):
+                if self.restores is None:
+                    raise ServiceError("workspace_restore_model_backend", "缺少模型恢复后端", 503)
+                return await self.restores.tool_operation(operation, payload, context)
             source = self._source(context)
             base = execution_budget_base(context.execution_timeouts)
             scope, binding = await self._guard(context, base, writing=operation == "create")
@@ -202,15 +211,14 @@ class ModelCheckpointService:
         except ServiceError as error:
             raise ToolError(error.code, str(error)) from error
 
-    async def _create(
+    def _invocation(
         self,
-        request: WorkspaceCheckpointCreate,
         context: ToolContext,
         source: CheckpointModelSource,
         base: ExecutionBudgetBase,
         scope: str,
         binding: WorkspaceBinding,
-    ) -> WorkspaceCheckpointView:
+    ) -> CheckpointInvocation:
         assert context.agent_id is not None
         identity = (
             context.agent_id,
@@ -234,19 +242,17 @@ class ModelCheckpointService:
                 id(context.workspace),
                 id(context.registry),
             )
-            if self._source(context) != source or actual != identity:
+            if self._source(context) != replace(source, restore_plan_id=None) or actual != identity:
                 raise ServiceError(
                     "workspace_checkpoint_model_context", "原模型捕获上下文被替换", 403
                 )
             self._check_budget(context, base)
 
-        if len(self.checkpoints._tasks) >= self.checkpoints.max_active:
-            if await self.store.by_key(scope, request.request_key) is None:
-                raise ServiceError("workspace_checkpoint_busy", "检查点捕获并发已满", 429)
-
         async def authorize(agent_id: str) -> tuple[str, WorkspaceBinding]:
             qualify()
-            if agent_id != context.agent_id or self._source(context) != source:
+            if agent_id != context.agent_id or self._source(context) != replace(
+                source, restore_plan_id=None
+            ):
                 raise ServiceError("workspace_checkpoint_model_context", "检查点Agent被重定向", 403)
             actual_scope, actual = await self._guard(context, base)
             if actual_scope != scope or actual is not binding:
@@ -281,10 +287,25 @@ class ModelCheckpointService:
                 )
             return response.data
 
+        return CheckpointInvocation(source, authorize, read, qualify)
+
+    async def _create(
+        self,
+        request: WorkspaceCheckpointCreate,
+        context: ToolContext,
+        source: CheckpointModelSource,
+        base: ExecutionBudgetBase,
+        scope: str,
+        binding: WorkspaceBinding,
+    ) -> WorkspaceCheckpointView:
+        assert context.agent_id is not None
+        invocation = self._invocation(context, source, base, scope, binding)
+        if len(self.checkpoints._tasks) >= self.checkpoints.max_active:
+            if await self.store.by_key(scope, request.request_key) is None:
+                raise ServiceError("workspace_checkpoint_busy", "检查点捕获并发已满", 429)
+
         task = asyncio.create_task(
-            self.checkpoints.create_model(
-                context.agent_id, request, CheckpointInvocation(source, authorize, read, qualify)
-            )
+            self.checkpoints.create_model(context.agent_id, request, invocation)
         )
         view = None
         try:
@@ -294,7 +315,7 @@ class ModelCheckpointService:
                 view = await _wait(task, lambda: None)
                 raise
             while view.status == "capturing":
-                await authorize(context.agent_id)
+                await invocation.authorize(context.agent_id)
                 entry = self.checkpoints._tasks.get(view.checkpoint_id)
                 if entry is not None and entry[0] == scope:
                     await asyncio.shield(entry[1])

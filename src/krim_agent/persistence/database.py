@@ -1361,12 +1361,16 @@ class NativeCheckpointModelSourceRow(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "call_id", name="uq_native_checkpoint_model_call"),
         CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_native_checkpoint_call"),
+        Index("uq_native_checkpoint_restore_baseline", "restore_plan_id", unique=True),
     )
     checkpoint_id: Mapped[str] = mapped_column(
         ForeignKey("native_workspace_checkpoints.checkpoint_id"), primary_key=True
     )
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     call_id: Mapped[str] = mapped_column(String(128))
+    restore_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_restore_plans.plan_id"), nullable=True
+    )
 
 
 class NativeWorkspaceCheckpointFileRow(Base):
@@ -1397,6 +1401,8 @@ class WorkspaceRestorePlanRow(Base):
     __table_args__ = (
         UniqueConstraint("scope_id", "request_key"),
         UniqueConstraint("scope_id", "execute_key"),
+        CheckConstraint("preview_model_bound IN (0,1)", name="ck_restore_preview_model"),
+        CheckConstraint("execute_model_bound IN (0,1)", name="ck_restore_execute_model"),
         CheckConstraint(
             "baseline_capture_format IN ('text','bytes')", name="ck_restore_baseline_format"
         ),
@@ -1431,6 +1437,8 @@ class WorkspaceRestorePlanRow(Base):
     baseline_capture_format: Mapped[str] = mapped_column(
         String(8), default="text", server_default="text"
     )
+    preview_model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    execute_model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     request_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     execute_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -1444,6 +1452,21 @@ class WorkspaceRestorePlanRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class WorkspaceRestoreModelSourceRow(Base):
+    __tablename__ = "workspace_restore_model_sources"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_restore_model_call"),
+        CheckConstraint("phase IN ('preview','execute')", name="ck_restore_model_phase"),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_restore_model_call"),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_restore_plans.plan_id"), primary_key=True
+    )
+    phase: Mapped[str] = mapped_column(String(8), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    call_id: Mapped[str] = mapped_column(String(128))
 
 
 class WorkspaceRestoreItemRow(Base):

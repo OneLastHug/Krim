@@ -7,6 +7,7 @@ import json
 import re
 import time
 from builtins import list as builtin_list
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Literal, cast
@@ -566,6 +567,8 @@ class WorkspaceEditStore:
         mixed_fence: MixedBatchFence | None = None,
         tree_fence: TreePlanFence | None = None,
         run_id: str | None = None,
+        call_id: str | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> StoredWorkspaceAttempt | None:
         value = digest(
             {"request": request.model_dump(mode="json"), "resource": resource_fingerprint}
@@ -599,6 +602,9 @@ class WorkspaceEditStore:
                 resource_fingerprint,
                 restore_fence,
                 row.operation_id if row is not None else None,
+                edits=self,
+                run_id=run_id,
+                call_id=call_id,
             )
             if row is not None:
                 proposal = await self._proposal(session, scope_id, row.proposal_id)
@@ -627,6 +633,8 @@ class WorkspaceEditStore:
                 row.operation_id if row is not None else None,
                 run_id=run_id,
             )
+            if authorize is not None:
+                authorize()
             return self._attempt(row) if row is not None else None
 
     @staticmethod
@@ -866,6 +874,7 @@ class WorkspaceEditStore:
         restore_fence: CheckpointRestoreFence | None = None,
         mixed_fence: MixedBatchFence | None = None,
         tree_fence: TreePlanFence | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> tuple[StoredWorkspaceAttempt, bool]:
         self._key(request.request_key)
         digest_value = digest(
@@ -875,6 +884,8 @@ class WorkspaceEditStore:
         self._validate_prepared(prepared, original_intent=False)
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self._writer(session)
+            if authorize is not None:
+                authorize()
             await self._scope(session, scope_id, writing=True, run_id=run_id)
             previous = await session.scalar(
                 select(WorkspaceEditAttemptRow).where(
@@ -899,6 +910,9 @@ class WorkspaceEditStore:
                 resource_fingerprint,
                 restore_fence,
                 previous.operation_id if previous is not None else None,
+                edits=self,
+                run_id=run_id,
+                call_id=call_id,
             )
             mixed_child = await assert_mixed_request(
                 session,
@@ -1012,6 +1026,8 @@ class WorkspaceEditStore:
             ]
             # ORM会同步下方UPDATE结果；必须在SQL执行前冻结动作来源。
             previous_status = proposal.status
+            if authorize is not None:
+                authorize()
             revision = await session.scalar(
                 update(WorkspaceEditProposalRow)
                 .where(
@@ -1085,7 +1101,9 @@ class WorkspaceEditStore:
                 raise ServiceError("workspace_operation_not_found", "修改操作不在该作用域中", 404)
             return self._attempt(row)
 
-    async def assert_execution(self, scope_id: str, operation_id: str) -> None:
+    async def assert_execution(
+        self, scope_id: str, operation_id: str, *, authorize: Callable[[], None] | None = None
+    ) -> None:
         """在文件锁内核对原操作资格；此检查不延长租约、不更改文件或账本。"""
         async with self.database.write_lock, self.database.sessions() as session:
             row = await session.get(WorkspaceEditAttemptRow, operation_id)
@@ -1105,10 +1123,12 @@ class WorkspaceEditStore:
             await assert_batch_execution(session, self.owner_id, operation_id)
             await assert_mixed_execution(session, self.owner_id, "file", operation_id)
             await assert_tree_execution(session, self.owner_id, "file", operation_id)
-            await assert_restore_execution(session, self.owner_id, operation_id)
+            await assert_restore_execution(session, self.owner_id, operation_id, self)
             await assert_command_proposal(
                 session, proposal, self._change(proposal).prepared, applying=row.action == "apply"
             )
+            if authorize is not None:
+                authorize()
 
     async def history(self, scope_id: str, proposal_id: str) -> builtin_list[WorkspaceAttemptView]:
         async with self.database.write_lock, self.database.sessions() as session:

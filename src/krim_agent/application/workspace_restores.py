@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 
 from krim_agent.persistence.workspace_restores import WorkspaceRestoreStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_change import WorkspaceChangeAction
-from krim_agent.workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
+from krim_agent.workspace_checkpoint import (
+    CheckpointModelSource,
+    WorkspaceCheckpointCreate,
+    WorkspaceCheckpointView,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreDispatch,
     CheckpointRestoreExecute,
@@ -21,7 +26,7 @@ from krim_agent.workspace_restore import (
 from krim_agent.workspace_writer import WorkspaceWriter
 
 from .workspace_changes import _wait
-from .workspace_checkpoints import CaptureGuard, WorkspaceCheckpointService
+from .workspace_checkpoints import CaptureGuard, CheckpointInvocation, WorkspaceCheckpointService
 from .workspace_execution import (
     enter_workspace_execution,
     inside_workspace_execution,
@@ -31,6 +36,15 @@ from .workspace_execution import (
 ExecuteRestore = Callable[
     [str, WorkspaceChangeAction, CheckpointRestoreFence, bool], Awaitable[object]
 ]
+
+
+@dataclass(frozen=True)
+class RestoreInvocation:
+    source: CheckpointModelSource
+    authorize: CaptureGuard
+    baseline: Callable[[str], CheckpointInvocation]
+    execute: ExecuteRestore
+    qualify: Callable[[], None]
 
 
 class WorkspaceRestoreService:
@@ -72,9 +86,14 @@ class WorkspaceRestoreService:
         )
 
     async def _preview(
-        self, agent_id: str, request: CheckpointRestorePreview, confirmed: bool
+        self,
+        agent_id: str,
+        request: CheckpointRestorePreview,
+        confirmed: bool,
+        invocation: RestoreInvocation | None = None,
     ) -> CheckpointRestoreView:
-        scope, binding = await self.authorize(agent_id)
+        authority = invocation.authorize if invocation is not None else self.authorize
+        scope, binding = await authority(agent_id)
         target = await self.checkpoints.store.get(scope, request.checkpoint_id)
         if request.baseline_capture_format == "bytes" or target.capture_format == "bytes":
             if self.checkpoints.require_bytes is None:
@@ -90,15 +109,26 @@ class WorkspaceRestoreService:
                 and await self.store.by_key(scope, request.request_key) is None
             ):
                 raise ServiceError("workspace_restore_busy", "恢复计划并发已达上限", 429)
-            view, created = await self.store.reserve(
-                scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
-            )
+            if invocation is None:
+                view, created = await self.store.reserve(
+                    scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
+                )
+            else:
+                view, created = await self.store.reserve(
+                    scope,
+                    request,
+                    binding.key,
+                    binding.fingerprint,
+                    binding.workspace.fingerprint,
+                    model_source=invocation.source,
+                    authorize=invocation.qualify,
+                )
             if created:
                 preparation = await self.store.preparation(scope, view.plan_id)
                 self._spawn(
                     scope,
                     "prepare:" + view.plan_id,
-                    self._prepare(agent_id, scope, preparation, binding, confirmed),
+                    self._prepare(agent_id, scope, preparation, binding, confirmed, invocation),
                 )
             return view
 
@@ -111,9 +141,14 @@ class WorkspaceRestoreService:
         )
 
     async def _start(
-        self, agent_id: str, request: CheckpointRestoreExecute, confirmed: bool
+        self,
+        agent_id: str,
+        request: CheckpointRestoreExecute,
+        confirmed: bool,
+        invocation: RestoreInvocation | None = None,
     ) -> CheckpointRestoreView:
-        scope, binding = await self.authorize(agent_id)
+        authority = invocation.authorize if invocation is not None else self.authorize
+        scope, binding = await authority(agent_id)
         async with self._start_lock:
             if self._closed:
                 raise ServiceError("workspace_restore_closed", "恢复服务已关闭", 503)
@@ -121,24 +156,61 @@ class WorkspaceRestoreService:
                 previous = await self.store.get(scope, request.plan_id)
                 if previous.execute_key is None:
                     raise ServiceError("workspace_restore_busy", "恢复计划并发已达上限", 429)
-            view, created = await self.store.start(
-                scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
-            )
+            if invocation is None:
+                view, created = await self.store.start(
+                    scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
+                )
+            else:
+                view, created = await self.store.start(
+                    scope,
+                    request,
+                    binding.key,
+                    binding.fingerprint,
+                    binding.workspace.fingerprint,
+                    model_source=invocation.source,
+                    authorize=invocation.qualify,
+                )
             if created:
                 dispatch = await self.store.execution(scope, view.plan_id)
                 self._spawn(
                     scope,
                     "execute:" + view.plan_id,
-                    self._run(agent_id, scope, dispatch, confirmed),
+                    self._run(agent_id, scope, dispatch, confirmed, invocation),
                 )
             return view
 
+    async def preview_model(
+        self, agent_id: str, request: CheckpointRestorePreview, invocation: RestoreInvocation
+    ) -> CheckpointRestoreView:
+        request = CheckpointRestorePreview.model_validate(request.model_dump())
+        return await _wait(
+            asyncio.create_task(self._preview(agent_id, request, False, invocation)), lambda: None
+        )
+
+    async def start_model(
+        self, agent_id: str, request: CheckpointRestoreExecute, invocation: RestoreInvocation
+    ) -> CheckpointRestoreView:
+        request = CheckpointRestoreExecute.model_validate(request.model_dump())
+        return await _wait(
+            asyncio.create_task(self._start(agent_id, request, False, invocation)), lambda: None
+        )
+
     async def _renew(
-        self, scope: str, identifier: str, token: str, phase: str, worker: asyncio.Task[None]
+        self,
+        scope: str,
+        identifier: str,
+        token: str,
+        phase: str,
+        worker: asyncio.Task[None],
+        invocation: RestoreInvocation | None = None,
+        agent_id: str | None = None,
     ) -> None:
         try:
             while True:
                 await asyncio.sleep(max(0.02, min(0.2, self.store.lease_seconds / 4)))
+                if invocation is not None:
+                    assert agent_id is not None
+                    await invocation.authorize(agent_id)
                 await self.store.renew(scope, identifier, token, phase)
         except asyncio.CancelledError:
             raise
@@ -153,28 +225,42 @@ class WorkspaceRestoreService:
         preparation: CheckpointRestorePreparation,
         binding: WorkspaceBinding,
         confirmed: bool,
+        invocation: RestoreInvocation | None = None,
     ) -> None:
         identifier, token = preparation.view.plan_id, preparation.token
         worker = asyncio.current_task()
         assert worker is not None
         marker = enter_workspace_execution(self._tasks, "prepare:" + identifier)
-        heartbeat = asyncio.create_task(self._renew(scope, identifier, token, "preparing", worker))
+        heartbeat = asyncio.create_task(
+            self._renew(scope, identifier, token, "preparing", worker, invocation, agent_id)
+        )
         ready = False
         code = None
 
         async def capture_backup() -> WorkspaceCheckpointView:
-            backup = await self.checkpoints.create(
-                agent_id,
-                WorkspaceCheckpointCreate(
-                    title="恢复前备份",
-                    paths=[item.path for item in preparation.view.items],
-                    request_key=preparation.baseline_key,
-                    capture_format=preparation.view.baseline_capture_format,
-                ),
-                confirmed=confirmed,
+            request = WorkspaceCheckpointCreate(
+                title="恢复前备份",
+                paths=[item.path for item in preparation.view.items],
+                request_key=preparation.baseline_key,
+                capture_format=preparation.view.baseline_capture_format,
             )
+            if invocation is None:
+                backup = await self.checkpoints.create(agent_id, request, confirmed=confirmed)
+            else:
+                backup = await self.checkpoints.create_model(
+                    agent_id, request, invocation.baseline(identifier)
+                )
             try:
-                await self.store.attach_baseline(scope, identifier, token, backup.checkpoint_id)
+                if invocation is None:
+                    await self.store.attach_baseline(scope, identifier, token, backup.checkpoint_id)
+                else:
+                    await self.store.attach_baseline(
+                        scope,
+                        identifier,
+                        token,
+                        backup.checkpoint_id,
+                        model_source=invocation.source,
+                    )
             except BaseException:
                 await self.checkpoints.cancel(scope, backup.checkpoint_id)
                 raise
@@ -189,7 +275,8 @@ class WorkspaceRestoreService:
                 raise ServiceError(
                     backup.error_code or "workspace_restore_baseline", "恢复前备份未完成", 409
                 )
-            actual_scope, actual = await self.authorize(agent_id)
+            authority = invocation.authorize if invocation is not None else self.authorize
+            actual_scope, actual = await authority(agent_id)
             if actual_scope != scope or actual.manifest() != binding.manifest():
                 raise ServiceError("workspace_binding_changed", "恢复计划资源已变化", 403)
             current = await self.checkpoints.store.captures(scope, backup.checkpoint_id)
@@ -199,7 +286,17 @@ class WorkspaceRestoreService:
                 writer.prepare_checkpoint_restore(old, desired)
                 for old, desired in zip(current, target, strict=True)
             )
-            await self.store.ready(scope, identifier, token, prepared)
+            if invocation is None:
+                await self.store.ready(scope, identifier, token, prepared)
+            else:
+                await self.store.ready(
+                    scope,
+                    identifier,
+                    token,
+                    prepared,
+                    model_source=invocation.source,
+                    authorize=invocation.qualify,
+                )
             ready = True
         except asyncio.CancelledError:
             code = "workspace_restore_cancelled"
@@ -229,13 +326,16 @@ class WorkspaceRestoreService:
         scope: str,
         dispatch: tuple[CheckpointRestoreDispatch, ...],
         confirmed: bool,
+        invocation: RestoreInvocation | None = None,
     ) -> None:
         first = dispatch[0].fence
         worker = asyncio.current_task()
         assert worker is not None
         marker = enter_workspace_execution(self._tasks, "execute:" + first.plan_id)
         heartbeat = asyncio.create_task(
-            self._renew(scope, first.plan_id, first.token, "executing", worker)
+            self._renew(
+                scope, first.plan_id, first.token, "executing", worker, invocation, agent_id
+            )
         )
         failure = None
         try:
@@ -244,7 +344,11 @@ class WorkspaceRestoreService:
                 cancelled = False
                 try:
                     # Hook返回值仅供工具链使用；真实结果始终读取原attempt关联。
-                    await self.execute(agent_id, child.request, child.fence, confirmed)
+                    if invocation is None:
+                        await self.execute(agent_id, child.request, child.fence, confirmed)
+                    else:
+                        await invocation.authorize(agent_id)
+                        await invocation.execute(agent_id, child.request, child.fence, False)
                 except asyncio.CancelledError:
                     cancelled, code = True, "workspace_restore_cancelled"
                 except ServiceError as error:
@@ -262,6 +366,8 @@ class WorkspaceRestoreService:
                     break
         except asyncio.CancelledError:
             failure = "workspace_restore_cancelled"
+        except ServiceError as error:
+            failure = error.code
         except Exception:
             failure = "workspace_restore_execution_failed"
         finally:

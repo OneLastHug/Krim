@@ -34,6 +34,8 @@ from .database import (
     NativeWorkspaceCheckpointFileRow,
     NativeWorkspaceCheckpointRow,
     WorkspaceFileLockRow,
+    WorkspaceRestoreModelSourceRow,
+    WorkspaceRestorePlanRow,
 )
 from .workspace_edits import WorkspaceEditStore, digest, snapshot_metadata
 
@@ -282,6 +284,19 @@ class WorkspaceCheckpointStore:
                     )
                 await self.edits._scope(session, scope, writing=True, run_id=model_source.run_id)
                 if (
+                    model_source.restore_plan_id is None
+                    and await session.scalar(
+                        select(WorkspaceRestoreModelSourceRow).where(
+                            WorkspaceRestoreModelSourceRow.run_id == model_source.run_id,
+                            WorkspaceRestoreModelSourceRow.call_id == model_source.call_id,
+                        )
+                    )
+                    is not None
+                ):
+                    raise ServiceError(
+                        "workspace_checkpoint_model_call_conflict", "原调用已绑定恢复阶段", 409
+                    )
+                if (
                     await session.scalar(
                         select(NativeCheckpointModelSourceRow).where(
                             NativeCheckpointModelSourceRow.run_id == model_source.run_id,
@@ -327,6 +342,7 @@ class WorkspaceCheckpointStore:
                         checkpoint_id=row.checkpoint_id,
                         run_id=model_source.run_id,
                         call_id=model_source.call_id,
+                        restore_plan_id=model_source.restore_plan_id,
                     )
                 )
             session.add_all(
@@ -353,6 +369,11 @@ class WorkspaceCheckpointStore:
             or not isinstance(source.call_id, str)
             or not 1 <= len(source.call_id) <= 128
             or any(ord(char) < 32 or ord(char) == 127 for char in source.call_id)
+            or source.restore_plan_id is not None
+            and (
+                not isinstance(source.restore_plan_id, str)
+                or not 1 <= len(source.restore_plan_id) <= 36
+            )
         ):
             raise ServiceError(
                 "workspace_checkpoint_model_context", "模型检查点需要原Run/call", 403
@@ -366,11 +387,42 @@ class WorkspaceCheckpointStore:
             raise ServiceError("workspace_checkpoint_corrupt", "原模型来源标记或材料缺失", 409)
         if saved is None:
             return None
-        source = CheckpointModelSource(saved.run_id, saved.call_id)
+        source = CheckpointModelSource(saved.run_id, saved.call_id, saved.restore_plan_id)
         self._valid_source(source)
         if not row.scope_id.startswith("session:"):
             raise ServiceError("workspace_checkpoint_corrupt", "模型检查点原会话损坏", 409)
         await self.edits._scope(session, row.scope_id, writing=live, run_id=source.run_id)
+        if (
+            source.restore_plan_id is None
+            and await session.scalar(
+                select(WorkspaceRestoreModelSourceRow).where(
+                    WorkspaceRestoreModelSourceRow.run_id == source.run_id,
+                    WorkspaceRestoreModelSourceRow.call_id == source.call_id,
+                )
+            )
+            is not None
+        ):
+            raise ServiceError("workspace_checkpoint_corrupt", "恢复基线不能改作直接创建来源", 409)
+        if source.restore_plan_id is not None:
+            from .workspace_restore_sources import restore_sources
+            from .workspace_restores import _assert_live
+
+            parent = await session.get(WorkspaceRestorePlanRow, source.restore_plan_id)
+            if parent is None:
+                raise ServiceError("workspace_checkpoint_corrupt", "基线缺少原恢复父计划", 409)
+            sources = await restore_sources(session, self.edits, parent)
+            if (
+                sources.get("preview") != CheckpointModelSource(source.run_id, source.call_id)
+                or parent.scope_id != row.scope_id
+                or parent.baseline_key != row.request_key
+                or parent.baseline_capture_format != row.capture_format
+                or parent.baseline_checkpoint_id not in {None, row.checkpoint_id}
+                or (parent.workspace_key, parent.resource_fingerprint, parent.workspace_fingerprint)
+                != (row.workspace_key, row.resource_fingerprint, row.workspace_fingerprint)
+            ):
+                raise ServiceError("workspace_checkpoint_corrupt", "基线未保留原预览来源", 409)
+            if live:
+                _assert_live(parent, self.owner_id, "preparing")
         return source
 
     async def source(self, scope: str, identifier: str) -> CheckpointModelSource | None:

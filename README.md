@@ -4,7 +4,7 @@ Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/�
 
 当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；二进制单文件命令成果已接通，见[报告](docs/testing/reports/2026-10-10-binary-command-artifacts.md)；普通二进制完整命令输入和原快照精确撤销已接通，见[报告](docs/testing/reports/2026-10-11-binary-command-inputs.md)；真实空/嵌套目录来源与可信Python冷读取已接通，见[报告](docs/testing/reports/2026-10-11-command-directory-provenance.md)；目录事务继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
 
-模型原生Checkpoint创建/query/cancel现已沿原Run/call、Scope、权限/预算和私有Fence接通，SDK/REST/Client/CLI/浏览器读取同一原结果，见[模型控制指南](docs/user-guide/model-native-checkpoints.md)与[报告](docs/testing/reports/2026-10-15-model-native-checkpoints.md)。模型恢复控制继续。
+模型原生Checkpoint创建/query/cancel现已沿原Run/call、Scope、权限/预算和私有Fence接通，SDK/REST/Client/CLI/浏览器读取同一原结果，见[模型控制指南](docs/user-guide/model-native-checkpoints.md)与[报告](docs/testing/reports/2026-10-15-model-native-checkpoints.md)。模型原生恢复preview/start/query/cancel、分阶段来源与唯一基线已接通，见[模型恢复指南](docs/user-guide/model-native-checkpoint-restores.md)及[实际验证](docs/testing/reports/2026-10-15-model-native-checkpoint-restores.md)。
 
 ## 快速开始
 
@@ -78,7 +78,7 @@ Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。
 
 目录事务/完整树交换、生成根撤销与原生二进制Checkpoint公共捕获/恢复已有后续分组证据，见[最新字节恢复报告](docs/testing/reports/2026-10-15-native-checkpoint-byte-restore.md)。命令资源现可显式配置独立cgroup v2进程树限额，并在模型工具、SDK、REST、CLI和浏览器读取同一原限额/用量，见[配置指南](docs/user-guide/process-tree-quotas.md)与[专项报告](docs/testing/reports/2026-10-15-process-tree-quotas.md)。默认rlimit仍只代表每进程/UID范围；树模式内存/进程线程由内核限制，累计CPU按内核用量采样收束。
 
-模型Checkpoint恢复控制、原负载根因和P04完整审计、商业模型质量/真实账单、生产多worker/租户、PostgreSQL/Redis与部署演练仍未完成。隔离执行仅有Linux本机证据。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+原负载根因和P04完整审计、商业模型质量/真实账单、生产多worker/租户、PostgreSQL/Redis与部署演练仍未完成。隔离执行仅有Linux本机证据。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
 
 工作区的目录文件描述符边界与条件发布目前仅Linux实测；Windows不能使用该文件能力，普通Agent/SDK/eval入口仍可用。文件路径约束不等于操作系统进程沙箱。
 

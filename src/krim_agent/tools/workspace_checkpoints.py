@@ -11,6 +11,12 @@ from krim_agent.workspace_checkpoint_control import (
     CheckpointQuery,
     CheckpointQueryResult,
 )
+from krim_agent.workspace_restore import (
+    CheckpointRestoreExecute,
+    CheckpointRestorePreview,
+    CheckpointRestoreView,
+)
+from krim_agent.workspace_restore_control import RestoreLookup, RestoreQuery, RestoreQueryResult
 
 from .core import ToolContext, ToolDefinition, ToolError
 
@@ -60,5 +66,47 @@ def checkpoint_control_tools() -> tuple[ToolDefinition, ...]:
             "write",
             output_schema=WorkspaceCheckpointView,
             output_guard=partial(_guard, "cancel"),
+        ),
+    )
+
+
+@cache
+def checkpoint_restore_control_tools() -> tuple[ToolDefinition, ...]:
+    return (
+        ToolDefinition(
+            "workspace_checkpoint_restore_preview",
+            "原调用内捕获恢复前基线并准备原条件恢复计划",
+            CheckpointRestorePreview,
+            partial(_execute, "restore_preview"),
+            "write",
+            output_schema=CheckpointRestoreView,
+            output_guard=partial(_guard, "restore_preview"),
+        ),
+        ToolDefinition(
+            "workspace_checkpoint_restore_start",
+            "按原预览版本执行逐文件条件恢复并等待真实回执",
+            CheckpointRestoreExecute,
+            partial(_execute, "restore_start"),
+            "write",
+            output_schema=CheckpointRestoreView,
+            output_guard=partial(_guard, "restore_start"),
+        ),
+        ToolDefinition(
+            "workspace_checkpoint_restore_query",
+            "只读原恢复计划ID、预览键或有界历史",
+            RestoreQuery,
+            partial(_execute, "restore_query"),
+            "read",
+            output_schema=RestoreQueryResult,
+            output_guard=partial(_guard, "restore_query"),
+        ),
+        ToolDefinition(
+            "workspace_checkpoint_restore_cancel",
+            "关闭原恢复准入并等待真实基线与写入收束",
+            RestoreLookup,
+            partial(_execute, "restore_cancel"),
+            "write",
+            output_schema=CheckpointRestoreView,
+            output_guard=partial(_guard, "restore_cancel"),
         ),
     )

@@ -14,7 +14,7 @@ from krim_agent.workspace_change import (
     WorkspaceChangeAction,
     WorkspaceChangeView,
 )
-from krim_agent.workspace_checkpoint import CheckpointCaptureFormat
+from krim_agent.workspace_checkpoint import CheckpointCaptureFormat, CheckpointModelSource
 
 
 class CheckpointRestorePreview(StrictModel):
@@ -101,6 +101,7 @@ class CheckpointRestoreFence:
     plan_id: str
     position: int
     token: str
+    model_source: CheckpointModelSource | None = None
 
 
 @dataclass(frozen=True)

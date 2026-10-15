@@ -36,6 +36,7 @@ from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
 from krim_agent.application.workspace_mixed_batches import MixedBatchService
 from krim_agent.application.workspace_model_checkpoints import ModelCheckpointService
+from krim_agent.application.workspace_model_restores import ModelRestoreService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
 from krim_agent.config import Settings
@@ -324,6 +325,9 @@ class AgentService:
             self.workspace_checkpoints,
             self._workspace_checkpoint_authorize,
             self._workspace_restore_child,
+        )
+        self.model_checkpoints.restores = ModelRestoreService(
+            self.model_checkpoints, self.workspace_restores
         )
         self._results: dict[str, tuple[str | None, int, ExecResult]] = {}
         self.restore_errors: dict[str, str] = {}
@@ -702,6 +706,19 @@ class AgentService:
         existing = {item.name: item for item in self.runtime.tools.definitions}
         if any(item.name in existing and existing[item.name] is not item for item in definitions):
             raise ValueError("模型检查点控制工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+        self.manager.workspace_checkpoints = self.workspace_checkpoints
+        self.manager.workspace_checkpoint_controls = self.model_checkpoints
+
+    def register_checkpoint_restore_controls(self) -> None:
+        from krim_agent.tools.workspace_checkpoints import checkpoint_restore_control_tools
+
+        definitions = checkpoint_restore_control_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型检查点恢复工具名称已被其它定义占用")
         for definition in definitions:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)

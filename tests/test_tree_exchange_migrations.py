@@ -60,7 +60,7 @@ async def test_empty_0044_roundtrip_preserves_original_file_directory_and_move_m
         async with store.database.engine.begin() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0050_native_checkpoint_models"
+            ).scalar_one() == "0051_checkpoint_restore_models"
             await connection.run_sync(
                 lambda sync: command.downgrade(migration_config(sync), "0043_tree_move_ledger")
             )
@@ -78,7 +78,7 @@ async def test_empty_0044_roundtrip_preserves_original_file_directory_and_move_m
             await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0050_native_checkpoint_models"
+            ).scalar_one() == "0051_checkpoint_restore_models"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert (
             await service.workspace_edits.get(scope, old_file.view.proposal_id)
@@ -105,7 +105,7 @@ async def test_nonempty_0044_refuses_loss_and_keeps_original_dual_material(runti
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0050_native_checkpoint_models"
+            ).scalar_one() == "0051_checkpoint_restore_models"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()
