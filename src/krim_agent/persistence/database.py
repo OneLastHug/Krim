@@ -1383,6 +1383,9 @@ class WorkspaceRestorePlanRow(Base):
         UniqueConstraint("scope_id", "request_key"),
         UniqueConstraint("scope_id", "execute_key"),
         CheckConstraint(
+            "baseline_capture_format IN ('text','bytes')", name="ck_restore_baseline_format"
+        ),
+        CheckConstraint(
             "phase IN ('preparing','ready','executing','finished','failed',"
             "'cancelled','interrupted','expired')",
             name="ck_restore_phase",
@@ -1410,6 +1413,9 @@ class WorkspaceRestorePlanRow(Base):
         ForeignKey("native_workspace_checkpoints.checkpoint_id"), nullable=True
     )
     baseline_key: Mapped[str] = mapped_column(String(128), unique=True)
+    baseline_capture_format: Mapped[str] = mapped_column(
+        String(8), default="text", server_default="text"
+    )
     request_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     execute_key: Mapped[str | None] = mapped_column(String(128), nullable=True)

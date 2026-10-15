@@ -412,10 +412,11 @@ export interface NativeCheckpointView {
   files: Array<{ path: string; captured: boolean; exists: boolean | null; sha256: string | null; byte_size: number | null; mode: number | null; content_kind?: "text" | "binary" | "absent" }>;
   error_code: string | null; created_at: string; updated_at: string;
 }
-export interface NativeRestorePreview { checkpoint_id: string; request_key: string; ttl_seconds?: number; }
+export interface NativeRestorePreview { checkpoint_id: string; request_key: string; ttl_seconds?: number; baseline_capture_format?: "text" | "bytes"; }
 export interface NativeRestoreExecute { plan_id: string; expected_revision: number; request_key: string; }
 export interface NativeRestoreView {
   source: "workspace"; plan_id: string; scope_id: string; checkpoint_id: string; baseline_checkpoint_id: string | null;
+  baseline_capture_format?: "text" | "bytes";
   request_key: string; execute_key: string | null; revision: number;
   phase: "preparing" | "ready" | "executing" | "finished" | "failed" | "cancelled" | "interrupted" | "expired";
   status: "preparing" | "ready" | "running" | "done" | "partial" | "failed" | "cancelled" | "interrupted" | "expired" | "uncertain";

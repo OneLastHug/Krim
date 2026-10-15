@@ -1,6 +1,7 @@
 """Playwright 的本机 Python 服务；临时 SQLite、合作式慢 fake 流与测试 Key。"""
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -740,7 +741,7 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
             handle.runtime.provider, handle.runtime.tool_policy = previous_provider, previous_policy
 
     class TestWorkspaceControl(StrictModel):
-        action: Literal["seed", "fail_save", "large", "bytes"]
+        action: Literal["seed", "fail_save", "large", "bytes", "inspect"]
         path: str = Field(default="file.txt", pattern=r"^[A-Za-z0-9_-]+\.txt$")
         content: str = Field(default="old\n", max_length=24000)
 
@@ -853,6 +854,16 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     @app.post("/_test/workspace")
     async def configure_workspace(payload: TestWorkspaceControl) -> dict[str, str]:
         global fail_next_save
+        if payload.action == "inspect":
+            path = write_root / payload.path
+            content = await asyncio.to_thread(path.read_bytes)
+            metadata = path.stat()
+            return {
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "bytes": str(len(content)),
+                "inode": str(metadata.st_ino),
+                "mode": str(metadata.st_mode & 0o777),
+            }
         if payload.action == "fail_save":
             fail_next_save = True
         elif payload.action == "bytes":

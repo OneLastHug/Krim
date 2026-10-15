@@ -103,6 +103,8 @@
             <label for="native-checkpoint-query" data-i18n="检查点或计划标识、原请求键">检查点或计划标识、原请求键</label><input id="native-checkpoint-query" maxlength="128" />
             <div class="actions"><button id="native-checkpoint-query-id" type="button" data-i18n="按标识查询">按标识查询</button><button id="native-checkpoint-query-key" type="button" data-i18n="按原键找回">按原键找回</button><button id="native-checkpoint-query-pending" type="button" data-i18n="查询未确认请求">查询未确认请求</button></div>
             <section id="native-checkpoint-detail" class="checkpoint-detail"></section>
+            <label for="native-restore-format" data-i18n="恢复前备份格式">恢复前备份格式</label><select id="native-restore-format"><option value="text" data-i18n="UTF-8文本（原默认）">UTF-8文本（原默认）</option><option value="bytes" data-i18n="完整文件字节（含二进制）">完整文件字节（含二进制）</option></select>
+            <p data-i18n="字节目标自动使用字节备份；文本目标当前含二进制时请明确选择字节备份。">字节目标自动使用字节备份；文本目标当前含二进制时请明确选择字节备份。</p>
             <div class="actions"><button id="native-checkpoint-preview" type="button" data-i18n="预览恢复检查点">预览恢复检查点</button><button id="native-checkpoint-wait" type="button" data-i18n="等待检查点捕获">等待检查点捕获</button><button id="native-checkpoint-cancel" type="button" data-i18n="取消检查点捕获">取消检查点捕获</button></div>
             <section id="native-restore-detail" class="checkpoint-detail"></section>
             <div class="actions"><button id="native-restore-execute" type="button" data-i18n="执行已审阅的恢复">执行已审阅的恢复</button><button id="native-restore-wait" type="button" data-i18n="等待恢复计划">等待恢复计划</button><button id="native-restore-cancel" type="button" data-i18n="取消恢复计划">取消恢复计划</button></div>

@@ -507,7 +507,7 @@ async def test_0031_upgrade_retains_history_and_nonempty_state_refuses_lossy_dow
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0048_native_checkpoint_bytes"
+            ).scalar_one() == "0049_checkpoint_restore_bytes"
     finally:
         await database.close()
 

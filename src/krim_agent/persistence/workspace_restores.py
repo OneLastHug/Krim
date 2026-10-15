@@ -64,6 +64,40 @@ async def _effect_tip(session: AsyncSession, key: str) -> int | None:
     return int(value) if value is not None else None
 
 
+async def _restore_formats(session: AsyncSession, row: WorkspaceRestorePlanRow) -> None:
+    target = await session.get(NativeWorkspaceCheckpointRow, row.checkpoint_id)
+    baseline = (
+        await session.get(NativeWorkspaceCheckpointRow, row.baseline_checkpoint_id)
+        if row.baseline_checkpoint_id is not None
+        else None
+    )
+    if (
+        row.baseline_capture_format not in {"text", "bytes"}
+        or target is None
+        or target.capture_format not in {"text", "bytes"}
+        or target.status != "available"
+        or target.scope_id != row.scope_id
+        or (target.workspace_key, target.resource_fingerprint, target.workspace_fingerprint)
+        != (row.workspace_key, row.resource_fingerprint, row.workspace_fingerprint)
+        or target.capture_format == "bytes"
+        and row.baseline_capture_format != "bytes"
+        or row.baseline_checkpoint_id is not None
+        and (
+            baseline is None
+            or baseline.scope_id != row.scope_id
+            or baseline.capture_format != row.baseline_capture_format
+            or baseline.request_key != row.baseline_key
+            or (
+                baseline.workspace_key,
+                baseline.resource_fingerprint,
+                baseline.workspace_fingerprint,
+            )
+            != (row.workspace_key, row.resource_fingerprint, row.workspace_fingerprint)
+        )
+    ):
+        raise ServiceError("workspace_restore_baseline", "恢复基线未保留原冻结格式与来源", 409)
+
+
 async def assert_restore_request(
     session: AsyncSession,
     owner_id: str,
@@ -110,6 +144,7 @@ async def assert_restore_request(
             raise ServiceError("workspace_restore_operation_conflict", "不能认领其他文件操作", 409)
         return child
     _assert_live(row, owner_id, "executing")
+    await _restore_formats(session, row)
     if not child.admission_open or child.operation_id is not None or child.status != "pending":
         raise ServiceError("workspace_restore_child_closed", "恢复子项准入已关闭", 409)
     assert child.file_key is not None
@@ -126,6 +161,7 @@ async def assert_restore_execution(session: AsyncSession, owner: str, operation_
         row = await session.get(WorkspaceRestorePlanRow, child.plan_id)
         assert row is not None
         _assert_live(row, owner, "executing")
+        await _restore_formats(session, row)
         assert child.file_key is not None
         if await _effect_tip(session, child.file_key) != child.effect_sequence:
             raise ServiceError("workspace_restore_version_conflict", "恢复文件版本已变化", 409)
@@ -187,6 +223,7 @@ class WorkspaceRestoreStore:
         if not secrets.compare_digest(row.token, token):
             raise ServiceError("workspace_restore_fenced", "恢复计划凭据已失效", 403)
         _assert_live(row, self.owner_id, phase)
+        await _restore_formats(session, row)
         await self.edits._scope(session, scope, writing=True)
         await self.edits._resource(session, scope, row.workspace_key, row.resource_fingerprint)
         return row
@@ -243,6 +280,7 @@ class WorkspaceRestoreStore:
                 scope_id=row.scope_id,
                 checkpoint_id=row.checkpoint_id,
                 baseline_checkpoint_id=row.baseline_checkpoint_id,
+                baseline_capture_format=row.baseline_capture_format,
                 request_key=row.request_key,
                 execute_key=row.execute_key,
                 revision=row.revision,
@@ -267,9 +305,10 @@ class WorkspaceRestoreStore:
         resource_fingerprint: str,
         workspace_fingerprint: str,
     ) -> tuple[CheckpointRestoreView, bool]:
-        from .workspace_checkpoints import capture_metadata
+        from .workspace_checkpoints import WorkspaceCheckpointStore
         from .workspace_edits import digest
 
+        request = CheckpointRestorePreview.model_validate(request.model_dump())
         self.edits._key(request.request_key)
         fingerprint = digest(
             {
@@ -329,6 +368,9 @@ class WorkspaceRestoreStore:
                 resource_fingerprint=resource_fingerprint,
                 workspace_fingerprint=workspace_fingerprint,
                 checkpoint_id=target.checkpoint_id,
+                baseline_capture_format="bytes"
+                if target.capture_format == "bytes" or request.baseline_capture_format == "bytes"
+                else "text",
                 baseline_key="krim-backup:" + secrets.token_hex(32),
                 request_key=request.request_key,
                 request_hash=fingerprint,
@@ -342,7 +384,7 @@ class WorkspaceRestoreStore:
             session.add(row)
             await session.flush()
             for position, entry in enumerate(files):
-                metadata = capture_metadata(entry.capture_metadata)
+                metadata = WorkspaceCheckpointStore._metadata(target, entry.capture_metadata)
                 session.add(
                     WorkspaceRestoreItemRow(
                         plan_id=identifier,
@@ -378,6 +420,7 @@ class WorkspaceRestoreStore:
                 or baseline.workspace_key != row.workspace_key
                 or baseline.resource_fingerprint != row.resource_fingerprint
                 or baseline.workspace_fingerprint != row.workspace_fingerprint
+                or baseline.capture_format != row.baseline_capture_format
                 or row.baseline_checkpoint_id not in {None, baseline_id}
             ):
                 raise ServiceError("workspace_restore_baseline", "恢复前备份未绑定原计划", 409)
@@ -388,7 +431,7 @@ class WorkspaceRestoreStore:
     async def ready(
         self, scope: str, identifier: str, token: str, prepared: tuple[PreparedFileChange, ...]
     ) -> None:
-        from .workspace_checkpoints import decode_capture
+        from .workspace_checkpoints import WorkspaceCheckpointStore
         from .workspace_edits import digest, encode_prepared, file_key
 
         async with self.database.write_lock, self.database.sessions.begin() as session:
@@ -432,8 +475,8 @@ class WorkspaceRestoreStore:
                     or not new_row.captured
                 ):
                     raise ServiceError("workspace_checkpoint_corrupt", "恢复快照缺少文件", 409)
-                old = decode_capture(old_row.capture_metadata, old_row.content)
-                new = decode_capture(new_row.capture_metadata, new_row.content)
+                old = WorkspaceCheckpointStore._decode(baseline, old_row)
+                new = WorkspaceCheckpointStore._decode(target, new_row)
                 spec = value.spec
                 self.edits._validate_prepared(value, original_intent=False)
                 if (
@@ -546,6 +589,7 @@ class WorkspaceRestoreStore:
                 raise ServiceError("workspace_restore_state", "恢复计划当前不可执行", 409)
             if row.revision != request.expected_revision:
                 raise ServiceError("workspace_restore_revision", "恢复计划版本已变化", 409)
+            await _restore_formats(session, row)
             row.execute_key, row.execute_hash = request.request_key, fingerprint
             row.phase, row.owner_id = "executing", self.owner_id
             row.lease_expires_at, row.token = (

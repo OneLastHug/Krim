@@ -250,7 +250,7 @@ async def test_nonempty_tree_downgrade_refuses_without_losing_old_foreign_keys(r
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0048_native_checkpoint_bytes"
+            ).scalar_one() == "0049_checkpoint_restore_bytes"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         await service.close()
@@ -370,5 +370,5 @@ async def test_empty_0041_roundtrip_preserves_0040_host_and_model_tables(runtime
         await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0048_native_checkpoint_bytes"
+        ).scalar_one() == "0049_checkpoint_restore_bytes"
         assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()

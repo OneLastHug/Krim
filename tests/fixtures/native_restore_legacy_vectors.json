@@ -1,0 +1,38 @@
+{
+  "package": "/data/tmp/root/krim-native-checkpoint-byte-capture-wheel-gate/venv/lib/python3.12/site-packages/krim_agent/__init__.py",
+  "wheel_sha256": "c8804182d48c25c1c789697527caae1eac46e25c1cf3d05d1d1144f12d9e48c0",
+  "request": {
+    "checkpoint_id": "original-target",
+    "request_key": "original-preview",
+    "ttl_seconds": 3600.0
+  },
+  "view": {
+    "source": "workspace",
+    "plan_id": "original-plan",
+    "scope_id": "session:original-agent",
+    "checkpoint_id": "original-target",
+    "baseline_checkpoint_id": "original-backup",
+    "request_key": "original-preview",
+    "execute_key": null,
+    "revision": 1,
+    "phase": "ready",
+    "status": "ready",
+    "items": [
+      {
+        "position": 0,
+        "path": "file.bin",
+        "proposal": null,
+        "operation": null,
+        "status": "pending",
+        "current_mode": 384,
+        "target_mode": 416,
+        "error_code": null
+      }
+    ],
+    "expires_at": 1792000000.0,
+    "error_code": null,
+    "created_at": "2026-10-13T00:00:00Z",
+    "updated_at": "2026-10-13T00:00:00Z"
+  },
+  "request_hash": "35d88a2ca175a075678f06763a6a39172fd2f4a2473acf723b06777e597bbbec"
+}
