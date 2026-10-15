@@ -39,6 +39,9 @@ WORKSPACE_MIXED_WRITE_TOOL_NAMES = frozenset({"workspace_mixed_start"})
 WORKSPACE_TREE_MODEL_TOOL_NAMES = frozenset(
     {"workspace_tree_model_prepare", "workspace_tree_start"}
 )
+WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES = frozenset(
+    {"workspace_checkpoint_create", "workspace_checkpoint_query", "workspace_checkpoint_cancel"}
+)
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
     {
         "directory_preview",
@@ -84,6 +87,7 @@ WORKSPACE_WRITE_TOOL_NAMES = (
     WORKSPACE_CHANGE_TOOL_NAMES
     | WORKSPACE_TREE_MODEL_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
+    | (WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES - {"workspace_checkpoint_query"})
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})
     | (WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES - {"generated_tree_undo_query"})
     | (
@@ -98,6 +102,7 @@ WORKSPACE_WRITE_TOOL_NAMES = (
 WORKSPACE_TOOL_NAMES = (
     WORKSPACE_READ_TOOL_NAMES
     | WORKSPACE_TREE_MODEL_TOOL_NAMES
+    | WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
     | WORKSPACE_CHANGE_TOOL_NAMES
     | WORKSPACE_DIRECTORY_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES

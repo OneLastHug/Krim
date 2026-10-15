@@ -173,7 +173,7 @@ async def test_locale_reopen_and_guarded_downgrade(tmp_path):
         async with reopened.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar() == "0049_checkpoint_restore_bytes"
+            ).scalar() == "0050_native_checkpoint_models"
         await repository.set_topic_locale(topic.id, "zh-CN")
         async with reopened.engine.begin() as connection:
             await connection.run_sync(

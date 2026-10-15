@@ -355,7 +355,7 @@ async def test_move_target_lock_refuses_lossy_downgrade(repository, tmp_path):
         async with repository.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0049_checkpoint_restore_bytes"
+            ).scalar_one() == "0050_native_checkpoint_models"
             assert (
                 await connection.execute(
                     text(

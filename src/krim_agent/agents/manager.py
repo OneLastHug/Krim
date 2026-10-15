@@ -37,7 +37,13 @@ from krim_agent.protocol.models import StreamFrame
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime import ChatRuntime
 from krim_agent.tools import ToolContext, ToolRegistry
-from krim_agent.tools.core import Decision, Policy, ToolDefinition
+from krim_agent.tools.core import (
+    CheckpointControlBackend,
+    Decision,
+    Policy,
+    ToolDefinition,
+    WorkspaceCheckpointBackend,
+)
 from krim_agent.workspace import WORKSPACE_TOOL_NAMES, WORKSPACE_WRITE_TOOL_NAMES, WorkspaceBinding
 
 from .permissions import profile_policy
@@ -474,6 +480,8 @@ class AgentManager:
         self.tree_models = ModelTreeService(self.workspace_changes, self.directory_changes)
         self.tree_moves = TreeMoveService(self.workspace_changes, self.directory_changes)
         self.tree_exchanges = TreeExchangeService(self.workspace_changes, self.directory_changes)
+        self.workspace_checkpoints: WorkspaceCheckpointBackend | None = None
+        self.workspace_checkpoint_controls: CheckpointControlBackend | None = None
         self.mixed_batch_writer = ModelMixedBatchService(
             self.workspace_changes, self.directory_changes
         )
@@ -774,6 +782,8 @@ class AgentManager:
             workspace_tree_models=self.tree_models,
             tree_moves=self.tree_moves,
             tree_exchanges=self.tree_exchanges,
+            workspace_checkpoints=self.workspace_checkpoints,
+            workspace_checkpoint_controls=self.workspace_checkpoint_controls,
             workspace_mixed_batches=self.mixed_batch_writer,
             workspace=definition.workspace,
             execution=definition.execution,
@@ -929,6 +939,8 @@ class AgentManager:
                 await handle.destroy()
 
     async def close(self) -> None:
+        if self.workspace_checkpoint_controls is not None:
+            self.workspace_checkpoint_controls.assert_external_close()
         self.tree_exchanges.assert_external_close()
         self.tree_moves.assert_external_close()
         self.commands.assert_external_close()

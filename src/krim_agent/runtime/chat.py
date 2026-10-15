@@ -62,6 +62,7 @@ from krim_agent.tokenizer import TokenizerError, TokenizerSpec
 from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import (
     ApprovalHandler,
+    CheckpointControlBackend,
     CommandBackend,
     Decision,
     DirectoryChangeBackend,
@@ -77,6 +78,7 @@ from krim_agent.tools.core import (
     TreeMoveBackend,
     TreePlanModelBackend,
     TreePlanQueryBackend,
+    WorkspaceCheckpointBackend,
 )
 from krim_agent.tools.discovery import ToolDiscovery
 from krim_agent.usage import TokenUsage
@@ -160,6 +162,8 @@ class ChatRuntime:
         workspace_tree_models: TreePlanModelBackend | None = None,
         tree_moves: TreeMoveBackend | None = None,
         tree_exchanges: TreeExchangeBackend | None = None,
+        workspace_checkpoints: WorkspaceCheckpointBackend | None = None,
+        workspace_checkpoint_controls: CheckpointControlBackend | None = None,
         workspace_mixed_batches: MixedBatchWriteBackend | None = None,
         workspace: WorkspaceBinding | None = None,
         execution: ExecutionBinding | None = None,
@@ -215,6 +219,8 @@ class ChatRuntime:
         self.workspace_tree_models = workspace_tree_models
         self.tree_moves = tree_moves
         self.tree_exchanges = tree_exchanges
+        self.workspace_checkpoints = workspace_checkpoints
+        self.workspace_checkpoint_controls = workspace_checkpoint_controls
         self.workspace_mixed_batches = workspace_mixed_batches
         self.workspace = workspace
         self.execution, self.commands = execution, commands
@@ -1082,6 +1088,8 @@ class ChatRuntime:
                         workspace_tree_models=self.workspace_tree_models,
                         tree_moves=self.tree_moves,
                         tree_exchanges=self.tree_exchanges,
+                        workspace_checkpoints=self.workspace_checkpoints,
+                        workspace_checkpoint_controls=self.workspace_checkpoint_controls,
                         workspace_mixed_batches=self.workspace_mixed_batches,
                         approval_handler=self.approval_handler,
                         question_handler=self.question_handler,
@@ -1229,6 +1237,8 @@ class ChatRuntime:
                 yield None
 
     async def close(self) -> None:
+        if self.workspace_checkpoint_controls is not None:
+            self.workspace_checkpoint_controls.assert_external_close()
         if self.tree_exchanges is not None:
             self.tree_exchanges.assert_external_close()
         if self.tree_moves is not None:

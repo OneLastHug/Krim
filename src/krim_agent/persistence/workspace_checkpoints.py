@@ -6,6 +6,7 @@ import hashlib
 import secrets
 import time
 from builtins import list as builtin_list
+from collections.abc import Callable
 from datetime import UTC
 from typing import Literal, cast
 from uuid import uuid4
@@ -20,6 +21,7 @@ from krim_agent.workspace_checkpoint import (
     CapturedFileMetadata,
     CheckpointCaptureFence,
     CheckpointCaptureFormat,
+    CheckpointModelSource,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointFileView,
     WorkspaceCheckpointView,
@@ -28,6 +30,7 @@ from krim_agent.workspace_checkpoint import (
 from krim_agent.workspace_writer import CapturedFile, FileSnapshot
 
 from .database import (
+    NativeCheckpointModelSourceRow,
     NativeWorkspaceCheckpointFileRow,
     NativeWorkspaceCheckpointRow,
     WorkspaceFileLockRow,
@@ -175,6 +178,7 @@ class WorkspaceCheckpointStore:
     async def _view(
         self, session: AsyncSession, row: NativeWorkspaceCheckpointRow
     ) -> WorkspaceCheckpointView:
+        await self._source(session, row)
         entries = await session.execute(
             select(
                 NativeWorkspaceCheckpointFileRow.path,
@@ -224,6 +228,8 @@ class WorkspaceCheckpointStore:
         workspace_fingerprint: str,
         *,
         capture_format: CheckpointCaptureFormat | None = None,
+        model_source: CheckpointModelSource | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> tuple[WorkspaceCheckpointView, bool]:
         request = WorkspaceCheckpointCreate.model_validate(request.model_dump())
         if capture_format is None:
@@ -245,6 +251,8 @@ class WorkspaceCheckpointStore:
         fingerprint = digest(original)
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
+            if authorize is not None:
+                authorize()
             topic = await self.edits._scope(session, scope, writing=False)
             previous = await session.scalar(
                 select(NativeWorkspaceCheckpointRow).where(
@@ -257,16 +265,43 @@ class WorkspaceCheckpointStore:
                     raise ServiceError(
                         "workspace_checkpoint_key_conflict", "检查点键已绑定其他请求", 409
                     )
+                if await self._source(session, previous) != model_source:
+                    raise ServiceError(
+                        "workspace_checkpoint_model_conflict", "原检查点绑定其他父调用来源", 409
+                    )
                 self._expire(previous)
                 await session.flush()
                 return await self._view(session, previous), False
             await self.edits._scope(session, scope, writing=True)
             await self.edits._resource(session, scope, workspace_key, resource_fingerprint)
+            if model_source is not None:
+                self._valid_source(model_source)
+                if not scope.startswith("session:"):
+                    raise ServiceError(
+                        "workspace_checkpoint_model_context", "模型检查点需要原Agent会话", 403
+                    )
+                await self.edits._scope(session, scope, writing=True, run_id=model_source.run_id)
+                if (
+                    await session.scalar(
+                        select(NativeCheckpointModelSourceRow).where(
+                            NativeCheckpointModelSourceRow.run_id == model_source.run_id,
+                            NativeCheckpointModelSourceRow.call_id == model_source.call_id,
+                        )
+                    )
+                    is not None
+                ):
+                    raise ServiceError(
+                        "workspace_checkpoint_model_call_conflict",
+                        "原模型调用已绑定其他检查点",
+                        409,
+                    )
             count = await session.scalar(
                 select(func.count()).select_from(NativeWorkspaceCheckpointRow)
             )
             if (count or 0) >= self.max_checkpoints:
                 raise ServiceError("workspace_checkpoint_limit", "检查点历史数量已达上限", 429)
+            if authorize is not None:
+                authorize()
             row = NativeWorkspaceCheckpointRow(
                 checkpoint_id=str(uuid4()),
                 scope_id=scope,
@@ -278,6 +313,7 @@ class WorkspaceCheckpointStore:
                 request_hash=fingerprint,
                 title=request.title,
                 capture_format=capture_format,
+                model_bound=model_source is not None,
                 status="capturing",
                 owner_id=self.owner_id,
                 lease_expires_at=time.time() + self.lease_seconds,
@@ -285,6 +321,14 @@ class WorkspaceCheckpointStore:
             )
             session.add(row)
             await session.flush()
+            if model_source is not None:
+                session.add(
+                    NativeCheckpointModelSourceRow(
+                        checkpoint_id=row.checkpoint_id,
+                        run_id=model_source.run_id,
+                        call_id=model_source.call_id,
+                    )
+                )
             session.add_all(
                 [
                     NativeWorkspaceCheckpointFileRow(
@@ -298,6 +342,52 @@ class WorkspaceCheckpointStore:
             )
             await session.flush()
             return await self._view(session, row), True
+
+    @staticmethod
+    def _valid_source(source: CheckpointModelSource) -> None:
+        if (
+            not isinstance(source, CheckpointModelSource)
+            or not isinstance(source.run_id, str)
+            or not 1 <= len(source.run_id) <= 36
+            or source.run_id == "local"
+            or not isinstance(source.call_id, str)
+            or not 1 <= len(source.call_id) <= 128
+            or any(ord(char) < 32 or ord(char) == 127 for char in source.call_id)
+        ):
+            raise ServiceError(
+                "workspace_checkpoint_model_context", "模型检查点需要原Run/call", 403
+            )
+
+    async def _source(
+        self, session: AsyncSession, row: NativeWorkspaceCheckpointRow, *, live: bool = False
+    ) -> CheckpointModelSource | None:
+        saved = await session.get(NativeCheckpointModelSourceRow, row.checkpoint_id)
+        if bool(row.model_bound) != (saved is not None):
+            raise ServiceError("workspace_checkpoint_corrupt", "原模型来源标记或材料缺失", 409)
+        if saved is None:
+            return None
+        source = CheckpointModelSource(saved.run_id, saved.call_id)
+        self._valid_source(source)
+        if not row.scope_id.startswith("session:"):
+            raise ServiceError("workspace_checkpoint_corrupt", "模型检查点原会话损坏", 409)
+        await self.edits._scope(session, row.scope_id, writing=live, run_id=source.run_id)
+        return source
+
+    async def source(self, scope: str, identifier: str) -> CheckpointModelSource | None:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.edits._scope(session, scope, writing=False)
+            return await self._source(session, await self._row(session, scope, identifier))
+
+    async def _fence(
+        self,
+        session: AsyncSession,
+        row: NativeWorkspaceCheckpointRow,
+        fence: CheckpointCaptureFence,
+    ) -> None:
+        if await self._source(session, row) != fence.model_source:
+            raise ServiceError(
+                "workspace_checkpoint_model_context", "捕获围栏未保留原模型父调用", 403
+            )
 
     async def _live(
         self,
@@ -318,11 +408,13 @@ class WorkspaceCheckpointStore:
             raise ServiceError("workspace_checkpoint_fenced", "检查点捕获资格已失效", 409)
         await self.edits._scope(session, scope, writing=True)
         await self.edits._resource(session, scope, row.workspace_key, row.resource_fingerprint)
+        await self._source(session, row, live=True)
         return row
 
     async def execution(self, scope: str, identifier: str) -> tuple[CheckpointCaptureFence, ...]:
         async with self.database.write_lock, self.database.sessions() as session:
             row = await self._live(session, scope, identifier)
+            source = await self._source(session, row)
             positions = await session.scalars(
                 select(NativeWorkspaceCheckpointFileRow.position)
                 .where(NativeWorkspaceCheckpointFileRow.checkpoint_id == identifier)
@@ -334,6 +426,7 @@ class WorkspaceCheckpointStore:
                     position,
                     row.token,
                     cast(CheckpointCaptureFormat, row.capture_format),
+                    source,
                 )
                 for position in positions
             )
@@ -342,7 +435,10 @@ class WorkspaceCheckpointStore:
         self, scope: str, fence: CheckpointCaptureFence, path: str | None = None
     ) -> None:
         async with self.database.write_lock, self.database.sessions() as session:
-            await self._live(session, scope, fence.checkpoint_id, fence.token, fence.capture_format)
+            row = await self._live(
+                session, scope, fence.checkpoint_id, fence.token, fence.capture_format
+            )
+            await self._fence(session, row, fence)
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
@@ -356,7 +452,12 @@ class WorkspaceCheckpointStore:
             raise ServiceError("workspace_file_busy", "检查点文件有未收束的修改操作", 409)
 
     async def record(
-        self, scope: str, fence: CheckpointCaptureFence, capture: CapturedFile
+        self,
+        scope: str,
+        fence: CheckpointCaptureFence,
+        capture: CapturedFile,
+        *,
+        authorize: Callable[[], None] | None = None,
     ) -> None:
         metadata = encode_capture(
             capture,
@@ -369,6 +470,9 @@ class WorkspaceCheckpointStore:
             row = await self._live(
                 session, scope, fence.checkpoint_id, fence.token, fence.capture_format
             )
+            await self._fence(session, row, fence)
+            if authorize is not None:
+                authorize()
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
@@ -392,6 +496,8 @@ class WorkspaceCheckpointStore:
             )
             if int(used or 0) + len(content or b"") > self.max_snapshot_bytes:
                 raise ServiceError("workspace_checkpoint_bytes", "检查点私有内容容量已达上限", 429)
+            if authorize is not None:
+                authorize()
             entry.content, entry.capture_metadata, entry.captured = content, metadata, True
             row.updated_at = utc_now()
 
@@ -399,6 +505,7 @@ class WorkspaceCheckpointStore:
         async with self.database.write_lock, self.database.sessions() as session:
             await self.edits._scope(session, scope, writing=False)
             row = await self._row(session, scope, identifier)
+            await self._source(session, row)
             entries = list(
                 await session.scalars(
                     select(NativeWorkspaceCheckpointFileRow)
@@ -422,6 +529,7 @@ class WorkspaceCheckpointStore:
         async with self.database.write_lock, self.database.sessions() as session:
             await self.edits._scope(session, scope, writing=False)
             row = await self._row(session, scope, fence.checkpoint_id)
+            await self._fence(session, row, fence)
             entry = await session.get(
                 NativeWorkspaceCheckpointFileRow, (fence.checkpoint_id, fence.position)
             )
@@ -444,14 +552,22 @@ class WorkspaceCheckpointStore:
             row = await self._live(
                 session, scope, fence.checkpoint_id, fence.token, fence.capture_format
             )
+            await self._fence(session, row, fence)
             row.lease_expires_at = time.time() + self.lease_seconds
 
-    async def finish(self, scope: str, fence: CheckpointCaptureFence) -> WorkspaceCheckpointView:
+    async def finish(
+        self,
+        scope: str,
+        fence: CheckpointCaptureFence,
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> WorkspaceCheckpointView:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             row = await self._live(
                 session, scope, fence.checkpoint_id, fence.token, fence.capture_format
             )
+            await self._fence(session, row, fence)
             entries = list(
                 await session.scalars(
                     select(NativeWorkspaceCheckpointFileRow).where(
@@ -463,6 +579,8 @@ class WorkspaceCheckpointStore:
                 raise ServiceError("workspace_checkpoint_incomplete", "检查点捕获未完成", 409)
             for entry in entries:
                 await self._idle_file(session, self._decode(row, entry))
+            if authorize is not None:
+                authorize()
             self._end(row, "available", None)
             await session.flush()
             return await self._view(session, row)
@@ -471,6 +589,7 @@ class WorkspaceCheckpointStore:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             row = await self._row(session, scope, fence.checkpoint_id)
+            await self._fence(session, row, fence)
             if (
                 not secrets.compare_digest(row.token, fence.token)
                 or row.capture_format != fence.capture_format

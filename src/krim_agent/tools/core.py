@@ -119,6 +119,10 @@ class TreeExchangeBackend(TreeMoveBackend, Protocol):
     """双完整树后端独立能力身份；沿同调用/原回程与生命周期协议。"""
 
 
+class CheckpointControlBackend(TreeMoveBackend, Protocol):
+    """检查点模型父调用控制，与内部捕获后端分开装配。"""
+
+
 class CommandBackend(Protocol):
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
@@ -147,6 +151,8 @@ class ToolExecutionBudget:
     active: bool = True
     waiters: int = 0
     remaining: float | None = None
+    pause_extension: float = 0.0
+    _pause_started: float | None = field(default=None, repr=False)
 
     def pause(self) -> bool:
         if not self.active or self.deadline.expired():
@@ -155,7 +161,8 @@ class ToolExecutionBudget:
             when = self.deadline.when()
             if when is None:
                 return False
-            self.remaining = max(0.0, when - asyncio.get_running_loop().time())
+            self._pause_started = asyncio.get_running_loop().time()
+            self.remaining = max(0.0, when - self._pause_started)
             self.deadline.reschedule(None)
         self.waiters += 1
         return True
@@ -164,8 +171,58 @@ class ToolExecutionBudget:
         self.waiters -= 1
         if self.waiters == 0 and self.active and not self.deadline.expired():
             assert self.remaining is not None
-            self.deadline.reschedule(asyncio.get_running_loop().time() + self.remaining)
+            now = asyncio.get_running_loop().time()
+            if self._pause_started is not None:
+                self.pause_extension += now - self._pause_started
+                self._pause_started = None
+            self.deadline.reschedule(now + self.remaining)
             self.remaining = None
+
+
+ExecutionBudgetBase = tuple[tuple[int, float | None], ...]
+
+
+def execution_budget_snapshot(budgets: tuple[ToolExecutionBudget, ...]) -> tuple[object, ...]:
+    return tuple(
+        (
+            id(item),
+            item.active,
+            item.waiters,
+            item.remaining,
+            item.deadline.when(),
+            item.pause_extension,
+            item._pause_started,
+        )
+        for item in budgets
+    )
+
+
+def execution_budget_base(budgets: tuple[ToolExecutionBudget, ...]) -> ExecutionBudgetBase:
+    values = []
+    for item in budgets:
+        when = item.deadline.when()
+        if when is None and item._pause_started is not None and item.remaining is not None:
+            when = item._pause_started + item.remaining
+        values.append((id(item), None if when is None else when - item.pause_extension))
+    return tuple(values)
+
+
+def same_execution_budget(first: ExecutionBudgetBase, second: ExecutionBudgetBase) -> bool:
+    from math import isclose, isfinite
+
+    if len(first) != len(second):
+        return False
+    for (left_id, left), (right_id, right) in zip(first, second, strict=True):
+        if left_id != right_id:
+            return False
+        if left is None or right is None:
+            if left is not right:
+                return False
+        elif not (
+            isfinite(left) and isfinite(right) and isclose(left, right, rel_tol=0, abs_tol=1e-7)
+        ):
+            return False
+    return True
 
 
 @dataclass
@@ -222,6 +279,8 @@ class ToolContext:
     checkpoint_capture: CheckpointCaptureFence | None = None
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
+    workspace_checkpoint_controls: CheckpointControlBackend | None = None
+    _checkpoint_control_response: tuple[str, str] | None = field(default=None, repr=False)
     execution: ExecutionBinding | None = None
     commands: CommandBackend | None = None
     command_capture: CommandCapture | None = None
@@ -270,6 +329,7 @@ class ToolContext:
             checkpoint_capture=self.checkpoint_capture,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
+            workspace_checkpoint_controls=self.workspace_checkpoint_controls,
             execution=self.execution,
             commands=self.commands,
             command_capture=self.command_capture,
