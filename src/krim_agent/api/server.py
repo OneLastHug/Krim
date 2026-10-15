@@ -115,6 +115,7 @@ from krim_agent.execution.management import (
     CommandAccepted,
     CommandHistoryPage,
     CommandHistoryRequest,
+    CommandResourcesView,
 )
 from krim_agent.execution.publication import (
     CommandChangesPage,
@@ -958,6 +959,16 @@ def create_app(
         confirmed: bool = Query(default=False),
     ) -> CommandView:
         return await agent_service.command_inspect(
+            agent_id, CommandLookup(command_id=command_id), confirmed=confirmed
+        )
+
+    @app.get("/v1/agents/{agent_id}/commands/{command_id}/resources")
+    async def agent_command_resources(
+        agent_id: WorkspaceIdentifier,
+        command_id: WorkspaceIdentifier,
+        confirmed: bool = Query(default=False),
+    ) -> CommandResourcesView:
+        return await agent_service.command_resources(
             agent_id, CommandLookup(command_id=command_id), confirmed=confirmed
         )
 

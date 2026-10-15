@@ -261,6 +261,7 @@ class ToolRegistry:
         tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
+        command_resources = name == "command_resources"
         tree_scope = (
             parent.run_id,
             parent.topic_id,
@@ -369,6 +370,7 @@ class ToolRegistry:
                 original_query_binding = _tree_query_binding(child) if tree_query else None
                 original_model_binding = _tree_query_binding(child) if tree_model else None
                 original_move_binding = _tree_move_binding(child) if tree_move else None
+                original_resource_binding = _tree_move_binding(child) if command_resources else None
                 original_capture_binding = (
                     _checkpoint_capture_binding(child) if byte_capture else None
                 )
@@ -393,6 +395,9 @@ class ToolRegistry:
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
                 original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
                 original_capture_budget = _tree_exchange_budget(child) if byte_capture else None
+                original_resource_budget = (
+                    _tree_exchange_budget(child) if command_resources else None
+                )
                 short: ShortCircuit | None = None
                 for hook in tuple(self._global_pre):
                     short = await hook(definition, child)
@@ -401,6 +406,16 @@ class ToolRegistry:
                 if short is None and definition.pre_execute is not None:
                     short = await definition.pre_execute(child)
                 parsed = definition.parameters.model_validate(child.arguments, strict=True)
+                if command_resources and (
+                    child.arguments != original_arguments
+                    or _tree_move_binding(child) != original_resource_binding
+                    or _tree_exchange_budget(child) != original_resource_budget
+                ):
+                    raise ToolError(
+                        "execution_resource_context", "Hook不能替换原资源查询参数、上下文或预算"
+                    )
+                if command_resources and short is not None:
+                    raise ToolError("execution_receipt_unverified", "资源查询须保留原账本事实")
                 if byte_capture and (
                     child.arguments != original_arguments
                     or _checkpoint_capture_binding(child) != original_capture_binding
@@ -537,10 +552,21 @@ class ToolRegistry:
                 move_response = child._tree_move_response
                 exchange_response = child._tree_exchange_response
                 capture_response = child._checkpoint_capture_response
+                resource_response = child._command_response
                 if definition.post_execute is not None:
                     result = await definition.post_execute(result, child)
                 for post in tuple(self._global_post):
                     result = await post(definition, result, child)
+                if command_resources and (
+                    child.arguments != original_arguments
+                    or _tree_move_binding(child) != original_resource_binding
+                    or _tree_exchange_budget(child) != original_resource_budget
+                ):
+                    raise ToolError(
+                        "execution_resource_context", "Hook不能替换原资源查询参数、上下文或预算"
+                    )
+                if command_resources and child._command_response != resource_response:
+                    raise ToolError("execution_receipt_unverified", "Hook不能替换原资源回程标记")
                 if byte_capture and (
                     child.arguments != original_arguments
                     or _checkpoint_capture_binding(child) != original_capture_binding

@@ -18,6 +18,7 @@ COMMAND_TOOL_NAMES = frozenset(
         "command_propose",
         "command_history",
         "command_inspect",
+        "command_resources",
         "directory_source_preview",
         "directory_source_query",
         "workspace_tree_prepare",

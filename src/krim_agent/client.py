@@ -62,7 +62,12 @@ from .execution.directory_publication import (
     CommandDirectoryProposalRequest,
     CommandDirectoryProposalView,
 )
-from .execution.management import CommandAccepted, CommandHistoryPage, CommandHistoryRequest
+from .execution.management import (
+    CommandAccepted,
+    CommandHistoryPage,
+    CommandHistoryRequest,
+    CommandResourcesView,
+)
 from .execution.publication import (
     CommandChangesPage,
     CommandChangesRequest,
@@ -328,6 +333,21 @@ class KrimClient:
         )
         self._check(response)
         return CommandView.model_validate_json(response.content)
+
+    def agent_command_resources(
+        self, agent_id: str, command_id: str, *, confirmed: bool = False
+    ) -> CommandResourcesView:
+        response = self._http.get(
+            _command_path(agent_id, command_id) + "/resources",
+            params={"confirmed": str(confirmed).lower()},
+        )
+        self._check(response)
+        value = CommandResourcesView.model_validate_json(response.content)
+        if value.command_id != command_id or value.scope_id != "session:" + agent_id:
+            raise ClientError(
+                "资源回程与原命令或作用域不匹配", code="execution_resource_response", status=502
+            )
+        return value
 
     def agent_command_wait(
         self,

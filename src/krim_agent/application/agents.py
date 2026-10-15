@@ -58,6 +58,7 @@ from krim_agent.execution.management import (
     CommandAccepted,
     CommandHistoryPage,
     CommandHistoryRequest,
+    CommandResourcesView,
 )
 from krim_agent.execution.publication import (
     CommandChangesPage,
@@ -852,6 +853,7 @@ class AgentService:
                     "command_changes",
                     "command_history",
                     "command_inspect",
+                    "command_resources",
                     "directory_query",
                     "directory_source_query",
                     "tree_move_query",
@@ -1608,6 +1610,17 @@ class AgentService:
             json.dumps(
                 await self._workspace_call(
                     agent_id, "command_inspect", request.model_dump(), confirmed=confirmed
+                )
+            )
+        )
+
+    async def command_resources(
+        self, agent_id: str, request: CommandLookup, *, confirmed: bool = False
+    ) -> CommandResourcesView:
+        return CommandResourcesView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id, "command_resources", request.model_dump(), confirmed=confirmed
                 )
             )
         )

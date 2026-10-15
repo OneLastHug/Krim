@@ -126,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--execution-limits", help="execution limits（执行限额）：本地SandboxLimits JSON文件"
     )
     serve.add_argument(
+        "--execution-cgroup-root",
+        help=(
+            "execution cgroup root（执行控制组根）：可信宿主已委派的独立krim-*根，"
+            "与tree限额同时配置"
+        ),
+    )
+    serve.add_argument(
         "--mcp-config", help="MCP config（MCP启动配置）：可信宿主本地JSON，最多64KiB"
     )
     subparsers.add_parser("version", help="version（版本）：显示当前版本")
@@ -384,6 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
             "get",
             "by-key",
             "inspect",
+            "resources",
             "read",
             "wait",
             "cancel",
@@ -1326,9 +1334,11 @@ def main() -> None:
                     if len(raw_limits) > 65536:
                         raise ValueError("执行限额配置不能超过64KiB")
                     limits = SandboxLimits.model_validate_json(raw_limits)
-                execution_runner = LinuxSandboxRunner(limits=limits)
-            elif args.execution_limits:
-                parser.error("--execution-limits须同时启用--execution")
+                execution_runner = LinuxSandboxRunner(
+                    limits=limits, cgroup_root=args.execution_cgroup_root
+                )
+            elif args.execution_limits or args.execution_cgroup_root:
+                parser.error("--execution-limits/--execution-cgroup-root须同时启用--execution")
             app = create_app(
                 settings,
                 workspace_root=args.workspace,

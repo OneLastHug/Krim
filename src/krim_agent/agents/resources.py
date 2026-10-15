@@ -20,6 +20,7 @@ from krim_agent.protocol.models import StrictModel
 from krim_agent.providers import ModelProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.tools import ToolRegistry
+from krim_agent.tools.command_resources import command_resources_tool
 from krim_agent.tools.commands import command_tools
 from krim_agent.tools.workspace import workspace_tools
 from krim_agent.workspace import Workspace, WorkspaceBinding
@@ -205,14 +206,19 @@ class AgentResourceRegistry:
         if len(self.executions) >= 32:
             raise ServiceError("agent_resource_limit", "执行资源数量已达上限", 429)
         existing = {item.name: item for item in self.tools.definitions}
-        for definition in command_tools():
+        definitions = (
+            (*command_tools(), command_resources_tool())
+            if runner.limits.tree is not None
+            else command_tools()
+        )
+        for definition in definitions:
             if definition.name in existing and existing[definition.name] is not definition:
                 raise ValueError("命令工具名称已被其他宿主工具占用")
         binding = ExecutionBinding(
             CommandResource(key=key, version=version, fingerprint=runner.fingerprint), runner
         )
         self.executions[key] = ExecutionResource(binding, owned)
-        for definition in command_tools():
+        for definition in definitions:
             if definition.name not in existing:
                 self.tools.register(definition)
         return binding

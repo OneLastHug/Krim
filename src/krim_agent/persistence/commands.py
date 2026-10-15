@@ -22,6 +22,7 @@ from krim_agent.execution.directories import (
     freeze_directory_manifest,
     read_directory_manifest,
 )
+from krim_agent.execution.management import CommandResourcesView
 from krim_agent.execution.models import ExecutionResult, ExecutionStatus, SandboxFile, SandboxLimits
 from krim_agent.execution.records import (
     CommandFile,
@@ -32,6 +33,7 @@ from krim_agent.execution.records import (
     CommandSnapshot,
     CommandView,
 )
+from krim_agent.execution.tree_models import SandboxTreeUsage
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import check_json, utc_now
 from krim_agent.workspace import Workspace
@@ -181,9 +183,42 @@ class CommandStore:
             raise ServiceError("execution_not_found", "命令不在该作用域中", 404)
         return row
 
+    @staticmethod
+    def _tree_usage(
+        saved: CommandSnapshot, result: dict[str, JsonValue] | None
+    ) -> SandboxTreeUsage | None:
+        if result is None or "tree_usage" not in result:
+            if result is not None and "tree_usage_hash" in result:
+                raise ServiceError("execution_record_corrupt", "整树统计材料缺失", 409)
+            return None
+        try:
+            if result.get("tree_usage_hash") != digest(result["tree_usage"]):
+                raise ValueError("checksum")
+            usage = SandboxTreeUsage.model_validate(result["tree_usage"])
+            if saved.limits.tree != usage.limits:
+                raise ValueError("limits")
+            return usage
+        except (ValidationError, ValueError):
+            raise ServiceError(
+                "execution_record_corrupt", "原整树用量或冻结限额损坏", 409
+            ) from None
+
     def _view(self, row: CommandRow) -> CommandView:
         saved = self._snapshot(row)
         result = row.result or {}
+        usage = self._tree_usage(saved, row.result)
+        if (
+            saved.limits.tree is not None
+            and row.result is not None
+            and row.started
+            and (usage is None or not usage.membership_verified)
+        ):
+            raise ServiceError("execution_record_corrupt", "已启动树命令缺少原进组事实", 409)
+        reaped = row.result is not None
+        if saved.limits.tree is not None and reaped:
+            reaped = (
+                usage is not None and usage.populated is False and usage.leader_reaped is True
+            ) or (usage is None and not row.dispatched and not row.started)
         outcome = result.get("status")
         if row.phase == "interrupted" and outcome is None:
             outcome = "uncertain" if row.dispatched else "setup_failed"
@@ -208,7 +243,7 @@ class CommandStore:
             input_files=len(saved.inputs),
             artifact_files=cast(int, result.get("artifact_files", 0)),
             artifacts_complete=bool(result.get("artifacts_complete", False)),
-            processes_reaped=row.result is not None,
+            processes_reaped=reaped,
             error_code=row.error_code,
             created_at=row.created_at.replace(tzinfo=UTC),
             updated_at=row.updated_at.replace(tzinfo=UTC),
@@ -436,6 +471,27 @@ class CommandStore:
             if len(values) != len(result.artifacts):
                 raise ServiceError("execution_artifact_invalid", "命令产物路径重复", 409)
             saved = self._snapshot(row)
+            usage = None
+            if result.tree_usage is not None:
+                usage = SandboxTreeUsage.model_validate(result.tree_usage.model_dump())
+                if (
+                    saved.limits.tree != usage.limits
+                    or result.started
+                    and not usage.membership_verified
+                ):
+                    raise ServiceError(
+                        "execution_tree_receipt", "整树回执未绑定原限额或进组资格", 409
+                    )
+            elif saved.limits.tree is not None and result.started:
+                raise ServiceError("execution_tree_receipt", "已启动树命令缺少原统计", 409)
+            if (
+                saved.limits.tree is not None
+                and result.status == "completed"
+                and (
+                    usage is None or usage.populated is not False or usage.leader_reaped is not True
+                )
+            ):
+                raise ServiceError("execution_tree_receipt", "未确认清空的树命令不能完成", 409)
             values = freeze_files(values, saved.limits)
             manifest = freeze_directory_manifest(
                 result.directories, set(values), saved.limits, complete=result.artifacts_complete
@@ -457,6 +513,9 @@ class CommandStore:
             }
             if manifest is not None:
                 payload["directory_manifest"] = manifest
+            if usage is not None:
+                payload["tree_usage"] = usage.model_dump(mode="json")
+                payload["tree_usage_hash"] = digest(payload["tree_usage"])
             if row.result is not None:
                 if row.result != payload:
                     raise ServiceError("execution_receipt_conflict", "原命令已有不同终态", 409)
@@ -496,6 +555,33 @@ class CommandStore:
             row = await self._row(session, scope, identifier)
             self._expire(session, row)
             return self._view(row)
+
+    async def resources(self, scope: str, identifier: str) -> CommandResourcesView:
+        async with self.database.write_lock, self.database.sessions.begin() as session:
+            await self._writer(session)
+            await self._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            self._expire(session, row)
+            saved = self._snapshot(row)
+            view = self._view(row)
+            return CommandResourcesView(
+                command_id=identifier,
+                revision=row.revision,
+                scope_id=row.scope_id,
+                topic_id=row.topic_id,
+                request_key=saved.request.request_key,
+                resource=saved.resource,
+                limits=saved.limits,
+                usage=self._tree_usage(saved, row.result),
+                run_id=row.run_id,
+                call_id=row.call_id,
+                phase=view.phase,
+                outcome=view.outcome,
+                dispatched=view.dispatched,
+                started=view.started,
+                processes_reaped=view.processes_reaped,
+                error_code=view.error_code,
+            )
 
     async def interrupt(self, scope: str, identifier: str, token: str) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:

@@ -1,8 +1,10 @@
 """Playwright 的本机 Python 服务；临时 SQLite、合作式慢 fake 流与测试 Key。"""
 
 import asyncio
+import atexit
 import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -251,6 +253,29 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     app.state.agents.register_execution(
         "sandbox", LinuxSandboxRunner(), version="browser-execution-v1", owned=True
     )
+    if os.environ.get("KRIM_TEST_EXECUTION_TREE") == "1":
+        from krim_agent.execution import CgroupRoot, SandboxLimits, SandboxTreeLimits
+
+        quota_root = CgroupRoot.prepare(
+            Path("/sys/fs/cgroup") / ("krim-agent-browser-" + uuid4().hex), remove_on_close=True
+        )
+        atexit.register(quota_root.close)
+        app.state.agents.register_execution(
+            "tree",
+            LinuxSandboxRunner(
+                limits=SandboxLimits(
+                    process_count=128,
+                    tree=SandboxTreeLimits(
+                        cpu_seconds=1.0,
+                        memory_bytes=134217728,
+                        process_count=8,
+                    ),
+                ),
+                cgroup_root=quota_root,
+            ),
+            version="browser-tree-v1",
+            owned=True,
+        )
     app.state.agents.register_tree_models()
     app.state.agents.register_tree_queries()
     app.state.agents.register_tree_moves()

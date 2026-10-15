@@ -25,6 +25,7 @@ from uuid import uuid4
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace import Workspace
 
+from .cgroups import CgroupLease, CgroupRoot
 from .directories import directory_metadata_limit
 from .models import (
     CommandSpec,
@@ -35,6 +36,7 @@ from .models import (
     SandboxFile,
     SandboxLimits,
 )
+from .tree_models import SandboxTreeUsage
 
 Authorize = Callable[[], Awaitable[None]]
 _current: contextvars.ContextVar[ExecutionHandle | None] = contextvars.ContextVar(
@@ -56,6 +58,24 @@ def _kill(pidfd: int) -> None:
         _syscall(424, pidfd, signal.SIGKILL, ctypes.c_void_p(), 0)
     except ProcessLookupError:
         pass
+
+
+def _reap_pidfd(pidfd: int) -> bool:
+    # 本机Python未导出P_PIDFD；Linux UAPI wait.h将其固定定义为3。
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            if os.waitid(3, pidfd, os.WEXITED | os.WNOHANG) is not None:
+                return True
+        except ChildProcessError:
+            pass
+        except InterruptedError:
+            continue
+        if "Pid:\t-1\n" in Path(f"/proc/self/fdinfo/{pidfd}").read_text():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def _child_pidfd(process: subprocess.Popen[bytes], status_fd: int, deadline: float) -> int:
@@ -168,6 +188,7 @@ class LinuxSandboxRunner:
         uid: int | None = None,
         gid: int | None = None,
         bubblewrap: str | Path = "/usr/bin/bwrap",
+        cgroup_root: str | Path | CgroupRoot | None = None,
     ) -> None:
         if not sys.platform.startswith("linux") or os.uname().machine not in {"x86_64", "aarch64"}:
             raise ServiceError("execution_platform", "当前平台尚未验证隔离执行", 503)
@@ -208,6 +229,28 @@ class LinuxSandboxRunner:
         except OSError:
             raise ServiceError("execution_pidfd", "内核进程句柄能力不可用", 503) from None
         self._broker_code = Path(__file__).with_name("_broker.py").read_bytes()
+        self._cgroup_owned = False
+        self._cgroup: CgroupRoot | None = None
+        self._launcher_code = b""
+        if (self.limits.tree is None) != (cgroup_root is None):
+            raise ServiceError(
+                "execution_tree_configuration", "树限额和可信cgroup根必须同时配置", 422
+            )
+        if cgroup_root is not None:
+            self._launcher_code = Path(__file__).with_name("_cgroup_launcher.py").read_bytes()
+            self._cgroup = (
+                cgroup_root if isinstance(cgroup_root, CgroupRoot) else CgroupRoot(cgroup_root)
+            )
+            self._cgroup.require()
+            self._cgroup_owned = not isinstance(cgroup_root, CgroupRoot)
+        tree_binding = (
+            ":cgroup-v2-v1:"
+            + self._cgroup.fingerprint
+            + ":"
+            + hashlib.sha256(self._launcher_code).hexdigest()
+            if self._cgroup is not None
+            else ""
+        )
         self._fingerprint = hashlib.sha256(
             (
                 self.version
@@ -215,6 +258,7 @@ class LinuxSandboxRunner:
                 + self.limits.model_dump_json()
                 + hashlib.sha256(self._broker_code).hexdigest()
                 + f":{self.uid}:{self.gid}:{max_active}:isolated-copy-v1"
+                + tree_binding
             ).encode()
         ).hexdigest()
         self._max_active = max_active
@@ -252,7 +296,7 @@ class LinuxSandboxRunner:
 
     @property
     def closed(self) -> bool:
-        return self._closed
+        return self._closed or self._cgroup is not None and self._cgroup.closed
 
     def _arguments(self, broker_fd: int, status_fd: int, gate_fd: int) -> list[str]:
         args = [
@@ -483,6 +527,9 @@ class LinuxSandboxRunner:
         pidfd: int | None = None
         child_fd: int | None = None
         pipe_fds: list[int] = []
+        tree: CgroupLease | None = None
+        tree_usage: SandboxTreeUsage | None = None
+        tree_failure: str | None = None
         selector = selectors.DefaultSelector()
         pending = memoryview(payload)
         try:
@@ -493,6 +540,9 @@ class LinuxSandboxRunner:
             if handle._cancel.is_set():
                 reason = "cancelled"
                 raise InterruptedError
+            if self._cgroup is not None:
+                assert self.limits.tree is not None
+                tree = self._cgroup.allocate(handle.execution_id, self.limits.tree)
             status_read, status_write = os.pipe()
             pipe_fds.extend((status_read, status_write))
             gate_read, gate_write = os.pipe()
@@ -507,24 +557,49 @@ class LinuxSandboxRunner:
                     if os.getuid() == 0
                     else {}
                 )
+                arguments = self._arguments(broker_fd, status_write, gate_read)
+                passed: tuple[int, ...] = (broker_fd, status_write, gate_read)
+                if tree is not None:
+                    join_fd = tree.open_join_fd()
+                    pipe_fds.append(join_fd)
+                    passed = (*passed, join_fd)
+                    arguments = [
+                        "/usr/bin/python3",
+                        "-I",
+                        "-S",
+                        "-c",
+                        self._launcher_code.decode(),
+                        str(os.getpid()),
+                        str(self.uid),
+                        str(self.gid),
+                        str(join_fd),
+                        *arguments,
+                    ]
+                    # 启动器只先给自己入组，再降权；不用线程不安全的Python preexec_fn。
+                    options = {}
                 process = subprocess.Popen(
-                    self._arguments(broker_fd, status_write, gate_read),
+                    arguments,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd="/",
                     env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
                     close_fds=True,
-                    pass_fds=(broker_fd, status_write, gate_read),
+                    pass_fds=passed,
                     start_new_session=True,
                     **options,
                 )
                 # Popen尚未poll/wait，退出子进程仍为僵尸，PID不会在取得pidfd前复用。
                 pidfd = _syscall(434, process.pid, 0)
+                if tree is not None:
+                    os.close(join_fd)
+                    pipe_fds.remove(join_fd)
             for fd in (status_write, gate_read):
                 os.close(fd)
                 pipe_fds.remove(fd)
             child_fd = _child_pidfd(process, status_read, deadline)
+            if tree is not None:
+                tree.verify_membership(process.pid)
             if handle._cancel.is_set():
                 reason = "cancelled"
                 raise InterruptedError
@@ -557,6 +632,13 @@ class LinuxSandboxRunner:
                 if reason is None and now >= deadline:
                     reason = "timed_out"
                     _kill(child_fd)
+                if tree is not None and tree_failure is None:
+                    try:
+                        tree_failure = tree.violation()
+                    except (OSError, ValueError, ServiceError):
+                        tree_failure = "execution_tree_observation"
+                    if tree_failure is not None:
+                        tree.stop()
                 for key, _ in selector.select(0.05):
                     if key.data == "exit":
                         process_exited = True
@@ -597,11 +679,17 @@ class LinuxSandboxRunner:
                             if ready or value.get("uid") != self.uid or pending:
                                 raise ValueError("ready")
                             ready = True
+                            if tree is not None:
+                                tree.verify_limits()
                             guard(deadline, True)
                             if reason or handle._cancel.is_set():
                                 reason = reason or "cancelled"
                                 _kill(child_fd)
                                 continue
+                            if tree is not None:
+                                tree.verify_limits()
+                                if tree_failure is not None:
+                                    continue
                             dispatched = True
                             pending = memoryview(b"run\n")
                             selector.register(process.stdin, selectors.EVENT_WRITE, "input")
@@ -726,6 +814,12 @@ class LinuxSandboxRunner:
         except Exception:
             failure = "execution_protocol_failed"
         finally:
+            if tree is not None:
+                try:
+                    tree_failure = tree_failure or tree.violation()
+                    tree.stop()
+                except (OSError, ValueError, ServiceError):
+                    tree_failure = tree_failure or "execution_tree_observation"
             if process is not None:
                 if child_fd is not None:
                     # 保留外层bubblewrap回收leader，宿主为subreaper时也不留下僵尸。
@@ -741,6 +835,20 @@ class LinuxSandboxRunner:
                 for cleanup_pipe in (process.stdout, process.stderr):
                     if cleanup_pipe is not None:
                         cleanup_pipe.close()
+            if tree is not None:
+                tree_usage = tree.finish()
+                if tree_usage.populated is not False:
+                    tree_failure = "execution_tree_cleanup"
+                if child_fd is not None:
+                    # 整组OOM/kill也会结束外层bwrap；只核实/回收这个原pidfd的leader。
+                    reaped = _reap_pidfd(child_fd)
+                else:
+                    reaped = process is None or (
+                        tree_usage.tasks_peak is not None and tree_usage.tasks_peak <= 1
+                    )
+                tree_usage = tree_usage.model_copy(update={"leader_reaped": reaped})
+                if not reaped:
+                    tree_failure = "execution_tree_cleanup"
             selector.close()
             if pidfd is not None:
                 os.close(pidfd)
@@ -752,7 +860,24 @@ class LinuxSandboxRunner:
         if reason is not None:
             status = reason
             complete = False
-            failure = "execution_cancelled" if reason == "cancelled" else "execution_timeout"
+            failure = (
+                "execution_tree_cleanup"
+                if tree_failure == "execution_tree_cleanup"
+                else "execution_cancelled"
+                if reason == "cancelled"
+                else "execution_timeout"
+            )
+        elif tree_failure is not None:
+            failure = tree_failure
+            status = (
+                "uncertain"
+                if tree_failure in {"execution_tree_cleanup", "execution_tree_observation"}
+                and dispatched
+                else "failed"
+                if dispatched
+                else "setup_failed"
+            )
+            complete = False
         elif failure:
             status = "uncertain" if dispatched else "setup_failed"
             complete = False
@@ -781,6 +906,7 @@ class LinuxSandboxRunner:
             tuple(sorted(directories, key=lambda item: item.path))
             if exit_code is not None
             else None,
+            tree_usage,
         )
 
     async def close(self) -> None:
@@ -796,6 +922,8 @@ class LinuxSandboxRunner:
             await asyncio.gather(*(handle.wait() for handle in handles), return_exceptions=True)
 
         await _settle(asyncio.create_task(drain()))
+        if self._cgroup_owned and self._cgroup is not None:
+            await asyncio.to_thread(self._cgroup.close)
 
     async def __aenter__(self) -> LinuxSandboxRunner:
         return self

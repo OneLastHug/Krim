@@ -4,6 +4,23 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "命令资源回程与原事实不一致": "Command resource response does not match original facts",
+    "命令资源限额与用量": "Command resource limits and usage",
+    "原资源仅有逐进程与UID限额": "Original resource has per-process and UID limits",
+    "整树累计CPU预算（秒）": "Process tree CPU budget (seconds)",
+    "整树内存上限（字节）": "Process tree memory limit (bytes)",
+    "整树进程线程上限": "Process tree task limit",
+    "包含启动准备、监督器和全部后代；CPU预算按内核合计用量采样收束。": (
+        "Includes setup, supervisors and descendants; CPU stops use sampled kernel total usage."
+    ),
+    "整树用量尚未收束": "Process tree usage is still pending",
+    "用量未确认": "Usage not confirmed",
+    "整树累计CPU用量（微秒）": "Process tree CPU usage (microseconds)",
+    "整树内存峰值（字节）": "Process tree peak memory (bytes)",
+    "整树进程线程峰值": "Process tree peak tasks",
+    "整树内存终止计数": "Process tree OOM kill count",
+    "整树进程限额拒绝计数": "Process tree task limit rejection count",
+    "整树回收已确认": "Process tree cleanup confirmed",
     "恢复前备份格式": "Backup capture format before restore",
     "字节目标自动使用字节备份；文本目标当前含二进制时请明确选择字节备份。": (
         "Byte targets use byte backups; explicitly select a byte backup when restoring "
