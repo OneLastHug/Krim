@@ -250,16 +250,12 @@ class WorkspaceEditStore:
         self.max_snapshot_bytes = max_snapshot_bytes
 
     async def _writer(self, session: AsyncSession) -> None:
-        # 首条SQL写语句取得SQLite写锁；跨连接不能依赖asyncio锁。
+        # 原INSERT冲突不改行仍取得SQLite写事务；跨连接不能依赖asyncio锁。
+        # 加锁记录不充当租约，避免额外更新时间令原事实查询也产生脏页和提交同步。
         await session.execute(
             insert(WorkspaceLedgerGuardRow)
             .values(guard_id="ledger", updated_at=utc_now())
             .on_conflict_do_nothing()
-        )
-        await session.execute(
-            update(WorkspaceLedgerGuardRow)
-            .where(WorkspaceLedgerGuardRow.guard_id == "ledger")
-            .values(updated_at=utc_now())
         )
 
     async def _scope(

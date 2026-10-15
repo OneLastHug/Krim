@@ -12,7 +12,7 @@ from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue, ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,14 +103,10 @@ class CommandStore:
 
     @staticmethod
     async def _writer(session: AsyncSession) -> None:
-        # 首条SQL取得SQLite写锁；覆盖两Database实例和真正独立进程的准入竞争。
+        # 原INSERT即使冲突不改行仍取得SQLite写锁，不能换成先SELECT或进程内锁。
+        # 额外递增加锁记录会让纯资格/历史查询也写盘；实际业务变更仍由原事务提交。
         await session.execute(
             insert(CommandGuardRow).values(id=1, revision=0).on_conflict_do_nothing()
-        )
-        await session.execute(
-            update(CommandGuardRow)
-            .where(CommandGuardRow.id == 1)
-            .values(revision=CommandGuardRow.revision + 1)
         )
 
     async def _scope(

@@ -167,7 +167,12 @@ async def main():
         assert await service.restore_persistent() == 1
         agent = AgentSession(service, metadata["agent_id"])
         assert "session:" + agent.session_id == metadata["scope"]
-        assert await store.recover_interrupted() == 1
+        # 公共恢复已收束原过期操作；先直接核实SQL，不能靠查询再次过期掩盖断口。
+        async with store.database.sessions() as sql:
+            recovered = await sql.get(WorkspaceTreeExchangeAttemptRow, metadata["operation_id"])
+            assert recovered.status == "uncertain"
+            assert recovered.owner_id is None and recovered.lease_expires_at is None
+        assert await store.recover_interrupted() == 0
         operation = await store.operation(metadata["scope"], metadata["operation_id"])
         assert operation.view.status == "uncertain" and operation.intent_recorded
         assert operation.prepared.left.fingerprint == metadata["left_before"]
