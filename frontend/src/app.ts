@@ -138,6 +138,7 @@ const agentsUI: AgentsUI = new AgentsUI($("agents"), {
   destroy: async agent => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}`, { method: "DELETE" }); state.handles = state.handles.filter(item => item.agent_id !== agent.agent_id); renderAgents(); },
   control: async (agent, action) => { await requestJson(`/v1/agents/${encodeURIComponent(agent.agent_id)}/session/${action}`, { method: "POST", body: JSON.stringify({ expected_revision: agent.session.revision }) }); await loadAgents(); },
   openTopic: loadTopic, openCheckpoints: agentId => checkpointUI.selectWorkspace(agentId),
+  openDirectoryCheckpoints: agentId => checkpointUI.selectWorkspace(agentId, "directory"),
   prompt: () => text("agent-prompt").value.trim(), notice: showNotice, status: localStatus,
 });
 const mcpUI = new MCPUI($("mcp-resources"), showNotice, loadAgents);

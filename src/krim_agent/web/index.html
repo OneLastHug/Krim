@@ -91,6 +91,7 @@
           <div class="actions"><button id="checkpoint-refresh" class="secondary" type="button" data-i18n="刷新快照">刷新快照</button><button id="checkpoint-create" class="secondary" type="button" data-i18n="创建快照">创建快照</button></div>
           <p id="checkpoint-status" role="status"></p><div id="checkpoint-items" class="stack"></div>
           </div>
+          <div id="checkpoint-workspace-kind" class="actions" hidden><label for="checkpoint-kind" data-i18n="检查点范围">检查点范围</label><select id="checkpoint-kind"><option value="files" data-i18n="文件检查点">文件检查点</option><option value="directory" data-i18n="完整目录检查点">完整目录检查点</option></select></div>
           <section id="checkpoint-native" hidden aria-label="文件检查点" data-i18n-aria-label="文件检查点">
             <div class="workspace-editor"><label for="native-checkpoint-title" data-i18n="快照名称">快照名称</label><input id="native-checkpoint-title" maxlength="120" />
               <label for="native-checkpoint-paths" data-i18n="检查点文件路径（每行一个，最多32个）">检查点文件路径（每行一个，最多32个）</label><textarea id="native-checkpoint-paths" rows="3" maxlength="16416"></textarea>
@@ -108,6 +109,19 @@
             <div class="actions"><button id="native-checkpoint-preview" type="button" data-i18n="预览恢复检查点">预览恢复检查点</button><button id="native-checkpoint-wait" type="button" data-i18n="等待检查点捕获">等待检查点捕获</button><button id="native-checkpoint-cancel" type="button" data-i18n="取消检查点捕获">取消检查点捕获</button></div>
             <section id="native-restore-detail" class="checkpoint-detail"></section>
             <div class="actions"><button id="native-restore-execute" type="button" data-i18n="执行已审阅的恢复">执行已审阅的恢复</button><button id="native-restore-wait" type="button" data-i18n="等待恢复计划">等待恢复计划</button><button id="native-restore-cancel" type="button" data-i18n="取消恢复计划">取消恢复计划</button></div>
+          </section>
+          <section id="checkpoint-directory" hidden aria-label="完整目录检查点" data-i18n-aria-label="完整目录检查点">
+            <p data-i18n="捕获授权目录的完整文件字节与结构，历史只显示摘要和规模。">捕获授权目录的完整文件字节与结构，历史只显示摘要和规模。</p>
+            <div class="workspace-editor"><label for="directory-checkpoint-title" data-i18n="快照名称">快照名称</label><input id="directory-checkpoint-title" maxlength="120" />
+              <label for="directory-checkpoint-path" data-i18n="目录相对路径">目录相对路径</label><input id="directory-checkpoint-path" maxlength="512" />
+              <div class="actions"><button id="directory-checkpoint-create" type="button" data-i18n="保存目录检查点">保存目录检查点</button><button id="directory-checkpoint-refresh" type="button" data-i18n="刷新目录检查点历史">刷新目录检查点历史</button></div></div>
+            <p id="directory-checkpoint-status" role="status"></p>
+            <h3 data-i18n="目录检查点历史">目录检查点历史</h3><p id="directory-checkpoint-page"></p><div id="directory-checkpoint-items" class="stack"></div>
+            <div class="actions"><button id="directory-checkpoint-prev" type="button" data-i18n="较新检查点">较新检查点</button><button id="directory-checkpoint-next" type="button" data-i18n="较早检查点">较早检查点</button></div>
+            <label for="directory-checkpoint-query" data-i18n="目录检查点标识或原请求键">目录检查点标识或原请求键</label><input id="directory-checkpoint-query" maxlength="128" />
+            <div class="actions"><button id="directory-checkpoint-by-id" type="button" data-i18n="按标识查询">按标识查询</button><button id="directory-checkpoint-by-key" type="button" data-i18n="按原键找回">按原键找回</button><button id="directory-checkpoint-pending" type="button" data-i18n="查询未确认请求">查询未确认请求</button></div>
+            <section id="directory-checkpoint-detail" class="checkpoint-detail"></section>
+            <div class="actions"><button id="directory-checkpoint-wait" type="button" data-i18n="等待目录捕获">等待目录捕获</button><button id="directory-checkpoint-cancel" type="button" data-i18n="取消目录捕获">取消目录捕获</button></div>
           </section>
         </details>
         <details class="workflow-panel">

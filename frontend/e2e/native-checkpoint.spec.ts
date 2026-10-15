@@ -43,7 +43,15 @@ async function capture(page: Page, paths: string, title = "保存的文件版本
 async function preview(page: Page): Promise<string> {
   await expect(page.locator("#native-checkpoint-preview")).toBeEnabled();
   await page.locator("#native-checkpoint-preview").click();
-  await expect(detail(page)).toHaveAttribute("data-restore-phase", "ready");
+  try { await expect(detail(page)).toHaveAttribute("data-restore-phase", "ready"); }
+  catch (error) {
+    const id = await detail(page).getAttribute("data-plan-id"), agentId = await page.locator("#checkpoint-source").inputValue();
+    if (id) {
+      const result = await page.request.get(`/v1/agents/${agentId}/workspace/native-restores/${id}`, { headers });
+      await test.info().attach("restore-original-fact-after-timeout", { body: await result.body(), contentType: "application/json" });
+    }
+    throw error;
+  }
   return (await detail(page).getAttribute("data-plan-id"))!;
 }
 async function execute(page: Page, approve = true): Promise<void> {

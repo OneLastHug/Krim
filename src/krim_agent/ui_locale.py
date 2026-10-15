@@ -4,6 +4,52 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "查看目录检查点": "View directory checkpoints",
+    "检查点范围": "Checkpoint scope",
+    "完整目录检查点": "Complete directory checkpoints",
+    "目录检查点": "Directory checkpoint",
+    "目录路径": "Directory path",
+    "创建时间": "Created at",
+    "更新时间": "Updated at",
+    "会话作用域": "Session scope",
+    "工作区标识": "Workspace key",
+    "工作区资源指纹": "Workspace resource fingerprint",
+    "完整目录摘要": "Complete directory fingerprint",
+    "目录节点数": "Directory entry count",
+    "目录数量": "Directory count",
+    "文件数量": "File count",
+    "文件总字节": "Total file bytes",
+    "捕获材料状态": "Captured material status",
+    "目录检查点历史": "Directory checkpoint history",
+    "保存目录检查点": "Save directory checkpoint",
+    "刷新目录检查点历史": "Refresh directory checkpoint history",
+    "目录检查点标识或原请求键": "Directory checkpoint ID or original request key",
+    "目录捕获中": "Capturing directory",
+    "目录检查点可用": "Directory checkpoint available",
+    "目录捕获失败": "Directory capture failed",
+    "目录捕获已取消": "Directory capture cancelled",
+    "目录捕获已中断": "Directory capture interrupted",
+    "等待目录捕获": "Wait for directory capture",
+    "取消目录捕获": "Cancel directory capture",
+    "正在读取目录检查点历史": "Loading directory checkpoint history",
+    "当前会话只能查询目录检查点历史": "This session can only read directory checkpoint history",
+    "目录捕获恢复记录不可用，新建已停用": (
+        "Directory capture recovery is unavailable; creation is disabled"
+    ),
+    "目录捕获请求无效": "Invalid directory capture request",
+    "目录检查点回程与原事实不一致": "Directory checkpoint response does not match original facts",
+    "原目录捕获请求尚未确认，请按原键继续查询": (
+        "Directory capture is not confirmed; keep querying the original key"
+    ),
+    "原目录捕获请求未被接受": "The original directory capture request was not accepted",
+    "未找到目录检查点": "Directory checkpoint not found",
+    "工作区资源授权无效": "Invalid workspace resource grant",
+    "已保存材料不表示捕获成功": "Stored material does not mean the capture succeeded",
+    "检查点历史第{page}页": "Checkpoint history page {page}",
+    "捕获授权目录的完整文件字节与结构，历史只显示摘要和规模。": (
+        "Capture complete file bytes and structure in an authorized directory; "
+        "history shows only fingerprints and sizes."
+    ),
     "命令资源回程与原事实不一致": "Command resource response does not match original facts",
     "命令资源限额与用量": "Command resource limits and usage",
     "原资源仅有逐进程与UID限额": "Original resource has per-process and UID limits",

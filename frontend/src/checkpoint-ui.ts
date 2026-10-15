@@ -3,6 +3,7 @@ import { errorText, requestJson, type AgentView } from "./api.js";
 import type { HostJson } from "./host.js";
 import { t } from "./i18n.js";
 import { NativeCheckpointUI } from "./native-checkpoint-ui.js";
+import { DirectoryCheckpointUI } from "./directory-checkpoint-ui.js";
 
 type Checkpoint = { id: string; title: string; metadata: Record<string, HostJson>; snapshot_ref: HostJson; status: "creating" | "available" | "rolling_back" | "rolled_back" | "failed" | "uncertain" };
 type Catalog = { topic_id: string; revision: number; active_operation_id: string | null; checkpoints: Checkpoint[] };
@@ -21,29 +22,37 @@ export class CheckpointUI {
   private sources: AgentView[] = [];
   private sourceSignature = "";
   private native: NativeCheckpointUI;
+  private directory: DirectoryCheckpointUI;
+  private kind: "files" | "directory" = "files";
   constructor(
     private readonly notice: (message: string, error?: boolean) => void,
     private readonly request: (channel: string, data: HostJson) => Promise<HostJson>,
     openProposal: (agentId: string, proposalId: string, operationId?: string) => Promise<void>,
   ) {
     this.native = new NativeCheckpointUI(notice, openProposal);
+    this.directory = new DirectoryCheckpointUI(notice);
     node("checkpoint-refresh").onclick = () => void this.load();
     node("checkpoint-create").onclick = () => void this.create();
     (node("checkpoint-source") as HTMLSelectElement).onchange = () => void this.switchSource((node("checkpoint-source") as HTMLSelectElement).value);
-    node("checkpoint-panel").ontoggle = () => this.native.toggled();
+    (node("checkpoint-kind") as HTMLSelectElement).onchange = () => {
+      this.kind = (node("checkpoint-kind") as HTMLSelectElement).value === "directory" ? "directory" : "files";
+      void this.switchSource(this.source);
+    };
+    node("checkpoint-panel").ontoggle = () => { this.native.toggled(); this.directory.toggled(); };
     this.renderSources(); this.render();
   }
   setSession(id: string): void { this.sessionId = id; this.render(); }
-  refreshLocale(): void { this.sourceSignature = ""; this.renderSources(); this.render(); this.native.refreshLocale(); }
+  refreshLocale(): void { this.sourceSignature = ""; this.renderSources(); this.render(); this.native.refreshLocale(); this.directory.refreshLocale(); }
   setWorkspaceSources(agents: AgentView[]): void {
     this.sources = agents.filter(agent => Boolean(agent.session.permissions.workspace));
     this.native.setSources(this.sources);
+    this.directory.setSources(this.sources);
     if (this.source !== "host" && !this.sources.some(agent => agent.agent_id === this.source)) void this.switchSource("host");
     this.renderSources();
   }
-  async selectWorkspace(id: string): Promise<void> {
+  async selectWorkspace(id: string, kind: "files" | "directory" = "files"): Promise<void> {
     if (!this.sources.some(agent => agent.agent_id === id)) throw new Error(t("工作区资源已停用或关闭"));
-    (node("checkpoint-panel") as HTMLDetailsElement).open = true;
+    this.kind = kind; (node("checkpoint-panel") as HTMLDetailsElement).open = true;
     await this.switchSource(id); node("checkpoint-panel").scrollIntoView({ block: "nearest" });
   }
   beginTopic(id: string): void {
@@ -53,7 +62,9 @@ export class CheckpointUI {
   async selectTopic(id: string): Promise<void> { this.beginTopic(id); if (this.source === "host") await this.load(); }
   private async switchSource(source: string): Promise<void> {
     this.generation += 1; this.source = source; this.renderSources(); this.render();
-    if (source === "host") { this.native.deactivate(); await this.load(); }
+    this.native.deactivate(); this.directory.deactivate();
+    if (source === "host") await this.load();
+    else if (this.kind === "directory") await this.directory.select(source);
     else await this.native.select(source);
   }
   private renderSources(): void {
@@ -104,7 +115,11 @@ export class CheckpointUI {
     finally { this.pendingTopics.delete(topicId); this.render(); if (this.current(topicId, generation)) await this.load(); }
   }
   private render(): void {
-    node("checkpoint-host").hidden = this.source !== "host"; node("checkpoint-native").hidden = this.source === "host";
+    node("checkpoint-host").hidden = this.source !== "host";
+    node("checkpoint-native").hidden = this.source === "host" || this.kind !== "files";
+    node("checkpoint-directory").hidden = this.source === "host" || this.kind !== "directory";
+    node("checkpoint-workspace-kind").hidden = this.source === "host";
+    (node("checkpoint-kind") as HTMLSelectElement).value = this.kind;
     const root = node("checkpoint-items"); root.replaceChildren();
     const busy = this.pendingTopics.has(this.topicId || "") || !!this.catalog?.active_operation_id;
     node("checkpoint-status").textContent = this.catalog?.checkpoints.some((item) => item.status === "uncertain") ? t("结果待宿主核实") : this.catalog?.active_operation_id ? t("Checkpoint 操作处理中") : !this.sessionId ? t("连接宿主后可创建或回滚快照") : !this.catalog?.checkpoints.length ? t("暂无资源快照") : "";
