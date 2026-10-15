@@ -322,6 +322,7 @@ def create_app(
     tree_exchanges_enabled: bool = False,
     generated_tree_undos_enabled: bool = False,
     checkpoint_bytes_enabled: bool = False,
+    checkpoint_controls_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
     execution_version: str = "local-v1",
     execution_owned: bool = False,
@@ -363,6 +364,8 @@ def create_app(
         agent_service.register_generated_tree_undos()
     if checkpoint_bytes_enabled:
         agent_service.register_checkpoint_bytes()
+    if checkpoint_controls_enabled:
+        agent_service.register_checkpoint_controls()
 
     def mcp_ready(names: list[str], resource_hash: str) -> None:
         for name in names:

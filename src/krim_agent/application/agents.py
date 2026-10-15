@@ -35,6 +35,7 @@ from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
 from krim_agent.application.workspace_mixed_batches import MixedBatchService
+from krim_agent.application.workspace_model_checkpoints import ModelCheckpointService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
 from krim_agent.config import Settings
@@ -317,6 +318,7 @@ class AgentService:
             require_bytes=self._workspace_checkpoint_bytes_authorize,
         )
         self.workspace_restore_store = WorkspaceRestoreStore(self.workspace_edits)
+        self.model_checkpoints = ModelCheckpointService(self.workspace_checkpoints)
         self.workspace_restores = WorkspaceRestoreService(
             self.workspace_restore_store,
             self.workspace_checkpoints,
@@ -692,6 +694,19 @@ class AgentService:
         for definition in definitions:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
+
+    def register_checkpoint_controls(self) -> None:
+        from krim_agent.tools.workspace_checkpoints import checkpoint_control_tools
+
+        definitions = checkpoint_control_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型检查点控制工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+        self.manager.workspace_checkpoints = self.workspace_checkpoints
+        self.manager.workspace_checkpoint_controls = self.model_checkpoints
 
     def register_tree_moves(self) -> None:
         """显式启用非空树工具；全量冲突检查，不扩大既有Agent冻结集合。"""
@@ -2357,6 +2372,7 @@ class AgentService:
         )
 
     async def close_session(self, agent_id: str, expected_revision: int) -> AgentSessionView:
+        self.model_checkpoints.assert_external_close()
         try:
             return await self._handle(agent_id).close_session(expected_revision)
         except AgentError as error:
@@ -2539,6 +2555,7 @@ class AgentService:
         return value
 
     async def stop(self, agent_id: str) -> AgentView:
+        self.model_checkpoints.assert_external_close()
         handle = self._handle(agent_id)
         background = self._tasks.get(agent_id)
         if (
@@ -2556,6 +2573,7 @@ class AgentService:
         return await self.view(handle)
 
     async def destroy(self, agent_id: str) -> AgentView:
+        self.model_checkpoints.assert_external_close()
         handle = self._handle(agent_id)
         try:
             await handle.destroy()
@@ -2582,6 +2600,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.model_checkpoints.assert_external_close()
         self.manager.tree_exchanges.assert_external_close()
         self.manager.tree_moves.assert_external_close()
         self.assert_external_command_control()
@@ -2600,6 +2619,7 @@ class AgentService:
                     task.cancel()
             await asyncio.gather(*(entry[2] for entry in launches), return_exceptions=True)
             await self.workspace_restores.close()
+            await self.model_checkpoints.close()
             await self.workspace_checkpoints.close()
             await self.workspace_batches.close()
             await self.workspace_mixed_batches.close()

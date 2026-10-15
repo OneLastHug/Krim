@@ -742,4 +742,4 @@ async def test_migration_refuses_nonempty_batch_loss(ledger):
     async with ledger.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0049_checkpoint_restore_bytes"
+        ).scalar_one() == "0050_native_checkpoint_models"

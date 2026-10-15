@@ -1325,6 +1325,7 @@ class NativeWorkspaceCheckpointRow(Base):
         CheckConstraint(
             "capture_format IN ('text','bytes')", name="ck_native_checkpoint_capture_format"
         ),
+        CheckConstraint("model_bound IN (0,1)", name="ck_native_checkpoint_model_bound"),
         CheckConstraint(
             "status IN ('capturing','available','failed','cancelled','interrupted')",
             name="ck_native_checkpoint_status",
@@ -1345,6 +1346,7 @@ class NativeWorkspaceCheckpointRow(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(String(120))
     capture_format: Mapped[str] = mapped_column(String(8), default="text", server_default="text")
+    model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     status: Mapped[str] = mapped_column(String(16))
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -1352,6 +1354,19 @@ class NativeWorkspaceCheckpointRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class NativeCheckpointModelSourceRow(Base):
+    __tablename__ = "native_checkpoint_model_sources"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_native_checkpoint_model_call"),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_native_checkpoint_call"),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("native_workspace_checkpoints.checkpoint_id"), primary_key=True
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    call_id: Mapped[str] = mapped_column(String(128))
 
 
 class NativeWorkspaceCheckpointFileRow(Base):

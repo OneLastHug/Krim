@@ -212,8 +212,15 @@ class CapturedFileMetadata(StrictModel):
 
 
 @dataclass(frozen=True)
+class CheckpointModelSource:
+    run_id: str
+    call_id: str
+
+
+@dataclass(frozen=True)
 class CheckpointCaptureFence:
     checkpoint_id: str
     position: int
     token: str
     capture_format: CheckpointCaptureFormat = "text"
+    model_source: CheckpointModelSource | None = None

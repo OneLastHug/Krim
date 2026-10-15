@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any
 
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
@@ -15,6 +16,7 @@ from krim_agent.workspace_checkpoint import (
     CheckpointCaptureFence,
     CheckpointCaptureInput,
     CheckpointCaptureView,
+    CheckpointModelSource,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointView,
     checkpoint_content_kind,
@@ -31,6 +33,14 @@ from .workspace_execution import (
 CaptureGuard = Callable[[str], Awaitable[tuple[str, WorkspaceBinding]]]
 CaptureRead = Callable[[str, str, CheckpointCaptureFence, bool], Awaitable[object]]
 CaptureBytesGuard = Callable[[str], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class CheckpointInvocation:
+    source: CheckpointModelSource
+    authorize: CaptureGuard
+    read: CaptureRead
+    qualify: Callable[[], None] | None = None
 
 
 class WorkspaceCheckpointService:
@@ -62,9 +72,14 @@ class WorkspaceCheckpointService:
         )
 
     async def _create(
-        self, agent_id: str, request: WorkspaceCheckpointCreate, confirmed: bool
+        self,
+        agent_id: str,
+        request: WorkspaceCheckpointCreate,
+        confirmed: bool,
+        invocation: CheckpointInvocation | None = None,
     ) -> WorkspaceCheckpointView:
-        scope, binding = await self.authorize(agent_id)
+        authority = invocation.authorize if invocation is not None else self.authorize
+        scope, binding = await authority(agent_id)
         if request.capture_format == "bytes":
             if self.require_bytes is None:
                 raise ServiceError(
@@ -79,15 +94,34 @@ class WorkspaceCheckpointService:
                 and await self.store.by_key(scope, request.request_key) is None
             ):
                 raise ServiceError("workspace_checkpoint_busy", "检查点并发已达上限", 429)
-            view, created = await self.store.reserve(
-                scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
-            )
+            if invocation is None:
+                view, created = await self.store.reserve(
+                    scope, request, binding.key, binding.fingerprint, binding.workspace.fingerprint
+                )
+            else:
+                view, created = await self.store.reserve(
+                    scope,
+                    request,
+                    binding.key,
+                    binding.fingerprint,
+                    binding.workspace.fingerprint,
+                    model_source=invocation.source,
+                    authorize=invocation.qualify,
+                )
             if not created:
                 return view
             identifier = view.checkpoint_id
             fences = await self.store.execution(scope, identifier)
             task = asyncio.create_task(
-                self._run(agent_id, scope, view.model_copy(deep=True), fences, binding, confirmed)
+                self._run(
+                    agent_id,
+                    scope,
+                    view.model_copy(deep=True),
+                    fences,
+                    binding,
+                    confirmed,
+                    invocation,
+                )
             )
             self._tasks[identifier] = (scope, task)
 
@@ -99,12 +133,28 @@ class WorkspaceCheckpointService:
             task.add_done_callback(done)
             return view
 
+    async def create_model(
+        self, agent_id: str, request: WorkspaceCheckpointCreate, invocation: CheckpointInvocation
+    ) -> WorkspaceCheckpointView:
+        request = WorkspaceCheckpointCreate.model_validate(request.model_dump())
+        return await _wait(
+            asyncio.create_task(self._create(agent_id, request, False, invocation)), lambda: None
+        )
+
     async def _renew(
-        self, scope: str, fence: CheckpointCaptureFence, worker: asyncio.Task[None]
+        self,
+        scope: str,
+        fence: CheckpointCaptureFence,
+        worker: asyncio.Task[None],
+        invocation: CheckpointInvocation | None = None,
+        agent_id: str | None = None,
     ) -> None:
         try:
             while True:
                 await asyncio.sleep(max(0.02, min(0.2, self.store.lease_seconds / 4)))
+                if invocation is not None:
+                    assert agent_id is not None
+                    await invocation.authorize(agent_id)
                 await self.store.renew(scope, fence)
         except asyncio.CancelledError:
             raise
@@ -142,6 +192,7 @@ class WorkspaceCheckpointService:
         try:
             if self._closed or context.checkpoint_capture is None:
                 raise ServiceError("workspace_checkpoint_closed", "捕获上下文不可用", 503)
+            self.capture_identity(context)
             if context.checkpoint_capture.capture_format != "text":
                 raise ServiceError(
                     "workspace_checkpoint_context", "字节捕获不能使用UTF-8读取工具", 403
@@ -163,7 +214,12 @@ class WorkspaceCheckpointService:
                 authorize=self._callback(check),
             )
             await check()
-            await self.store.record(scope, fence, capture)
+            if fence.model_source is None:
+                await self.store.record(scope, fence, capture)
+            else:
+                await self.store.record(
+                    scope, fence, capture, authorize=lambda: self.capture_budget(context)
+                )
             if capture.snapshot is None:
                 raise ServiceError("workspace_not_found", "工作区条目不存在", 404)
             return binding.workspace.file_view(
@@ -171,6 +227,35 @@ class WorkspaceCheckpointService:
             ).model_dump(mode="json")
         except ServiceError as error:
             raise ToolError(error.code, str(error)) from error
+
+    @staticmethod
+    def capture_identity(context: ToolContext) -> None:
+        fence = context.checkpoint_capture
+        if fence is None:
+            raise ServiceError("workspace_checkpoint_context", "缺少原内部捕获围栏", 403)
+        source = fence.model_source
+        if source is None:
+            valid = context.origin == "host" and context.run_id == "local"
+        else:
+            valid = (
+                context.origin == "model"
+                and context.run_id == source.run_id
+                and context.source_call_id == source.call_id
+            )
+        if not valid:
+            raise ServiceError("workspace_checkpoint_context", "捕获未保留原父调用来源", 403)
+
+    @staticmethod
+    def capture_budget(context: ToolContext) -> None:
+        WorkspaceCheckpointService.capture_identity(context)
+        for budget in context.execution_timeouts:
+            when = budget.deadline.when()
+            if (
+                not budget.active
+                or budget.deadline.expired()
+                or (when is not None and asyncio.get_running_loop().time() >= when)
+            ):
+                raise ServiceError("tool_timeout", "捕获原调用预算已结束", 408)
 
     @staticmethod
     def _capture_view(capture: CapturedFile) -> CheckpointCaptureView:
@@ -192,13 +277,12 @@ class WorkspaceCheckpointService:
             self._closed
             or fence is None
             or fence.capture_format != "bytes"
-            or context.origin != "host"
-            or context.run_id != "local"
             or context.command_capture is not None
             or context.checkpoint_restore is not None
             or context.workspace_checkpoints is not self
         ):
             raise ServiceError("workspace_checkpoint_context", "字节捕获需要原私有捕获上下文", 403)
+        self.capture_identity(context)
         request = CheckpointCaptureInput.model_validate(payload)
         scope, binding = await self.changes._guard(context)
         await self.store.assert_capture(scope, fence, request.path)
@@ -234,7 +318,12 @@ class WorkspaceCheckpointService:
             await check()
             if capture.snapshot is not None and capture.snapshot.mode & ~0o777:
                 raise ServiceError("workspace_checkpoint_mode", "字节捕获不支持特殊权限位", 409)
-            await self.store.record(scope, fence, capture)
+            if fence.model_source is None:
+                await self.store.record(scope, fence, capture)
+            else:
+                await self.store.record(
+                    scope, fence, capture, authorize=lambda: self.capture_budget(context)
+                )
             return self._capture_view(capture).model_dump(mode="json")
         except ServiceError as error:
             raise ToolError(error.code, str(error)) from error
@@ -262,15 +351,18 @@ class WorkspaceCheckpointService:
         fences: tuple[CheckpointCaptureFence, ...],
         binding: WorkspaceBinding,
         confirmed: bool,
+        invocation: CheckpointInvocation | None = None,
     ) -> None:
         worker = asyncio.current_task()
         assert worker is not None
         marker = enter_workspace_execution(self._tasks, view.checkpoint_id)
-        renew = asyncio.create_task(self._renew(scope, fences[0], worker))
+        renew = asyncio.create_task(self._renew(scope, fences[0], worker, invocation, agent_id))
+        read = invocation.read if invocation is not None else self.read
+        authority = invocation.authorize if invocation is not None else self.authorize
         try:
             for entry, fence in zip(view.files, fences, strict=True):
                 try:
-                    await self.read(agent_id, entry.path, fence, confirmed)
+                    await read(agent_id, entry.path, fence, confirmed)
                 except ServiceError as error:
                     # 原read工具如实返回不存在；只有私有账本确已捕获缺失才接受。
                     captured = await self.store.captured(scope, fence)
@@ -288,7 +380,7 @@ class WorkspaceCheckpointService:
             captures = await self.store.captures(scope, view.checkpoint_id)
 
             async def check() -> None:
-                actual_scope, actual = await self.authorize(agent_id)
+                actual_scope, actual = await authority(agent_id)
                 if actual_scope != scope or actual.manifest() != binding.manifest():
                     raise ServiceError("workspace_binding_changed", "检查点资源已改变", 403)
                 await self.store.assert_capture(scope, fences[0])
@@ -299,7 +391,10 @@ class WorkspaceCheckpointService:
                 authorize=self._callback(check),
                 allow_binary=view.capture_format == "bytes",
             )
-            await self.store.finish(scope, fences[0])
+            if invocation is None:
+                await self.store.finish(scope, fences[0])
+            else:
+                await self.store.finish(scope, fences[0], authorize=invocation.qualify)
         except asyncio.CancelledError:
             await _wait(
                 asyncio.create_task(
