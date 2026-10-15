@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace_change import RestoreFileSpec, WorkspaceChangeAction
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_restore import (
     CheckpointRestoreDispatch,
     CheckpointRestoreExecute,
@@ -33,8 +36,10 @@ from .database import (
     WorkspaceFileEffectRow,
     WorkspaceFileLockRow,
     WorkspaceRestoreItemRow,
+    WorkspaceRestoreModelSourceRow,
     WorkspaceRestorePlanRow,
 )
+from .workspace_restore_sources import admit_restore_source, restore_sources
 
 if TYPE_CHECKING:
     from .workspace_edits import WorkspaceEditStore
@@ -64,7 +69,12 @@ async def _effect_tip(session: AsyncSession, key: str) -> int | None:
     return int(value) if value is not None else None
 
 
-async def _restore_formats(session: AsyncSession, row: WorkspaceRestorePlanRow) -> None:
+async def _restore_formats(
+    session: AsyncSession, row: WorkspaceRestorePlanRow, edits: WorkspaceEditStore
+) -> None:
+    from .workspace_checkpoints import WorkspaceCheckpointStore
+
+    await restore_sources(session, edits, row)
     target = await session.get(NativeWorkspaceCheckpointRow, row.checkpoint_id)
     baseline = (
         await session.get(NativeWorkspaceCheckpointRow, row.baseline_checkpoint_id)
@@ -96,6 +106,14 @@ async def _restore_formats(session: AsyncSession, row: WorkspaceRestorePlanRow) 
         )
     ):
         raise ServiceError("workspace_restore_baseline", "恢复基线未保留原冻结格式与来源", 409)
+    checkpoints = WorkspaceCheckpointStore(edits)
+    await checkpoints._source(session, target)
+    if baseline is not None:
+        source = await checkpoints._source(session, baseline)
+        preview = (await restore_sources(session, edits, row)).get("preview")
+        expected = replace(preview, restore_plan_id=row.plan_id) if preview is not None else None
+        if source != expected:
+            raise ServiceError("workspace_restore_baseline", "恢复基线原调用来源不匹配", 403)
 
 
 async def assert_restore_request(
@@ -106,6 +124,10 @@ async def assert_restore_request(
     resource_fingerprint: str,
     fence: CheckpointRestoreFence | None,
     existing_operation_id: str | None = None,
+    *,
+    edits: WorkspaceEditStore,
+    run_id: str | None = None,
+    call_id: str | None = None,
 ) -> WorkspaceRestoreItemRow | None:
     """与原reserve同事务关联；公开参数不能认领或绕过恢复计划。"""
     child = await session.scalar(
@@ -139,12 +161,19 @@ async def assert_restore_request(
         or child.request_key != request.request_key
     ):
         raise ServiceError("workspace_restore_target", "恢复凭据或冻结目标不匹配", 403)
+    source = (await restore_sources(session, edits, row)).get("execute")
+    if (
+        source != fence.model_source
+        or source is not None
+        and (source.run_id != run_id or source.call_id != call_id)
+    ):
+        raise ServiceError("workspace_restore_model_context", "恢复子项未保留原执行调用", 403)
     if existing_operation_id is not None:
         if child.operation_id != existing_operation_id:
             raise ServiceError("workspace_restore_operation_conflict", "不能认领其他文件操作", 409)
         return child
     _assert_live(row, owner_id, "executing")
-    await _restore_formats(session, row)
+    await _restore_formats(session, row, edits)
     if not child.admission_open or child.operation_id is not None or child.status != "pending":
         raise ServiceError("workspace_restore_child_closed", "恢复子项准入已关闭", 409)
     assert child.file_key is not None
@@ -153,7 +182,9 @@ async def assert_restore_request(
     return child
 
 
-async def assert_restore_execution(session: AsyncSession, owner: str, operation_id: str) -> None:
+async def assert_restore_execution(
+    session: AsyncSession, owner: str, operation_id: str, edits: WorkspaceEditStore
+) -> None:
     child = await session.scalar(
         select(WorkspaceRestoreItemRow).where(WorkspaceRestoreItemRow.operation_id == operation_id)
     )
@@ -161,7 +192,16 @@ async def assert_restore_execution(session: AsyncSession, owner: str, operation_
         row = await session.get(WorkspaceRestorePlanRow, child.plan_id)
         assert row is not None
         _assert_live(row, owner, "executing")
-        await _restore_formats(session, row)
+        await _restore_formats(session, row, edits)
+        source = (await restore_sources(session, edits, row)).get("execute")
+        if source is not None:
+            attempt = await session.get(WorkspaceEditAttemptRow, operation_id)
+            if attempt is None or (attempt.run_id, attempt.call_id) != (
+                source.run_id,
+                source.call_id,
+            ):
+                raise ServiceError("workspace_restore_model_context", "原恢复操作来源不匹配", 403)
+            await edits._scope(session, row.scope_id, writing=True, run_id=source.run_id)
         assert child.file_key is not None
         if await _effect_tip(session, child.file_key) != child.effect_sequence:
             raise ServiceError("workspace_restore_version_conflict", "恢复文件版本已变化", 409)
@@ -223,7 +263,11 @@ class WorkspaceRestoreStore:
         if not secrets.compare_digest(row.token, token):
             raise ServiceError("workspace_restore_fenced", "恢复计划凭据已失效", 403)
         _assert_live(row, self.owner_id, phase)
-        await _restore_formats(session, row)
+        await _restore_formats(session, row, self.edits)
+        stage = "preview" if phase == "preparing" else "execute"
+        source = (await restore_sources(session, self.edits, row)).get(stage)
+        if source is not None:
+            await self.edits._scope(session, scope, writing=True, run_id=source.run_id)
         await self.edits._scope(session, scope, writing=True)
         await self.edits._resource(session, scope, row.workspace_key, row.resource_fingerprint)
         return row
@@ -261,6 +305,7 @@ class WorkspaceRestoreStore:
     async def _view(
         self, session: AsyncSession, row: WorkspaceRestorePlanRow
     ) -> CheckpointRestoreView:
+        await restore_sources(session, self.edits, row)
         items = [
             await self._item(session, child) for child in await self._children(session, row.plan_id)
         ]
@@ -304,6 +349,9 @@ class WorkspaceRestoreStore:
         workspace_key: str,
         resource_fingerprint: str,
         workspace_fingerprint: str,
+        *,
+        model_source: CheckpointModelSource | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> tuple[CheckpointRestoreView, bool]:
         from .workspace_checkpoints import WorkspaceCheckpointStore
         from .workspace_edits import digest
@@ -320,6 +368,8 @@ class WorkspaceRestoreStore:
         )
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
+            if authorize is not None:
+                authorize()
             topic = await self.edits._scope(session, scope, writing=False)
             previous = await session.scalar(
                 select(WorkspaceRestorePlanRow).where(
@@ -332,15 +382,24 @@ class WorkspaceRestoreStore:
                     raise ServiceError(
                         "workspace_restore_key_conflict", "恢复预览键已绑定其他请求", 409
                     )
+                if (await restore_sources(session, self.edits, previous)).get(
+                    "preview"
+                ) != model_source:
+                    raise ServiceError(
+                        "workspace_restore_model_conflict", "预览绑定其他原调用", 409
+                    )
                 await self._expire(session, previous)
                 return await self._view(session, previous), False
             await self.edits._scope(session, scope, writing=True)
             await self.edits._resource(session, scope, workspace_key, resource_fingerprint)
+            if model_source is not None:
+                await admit_restore_source(session, self.edits, scope, model_source)
             target = await session.get(NativeWorkspaceCheckpointRow, request.checkpoint_id)
             if target is None or target.scope_id != scope:
                 raise ServiceError("workspace_checkpoint_not_found", "检查点不在该作用域中", 404)
             if target.status != "available":
                 raise ServiceError("workspace_checkpoint_unavailable", "检查点尚不可用于恢复", 409)
+            await WorkspaceCheckpointStore(self.edits)._source(session, target)
             if (
                 target.workspace_key,
                 target.resource_fingerprint,
@@ -380,9 +439,19 @@ class WorkspaceRestoreStore:
                 owner_id=self.owner_id,
                 lease_expires_at=time.time() + self.lease_seconds,
                 token=secrets.token_hex(32),
+                preview_model_bound=model_source is not None,
             )
             session.add(row)
             await session.flush()
+            if model_source is not None:
+                session.add(
+                    WorkspaceRestoreModelSourceRow(
+                        plan_id=identifier,
+                        phase="preview",
+                        run_id=model_source.run_id,
+                        call_id=model_source.call_id,
+                    )
+                )
             for position, entry in enumerate(files):
                 metadata = WorkspaceCheckpointStore._metadata(target, entry.capture_metadata)
                 session.add(
@@ -395,6 +464,8 @@ class WorkspaceRestoreStore:
                     )
                 )
             await session.flush()
+            if authorize is not None:
+                authorize()
             return await self._view(session, row), True
 
     async def preparation(self, scope: str, identifier: str) -> CheckpointRestorePreparation:
@@ -406,11 +477,19 @@ class WorkspaceRestoreStore:
             )
 
     async def attach_baseline(
-        self, scope: str, identifier: str, token: str, baseline_id: str
+        self,
+        scope: str,
+        identifier: str,
+        token: str,
+        baseline_id: str,
+        *,
+        model_source: CheckpointModelSource | None = None,
     ) -> None:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             row = await self._row(session, scope, identifier)
+            if (await restore_sources(session, self.edits, row)).get("preview") != model_source:
+                raise ServiceError("workspace_restore_model_conflict", "基线原预览来源不匹配", 403)
             baseline = await session.get(NativeWorkspaceCheckpointRow, baseline_id)
             if (
                 not secrets.compare_digest(row.token, token)
@@ -429,7 +508,14 @@ class WorkspaceRestoreStore:
             row.updated_at = utc_now()
 
     async def ready(
-        self, scope: str, identifier: str, token: str, prepared: tuple[PreparedFileChange, ...]
+        self,
+        scope: str,
+        identifier: str,
+        token: str,
+        prepared: tuple[PreparedFileChange, ...],
+        *,
+        model_source: CheckpointModelSource | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> None:
         from .workspace_checkpoints import WorkspaceCheckpointStore
         from .workspace_edits import digest, encode_prepared, file_key
@@ -437,6 +523,10 @@ class WorkspaceRestoreStore:
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
             row = await self._live(session, scope, identifier, token, "preparing")
+            if (await restore_sources(session, self.edits, row)).get("preview") != model_source:
+                raise ServiceError("workspace_restore_model_conflict", "准备原预览来源不匹配", 403)
+            if authorize is not None:
+                authorize()
             baseline = await session.get(NativeWorkspaceCheckpointRow, row.baseline_checkpoint_id)
             target = await session.get(NativeWorkspaceCheckpointRow, row.checkpoint_id)
             if (
@@ -537,12 +627,22 @@ class WorkspaceRestoreStore:
                 child.proposal_id, child.file_key = proposal.proposal_id, key
                 child.effect_sequence = await _effect_tip(session, key)
                 child.current_mode = old.snapshot.mode if old.snapshot else None
+            if authorize is not None:
+                authorize()
             row.phase, row.owner_id, row.lease_expires_at = "ready", None, None
             row.revision += 1
             row.updated_at = utc_now()
 
     async def start(
-        self, scope: str, request: CheckpointRestoreExecute, key: str, resource: str, workspace: str
+        self,
+        scope: str,
+        request: CheckpointRestoreExecute,
+        key: str,
+        resource: str,
+        workspace: str,
+        *,
+        model_source: CheckpointModelSource | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> tuple[CheckpointRestoreView, bool]:
         from .workspace_edits import digest
 
@@ -557,6 +657,8 @@ class WorkspaceRestoreStore:
         )
         async with self.database.write_lock, self.database.sessions.begin() as session:
             await self.edits._writer(session)
+            if authorize is not None:
+                authorize()
             await self.edits._scope(session, scope, writing=False)
             row = await self._row(session, scope, request.plan_id)
             if row.execute_key is not None:
@@ -564,9 +666,15 @@ class WorkspaceRestoreStore:
                     raise ServiceError(
                         "workspace_restore_execute_conflict", "计划已绑定原执行请求", 409
                     )
+                if (await restore_sources(session, self.edits, row)).get("execute") != model_source:
+                    raise ServiceError(
+                        "workspace_restore_model_conflict", "执行绑定其他原调用", 409
+                    )
                 await self._expire(session, row)
                 return await self._view(session, row), False
             await self.edits._scope(session, scope, writing=True)
+            if model_source is not None:
+                await admit_restore_source(session, self.edits, scope, model_source)
             await self.edits._resource(session, scope, key, resource)
             if (row.workspace_key, row.resource_fingerprint, row.workspace_fingerprint) != (
                 key,
@@ -589,8 +697,18 @@ class WorkspaceRestoreStore:
                 raise ServiceError("workspace_restore_state", "恢复计划当前不可执行", 409)
             if row.revision != request.expected_revision:
                 raise ServiceError("workspace_restore_revision", "恢复计划版本已变化", 409)
-            await _restore_formats(session, row)
+            await _restore_formats(session, row, self.edits)
             row.execute_key, row.execute_hash = request.request_key, fingerprint
+            row.execute_model_bound = model_source is not None
+            if model_source is not None:
+                session.add(
+                    WorkspaceRestoreModelSourceRow(
+                        plan_id=row.plan_id,
+                        phase="execute",
+                        run_id=model_source.run_id,
+                        call_id=model_source.call_id,
+                    )
+                )
             row.phase, row.owner_id = "executing", self.owner_id
             row.lease_expires_at, row.token = (
                 time.time() + self.lease_seconds,
@@ -601,6 +719,8 @@ class WorkspaceRestoreStore:
             for child in await self._children(session, row.plan_id):
                 child.admission_open = True
             await session.flush()
+            if authorize is not None:
+                authorize()
             return await self._view(session, row), True
 
     async def execution(self, scope: str, identifier: str) -> tuple[CheckpointRestoreDispatch, ...]:
@@ -608,12 +728,13 @@ class WorkspaceRestoreStore:
             row = await self._row(session, scope, identifier)
             await self._live(session, scope, identifier, row.token, "executing")
             children = await self._children(session, identifier)
+            source = (await restore_sources(session, self.edits, row)).get("execute")
             result = []
             for child in children:
                 assert child.proposal_id is not None
                 result.append(
                     CheckpointRestoreDispatch(
-                        CheckpointRestoreFence(identifier, child.position, row.token),
+                        CheckpointRestoreFence(identifier, child.position, row.token, source),
                         WorkspaceChangeAction(
                             proposal_id=child.proposal_id,
                             action="apply",
@@ -669,6 +790,12 @@ class WorkspaceRestoreStore:
             row = await self._row(session, scope, identifier)
             await self._expire(session, row)
             return await self._view(session, row)
+
+    async def source(self, scope: str, identifier: str, phase: str) -> CheckpointModelSource | None:
+        async with self.database.write_lock, self.database.sessions() as session:
+            await self.edits._scope(session, scope, writing=False)
+            row = await self._row(session, scope, identifier)
+            return (await restore_sources(session, self.edits, row)).get(phase)
 
     async def by_key(self, scope: str, key: str) -> CheckpointRestoreView | None:
         self.edits._key(key)

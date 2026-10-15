@@ -286,6 +286,10 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
         from browser_model_checkpoints import configure_model_checkpoints
 
         configure_model_checkpoints(app, write_root)
+    if os.environ.get("KRIM_TEST_MODEL_RESTORES") == "1":
+        from browser_model_restores import configure_model_restores
+
+        configure_model_restores(app, write_root)
     configure_generated_roots(app, runtime, write_root)
 
     class TestTreeMoveControl(StrictModel):

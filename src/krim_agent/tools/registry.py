@@ -117,6 +117,7 @@ def _tree_exchange_budget(context: ToolContext) -> tuple[object, ...]:
 
 def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
     fence = context.checkpoint_capture
+    restore = context.checkpoint_restore
     return (
         _tree_move_binding(context),
         id(context.workspace_checkpoints),
@@ -126,9 +127,29 @@ def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
             fence.position,
             fence.token,
             fence.capture_format,
-            (fence.model_source.run_id, fence.model_source.call_id) if fence.model_source else None,
+            (
+                fence.model_source.run_id,
+                fence.model_source.call_id,
+                fence.model_source.restore_plan_id,
+            )
+            if fence.model_source
+            else None,
         )
         if fence
+        else None,
+        (
+            restore.plan_id,
+            restore.position,
+            restore.token,
+            (
+                restore.model_source.run_id,
+                restore.model_source.call_id,
+                restore.model_source.restore_plan_id,
+            )
+            if restore.model_source
+            else None,
+        )
+        if restore
         else None,
     )
 
@@ -281,14 +302,27 @@ class ToolRegistry:
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
         checkpoint_control = name in WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
-        checkpoint_capture = byte_capture or (
-            name == "workspace_read"
-            and parent.checkpoint_capture is not None
-            and parent.checkpoint_capture.model_source is not None
+        restore_model = (
+            parent.checkpoint_restore is not None
+            and parent.checkpoint_restore.model_source is not None
         )
-        checkpoint_model = checkpoint_control or (
-            parent.checkpoint_capture is not None
-            and parent.checkpoint_capture.model_source is not None
+        restore_leaf = name == "workspace_change" and restore_model
+        checkpoint_capture = (
+            restore_leaf
+            or byte_capture
+            or (
+                name == "workspace_read"
+                and parent.checkpoint_capture is not None
+                and parent.checkpoint_capture.model_source is not None
+            )
+        )
+        checkpoint_model = (
+            checkpoint_control
+            or restore_model
+            or (
+                parent.checkpoint_capture is not None
+                and parent.checkpoint_capture.model_source is not None
+            )
         )
         checkpoint_context_code = (
             "workspace_checkpoint_model_context"
@@ -310,6 +344,15 @@ class ToolRegistry:
             parent.source_call_id,
         )
         try:
+            if restore_model and (
+                not restore_leaf
+                or parent.checkpoint_capture is not None
+                or parent.command_capture is not None
+                or parent.workspace_batch is not None
+                or parent.mixed_batch is not None
+                or parent.tree_fence is not None
+            ):
+                raise ToolError("workspace_restore_model_context", "恢复围栏仅供原文件执行子项")
             if checkpoint_control and (
                 parent.origin != "model"
                 or parent.run_id == "local"
@@ -340,7 +383,7 @@ class ToolRegistry:
             ):
                 raise ToolError("workspace_checkpoint_context", "字节元数据工具需要原私有捕获Fence")
             if checkpoint_capture:
-                fence = parent.checkpoint_capture
+                fence = parent.checkpoint_restore if restore_leaf else parent.checkpoint_capture
                 assert fence is not None
                 source = fence.model_source
                 valid = (

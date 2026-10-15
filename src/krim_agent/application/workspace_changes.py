@@ -13,7 +13,12 @@ from krim_agent.persistence.agent_sessions import assert_session_open, guard_age
 from krim_agent.persistence.database import RunRow
 from krim_agent.persistence.workspace_edits import StoredWorkspaceAttempt, WorkspaceEditStore
 from krim_agent.protocol.domain import ServiceError
-from krim_agent.tools.core import ToolContext, ToolError
+from krim_agent.tools.core import (
+    ToolContext,
+    ToolError,
+    execution_budget_base,
+    same_execution_budget,
+)
 from krim_agent.tools.workspace import workspace_io
 from krim_agent.workspace import WorkspaceBinding
 from krim_agent.workspace_change import (
@@ -58,11 +63,77 @@ class WorkspaceChangeService:
         self._active_operation_ids: set[str] = set()
         self._closed = False
 
+    @staticmethod
+    def _restore_qualifier(context: ToolContext) -> Callable[[], None] | None:
+        fence = context.checkpoint_restore
+        if fence is None or fence.model_source is None:
+            return None
+        source = fence.model_source
+        base = execution_budget_base(context.execution_timeouts)
+
+        def identity() -> tuple[object, ...]:
+            return (
+                context.run_id,
+                context.call_id,
+                context.source_call_id,
+                context.origin,
+                context.agent_id,
+                context.session_id,
+                context.topic_id,
+                context.depth,
+                context.timeout,
+                context.budget_account_ids,
+                id(context.workspace),
+                id(context.registry),
+                id(context.workspace_changes),
+                id(context.workspace_checkpoint_controls),
+                id(context.checkpoint_restore),
+                fence.plan_id,
+                fence.position,
+                fence.token,
+                fence.model_source,
+            )
+
+        original = identity()
+
+        def qualify() -> None:
+            if (
+                context.origin != "model"
+                or context.run_id != source.run_id
+                or context.source_call_id != source.call_id
+                or source.restore_plan_id is not None
+                or not context.execution_timeouts
+                or context.agent_id is None
+                or context.session_id is None
+                or identity() != original
+                or not same_execution_budget(
+                    base, execution_budget_base(context.execution_timeouts)
+                )
+            ):
+                raise ServiceError(
+                    "workspace_restore_model_context", "恢复子项原上下文或预算变化", 403
+                )
+            loop = asyncio.get_running_loop()
+            for budget in context.execution_timeouts:
+                when = budget.deadline.when()
+                if (
+                    not budget.active
+                    or budget.deadline.expired()
+                    or when is not None
+                    and loop.time() >= when
+                ):
+                    raise ServiceError("tool_timeout", "原恢复调用预算已结束", 408)
+
+        return qualify
+
     async def _guard(
         self, context: ToolContext, *, writing: bool = True
     ) -> tuple[str, WorkspaceBinding]:
         if self._closed:
             raise ServiceError("workspace_service_closed", "工作区修改服务已关闭", 503)
+        qualify = self._restore_qualifier(context)
+        if qualify is not None:
+            qualify()
         binding = context.workspace
         if binding is None:
             raise ServiceError("workspace_unbound", "当前会话没有工作区授权", 409)
@@ -178,10 +249,19 @@ class WorkspaceChangeService:
             abort.set()
 
     async def _authorize_publication(
-        self, context: ToolContext, scope: str, operation_id: str
+        self,
+        context: ToolContext,
+        scope: str,
+        operation_id: str,
+        qualify: Callable[[], None] | None = None,
     ) -> None:
         await self._guard(context)
-        await self.store.assert_execution(scope, operation_id)
+        if qualify is None:
+            await self.store.assert_execution(scope, operation_id)
+        else:
+            qualify()
+            await self.store.assert_execution(scope, operation_id, authorize=qualify)
+            qualify()
 
     @staticmethod
     def _effect(
@@ -256,6 +336,12 @@ class WorkspaceChangeService:
         self, request: WorkspaceChangeAction, context: ToolContext, abort: Event
     ) -> WorkspaceAttemptView:
         scope, binding = await self._guard(context)
+        qualify = self._restore_qualifier(context)
+        lookup_options: dict[str, Any] = {}
+        reserve_options: dict[str, Any] = {}
+        if qualify is not None:
+            lookup_options = {"call_id": context.source_call_id, "authorize": qualify}
+            reserve_options = {"authorize": qualify}
         previous = await self.store.find_action(
             scope,
             request,
@@ -265,6 +351,7 @@ class WorkspaceChangeService:
             mixed_fence=context.mixed_batch,
             tree_fence=context.tree_fence,
             run_id=context.run_id if context.run_id != "local" else None,
+            **lookup_options,
         )
         if previous is not None:
             return previous.view
@@ -285,6 +372,7 @@ class WorkspaceChangeService:
             restore_fence=context.checkpoint_restore,
             mixed_fence=context.mixed_batch,
             tree_fence=context.tree_fence,
+            **reserve_options,
         )
         if not created:
             return attempt.view
@@ -296,7 +384,7 @@ class WorkspaceChangeService:
             # 只由Writer线程在文件锁内调用；原事件循环负责检查SQL和会话事实。
             if loop.is_closed():
                 raise ServiceError("workspace_publication_unavailable", "发布资格无法核实", 503)
-            check = self._authorize_publication(context, scope, attempt.view.operation_id)
+            check = self._authorize_publication(context, scope, attempt.view.operation_id, qualify)
             try:
                 future = asyncio.run_coroutine_threadsafe(check, loop)
             except RuntimeError:

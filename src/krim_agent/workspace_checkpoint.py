@@ -215,6 +215,7 @@ class CapturedFileMetadata(StrictModel):
 class CheckpointModelSource:
     run_id: str
     call_id: str
+    restore_plan_id: str | None = None
 
 
 @dataclass(frozen=True)
