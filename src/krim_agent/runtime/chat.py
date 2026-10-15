@@ -7,6 +7,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Literal
 
 from pydantic import JsonValue, ValidationError
@@ -113,13 +114,21 @@ class RunState:
     trace_context: TraceContext | None = None
 
     async def publish(
-        self, kind: Literal["start", "chunk", "end", "error"], data: JsonValue = None
+        self,
+        kind: Literal["start", "chunk", "end", "error"],
+        data: JsonValue = None,
+        *,
+        writer: Callable[[StreamFrame], Awaitable[StreamFrame]] | None = None,
+        on_persisted: Callable[[], None] | None = None,
     ) -> None:
         async with self.publish_lock:
             frame = StreamFrame(stream_id=self.run.id, seq=len(self.frames), kind=kind, data=data)
 
             async def commit() -> None:
-                stored = await self.event_writer(frame) if self.event_writer is not None else frame
+                write_frame = writer if writer is not None else self.event_writer
+                stored = await write_frame(frame) if write_frame is not None else frame
+                if on_persisted is not None:
+                    on_persisted()
                 async with self.condition:
                     self.frames.append(stored)
                     self.condition.notify_all()
@@ -639,6 +648,31 @@ class ChatRuntime:
                 async with state.condition:
                     state.condition.notify_all()
 
+    async def _publish_message(
+        self,
+        state: RunState,
+        role: str,
+        content: str,
+        details: dict[str, JsonValue],
+        data: dict[str, JsonValue],
+        on_persisted: Callable[[], None],
+    ) -> None:
+        async def write(frame: StreamFrame) -> StreamFrame:
+            try:
+                return await self.repository.append_message_event(
+                    state.run, role, content, details, frame
+                )
+            except Exception:
+                # COMMIT之后的回程可能丢失；只核实原消息/seq，不重发模型或工具。
+                original = await self.repository.read_message_event(
+                    state.run, role, content, details, frame
+                )
+                if original is not None:
+                    return original
+                raise
+
+        await state.publish("chunk", data, writer=write, on_persisted=on_persisted)
+
     async def _loop(self, state: RunState) -> None:
         assert state.skill_snapshot is not None
         assert state.context_config is not None and state.context_engine is not None
@@ -1041,12 +1075,13 @@ class ChatRuntime:
             if not calls:
                 if not state.draft:
                     raise ServiceError("no_output", "模型没有输出文本或工具请求")
-                await self.repository.add_message(
-                    state.run, "assistant", state.draft, {"step": _step, "partial": False}
-                )
-                state.draft = ""
-                await state.publish(
-                    "chunk", {"type": "step_finish", "step": _step, "finish_reason": "stop"}
+                await self._publish_message(
+                    state,
+                    "assistant",
+                    state.draft,
+                    {"step": _step, "partial": False},
+                    {"type": "step_finish", "step": _step, "finish_reason": "stop"},
+                    lambda: setattr(state, "draft", ""),
                 )
                 return
             await self.repository.add_message(
@@ -1104,22 +1139,19 @@ class ChatRuntime:
                         tracer=self.tracer,
                     ),
                 )
-                await self.repository.add_message(
-                    state.run,
+                added = state.discovery.consume(tool_step, call.id, call.name, result)
+                await self._publish_message(
+                    state,
                     "tool",
                     result.content[0].text,
                     {"call_id": call.id, "name": call.name, **result.model_dump(mode="json")},
-                )
-                state.pending_calls.remove(call)
-                added = state.discovery.consume(tool_step, call.id, call.name, result)
-                await state.publish(
-                    "chunk",
                     {
                         "type": "tool_result",
                         "call_id": call.id,
                         "name": call.name,
                         **result.model_dump(mode="json"),
                     },
+                    partial(state.pending_calls.remove, call),
                 )
                 if added:
                     await state.publish(
