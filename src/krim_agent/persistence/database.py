@@ -1388,6 +1388,7 @@ class WorkspaceDirectoryCaptureRow(Base):
             "AND length(workspace_fingerprint) = 64 AND length(token) = 64",
             name="ck_directory_capture_hashes",
         ),
+        CheckConstraint("model_bound IN (0,1)", name="ck_directory_capture_model_bound"),
     )
     checkpoint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     scope_id: Mapped[str] = mapped_column(String(80), index=True)
@@ -1400,6 +1401,7 @@ class WorkspaceDirectoryCaptureRow(Base):
     resource_fingerprint: Mapped[str] = mapped_column(String(64))
     workspace_fingerprint: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="capturing")
+    model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     token: Mapped[str] = mapped_column(String(64))
@@ -1409,6 +1411,19 @@ class WorkspaceDirectoryCaptureRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceDirectoryCaptureModelSourceRow(Base):
+    __tablename__ = "workspace_directory_capture_model_sources"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_directory_capture_model_call"),
+        CheckConstraint("length(call_id) BETWEEN 1 AND 128", name="ck_directory_capture_call"),
+    )
+    checkpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_captures.checkpoint_id"), primary_key=True
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    call_id: Mapped[str] = mapped_column(String(128))
 
 
 class NativeWorkspaceCheckpointRow(Base):

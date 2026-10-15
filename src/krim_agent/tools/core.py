@@ -286,6 +286,7 @@ class ToolContext:
     source_call_id: str | None = field(default=None, repr=False)
     checkpoint_capture: CheckpointCaptureFence | None = None
     directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None
+    directory_checkpoint_qualify: Callable[[], None] | None = field(default=None, repr=False)
     workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
     _directory_checkpoint_capture_response: str | None = field(default=None, repr=False)
     checkpoint_restore: CheckpointRestoreFence | None = None
@@ -339,6 +340,7 @@ class ToolContext:
             tree_exchanges=self.tree_exchanges,
             checkpoint_capture=self.checkpoint_capture,
             directory_checkpoint_capture=self.directory_checkpoint_capture,
+            directory_checkpoint_qualify=self.directory_checkpoint_qualify,
             workspace_directory_checkpoints=self.workspace_directory_checkpoints,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,

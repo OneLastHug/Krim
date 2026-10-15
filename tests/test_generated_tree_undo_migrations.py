@@ -57,7 +57,7 @@ async def test_empty_0047_roundtrip_preserves_original_active_move_and_seal_byte
             await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0053_directory_captures"
+            ).scalar_one() == "0054_directory_capture_models"
             assert before == [(await connection.execute(text(query))).all() for query in queries]
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert await seals.get(scope, binding, plan.plan_id) == sealed
@@ -123,7 +123,7 @@ async def test_0047_nonempty_marker_or_source_refuses_loss_with_original_rows_un
             ).all() == links
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0053_directory_captures"
+            ).scalar_one() == "0054_directory_capture_models"
         if material == "both":
             assert await store.proposal(scope, proposal.view.proposal_id) == proposal
     finally:

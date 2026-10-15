@@ -39,6 +39,9 @@ from krim_agent.application.workspace_directory_checkpoints import (
 )
 from krim_agent.application.workspace_mixed_batches import MixedBatchService
 from krim_agent.application.workspace_model_checkpoints import ModelCheckpointService
+from krim_agent.application.workspace_model_directory_checkpoints import (
+    ModelDirectoryCheckpointService,
+)
 from krim_agent.application.workspace_model_restores import ModelRestoreService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
@@ -343,6 +346,10 @@ class AgentService:
         )
         self.workspace_restore_store = WorkspaceRestoreStore(self.workspace_edits)
         self.model_checkpoints = ModelCheckpointService(self.workspace_checkpoints)
+        self.directory_checkpoints.model_close_guard = self.model_checkpoints.assert_external_close
+        self.model_checkpoints.directories = ModelDirectoryCheckpointService(
+            self.model_checkpoints, self.directory_checkpoints
+        )
         self.workspace_restores = WorkspaceRestoreService(
             self.workspace_restore_store,
             self.workspace_checkpoints,
@@ -700,6 +707,19 @@ class AgentService:
             raise ValueError("目录捕获工具名称已由其它定义占用")
         if existing is None:
             self.runtime.tools.register(definition)
+
+    def register_directory_checkpoint_controls(self) -> None:
+        from krim_agent.tools.workspace_checkpoints import directory_checkpoint_control_tools
+
+        definitions = directory_checkpoint_control_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型目录检查点控制工具名称已被占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+        self.manager.workspace_checkpoint_controls = self.model_checkpoints
+        self.manager.workspace_directory_checkpoints = self.directory_checkpoints
 
     def register_mixed_batch_writes(self) -> None:
         """可信宿主显式启用模型混合批次写工具；权限仍由原ToolRegistry裁决。"""

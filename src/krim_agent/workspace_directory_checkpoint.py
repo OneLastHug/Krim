@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel, check_json
 from krim_agent.workspace_change import SHA256
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_tree_snapshot import WorkspaceTreeSnapshot, _path
 
 
@@ -129,3 +130,24 @@ class DirectoryCheckpointCaptureView(DirectoryCheckpointSummary):
 class DirectoryCheckpointCaptureFence:
     checkpoint_id: str
     token: str = field(repr=False)
+    model_source: CheckpointModelSource | None = None
+
+
+def directory_checkpoint_model_source(value: object) -> CheckpointModelSource | None:
+    """内部来源先分类；假/falsey对象不能被解释成Host来源。"""
+    if value is None:
+        return None
+    if (
+        type(value) is not CheckpointModelSource
+        or type(value.run_id) is not str
+        or not 1 <= len(value.run_id) <= 36
+        or value.run_id == "local"
+        or type(value.call_id) is not str
+        or not 1 <= len(value.call_id) <= 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in value.call_id)
+        or value.restore_plan_id is not None
+    ):
+        raise ServiceError(
+            "workspace_directory_capture_model_context", "目录捕获须保留原Run/call来源", 403
+        )
+    return value

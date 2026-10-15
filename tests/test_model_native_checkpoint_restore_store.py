@@ -534,7 +534,7 @@ async def test_0051_model_restore_refuses_lossy_downgrade_with_exact_original_ma
         async with database.engine.connect() as sql:
             assert (
                 await sql.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0053_directory_captures"
+            ).scalar_one() == "0054_directory_capture_models"
             assert (
                 await sql.execute(
                     text(

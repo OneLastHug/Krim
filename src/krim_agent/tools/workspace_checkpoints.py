@@ -11,6 +11,11 @@ from krim_agent.workspace_checkpoint_control import (
     CheckpointQuery,
     CheckpointQueryResult,
 )
+from krim_agent.workspace_directory_checkpoint import (
+    DirectoryCheckpointCreate,
+    DirectoryCheckpointView,
+)
+from krim_agent.workspace_directory_checkpoint_control import DirectoryCheckpointQueryResult
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -108,5 +113,38 @@ def checkpoint_restore_control_tools() -> tuple[ToolDefinition, ...]:
             "write",
             output_schema=CheckpointRestoreView,
             output_guard=partial(_guard, "restore_cancel"),
+        ),
+    )
+
+
+@cache
+def directory_checkpoint_control_tools() -> tuple[ToolDefinition, ...]:
+    return (
+        ToolDefinition(
+            "workspace_directory_checkpoint_create",
+            "在原模型Run/call内捕获完整目录，保留原父预算与真实元数据",
+            DirectoryCheckpointCreate,
+            partial(_execute, "directory_create"),
+            "write",
+            output_schema=DirectoryCheckpointView,
+            output_guard=partial(_guard, "directory_create"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_query",
+            "只读原目录捕获ID、请求键或有界历史，零再次捕获",
+            CheckpointQuery,
+            partial(_execute, "directory_query"),
+            "read",
+            output_schema=DirectoryCheckpointQueryResult,
+            output_guard=partial(_guard, "directory_query"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_cancel",
+            "关闭原目录捕获准入并等待原生产者收束",
+            CheckpointLookup,
+            partial(_execute, "directory_cancel"),
+            "write",
+            output_schema=DirectoryCheckpointView,
+            output_guard=partial(_guard, "directory_cancel"),
         ),
     )

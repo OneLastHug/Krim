@@ -507,7 +507,7 @@ async def test_0031_upgrade_retains_history_and_nonempty_state_refuses_lossy_dow
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0053_directory_captures"
+            ).scalar_one() == "0054_directory_capture_models"
     finally:
         await database.close()
 

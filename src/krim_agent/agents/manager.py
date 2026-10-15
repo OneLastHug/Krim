@@ -40,6 +40,7 @@ from krim_agent.tools import ToolContext, ToolRegistry
 from krim_agent.tools.core import (
     CheckpointControlBackend,
     Decision,
+    DirectoryCheckpointBackend,
     Policy,
     ToolDefinition,
     WorkspaceCheckpointBackend,
@@ -482,6 +483,7 @@ class AgentManager:
         self.tree_exchanges = TreeExchangeService(self.workspace_changes, self.directory_changes)
         self.workspace_checkpoints: WorkspaceCheckpointBackend | None = None
         self.workspace_checkpoint_controls: CheckpointControlBackend | None = None
+        self.workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
         self.mixed_batch_writer = ModelMixedBatchService(
             self.workspace_changes, self.directory_changes
         )
@@ -784,6 +786,7 @@ class AgentManager:
             tree_exchanges=self.tree_exchanges,
             workspace_checkpoints=self.workspace_checkpoints,
             workspace_checkpoint_controls=self.workspace_checkpoint_controls,
+            workspace_directory_checkpoints=self.workspace_directory_checkpoints,
             workspace_mixed_batches=self.mixed_batch_writer,
             workspace=definition.workspace,
             execution=definition.execution,

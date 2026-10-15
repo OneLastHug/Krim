@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import dataclass
 from threading import Event
 from typing import Any
 
@@ -19,6 +20,7 @@ from krim_agent.tools.core import (
 )
 from krim_agent.tools.workspace import workspace_io
 from krim_agent.workspace import WorkspaceBinding
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointCaptureFence,
     DirectoryCheckpointCaptureInput,
@@ -41,6 +43,14 @@ DirectoryCaptureRead = Callable[
 ]
 
 
+@dataclass(frozen=True)
+class DirectoryCheckpointInvocation:
+    source: CheckpointModelSource
+    authorize: CaptureGuard
+    read: DirectoryCaptureRead
+    qualify: Callable[[], None]
+
+
 class WorkspaceDirectoryCheckpointService:
     def __init__(
         self,
@@ -58,6 +68,7 @@ class WorkspaceDirectoryCheckpointService:
         self._tasks: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._start_lock = asyncio.Lock()
         self._closed = False
+        self.model_close_guard: Callable[[], None] | None = None
 
     async def create(
         self, agent_id: str, request: DirectoryCheckpointMaterialCreate, *, confirmed: bool = False
@@ -68,9 +79,14 @@ class WorkspaceDirectoryCheckpointService:
         )
 
     async def _create(
-        self, agent_id: str, request: DirectoryCheckpointMaterialCreate, confirmed: bool
+        self,
+        agent_id: str,
+        request: DirectoryCheckpointMaterialCreate,
+        confirmed: bool,
+        invocation: DirectoryCheckpointInvocation | None = None,
     ) -> DirectoryCheckpointView:
-        scope, binding = await self.authorize(agent_id)
+        authority = invocation.authorize if invocation is not None else self.authorize
+        scope, binding = await authority(agent_id)
         async with self._start_lock:
             if self._closed:
                 raise ServiceError("workspace_directory_capture_closed", "目录捕获服务已关闭", 503)
@@ -79,11 +95,22 @@ class WorkspaceDirectoryCheckpointService:
                 and await self.store.by_key(scope, request.request_key) is None
             ):
                 raise ServiceError("workspace_directory_capture_busy", "目录捕获并发已满", 429)
-            view, created = await self.store.reserve(scope, binding, request)
+            if invocation is None:
+                view, created = await self.store.reserve(scope, binding, request)
+            else:
+                view, created = await self.store.reserve(
+                    scope,
+                    binding,
+                    request,
+                    model_source=invocation.source,
+                    authorize=invocation.qualify,
+                )
             if not created:
                 return view
             fence = await self.store.execution(scope, view.checkpoint_id)
-            task = asyncio.create_task(self._run(agent_id, scope, view.root_path, fence, confirmed))
+            task = asyncio.create_task(
+                self._run(agent_id, scope, view.root_path, fence, confirmed, invocation)
+            )
             self._tasks[view.checkpoint_id] = (scope, task)
 
             def done(result: asyncio.Task[None]) -> None:
@@ -94,16 +121,43 @@ class WorkspaceDirectoryCheckpointService:
             task.add_done_callback(done)
             return view
 
+    async def create_model(
+        self,
+        agent_id: str,
+        request: DirectoryCheckpointMaterialCreate,
+        invocation: DirectoryCheckpointInvocation,
+    ) -> DirectoryCheckpointView:
+        request = DirectoryCheckpointMaterialCreate.model_validate(request.model_dump(mode="json"))
+        return await _wait(
+            asyncio.create_task(self._create(agent_id, request, False, invocation)), lambda: None
+        )
+
     async def _renew(
-        self, scope: str, fence: DirectoryCheckpointCaptureFence, worker: asyncio.Task[None]
+        self,
+        scope: str,
+        fence: DirectoryCheckpointCaptureFence,
+        worker: asyncio.Task[None],
+        invocation: DirectoryCheckpointInvocation | None = None,
+        agent_id: str | None = None,
     ) -> None:
         try:
             while True:
                 await asyncio.sleep(max(0.02, min(0.2, self.store.lease_seconds / 4)))
-                await self.store.renew(scope, fence)
+                if invocation is None:
+                    await self.store.renew(scope, fence)
+                else:
+                    assert agent_id is not None
+                    await invocation.authorize(agent_id)
+                    await self.store.renew(scope, fence, authorize=invocation.qualify)
         except asyncio.CancelledError:
             raise
         except Exception:
+            try:
+                if (await self.store.get(scope, fence.checkpoint_id)).status == "available":
+                    # 完成事务已经结束原租约；正常完成不应取消尚在返回原回执的工具。
+                    return
+            except Exception:
+                pass
             if not worker.done() and not worker.cancelling():
                 worker.cancel()
 
@@ -114,36 +168,37 @@ class WorkspaceDirectoryCheckpointService:
         root_path: str,
         fence: DirectoryCheckpointCaptureFence,
         confirmed: bool,
+        invocation: DirectoryCheckpointInvocation | None = None,
     ) -> None:
         worker = asyncio.current_task()
         assert worker is not None
         marker = enter_workspace_execution(self._tasks, fence.checkpoint_id)
-        renew = asyncio.create_task(self._renew(scope, fence, worker))
+        renew = asyncio.create_task(self._renew(scope, fence, worker, invocation, agent_id))
+
+        async def fail(code: str) -> None:
+            # 已失权的续租者不能再取消正在落盘的失败收尾；内部取消不冒充父Run取消。
+            renew.cancel()
+            cleanup = asyncio.create_task(self.store.fail(scope, fence, code))
+            try:
+                await _wait(cleanup, lambda: None)
+            except asyncio.CancelledError:
+                if cleanup.cancelled():
+                    raise
+
         try:
-            await self.read(agent_id, root_path, fence, confirmed)
+            read = invocation.read if invocation is not None else self.read
+            await read(agent_id, root_path, fence, confirmed)
             view = await self.store.get(scope, fence.checkpoint_id)
             if view.status != "available":
                 raise ServiceError(
                     "workspace_directory_capture_unverified", "目录读取未通过完整回程校验", 409
                 )
         except asyncio.CancelledError:
-            await _wait(
-                asyncio.create_task(
-                    self.store.fail(scope, fence, "workspace_directory_capture_cancelled")
-                ),
-                lambda: None,
-            )
+            await fail("workspace_directory_capture_cancelled")
         except ServiceError as error:
-            await _wait(
-                asyncio.create_task(self.store.fail(scope, fence, error.code)), lambda: None
-            )
+            await fail(error.code)
         except Exception:
-            await _wait(
-                asyncio.create_task(
-                    self.store.fail(scope, fence, "workspace_directory_capture_failed")
-                ),
-                lambda: None,
-            )
+            await fail("workspace_directory_capture_failed")
         finally:
             renew.cancel()
             await asyncio.gather(renew, return_exceptions=True)
@@ -154,14 +209,24 @@ class WorkspaceDirectoryCheckpointService:
         if type(fence) is not DirectoryCheckpointCaptureFence:
             raise ServiceError("workspace_directory_capture_context", "缺少原目录捕获围栏", 403)
         self.store._valid_fence(fence)
+        source = fence.model_source
+        identity = (
+            context.origin == "host"
+            and context.run_id == "local"
+            and context.source_call_id is None
+            and context.directory_checkpoint_qualify is None
+            if source is None
+            else context.origin == "model"
+            and context.run_id == source.run_id
+            and context.source_call_id == source.call_id
+            and callable(context.directory_checkpoint_qualify)
+        )
         if (
             self._closed
             or context.workspace_directory_checkpoints is not self
-            or context.origin != "host"
-            or context.run_id != "local"
+            or not identity
             or context.agent_id is None
             or context.session_id is None
-            or context.source_call_id is not None
             or not context.execution_timeouts
             or any(
                 item is not None
@@ -176,8 +241,10 @@ class WorkspaceDirectoryCheckpointService:
             )
         ):
             raise ServiceError(
-                "workspace_directory_capture_context", "目录捕获需要原私有Host上下文", 403
+                "workspace_directory_capture_context", "目录捕获须保留原私有来源上下文", 403
             )
+        if context.directory_checkpoint_qualify is not None:
+            context.directory_checkpoint_qualify()
         loop = asyncio.get_running_loop()
         for budget in context.execution_timeouts:
             when = budget.deadline.when()
@@ -332,6 +399,8 @@ class WorkspaceDirectoryCheckpointService:
         return await _wait(asyncio.create_task(stop()), lambda: None)
 
     def assert_external_close(self) -> None:
+        if self.model_close_guard is not None:
+            self.model_close_guard()
         if inside_workspace_execution(self._tasks):
             raise ServiceError(
                 "workspace_directory_capture_reentrant", "捕获回调须取消原任务，不能关闭服务", 409

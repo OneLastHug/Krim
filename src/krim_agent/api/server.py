@@ -327,6 +327,7 @@ def create_app(
     generated_tree_undos_enabled: bool = False,
     checkpoint_bytes_enabled: bool = False,
     directory_checkpoints_enabled: bool = False,
+    directory_checkpoint_controls_enabled: bool = False,
     checkpoint_controls_enabled: bool = False,
     checkpoint_restore_controls_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
@@ -372,6 +373,8 @@ def create_app(
         agent_service.register_checkpoint_bytes()
     if directory_checkpoints_enabled:
         agent_service.register_directory_checkpoints()
+    if directory_checkpoint_controls_enabled:
+        agent_service.register_directory_checkpoint_controls()
     if checkpoint_controls_enabled:
         agent_service.register_checkpoint_controls()
     if checkpoint_restore_controls_enabled:

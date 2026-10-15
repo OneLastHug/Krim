@@ -220,11 +220,21 @@ async def test_cold_link_to_unrelated_material_is_rejected(capture_context):
     assert corrupt.value.code == "workspace_directory_capture_corrupt"
 
 
-async def test_renew_flush_crossing_original_lease_cannot_revive_producer(capture_context):
+async def test_renew_flush_crossing_original_lease_cannot_revive_producer(
+    capture_context, monkeypatch
+):
     store, scope, _binding, _snapshot, _request, view, fence = await reserved(capture_context)
-    async with store.database.sessions() as sql, sql.begin():
-        row = await sql.get(WorkspaceDirectoryCaptureRow, view.checkpoint_id)
+    original_live = store._live
+    committed_lease = []
+
+    async def expiring(sql, actual_scope, actual_fence):
+        row = await original_live(sql, actual_scope, actual_fence)
+        committed_lease.append(row.lease_expires_at)
+        # 固定最后资格后的注入窗口；前置SQL耗时不充当本节点的过期触发。
         row.lease_expires_at = time.time() + 0.1
+        return row
+
+    monkeypatch.setattr(store, "_live", expiring)
     delayed = []
 
     def delay_renew(sql, _flush, _instances):
@@ -243,5 +253,8 @@ async def test_renew_flush_crossing_original_lease_cannot_revive_producer(captur
     finally:
         event.remove(Session, "before_flush", delay_renew)
     assert delayed == [True]
-    assert (await store.get(scope, view.checkpoint_id)).status == "interrupted"
+    async with store.database.sessions() as sql:
+        row = await sql.get(WorkspaceDirectoryCaptureRow, view.checkpoint_id)
+        assert committed_lease == [row.lease_expires_at]
+        assert row.status == "capturing" and row.owner_id == store.owner_id
     assert await material_count(store) == 0

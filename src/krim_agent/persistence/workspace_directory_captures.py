@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointCaptureFence,
     DirectoryCheckpointCaptureView,
@@ -25,10 +26,17 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointSummary,
     DirectoryCheckpointView,
     StoredDirectoryCheckpoint,
+    directory_checkpoint_model_source,
 )
 from krim_agent.workspace_tree_snapshot import WorkspaceTreeSnapshot
 
-from .database import WorkspaceDirectoryCaptureRow, WorkspaceDirectoryCheckpointRow
+from .database import (
+    NativeCheckpointModelSourceRow,
+    WorkspaceDirectoryCaptureModelSourceRow,
+    WorkspaceDirectoryCaptureRow,
+    WorkspaceDirectoryCheckpointRow,
+    WorkspaceRestoreModelSourceRow,
+)
 from .workspace_directory_checkpoints import WorkspaceDirectoryCheckpointStore
 from .workspace_edits import digest
 
@@ -60,15 +68,57 @@ class WorkspaceDirectoryCaptureStore:
         )
 
     @staticmethod
-    def _hash(request: DirectoryCheckpointMaterialCreate, binding: WorkspaceBinding) -> str:
-        return digest(
-            {
-                "request": request.model_dump(mode="json"),
-                "key": binding.key,
-                "resource": binding.fingerprint,
-                "workspace": binding.workspace.fingerprint,
-            }
+    def _hash(
+        request: DirectoryCheckpointMaterialCreate,
+        binding: WorkspaceBinding,
+        source: CheckpointModelSource | None = None,
+    ) -> str:
+        return WorkspaceDirectoryCaptureStore._checksum(
+            request, binding.key, binding.fingerprint, binding.workspace.fingerprint, source
         )
+
+    @staticmethod
+    def _checksum(
+        request: DirectoryCheckpointMaterialCreate,
+        key: str,
+        resource: str,
+        workspace: str,
+        source: CheckpointModelSource | None,
+    ) -> str:
+        value = {
+            "request": request.model_dump(mode="json"),
+            "key": key,
+            "resource": resource,
+            "workspace": workspace,
+        }
+        if source is not None:
+            value["model_source"] = {"run_id": source.run_id, "call_id": source.call_id}
+        return digest(value)
+
+    async def _source(
+        self, sql: AsyncSession, row: WorkspaceDirectoryCaptureRow, *, live: bool = False
+    ) -> CheckpointModelSource | None:
+        saved = await sql.get(WorkspaceDirectoryCaptureModelSourceRow, row.checkpoint_id)
+        if bool(row.model_bound) != (saved is not None):
+            raise _error("corrupt", "目录捕获模型标记或原来源缺失")
+        if saved is None:
+            return None
+        try:
+            source = directory_checkpoint_model_source(
+                CheckpointModelSource(saved.run_id, saved.call_id)
+            )
+        except ServiceError:
+            raise _error("corrupt", "目录捕获持久来源损坏") from None
+        assert source is not None
+        if not row.scope_id.startswith("session:"):
+            raise _error("corrupt", "目录模型捕获缺少原Agent会话")
+        await self.edits._scope(sql, row.scope_id, writing=live, run_id=source.run_id)
+        return source
+
+    async def source(self, scope: str, identifier: str) -> CheckpointModelSource | None:
+        async with self.database.write_lock, self.database.sessions() as sql:
+            row = await self._row(sql, scope, identifier)
+            return await self._source(sql, row)
 
     async def _row(
         self, sql: AsyncSession, scope: str, identifier: str, *, resource: bool = True
@@ -76,15 +126,15 @@ class WorkspaceDirectoryCaptureStore:
         row = await sql.get(WorkspaceDirectoryCaptureRow, identifier)
         if row is None or row.scope_id != scope:
             raise _error("not_found", "目录捕获不在此作用域中", 404)
+        source = await self._source(sql, row)
         try:
             request = self._request(row)
-            checksum = digest(
-                {
-                    "request": request.model_dump(mode="json"),
-                    "key": row.workspace_key,
-                    "resource": row.resource_fingerprint,
-                    "workspace": row.workspace_fingerprint,
-                }
+            checksum = self._checksum(
+                request,
+                row.workspace_key,
+                row.resource_fingerprint,
+                row.workspace_fingerprint,
+                source,
             )
             if row.request_hash != checksum:
                 raise ValueError("原目录捕获请求摘要损坏")
@@ -169,7 +219,13 @@ class WorkspaceDirectoryCaptureStore:
             raise _error("corrupt", "目录捕获状态或摘要损坏") from None
 
     async def reserve(
-        self, scope: str, binding: WorkspaceBinding, request: DirectoryCheckpointMaterialCreate
+        self,
+        scope: str,
+        binding: WorkspaceBinding,
+        request: DirectoryCheckpointMaterialCreate,
+        *,
+        model_source: CheckpointModelSource | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> tuple[DirectoryCheckpointView, bool]:
         if (
             type(binding) is not WorkspaceBinding
@@ -177,9 +233,12 @@ class WorkspaceDirectoryCaptureStore:
         ):
             raise _error("input", "目录捕获请求或绑定类型无效", 422)
         request = DirectoryCheckpointMaterialCreate.model_validate(request.model_dump(mode="json"))
-        checksum = self._hash(request, binding)
+        model_source = directory_checkpoint_model_source(model_source)
+        checksum = self._hash(request, binding, model_source)
         async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.edits._writer(sql)
+            if authorize is not None:
+                authorize()
             topic = await self.edits._scope(sql, scope, writing=False)
             await self.edits._resource(sql, scope, binding.key, binding.fingerprint)
             previous = await sql.scalar(
@@ -189,12 +248,34 @@ class WorkspaceDirectoryCaptureStore:
                 )
             )
             if previous is not None:
+                previous = await self._row(sql, scope, previous.checkpoint_id)
+                if await self._source(sql, previous) != model_source:
+                    raise _error("model_conflict", "原目录捕获绑定其他父调用来源")
                 if previous.request_hash != checksum:
                     raise _error("key_conflict", "原目录捕获键已绑定其他请求或资源")
-                previous = await self._row(sql, scope, previous.checkpoint_id)
                 self._expire(previous)
                 return await self._view(sql, previous), False
-            await self.edits._scope(sql, scope, writing=True)
+            if model_source is not None:
+                if not scope.startswith("session:"):
+                    raise _error("model_context", "目录模型捕获须使用原Agent会话", 403)
+                await self.edits._scope(sql, scope, writing=True, run_id=model_source.run_id)
+                for table in (
+                    WorkspaceDirectoryCaptureModelSourceRow,
+                    NativeCheckpointModelSourceRow,
+                    WorkspaceRestoreModelSourceRow,
+                ):
+                    if (
+                        await sql.scalar(
+                            select(table).where(
+                                table.run_id == model_source.run_id,
+                                table.call_id == model_source.call_id,
+                            )
+                        )
+                        is not None
+                    ):
+                        raise _error("model_call_conflict", "原Run/call已绑定其他检查点操作")
+            else:
+                await self.edits._scope(sql, scope, writing=True)
             if not binding.require().writable:
                 raise ServiceError("workspace_read_only", "原工作区未授写能力", 403)
             count = int(
@@ -215,14 +296,31 @@ class WorkspaceDirectoryCaptureStore:
                 resource_fingerprint=binding.fingerprint,
                 workspace_fingerprint=binding.workspace.fingerprint,
                 status="capturing",
+                model_bound=model_source is not None,
                 owner_id=self.owner_id,
                 lease_expires_at=time.time() + self.lease_seconds,
                 token=secrets.token_hex(32),
             )
             sql.add(row)
             await sql.flush()
-            await self.edits._scope(sql, scope, writing=True)
+            if model_source is not None:
+                sql.add(
+                    WorkspaceDirectoryCaptureModelSourceRow(
+                        checkpoint_id=row.checkpoint_id,
+                        run_id=model_source.run_id,
+                        call_id=model_source.call_id,
+                    )
+                )
+                await sql.flush()
+            await self.edits._scope(
+                sql,
+                scope,
+                writing=True,
+                run_id=model_source.run_id if model_source is not None else None,
+            )
             binding.require()
+            if authorize is not None:
+                authorize()
             return await self._view(sql, row), True
 
     @staticmethod
@@ -235,6 +333,7 @@ class WorkspaceDirectoryCaptureStore:
             or re.fullmatch(r"[0-9a-f]{64}", fence.token) is None
         ):
             raise _error("context", "目录捕获内部围栏无效", 403)
+        directory_checkpoint_model_source(fence.model_source)
 
     def _assert_live(
         self, row: WorkspaceDirectoryCaptureRow, fence: DirectoryCheckpointCaptureFence
@@ -254,6 +353,8 @@ class WorkspaceDirectoryCaptureStore:
         row = await self._row(sql, scope, fence.checkpoint_id)
         self._assert_live(row, fence)
         await self.edits._scope(sql, scope, writing=True)
+        if await self._source(sql, row, live=True) != fence.model_source:
+            raise _error("model_context", "目录围栏未保留原父调用来源", 403)
         self._assert_live(row, fence)
         return row
 
@@ -261,7 +362,9 @@ class WorkspaceDirectoryCaptureStore:
         async with self.database.write_lock, self.database.sessions() as sql:
             await self.edits._scope(sql, scope, writing=True)
             row = await self._row(sql, scope, identifier)
-            fence = DirectoryCheckpointCaptureFence(identifier, row.token)
+            fence = DirectoryCheckpointCaptureFence(
+                identifier, row.token, await self._source(sql, row, live=True)
+            )
             self._assert_live(row, fence)
             return fence
 
@@ -273,7 +376,13 @@ class WorkspaceDirectoryCaptureStore:
             if row.root_path != root_path:
                 raise _error("target", "目录捕获未保留原冻结根", 403)
 
-    async def renew(self, scope: str, fence: DirectoryCheckpointCaptureFence) -> None:
+    async def renew(
+        self,
+        scope: str,
+        fence: DirectoryCheckpointCaptureFence,
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> None:
         async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.edits._writer(sql)
             row = await self._live(sql, scope, fence)
@@ -282,6 +391,8 @@ class WorkspaceDirectoryCaptureStore:
             await sql.flush()
             if (previous_lease or 0) <= time.time():
                 raise _error("fenced", "续租提交前原目录租约已失效")
+            if authorize is not None:
+                authorize()
 
     @staticmethod
     def _qualify(binding: WorkspaceBinding, qualify: Callable[[], None]) -> None:
@@ -372,6 +483,8 @@ class WorkspaceDirectoryCaptureStore:
             await self.edits._writer(sql)
             # 撤权不能阻止原token关闭生产准入；此路径只收束原任务，绝不发布材料。
             row = await self._row(sql, scope, fence.checkpoint_id, resource=False)
+            if await self._source(sql, row) != fence.model_source:
+                raise _error("model_context", "迟到失败未保留原目录父来源", 403)
             if row.owner_id not in {None, self.owner_id} or not secrets.compare_digest(
                 row.token, fence.token
             ):

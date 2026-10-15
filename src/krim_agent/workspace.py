@@ -49,6 +49,9 @@ WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES = frozenset(
         "workspace_checkpoint_restore_start",
         "workspace_checkpoint_restore_query",
         "workspace_checkpoint_restore_cancel",
+        "workspace_directory_checkpoint_create",
+        "workspace_directory_checkpoint_query",
+        "workspace_directory_checkpoint_cancel",
     }
 )
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
@@ -101,6 +104,7 @@ WORKSPACE_WRITE_TOOL_NAMES = (
         - {
             "workspace_checkpoint_query",
             "workspace_checkpoint_restore_query",
+            "workspace_directory_checkpoint_query",
         }
     )
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})

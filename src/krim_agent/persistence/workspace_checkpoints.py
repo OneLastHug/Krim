@@ -33,6 +33,7 @@ from .database import (
     NativeCheckpointModelSourceRow,
     NativeWorkspaceCheckpointFileRow,
     NativeWorkspaceCheckpointRow,
+    WorkspaceDirectoryCaptureModelSourceRow,
     WorkspaceFileLockRow,
     WorkspaceRestoreModelSourceRow,
     WorkspaceRestorePlanRow,
@@ -283,6 +284,18 @@ class WorkspaceCheckpointStore:
                         "workspace_checkpoint_model_context", "模型检查点需要原Agent会话", 403
                     )
                 await self.edits._scope(session, scope, writing=True, run_id=model_source.run_id)
+                if (
+                    await session.scalar(
+                        select(WorkspaceDirectoryCaptureModelSourceRow).where(
+                            WorkspaceDirectoryCaptureModelSourceRow.run_id == model_source.run_id,
+                            WorkspaceDirectoryCaptureModelSourceRow.call_id == model_source.call_id,
+                        )
+                    )
+                    is not None
+                ):
+                    raise ServiceError(
+                        "workspace_checkpoint_model_call_conflict", "原调用已绑定目录捕获", 409
+                    )
                 if (
                     model_source.restore_plan_id is None
                     and await session.scalar(
