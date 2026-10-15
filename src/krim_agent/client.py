@@ -9,7 +9,7 @@ from types import TracebackType
 from uuid import uuid4
 
 import httpx
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from krim_agent.agents import AgentProfileUpdate, AgentProfileVersion, AgentResourceView
 from krim_agent.agents.sessions import AgentSessionControl, AgentSessionView, AgentTurnView
@@ -17,6 +17,7 @@ from krim_agent.persistence.completed_tree_origins import (
     CompletedTreeOriginLookupView,
     CompletedTreeOriginView,
 )
+from krim_agent.protocol.domain import ServiceError
 
 from .agents import AgentDescriptor
 from .application.agents import AgentInventoryView, AgentPromptRequest, AgentView
@@ -136,6 +137,14 @@ from .workspace_directory import (
     DirectoryQueryResult,
 )
 from .workspace_directory_checkpoint import DirectoryCheckpointCreate, DirectoryCheckpointView
+from .workspace_directory_restore import (
+    REQUEST_KEY,
+    DirectoryRestoreExecute,
+    DirectoryRestoreOperationView,
+    DirectoryRestorePreview,
+    DirectoryRestoreView,
+)
+from .workspace_directory_restore_public import DirectoryRestoreDiffPage
 from .workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -2004,6 +2013,251 @@ class KrimClient:
                 code="workspace_directory_capture_response",
                 status=502,
             )
+        return value
+
+    @staticmethod
+    def _directory_restore_bad_response() -> ClientError:
+        return ClientError(
+            "目录恢复回程未保留原请求与作用域",
+            code="workspace_directory_restore_response",
+            status=502,
+        )
+
+    @staticmethod
+    def _directory_restore_id(value: str) -> str:
+        if type(value) is not str:
+            raise ClientError(
+                "目录恢复标识类型无效", code="workspace_identifier_invalid", status=422
+            )
+        return _workspace_identifier(value)
+
+    @classmethod
+    def _directory_restore_base(cls, agent_id: str) -> str:
+        return f"/v1/agents/{cls._directory_restore_id(agent_id)}/workspace/directory-restores"
+
+    @staticmethod
+    def _directory_restore_key(value: str) -> str:
+        if type(value) is not str or re.fullmatch(REQUEST_KEY, value) is None:
+            raise ClientError(
+                "目录恢复请求键无效", code="workspace_request_key_invalid", status=422
+            )
+        return value
+
+    @staticmethod
+    def _directory_restore_confirm(confirmed: bool) -> str:
+        if type(confirmed) is not bool:
+            raise ClientError(
+                "目录恢复确认必须为布尔值", code="workspace_directory_restore_input", status=422
+            )
+        return str(confirmed).lower()
+
+    @staticmethod
+    def _directory_restore_pagination(offset: int, limit: int, maximum: int) -> None:
+        if (
+            type(offset) is not int
+            or not 0 <= offset <= 9007199254740991
+            or type(limit) is not int
+            or not 1 <= limit <= maximum
+        ):
+            raise ClientError(
+                "目录恢复分页参数无效", code="workspace_directory_restore_pagination", status=422
+            )
+
+    @staticmethod
+    def _directory_restore_scope(scope_id: str, agent_id: str) -> None:
+        if scope_id != "session:" + agent_id:
+            raise KrimClient._directory_restore_bad_response()
+
+    def _directory_restore_response[Result: BaseModel](
+        self, response: httpx.Response, model: type[Result]
+    ) -> Result:
+        self._check(response)
+        try:
+            return model.model_validate_json(response.content)
+        except (ValueError, TypeError, ServiceError):
+            raise self._directory_restore_bad_response() from None
+
+    def agent_workspace_preview_directory_restore(
+        self, agent_id: str, request: DirectoryRestorePreview, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        request = DirectoryRestorePreview.model_validate(request.model_dump(mode="json"))
+        response = self._http.post(
+            self._directory_restore_base(agent_id) + "/preview",
+            params={"confirmed": self._directory_restore_confirm(confirmed)},
+            json=request.model_dump(mode="json"),
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.request_key != request.request_key or value.target != request.target:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_execute_directory_restore(
+        self, agent_id: str, request: DirectoryRestoreExecute, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        request = DirectoryRestoreExecute.model_validate(request.model_dump(mode="json"))
+        response = self._http.post(
+            self._directory_restore_base(agent_id) + "/start",
+            params={"confirmed": self._directory_restore_confirm(confirmed)},
+            json=request.model_dump(mode="json"),
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if (
+            value.plan_id != request.plan_id
+            or value.execute_key != request.request_key
+            or value.revision <= request.expected_revision
+        ):
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_verify_directory_restore(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        response = self._http.post(
+            self._directory_restore_base(agent_id)
+            + "/operations/"
+            + self._directory_restore_id(operation_id)
+            + "/verify",
+            params={"confirmed": self._directory_restore_confirm(confirmed)},
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.operation_id != operation_id or value.execute_key is None:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_directory_restore(
+        self, agent_id: str, plan_id: str
+    ) -> DirectoryRestoreView:
+        response = self._http.get(
+            self._directory_restore_base(agent_id) + "/" + self._directory_restore_id(plan_id)
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.plan_id != plan_id:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_directory_restore_by_key(
+        self, agent_id: str, request_key: str
+    ) -> DirectoryRestoreView | None:
+        response = self._http.get(
+            self._directory_restore_base(agent_id) + "/by-key",
+            params={"request_key": self._directory_restore_key(request_key)},
+        )
+        self._check(response)
+        if response.content.strip(b" \t\r\n") == b"null":
+            return None
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.request_key != request_key:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_directory_restores(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[DirectoryRestoreView]:
+        self._directory_restore_pagination(offset, limit, 32)
+        response = self._http.get(
+            self._directory_restore_base(agent_id), params={"offset": offset, "limit": limit}
+        )
+        self._check(response)
+        try:
+            values = TypeAdapter(list[DirectoryRestoreView]).validate_json(response.content)
+        except (ValueError, TypeError, ServiceError):
+            raise self._directory_restore_bad_response() from None
+        if len(values) > limit or len({item.plan_id for item in values}) != len(values):
+            raise self._directory_restore_bad_response()
+        for value in values:
+            self._directory_restore_scope(value.scope_id, agent_id)
+        return values
+
+    def agent_workspace_directory_restore_diff(
+        self, agent_id: str, plan_id: str, *, offset: int = 0, limit: int = 128
+    ) -> DirectoryRestoreDiffPage:
+        self._directory_restore_pagination(offset, limit, 128)
+        response = self._http.get(
+            self._directory_restore_base(agent_id)
+            + "/"
+            + self._directory_restore_id(plan_id)
+            + "/diff",
+            params={"offset": offset, "limit": limit},
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreDiffPage)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.plan_id != plan_id or value.offset != offset or value.limit != limit:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_directory_restore_operation(
+        self, agent_id: str, operation_id: str
+    ) -> DirectoryRestoreOperationView:
+        response = self._http.get(
+            self._directory_restore_base(agent_id)
+            + "/operations/"
+            + self._directory_restore_id(operation_id)
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreOperationView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.operation_id != operation_id or value.kind != "execute":
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_directory_restore_operation_by_key(
+        self, agent_id: str, request_key: str
+    ) -> DirectoryRestoreOperationView | None:
+        response = self._http.get(
+            self._directory_restore_base(agent_id) + "/operations/by-key",
+            params={"request_key": self._directory_restore_key(request_key)},
+        )
+        self._check(response)
+        if response.content.strip(b" \t\r\n") == b"null":
+            return None
+        value = self._directory_restore_response(response, DirectoryRestoreOperationView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.request_key != request_key or value.kind != "execute":
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_wait_directory_restore(
+        self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
+    ) -> DirectoryRestoreView:
+        if (
+            type(timeout_seconds) not in {float, int}
+            or not math.isfinite(timeout_seconds)
+            or not 0 <= timeout_seconds <= 300
+        ):
+            raise ClientError(
+                "目录恢复等待须为0–300秒", code="workspace_directory_restore_timeout", status=422
+            )
+        response = self._http.post(
+            self._directory_restore_base(agent_id)
+            + "/"
+            + self._directory_restore_id(plan_id)
+            + "/wait",
+            params={"timeout_seconds": timeout_seconds},
+            timeout=max(60, timeout_seconds + 5),
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.plan_id != plan_id:
+            raise self._directory_restore_bad_response()
+        return value
+
+    def agent_workspace_cancel_directory_restore(
+        self, agent_id: str, plan_id: str
+    ) -> DirectoryRestoreView:
+        response = self._http.post(
+            self._directory_restore_base(agent_id)
+            + "/"
+            + self._directory_restore_id(plan_id)
+            + "/cancel"
+        )
+        value = self._directory_restore_response(response, DirectoryRestoreView)
+        self._directory_restore_scope(value.scope_id, agent_id)
+        if value.plan_id != plan_id:
+            raise self._directory_restore_bad_response()
         return value
 
     def agent_workspace_create_checkpoint(

@@ -98,6 +98,11 @@ class WorkspaceDirectoryRestoreService:
         if sum(not task.done() for _, task in self._tasks.values()) >= self.max_active:
             raise _error("busy", "目录恢复并发已满", 429)
 
+    @staticmethod
+    def _confirmation(confirmed: bool) -> None:
+        if type(confirmed) is not bool:
+            raise _error("input", "目录恢复确认必须为布尔值", 422)
+
     def _spawn(
         self,
         agent_id: str,
@@ -126,6 +131,7 @@ class WorkspaceDirectoryRestoreService:
     async def preview(
         self, agent_id: str, request: DirectoryRestorePreview, *, confirmed: bool = False
     ) -> DirectoryRestoreView:
+        self._confirmation(confirmed)
         request = DirectoryRestorePreview.model_validate(request.model_dump(mode="json"))
 
         async def admit() -> DirectoryRestoreView:
@@ -152,6 +158,7 @@ class WorkspaceDirectoryRestoreService:
     async def start(
         self, agent_id: str, request: DirectoryRestoreExecute, *, confirmed: bool = False
     ) -> DirectoryRestoreView:
+        self._confirmation(confirmed)
         request = DirectoryRestoreExecute.model_validate(request.model_dump(mode="json"))
 
         async def admit() -> DirectoryRestoreView:
@@ -178,6 +185,8 @@ class WorkspaceDirectoryRestoreService:
     async def verify(
         self, agent_id: str, operation_id: str, *, confirmed: bool = False
     ) -> DirectoryRestoreView:
+        self._confirmation(confirmed)
+
         async def admit() -> DirectoryRestoreView:
             scope, binding = await self.authorize(agent_id, "verify")
             async with self._start_lock:

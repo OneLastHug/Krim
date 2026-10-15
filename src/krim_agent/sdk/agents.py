@@ -77,6 +77,16 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointCreate,
     DirectoryCheckpointView,
 )
+from krim_agent.workspace_directory_restore import (
+    DirectoryRestoreExecute,
+    DirectoryRestoreOperationView,
+    DirectoryRestorePreview,
+    DirectoryRestoreView,
+)
+from krim_agent.workspace_directory_restore_public import (
+    DirectoryRestoreDiffPage,
+    directory_restore_diff_page,
+)
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
     NativeBatchRequest,
@@ -548,6 +558,73 @@ class AgentSession:
         return await self.service.workspace_directory_checkpoint_cancel(
             self.agent_id, checkpoint_id
         )
+
+    async def preview_directory_checkpoint_restore(
+        self, request: DirectoryRestorePreview, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        return await self.service.workspace_preview_directory_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def execute_directory_checkpoint_restore(
+        self, request: DirectoryRestoreExecute, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        return await self.service.workspace_start_directory_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def verify_directory_checkpoint_restore(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> DirectoryRestoreView:
+        return await self.service.workspace_verify_directory_restore(
+            self.agent_id, operation_id, confirmed=confirmed
+        )
+
+    async def directory_checkpoint_restore(self, plan_id: str) -> DirectoryRestoreView:
+        return await self.service.workspace_directory_restore(self.agent_id, plan_id)
+
+    async def directory_checkpoint_restore_by_key(
+        self, request_key: str
+    ) -> DirectoryRestoreView | None:
+        return await self.service.workspace_directory_restore_by_key(self.agent_id, request_key)
+
+    async def directory_checkpoint_restores(
+        self, *, offset: int = 0, limit: int = 32
+    ) -> list[DirectoryRestoreView]:
+        return await self.service.workspace_directory_restore_list(
+            self.agent_id, offset=offset, limit=limit
+        )
+
+    async def directory_checkpoint_restore_diff(
+        self, plan_id: str, *, offset: int = 0, limit: int = 128
+    ) -> DirectoryRestoreDiffPage:
+        entries = await self.service.workspace_directory_restore_diff(
+            self.agent_id, plan_id, offset=offset, limit=limit
+        )
+        plan = await self.service.workspace_directory_restore(self.agent_id, plan_id)
+        return directory_restore_diff_page(plan, entries, offset, limit)
+
+    async def directory_checkpoint_restore_operation(
+        self, operation_id: str
+    ) -> DirectoryRestoreOperationView:
+        return await self.service.workspace_directory_restore_operation(self.agent_id, operation_id)
+
+    async def directory_checkpoint_restore_operation_by_key(
+        self, request_key: str
+    ) -> DirectoryRestoreOperationView | None:
+        return await self.service.workspace_directory_restore_operation_by_key(
+            self.agent_id, request_key
+        )
+
+    async def wait_directory_checkpoint_restore(
+        self, plan_id: str, *, timeout_seconds: float = 30
+    ) -> DirectoryRestoreView:
+        return await self.service.workspace_directory_restore_wait(
+            self.agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_directory_checkpoint_restore(self, plan_id: str) -> DirectoryRestoreView:
+        return await self.service.workspace_directory_restore_cancel(self.agent_id, plan_id)
 
     async def create_file_checkpoint(
         self, request: WorkspaceCheckpointCreate, *, confirmed: bool = False

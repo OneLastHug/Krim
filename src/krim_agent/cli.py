@@ -110,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory checkpoints（目录检查点）：显式启用完整目录捕获，仍需原工作区授权",
     )
     serve.add_argument(
+        "--directory-restores",
+        action="store_true",
+        help="directory restores（目录恢复）：显式登记原受控恢复叶，写入仍需原授权",
+    )
+    serve.add_argument(
         "--directory-checkpoint-controls",
         action="store_true",
         help=(
@@ -177,6 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .directory_checkpoint_cli import add_parser as add_directory_checkpoint_parser
 
     add_directory_checkpoint_parser(subparsers)
+    from .directory_restore_cli import add_parser as add_directory_restore_parser
+
+    add_directory_restore_parser(subparsers)
     workspace = subparsers.add_parser(
         "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
     )
@@ -1335,6 +1343,8 @@ def main() -> None:
             parser.error("serve --checkpoint-bytes需要已授权--workspace")
         if args.directory_checkpoints and not args.workspace:
             parser.error("serve --directory-checkpoints需要已授权--workspace")
+        if args.directory_restores and not args.workspace:
+            parser.error("serve --directory-restores需要已授权--workspace")
         if args.directory_checkpoint_controls and not args.workspace:
             parser.error("serve --directory-checkpoint-controls需要已授权--workspace")
         if args.checkpoint_controls and not args.workspace:
@@ -1382,6 +1392,7 @@ def main() -> None:
                 generated_tree_undos_enabled=args.generated_tree_undos,
                 checkpoint_bytes_enabled=args.checkpoint_bytes,
                 directory_checkpoints_enabled=args.directory_checkpoints,
+                directory_restores_enabled=args.directory_restores,
                 directory_checkpoint_controls_enabled=args.directory_checkpoint_controls,
                 checkpoint_controls_enabled=args.checkpoint_controls,
                 checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,
@@ -1447,6 +1458,11 @@ def main() -> None:
                 from .directory_checkpoint_cli import run_command as directory_checkpoint_command
 
                 directory_checkpoint_command(client, args, parser)
+                return
+            if args.command == "directory-restores":
+                from .directory_restore_cli import run_command as directory_restore_command
+
+                directory_restore_command(client, args, parser)
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)
