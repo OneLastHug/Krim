@@ -12,6 +12,7 @@ from krim_agent.config import Settings
 from krim_agent.execution import LinuxSandboxRunner
 from krim_agent.persistence import Database, KrimRepository
 from krim_agent.persistence.completed_tree_seals import CompletedTreeSealStore
+from krim_agent.persistence.database import WorkspaceTreeExchangeAttemptRow
 from krim_agent.persistence.workspace_tree_exchanges import WorkspaceTreeExchangeStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.providers import FakeProvider
@@ -101,7 +102,16 @@ async def main():
         assert await service.restore_persistent() == 1
         store = WorkspaceTreeExchangeStore(service.workspace_edits)
         try:
-            assert await store.recover_interrupted() == 1
+            # 启动恢复必须已经提交；先只读SQL，不能由下面的查询惰性补做恢复。
+            async with store.database.sessions() as sql:
+                recovered = await sql.get(WorkspaceTreeExchangeAttemptRow, value["operation_id"])
+                assert recovered is not None
+                assert recovered.scope_id == value["scope"]
+                assert recovered.proposal_id == value["proposal_id"]
+                assert recovered.status == "uncertain" and recovered.intent_recorded
+                assert recovered.owner_id is None and recovered.lease_expires_at is None
+                assert recovered.receipt is None
+            assert await store.recover_interrupted() == 0
             operation = await store.operation(value["scope"], value["operation_id"])
             assert operation.view.status == "uncertain" and operation.intent_recorded
             stale = WorkspaceTreeExchangeStore(service.workspace_edits)
@@ -150,6 +160,8 @@ async def main():
                         "status": result.view.status,
                         "replay_calls": calls,
                         "old_owner_fenced": True,
+                        "startup_recovered": True,
+                        "idempotent_recovery": 0,
                         "left_inode": effect.observed_left.entries[0].directory.inode,
                         "right_inode": effect.observed_right.entries[0].directory.inode,
                     }

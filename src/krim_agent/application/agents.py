@@ -446,6 +446,9 @@ class AgentService:
         if not restoring and not (await self.profiles.get(name)).enabled:
             raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
         profile = await self.profiles.get(name, revision)
+        return self._definition_from_profile(profile)
+
+    def _definition_from_profile(self, profile: AgentProfileVersion) -> AgentDefinition:
         if not profile.enabled:
             raise ServiceError("agent_profile_disabled", "Agent配置已停用", 409)
         if profile.config.provider_key not in self.resources.providers:
@@ -2335,7 +2338,7 @@ class AgentService:
                 continue
             error_code = None
             try:
-                await self._profile_definition(profile.name, profile.revision)
+                self._definition_from_profile(profile)
             except ServiceError as error:
                 error_code = error.code
             values.append(

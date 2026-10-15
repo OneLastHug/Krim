@@ -6,7 +6,7 @@ import hashlib
 import json
 
 from pydantic import JsonValue
-from sqlalchemy import JSON, Boolean, Integer, String, select, update
+from sqlalchemy import JSON, Boolean, Integer, String, and_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -100,9 +100,28 @@ class AgentProfileStore:
 
     async def list(self) -> list[AgentProfileVersion]:
         async with self.database.write_lock, self.database.sessions() as session:
-            names = list(
-                await session.scalars(
-                    select(AgentProfileHeadRow.name).order_by(AgentProfileHeadRow.name)
+            rows = await session.execute(
+                select(AgentProfileHeadRow, AgentProfileVersionRow)
+                .outerjoin(
+                    AgentProfileVersionRow,
+                    and_(
+                        AgentProfileVersionRow.name == AgentProfileHeadRow.name,
+                        AgentProfileVersionRow.revision == AgentProfileHeadRow.revision,
+                    ),
                 )
+                .order_by(AgentProfileHeadRow.name)
             )
-        return [await self.get(name) for name in names]
+            values = []
+            for head, row in rows:
+                if row is None:
+                    raise ServiceError("agent_profile_not_found", "Agent配置版本不存在", 404)
+                values.append(
+                    AgentProfileVersion(
+                        name=head.name,
+                        revision=head.revision,
+                        enabled=row.enabled,
+                        config=AgentProfile.model_validate(row.config),
+                        config_hash=row.config_hash,
+                    )
+                )
+            return values
