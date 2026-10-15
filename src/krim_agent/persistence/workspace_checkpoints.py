@@ -284,6 +284,9 @@ class WorkspaceCheckpointStore:
                         "workspace_checkpoint_model_context", "模型检查点需要原Agent会话", 403
                     )
                 await self.edits._scope(session, scope, writing=True, run_id=model_source.run_id)
+                from .directory_restore_sources import assert_no_directory_restore_call
+
+                await assert_no_directory_restore_call(session, model_source)
                 if (
                     await session.scalar(
                         select(WorkspaceDirectoryCaptureModelSourceRow).where(

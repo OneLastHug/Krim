@@ -54,7 +54,7 @@ async def schema(database):
         result = await sql.run_sync(reflect)
         head = (await sql.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         foreign_keys = (await sql.execute(text("PRAGMA foreign_key_check"))).all()
-    assert head == "0054_directory_capture_models" and foreign_keys == []
+    assert head == "0055_directory_restore_plans" and foreign_keys == []
     return result
 
 

@@ -1426,6 +1426,276 @@ class WorkspaceDirectoryCaptureModelSourceRow(Base):
     call_id: Mapped[str] = mapped_column(String(128))
 
 
+class WorkspaceDirectoryRestorePlanRow(Base):
+    __tablename__ = "workspace_directory_restore_plans"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key", name="uq_directory_restore_preview_key"),
+        UniqueConstraint("scope_id", "execute_key", name="uq_directory_restore_execute_key"),
+        UniqueConstraint("baseline_material_id", name="uq_directory_restore_baseline"),
+        CheckConstraint(
+            "target_kind IN ('checkpoint','baseline') AND "
+            "((target_kind = 'checkpoint' AND target_checkpoint_id IS NOT NULL "
+            "AND target_baseline_plan_id IS NULL) OR "
+            "(target_kind = 'baseline' AND target_checkpoint_id IS NULL "
+            "AND target_baseline_plan_id IS NOT NULL AND target_baseline_plan_id != plan_id))",
+            name="ck_directory_restore_target",
+        ),
+        CheckConstraint(
+            "phase IN ('preparing','ready','executing','finished','failed','cancelled',"
+            "'interrupted','expired','uncertain')",
+            name="ck_directory_restore_phase",
+        ),
+        CheckConstraint(
+            "preparation_status IN "
+            "('running','done','rejected','cancelled','interrupted','expired')",
+            name="ck_directory_restore_preparation_status",
+        ),
+        CheckConstraint(
+            "(phase = 'preparing' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (phase != 'preparing' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_directory_restore_owner",
+        ),
+        CheckConstraint(
+            "(prepared_metadata IS NULL AND prepared_payload IS NULL) OR "
+            "(prepared_metadata IS NOT NULL AND prepared_payload IS NOT NULL "
+            "AND baseline_material_id IS NOT NULL AND stage_metadata IS NOT NULL)",
+            name="ck_directory_restore_prepared",
+        ),
+        CheckConstraint(
+            "phase NOT IN ('ready','executing','finished','uncertain') OR "
+            "(baseline_material_id IS NOT NULL AND preparation_status = 'done')",
+            name="ck_directory_restore_ready",
+        ),
+        CheckConstraint(
+            "phase NOT IN ('finished','uncertain') OR prepared_metadata IS NOT NULL",
+            name="ck_directory_restore_published",
+        ),
+        CheckConstraint(
+            "phase NOT IN ('executing','finished','uncertain') OR execute_key IS NOT NULL",
+            name="ck_directory_restore_execute",
+        ),
+        CheckConstraint(
+            "(execute_key IS NULL) = (execute_hash IS NULL)",
+            name="ck_directory_restore_execute_hash",
+        ),
+        CheckConstraint(
+            "(baseline_material_id IS NULL AND baseline_fingerprint IS NULL "
+            "AND baseline_summary IS NULL AND baseline_hash IS NULL) OR "
+            "(baseline_material_id IS NOT NULL AND baseline_fingerprint IS NOT NULL "
+            "AND baseline_summary IS NOT NULL AND baseline_hash IS NOT NULL)",
+            name="ck_directory_restore_baseline_descriptor",
+        ),
+        CheckConstraint(
+            "preview_model_bound IN (FALSE,TRUE) AND execute_model_bound IN (FALSE,TRUE) "
+            "AND cancel_requested IN (FALSE,TRUE) AND cleanup_pending IN (FALSE,TRUE)",
+            name="ck_directory_restore_flags",
+        ),
+        CheckConstraint(
+            "revision >= 0 AND revision <= 9007199254740991 AND expires_at > 0 "
+            "AND ttl_seconds > 0 AND ttl_seconds <= 86400 "
+            "AND length(token) = 64 AND length(stage_token) = 32 "
+            "AND length(request_hash) = 64 AND length(resource_fingerprint) = 64 "
+            "AND length(workspace_fingerprint) = 64 AND length(target_fingerprint) = 64 "
+            "AND (baseline_fingerprint IS NULL OR length(baseline_fingerprint) = 64) "
+            "AND (baseline_hash IS NULL OR length(baseline_hash) = 64) "
+            "AND staging_reserved_bytes >= 0 AND staging_reserved_bytes <= 33554432 "
+            "AND staging_reserved_entries >= 0 AND staging_reserved_entries <= 1025",
+            name="ck_directory_restore_bounds",
+        ),
+        CheckConstraint(
+            "length(root_path) BETWEEN 1 AND 512 AND length(request_key) BETWEEN 1 AND 128 "
+            "AND length(workspace_key) BETWEEN 1 AND 64",
+            name="ck_directory_restore_input",
+        ),
+    )
+    plan_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    ttl_seconds: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float)
+    target_kind: Mapped[str] = mapped_column(String(16))
+    target_checkpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_captures.checkpoint_id"), nullable=True
+    )
+    target_baseline_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_restore_plans.plan_id"), nullable=True
+    )
+    target_material_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_checkpoints.checkpoint_id")
+    )
+    target_fingerprint: Mapped[str] = mapped_column(String(64))
+    target_summary: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    baseline_material_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_directory_checkpoints.checkpoint_id"), nullable=True
+    )
+    baseline_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    baseline_summary: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    baseline_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    root_path: Mapped[str] = mapped_column(String(512))
+    workspace_key: Mapped[str] = mapped_column(String(64))
+    resource_fingerprint: Mapped[str] = mapped_column(String(64))
+    workspace_fingerprint: Mapped[str] = mapped_column(String(64))
+    phase: Mapped[str] = mapped_column(String(16), default="preparing")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    preparation_status: Mapped[str] = mapped_column(String(16), default="running")
+    preparation_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    preparation_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    stage_token: Mapped[str] = mapped_column(String(32))
+    stage_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    prepared_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    prepared_payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    execute_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execute_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    preview_model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    execute_model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    staging_reserved_bytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    staging_reserved_entries: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceDirectoryRestoreAttemptRow(Base):
+    __tablename__ = "workspace_directory_restore_attempts"
+    __table_args__ = (
+        UniqueConstraint("plan_id", name="uq_directory_restore_single_execution"),
+        UniqueConstraint("operation_id", "plan_id", name="uq_directory_restore_operation_parent"),
+        UniqueConstraint("scope_id", "request_key", name="uq_directory_restore_operation_key"),
+        CheckConstraint(
+            "status IN "
+            "('running','done','rejected','uncertain','cancelled','interrupted','expired')",
+            name="ck_directory_restore_operation_status",
+        ),
+        CheckConstraint(
+            "mode IN ('execute','verify') AND intent_recorded IN (FALSE,TRUE) "
+            "AND verify_model_bound IN (FALSE,TRUE) AND verification_count >= 0 "
+            "AND verification_model_count >= 0 "
+            "AND verification_model_count <= verification_count",
+            name="ck_directory_restore_operation_flags",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status != 'running' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_directory_restore_operation_owner",
+        ),
+        CheckConstraint(
+            "status NOT IN ('done','uncertain') OR intent_recorded = TRUE",
+            name="ck_directory_restore_operation_intent",
+        ),
+        CheckConstraint(
+            "mode != 'verify' OR intent_recorded = TRUE",
+            name="ck_directory_restore_verification_intent",
+        ),
+        CheckConstraint(
+            "status != 'done' OR effect_metadata IS NOT NULL",
+            name="ck_directory_restore_operation_done",
+        ),
+        CheckConstraint(
+            "(status IN ('running','done') AND error_code IS NULL) OR "
+            "(status NOT IN ('running','done') AND error_code IS NOT NULL)",
+            name="ck_directory_restore_operation_error",
+        ),
+        CheckConstraint(
+            "(verification_run_id IS NULL) = (verification_call_id IS NULL) "
+            "AND length(token) = 64 AND expected_revision >= 0 "
+            "AND expected_revision <= 9007199254740991 AND length(request_hash) = 64",
+            name="ck_directory_restore_operation_bounds",
+        ),
+    )
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("workspace_directory_restore_plans.plan_id"))
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    mode: Mapped[str] = mapped_column(String(16), default="execute")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    intent_recorded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    effect_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    verification_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    verification_model_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    verify_model_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    verification_run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    verification_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verification_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceDirectoryRestoreLockRow(Base):
+    __tablename__ = "workspace_directory_restore_locks"
+    __table_args__ = (
+        UniqueConstraint("kind", "lock_key", name="uq_directory_restore_physical_lock"),
+        ForeignKeyConstraint(
+            ["operation_id", "plan_id"],
+            [
+                "workspace_directory_restore_attempts.operation_id",
+                "workspace_directory_restore_attempts.plan_id",
+            ],
+        ),
+        CheckConstraint("kind IN ('entry','directory')", name="ck_directory_restore_lock_kind"),
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_directory_restore_plans.plan_id"), primary_key=True
+    )
+    operation_id: Mapped[str] = mapped_column(String(36))
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class WorkspaceDirectoryRestoreModelSourceRow(Base):
+    __tablename__ = "workspace_directory_restore_model_sources"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["operation_id", "plan_id"],
+            [
+                "workspace_directory_restore_attempts.operation_id",
+                "workspace_directory_restore_attempts.plan_id",
+            ],
+        ),
+        Index(
+            "uq_directory_restore_original_source",
+            "plan_id",
+            "phase",
+            unique=True,
+            sqlite_where=sql_text("phase IN ('preview','execute')"),
+            postgresql_where=sql_text("phase IN ('preview','execute')"),
+        ),
+        CheckConstraint(
+            "phase IN ('preview','execute','verify') AND length(call_id) BETWEEN 1 AND 128 "
+            "AND ((phase = 'preview' AND operation_id IS NULL) "
+            "OR (phase != 'preview' AND operation_id IS NOT NULL))",
+            name="ck_directory_restore_model_source",
+        ),
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    call_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("workspace_directory_restore_plans.plan_id"))
+    phase: Mapped[str] = mapped_column(String(16))
+    operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
 class NativeWorkspaceCheckpointRow(Base):
     __tablename__ = "native_workspace_checkpoints"
     __table_args__ = (
