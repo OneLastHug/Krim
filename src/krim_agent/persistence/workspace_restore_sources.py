@@ -64,6 +64,9 @@ async def admit_restore_source(
     if source.restore_plan_id is not None or not scope.startswith("session:"):
         raise ServiceError("workspace_restore_model_context", "恢复阶段需要原模型父调用", 403)
     await edits._scope(session, scope, writing=True, run_id=source.run_id)
+    from .directory_restore_sources import assert_no_directory_restore_call
+
+    await assert_no_directory_restore_call(session, source)
     prior = await session.scalar(
         select(WorkspaceRestoreModelSourceRow).where(
             WorkspaceRestoreModelSourceRow.run_id == source.run_id,

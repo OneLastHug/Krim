@@ -93,7 +93,13 @@ async def test_actual_0053_host_upgrade_roundtrip_preserves_original_hash_rows_a
                     )
                 ).all()
             }
-        await database.initialize()
+        # 此用例审计0053→0054的单阶段历史DDL，不能随正常latest-head移动。
+        async with database.engine.begin() as sql:
+            await sql.run_sync(
+                lambda sync: command.upgrade(
+                    migration_config(sync), "0054_directory_capture_models"
+                )
+            )
         store = WorkspaceDirectoryCaptureStore(
             WorkspaceDirectoryCheckpointStore(WorkspaceEditStore(database))
         )
@@ -150,7 +156,11 @@ async def test_actual_0053_host_upgrade_roundtrip_preserves_original_hash_rows_a
                     assert (
                         await sql.execute(text("SELECT * FROM workspace_directory_captures"))
                     ).one() == before_row
-                    await sql.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
+                    await sql.run_sync(
+                        lambda sync: command.upgrade(
+                            migration_config(sync), "0054_directory_capture_models"
+                        )
+                    )
         assert (await store.get("topic:old", "old-host")).model_dump(mode="json") == original
     finally:
         await database.close()
@@ -176,7 +186,7 @@ async def test_0054_model_source_or_marker_only_cannot_be_lossily_downgraded(con
     async with store.database.engine.connect() as sql:
         assert (
             await sql.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0054_directory_capture_models"
+        ).scalar_one() == "0055_directory_restore_plans"
         assert (
             await sql.execute(text("SELECT request_hash FROM workspace_directory_captures"))
         ).scalar_one()

@@ -47,7 +47,7 @@ async def test_empty_0046_roundtrip_preserves_original_0045_material_and_existin
             await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0054_directory_capture_models"
+            ).scalar_one() == "0055_directory_restore_plans"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert await seals.get(scope, binding, plan.plan_id) == sealed
         assert await store.proposal(scope, proposal.view.proposal_id) == proposal

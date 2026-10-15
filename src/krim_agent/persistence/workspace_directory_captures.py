@@ -259,6 +259,9 @@ class WorkspaceDirectoryCaptureStore:
                 if not scope.startswith("session:"):
                     raise _error("model_context", "目录模型捕获须使用原Agent会话", 403)
                 await self.edits._scope(sql, scope, writing=True, run_id=model_source.run_id)
+                from .directory_restore_sources import assert_no_directory_restore_call
+
+                await assert_no_directory_restore_call(sql, model_source)
                 for table in (
                     WorkspaceDirectoryCaptureModelSourceRow,
                     NativeCheckpointModelSourceRow,

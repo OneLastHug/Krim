@@ -344,7 +344,7 @@ async def test_migration_empty_roundtrip_and_nonempty_ledger_refuses_loss(reposi
         async with store.database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0054_directory_capture_models"
+            ).scalar_one() == "0055_directory_restore_plans"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
     finally:
         workspace.close()

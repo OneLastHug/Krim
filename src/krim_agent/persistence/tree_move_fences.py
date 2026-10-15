@@ -17,6 +17,7 @@ from krim_agent.workspace_writer import PreparedFileChange
 from .database import (
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryLockRow,
+    WorkspaceDirectoryRestoreLockRow,
     WorkspaceEditAttemptRow,
     WorkspaceFileLockRow,
     WorkspaceTreeExchangeLockRow,
@@ -99,6 +100,25 @@ async def assert_no_move_lock(
     if await sql.scalar(exchange_query) is not None:
         raise ServiceError(
             "workspace_tree_exchange_busy", "原两树有执行中或未核实交换，禁止命名空间发布", 409
+        )
+    restore_query = select(WorkspaceDirectoryRestoreLockRow.operation_id).where(
+        or_(
+            *(
+                and_(
+                    WorkspaceDirectoryRestoreLockRow.kind == kind,
+                    WorkspaceDirectoryRestoreLockRow.lock_key == key,
+                )
+                for kind, key in keys
+            )
+        )
+    )
+    if exclude_operation_id is not None:
+        restore_query = restore_query.where(
+            WorkspaceDirectoryRestoreLockRow.operation_id != exclude_operation_id
+        )
+    if await sql.scalar(restore_query) is not None:
+        raise ServiceError(
+            "workspace_directory_restore_busy", "原目录有执行中或未核实恢复，禁止命名空间发布", 409
         )
 
 
