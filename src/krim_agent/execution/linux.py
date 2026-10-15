@@ -690,6 +690,8 @@ class LinuxSandboxRunner:
                                 tree.verify_limits()
                                 if tree_failure is not None:
                                     continue
+                            if handle._cancel.is_set() or time.monotonic() >= deadline:
+                                raise TimeoutError
                             dispatched = True
                             pending = memoryview(b"run\n")
                             selector.register(process.stdin, selectors.EVENT_WRITE, "input")
