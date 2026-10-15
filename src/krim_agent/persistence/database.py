@@ -79,7 +79,7 @@ from krim_agent.skills import (
 from krim_agent.tools.core import ToolAudit
 from krim_agent.usage import RunUsageView, usage_from_events
 
-from .migration import upgrade_database
+from .migration import migration_guard, upgrade_database
 from .tree import ROOT, MessageTree
 
 
@@ -1604,7 +1604,27 @@ class Database:
         self.write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        async with self.engine.begin() as connection:
+        task = asyncio.create_task(self._initialize())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+                if not task.cancelling():
+                    task.cancel()
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _initialize(self) -> None:
+        async with migration_guard(), self.engine.begin() as connection:
             await connection.run_sync(upgrade_database)
 
     async def close(self) -> None:
