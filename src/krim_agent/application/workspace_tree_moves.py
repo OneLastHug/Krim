@@ -18,6 +18,7 @@ from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import ToolContext, ToolError
 from krim_agent.tools.workspace import workspace_io
 from krim_agent.workspace import WorkspaceBinding
+from krim_agent.workspace_missing_directory_rollback import MissingDirectoryRollbackSource
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveAttemptView,
@@ -53,6 +54,7 @@ class TreeMoveService:
         self.store = WorkspaceTreeMoveStore(changes.store)
         self._operations: dict[asyncio.Task[dict[str, JsonValue]], Event] = {}
         self._active: dict[str, tuple[str, asyncio.Task[Any], Event]] = {}
+        self._active_parents: dict[str, asyncio.Task[Any]] = {}
         self._closed = False
 
     def _inside(self) -> bool:
@@ -68,10 +70,21 @@ class TreeMoveService:
         if self._inside():
             raise ServiceError("workspace_tree_move_self_close", "树移动回调不能关闭自身服务", 409)
 
+    def _scope_marker(self) -> tuple[object, asyncio.Task[Any] | None]:
+        marker = _current.get()
+        if (
+            marker is not None
+            and marker[0] is self
+            and marker[1] is not None
+            and not marker[1].done()
+        ):
+            return marker
+        return self, asyncio.current_task()
+
     @asynccontextmanager
     async def call_scope(self) -> AsyncIterator[None]:
         """覆盖原Registry的审批/Hook/执行/回程，先拒绝自身关闭再释放SDK/DB。"""
-        marker = _current.set((self, asyncio.current_task()))
+        marker = _current.set(self._scope_marker())
         try:
             yield
         finally:
@@ -115,7 +128,7 @@ class TreeMoveService:
     async def tool_operation(
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
-        marker = _current.set((self, asyncio.current_task()))
+        marker = _current.set(self._scope_marker())
         try:
             self._source(context)
             if len(self._operations) >= 64:
@@ -160,6 +173,12 @@ class TreeMoveService:
     async def _execute(
         self, operation: str, payload: dict[str, Any], context: ToolContext, abort: Event
     ) -> dict[str, JsonValue]:
+        if operation.startswith("missing_rollback_"):
+            from .missing_directory_rollback import MissingDirectoryRollbackOperations
+
+            return await MissingDirectoryRollbackOperations(self).execute(
+                operation, payload, context, abort
+            )
         if operation.startswith("generated_undo_"):
             from .generated_tree_undo import GeneratedTreeUndoOperations
 
@@ -229,6 +248,7 @@ class TreeMoveService:
         abort: Event,
         *,
         generated_origin: GeneratedTreeUndoSource | None = None,
+        missing_origin: MissingDirectoryRollbackSource | None = None,
         qualify: Callable[[], None] | None = None,
     ) -> TreeMovePreviewView:
         scope, binding = await self._guard(context)
@@ -262,6 +282,7 @@ class TreeMoveService:
             prepared,
             model_source=self._source(context),
             generated_origin=generated_origin,
+            missing_origin=missing_origin,
         )
         return stored.view
 
@@ -410,6 +431,12 @@ class TreeMoveService:
         task = asyncio.current_task()
         assert task is not None
         self._active[request.proposal_id] = (scope, task, abort)
+        marker = _current.get()
+        self._active_parents[request.proposal_id] = (
+            marker[1]
+            if marker is not None and marker[0] is self and marker[1] is not None
+            else task
+        )
         renewal = (
             self._renew(scope, identifier, context, abort)
             if qualify is None
@@ -467,6 +494,7 @@ class TreeMoveService:
         finally:
             if self._active.get(request.proposal_id) == (scope, task, abort):
                 self._active.pop(request.proposal_id, None)
+                self._active_parents.pop(request.proposal_id, None)
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
@@ -510,7 +538,14 @@ class TreeMoveService:
         active = self._active.get(proposal_id)
         if active is not None and active[0] == scope:
             active[2].set()
-            if not self._inside():
+            marker = _current.get()
+            same_producer = (
+                marker is not None
+                and marker[0] is self
+                and marker[1] is not None
+                and marker[1] is self._active_parents.get(proposal_id)
+            )
+            if not same_producer:
                 await _wait(active[1], active[2].set)
         return (await self.store.proposal(scope, cancelled.view.proposal_id)).view
 

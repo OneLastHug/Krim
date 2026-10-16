@@ -121,6 +121,7 @@ from krim_agent.tools.directory_checkpoint_capture import directory_checkpoint_c
 from krim_agent.tools.directory_restore import directory_restore_tools
 from krim_agent.tools.generated_tree_undo import generated_tree_undo_tools
 from krim_agent.tools.missing_directory_restore import missing_directory_restore_tools
+from krim_agent.tools.missing_directory_rollback import missing_directory_rollback_tools
 from krim_agent.tools.tree_exchanges import tree_exchange_tools
 from krim_agent.tools.tree_moves import tree_move_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
@@ -201,6 +202,17 @@ from krim_agent.workspace_missing_directory_restore import (
 from krim_agent.workspace_missing_directory_restore_control import (
     MISSING_DIRECTORY_RESTORE_STEP_TOOLS,
     MissingDirectoryRestoreStepInput,
+)
+from krim_agent.workspace_missing_directory_rollback import (
+    MissingDirectoryRollbackAction,
+    MissingDirectoryRollbackAttemptView,
+    MissingDirectoryRollbackPreview,
+    MissingDirectoryRollbackView,
+)
+from krim_agent.workspace_missing_directory_rollback_control import (
+    MissingDirectoryRollbackCancel,
+    MissingDirectoryRollbackQuery,
+    MissingDirectoryRollbackQueryResult,
 )
 from krim_agent.workspace_mixed_batch import (
     MixedBatchDispatch,
@@ -908,6 +920,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_missing_directory_rollbacks(self) -> None:
+        """显式整组登记，冲突先拒绝，旧冻结Agent不自动提升能力。"""
+        definitions = missing_directory_rollback_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("缺失基线回退工具名称已被其他定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_execution(
         self, key: str, runner: LinuxSandboxRunner, *, version: str, owned: bool = False
     ) -> ExecutionBinding:
@@ -1025,6 +1047,8 @@ class AgentService:
     ) -> object:
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+        if type(confirmed) is not bool:
+            raise ServiceError("workspace_confirmation", "工作区确认标记必须是布尔值", 422)
         handle = self._handle(agent_id)
         async with self.runtime.repository.database.write_lock:
             async with self.runtime.repository.database.sessions() as session:
@@ -1050,6 +1074,7 @@ class AgentService:
                     "tree_exchange_query",
                     "tree_exchange_seal_query",
                     "generated_tree_undo_query",
+                    "missing_directory_rollback_query",
                 }:
                     await assert_session_open(session, session_row)
         if self._closed:
@@ -1187,12 +1212,26 @@ class AgentService:
                 "workspace_generated_undo_context": 403,
                 "workspace_generated_undo_source": 403,
                 "workspace_generated_undo_deadline": 409,
+                "workspace_generated_undo_budget": 409,
                 "workspace_generated_undo_required": 409,
                 "workspace_generated_undo_seal_required": 409,
                 "workspace_generated_undo_source_conflict": 409,
                 "workspace_generated_undo_version_conflict": 409,
                 "workspace_generated_undo_restore_conflict": 409,
                 "workspace_generated_undo_operation": 422,
+                "workspace_missing_directory_rollback_backend_missing": 503,
+                "workspace_missing_directory_rollback_context": 403,
+                "workspace_missing_directory_rollback_source": 403,
+                "workspace_missing_directory_rollback_budget": 409,
+                "workspace_missing_directory_rollback_deadline": 409,
+                "workspace_missing_directory_rollback_required": 409,
+                "workspace_missing_directory_rollback_corrupt": 409,
+                "workspace_missing_directory_rollback_incomplete": 409,
+                "workspace_missing_directory_rollback_root_changed": 409,
+                "workspace_missing_directory_rollback_pagination": 422,
+                "workspace_missing_directory_rollback_operation": 422,
+                "workspace_missing_directory_restore_not_found": 404,
+                "workspace_missing_directory_restore_corrupt": 409,
                 "workspace_tree_move_model_context": 403,
                 "workspace_tree_move_source_conflict": 403,
                 "workspace_tree_move_closed": 503,
@@ -1516,6 +1555,76 @@ class AgentService:
                 await self._workspace_call(
                     agent_id,
                     "generated_tree_undo_cancel",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def missing_directory_rollback_preview(
+        self, agent_id: str, request: MissingDirectoryRollbackPreview, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        return MissingDirectoryRollbackView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "missing_directory_rollback_preview",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def missing_directory_rollback_change(
+        self, agent_id: str, request: MissingDirectoryRollbackAction, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        return MissingDirectoryRollbackAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "missing_directory_rollback_change",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def missing_directory_rollback_query(
+        self, agent_id: str, request: MissingDirectoryRollbackQuery, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackQueryResult:
+        return MissingDirectoryRollbackQueryResult.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "missing_directory_rollback_query",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def missing_directory_rollback_reconcile(
+        self, agent_id: str, request: TreeMoveOperationRequest, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        return MissingDirectoryRollbackAttemptView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "missing_directory_rollback_reconcile",
+                    request.model_dump(),
+                    confirmed=confirmed,
+                )
+            )
+        )
+
+    async def missing_directory_rollback_cancel(
+        self, agent_id: str, request: MissingDirectoryRollbackCancel, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        return MissingDirectoryRollbackView.model_validate_json(
+            json.dumps(
+                await self._workspace_call(
+                    agent_id,
+                    "missing_directory_rollback_cancel",
                     request.model_dump(),
                     confirmed=confirmed,
                 )
