@@ -32,6 +32,7 @@ from krim_agent.agents import (
 )
 from krim_agent.agents.permissions import profile_policy
 from krim_agent.agents.sessions import AgentSessionView, AgentTurnView
+from krim_agent.application.conversation_recovery import ConversationRecoveryController
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_changes import _wait
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
@@ -56,6 +57,11 @@ from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
 from krim_agent.config import Settings
 from krim_agent.context_engine import ContextRunConfig
+from krim_agent.conversation_recovery import (
+    ConversationRecoveryPreview,
+    ConversationRecoveryRecord,
+    ConversationRecoveryRequest,
+)
 from krim_agent.execution.agent_models import (
     AgentCommandRequest,
     CommandLookup,
@@ -442,6 +448,7 @@ class AgentService:
         self.restore_errors: dict[str, str] = {}
         self._tasks: dict[str, tuple[AgentPromptRequest, asyncio.Task[AgentView], str | None]] = {}
         self._workspace_operations: set[asyncio.Task[ToolResult]] = set()
+        self.conversation_recoveries = ConversationRecoveryController(self)
         self._command_launch_lock = asyncio.Lock()
         self._command_launches: dict[
             tuple[str, str], tuple[str, asyncio.Future[str], asyncio.Task[object]]
@@ -1018,6 +1025,19 @@ class AgentService:
             resource_version=version,
             resource_manifest=manifest,
         )
+
+    async def conversation_recovery_preview(self, agent_id: str) -> ConversationRecoveryPreview:
+        return await self.conversation_recoveries.preview(agent_id)
+
+    async def conversation_recovery_apply(
+        self, agent_id: str, request: ConversationRecoveryRequest, *, confirmed: bool = False
+    ) -> ConversationRecoveryRecord:
+        return await self.conversation_recoveries.apply(agent_id, request, confirmed=confirmed)
+
+    async def conversation_recovery_by_key(
+        self, agent_id: str, request_key: str
+    ) -> ConversationRecoveryRecord | None:
+        return await self.conversation_recoveries.by_key(agent_id, request_key)
 
     async def workspace_info(self, agent_id: str) -> WorkspaceView:
         handle = self._handle(agent_id)
@@ -2997,6 +3017,7 @@ class AgentService:
             )
 
     async def execute(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
+        self.conversation_recoveries.assert_execution_allowed(agent_id)
         handle = self._handle(agent_id)
         try:
             result = await handle.execute(request.prompt, request.idempotency_key)
@@ -3026,6 +3047,7 @@ class AgentService:
             return await self._start_background(agent_id, request)
 
     async def _start_background(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
+        self.conversation_recoveries.assert_execution_allowed(agent_id)
         if self._closed:
             raise ServiceError("agent_service_closed", "Agent 服务已关闭", 503)
         handle = self._handle(agent_id)
@@ -3128,6 +3150,7 @@ class AgentService:
                 await asyncio.shield(background[1])
 
     async def resume(self, agent_id: str, request: AgentPromptRequest) -> AgentView:
+        self.conversation_recoveries.assert_execution_allowed(agent_id)
         handle = self._handle(agent_id)
         try:
             result = await handle.resume(request.prompt, request.idempotency_key)
@@ -3198,6 +3221,7 @@ class AgentService:
         return reader, state
 
     async def close(self) -> None:
+        self.conversation_recoveries.assert_external_close()
         self.directory_restores.assert_external_close()
         self.missing_directory_restores.assert_external_close()
         self.directory_checkpoints.assert_external_close()
@@ -3219,6 +3243,7 @@ class AgentService:
         async with self._start_lock:
             self._closed = True
         try:
+            await self.conversation_recoveries.close()
             launches = list(self._command_launches.values())
             for _signature, _admitted, task in launches:
                 if not task.cancelling():

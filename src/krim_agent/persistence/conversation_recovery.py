@@ -6,7 +6,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Literal, TypedDict, cast
-from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +20,7 @@ from krim_agent.conversation_recovery import (
     incomplete_tail,
     path_fingerprint,
     recovery_error,
+    recovery_message_identifier,
     recovery_notice,
     tool_reference,
 )
@@ -56,8 +56,7 @@ class ConversationRecoveryStore:
 
     @staticmethod
     def message_id(scope: ConversationRecoveryScope, request_key: str) -> str:
-        value = canonical(["krim-conversation-recovery-v1", scope.topic_id, request_key])
-        return str(uuid5(NAMESPACE_URL, value.decode("utf-8")))
+        return recovery_message_identifier(scope.topic_id, request_key)
 
     @staticmethod
     def _request_hash(

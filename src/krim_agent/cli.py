@@ -211,6 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .missing_directory_rollback_cli import add_parser as add_missing_directory_rollback_parser
 
     add_missing_directory_rollback_parser(subparsers)
+    from .conversation_recovery_cli import add_parser as add_conversation_recovery_parser
+
+    add_conversation_recovery_parser(subparsers)
     workspace = subparsers.add_parser(
         "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
     )
@@ -1515,6 +1518,11 @@ def main() -> None:
                 )
 
                 missing_directory_rollback_command(client, args, parser)
+                return
+            if args.command == "conversation-recoveries":
+                from .conversation_recovery_cli import run_command as conversation_recovery_command
+
+                conversation_recovery_command(client, args, parser)
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)
