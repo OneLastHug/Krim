@@ -161,6 +161,16 @@ from .workspace_missing_directory_restore import (
 from .workspace_missing_directory_restore_public import (
     MissingDirectoryRestoreDiffPage,
 )
+from .workspace_missing_directory_rollback import (
+    MissingDirectoryRollbackAction,
+    MissingDirectoryRollbackAttemptView,
+    MissingDirectoryRollbackPreview,
+    MissingDirectoryRollbackView,
+)
+from .workspace_missing_directory_rollback_control import (
+    MissingDirectoryRollbackQuery,
+    MissingDirectoryRollbackQueryResult,
+)
 from .workspace_mixed_batch import MixedBatchHistoryPage, MixedBatchRequest, MixedBatchView
 from .workspace_restore import (
     CheckpointRestoreExecute,
@@ -192,6 +202,7 @@ from .workspace_tree_move import (
     TreeMoveQueryRequest,
     TreeMoveQueryResult,
 )
+from .workspace_tree_writer import WorkspaceTreeWriter
 
 
 class ClientError(Exception):
@@ -1037,6 +1048,258 @@ class KrimClient:
             value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
         )
         return value
+
+    @staticmethod
+    def _missing_rollback_bad_response() -> ClientError:
+        return ClientError(
+            "缺失基线回退回程与原请求/作用域不一致",
+            code="workspace_missing_directory_rollback_response",
+            status=502,
+        )
+
+    @staticmethod
+    def _missing_rollback_id(value: str) -> str:
+        if type(value) is not str:
+            raise ClientError(
+                "回退标识类型无效", code="workspace_missing_directory_rollback_input", status=422
+            )
+        return _workspace_identifier(value)
+
+    @staticmethod
+    def _missing_rollback_confirm(value: bool) -> str:
+        if type(value) is not bool:
+            raise ClientError(
+                "回退确认必须为实际bool",
+                code="workspace_missing_directory_rollback_input",
+                status=422,
+            )
+        return str(value).lower()
+
+    @classmethod
+    def _missing_rollback_base(cls, agent_id: str) -> str:
+        return (
+            f"/v1/agents/{cls._missing_rollback_id(agent_id)}/workspace/missing-directory-rollbacks"
+        )
+
+    @staticmethod
+    def _missing_rollback_input[Model: BaseModel](request: Model, model: type[Model]) -> Model:
+        try:
+            if not isinstance(request, BaseModel):
+                raise ValueError("需要原严格模型")
+            return model.model_validate(request.model_dump(mode="json"))
+        except (TypeError, ValueError, ServiceError):
+            raise ClientError(
+                "回退请求不符合原严格协议",
+                code="workspace_missing_directory_rollback_input",
+                status=422,
+            ) from None
+
+    def _missing_rollback_response[Model: BaseModel](
+        self, response: httpx.Response, model: type[Model]
+    ) -> Model:
+        self._check(response)
+        try:
+            return model.model_validate_json(response.content)
+        except (TypeError, ValueError, ServiceError):
+            raise self._missing_rollback_bad_response() from None
+
+    def _missing_rollback_match(self, matched: bool) -> None:
+        if not matched:
+            raise self._missing_rollback_bad_response()
+
+    def _missing_rollback_view(self, value: MissingDirectoryRollbackView, agent_id: str) -> None:
+        move = value.move
+        try:
+            WorkspaceTreeWriter._paths(move.source_path, move.target_path)
+            valid = (
+                move.scope_id == "session:" + agent_id
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", move.proposal_id) is not None
+                and re.fullmatch(r"[a-f0-9]{64}", move.resource_fingerprint) is not None
+                and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", move.workspace_key) is not None
+                and move.expires_at > 0
+                and move.created_at.utcoffset() is not None
+                and move.updated_at.utcoffset() is not None
+                and move.updated_at >= move.created_at
+                and (
+                    move.active_operation_id is None
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", move.active_operation_id)
+                    is not None
+                )
+            )
+        except (TypeError, ValueError, ServiceError):
+            raise self._missing_rollback_bad_response() from None
+        self._missing_rollback_match(valid)
+
+    def _missing_rollback_attempt(
+        self, value: MissingDirectoryRollbackAttemptView, agent_id: str
+    ) -> None:
+        op = value.operation
+        try:
+            valid = (
+                op.scope_id == "session:" + agent_id
+                and all(
+                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", identifier) is not None
+                    for identifier in (op.operation_id, op.proposal_id)
+                )
+                and op.created_at.utcoffset() is not None
+                and op.updated_at.utcoffset() is not None
+                and op.updated_at >= op.created_at
+                and (
+                    op.status != "done"
+                    or op.receipt is not None
+                    and op.receipt.status == "done"
+                    and not op.recovery_required
+                    and not op.receipt.recovery_required
+                    and op.receipt.error_code is None
+                    and op.receipt.after_fingerprint is not None
+                    and op.receipt.changed == (op.action != "keep")
+                )
+            )
+            if op.receipt is not None:
+                WorkspaceTreeWriter._paths(op.receipt.source_path, op.receipt.target_path)
+                valid = (
+                    valid
+                    and op.receipt.status == op.status
+                    and op.recovery_required == op.receipt.recovery_required
+                )
+        except (TypeError, ValueError, ServiceError):
+            raise self._missing_rollback_bad_response() from None
+        self._missing_rollback_match(valid)
+
+    def agent_missing_directory_rollback_preview(
+        self, agent_id: str, request: MissingDirectoryRollbackPreview, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        request = self._missing_rollback_input(request, MissingDirectoryRollbackPreview)
+        response = self._http.post(
+            self._missing_rollback_base(agent_id) + "/preview",
+            params={"confirmed": self._missing_rollback_confirm(confirmed)},
+            json=request.model_dump(mode="json"),
+        )
+        value = self._missing_rollback_response(response, MissingDirectoryRollbackView)
+        self._missing_rollback_view(value, agent_id)
+        self._missing_rollback_match(
+            value.source_plan_id == request.plan_id
+            and value.move.target_path == request.preserve_path
+            and value.approved_fingerprint == request.expected_fingerprint
+        )
+        return value
+
+    def agent_missing_directory_rollback_change(
+        self, agent_id: str, request: MissingDirectoryRollbackAction, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        request = self._missing_rollback_input(request, MissingDirectoryRollbackAction)
+        response = self._http.post(
+            self._missing_rollback_base(agent_id) + "/change",
+            params={"confirmed": self._missing_rollback_confirm(confirmed)},
+            json=request.model_dump(mode="json"),
+        )
+        value = self._missing_rollback_response(response, MissingDirectoryRollbackAttemptView)
+        self._missing_rollback_attempt(value, agent_id)
+        self._missing_rollback_match(
+            value.action == request.action
+            and value.operation.proposal_id == request.proposal_id
+            and value.operation.expected_revision == request.expected_revision
+        )
+        return value
+
+    def _missing_rollback_page(
+        self, identifiers: list[str], next_after: str | None, request: MissingDirectoryRollbackQuery
+    ) -> None:
+        self._missing_rollback_match(
+            len(identifiers) <= request.limit
+            and identifiers == sorted(set(identifiers))
+            and all(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", x) is not None
+                and (request.after is None or x > request.after)
+                for x in identifiers
+            )
+            and (
+                next_after is None
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", next_after) is not None
+                and (request.after is None or next_after > request.after)
+                and (not identifiers or next_after >= identifiers[-1])
+            )
+        )
+
+    def agent_missing_directory_rollback_query(
+        self, agent_id: str, request: MissingDirectoryRollbackQuery, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackQueryResult:
+        request = self._missing_rollback_input(request, MissingDirectoryRollbackQuery)
+        params: dict[str, str] = {
+            "kind": request.kind,
+            "confirmed": self._missing_rollback_confirm(confirmed),
+        }
+        for key, value in (
+            ("identifier", request.identifier),
+            ("request_key", request.request_key),
+            ("after", request.after),
+        ):
+            if value is not None:
+                params[key] = value
+        if request.kind in {"history", "proposals"}:
+            params["limit"] = str(request.limit)
+        response = self._http.get(self._missing_rollback_base(agent_id) + "/query", params=params)
+        result = self._missing_rollback_response(response, MissingDirectoryRollbackQueryResult)
+        self._missing_rollback_match(result.kind == request.kind)
+        if result.proposal is not None:
+            self._missing_rollback_view(result.proposal, agent_id)
+            self._missing_rollback_match(
+                request.kind != "proposal" or result.proposal.move.proposal_id == request.identifier
+            )
+        if result.operation is not None:
+            self._missing_rollback_attempt(result.operation, agent_id)
+            self._missing_rollback_match(
+                request.kind != "operation"
+                or result.operation.operation.operation_id == request.identifier
+            )
+        if result.history is not None:
+            entries = result.history.items
+            for item in entries:
+                self._missing_rollback_attempt(item, agent_id)
+            self._missing_rollback_match(
+                all(item.operation.proposal_id == request.identifier for item in entries)
+                and len({(item.source_plan_id, item.source_operation_id) for item in entries}) <= 1
+            )
+            self._missing_rollback_page(
+                [item.operation.operation_id for item in entries],
+                result.history.next_after,
+                request,
+            )
+        if result.proposals is not None:
+            for proposal in result.proposals.items:
+                self._missing_rollback_view(proposal, agent_id)
+            self._missing_rollback_page(
+                [item.move.proposal_id for item in result.proposals.items],
+                result.proposals.next_after,
+                request,
+            )
+        return result
+
+    def agent_missing_directory_rollback_reconcile(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        operation_id = self._missing_rollback_id(operation_id)
+        response = self._http.post(
+            self._missing_rollback_base(agent_id) + f"/operations/{operation_id}/reconcile",
+            params={"confirmed": self._missing_rollback_confirm(confirmed)},
+        )
+        result = self._missing_rollback_response(response, MissingDirectoryRollbackAttemptView)
+        self._missing_rollback_attempt(result, agent_id)
+        self._missing_rollback_match(result.operation.operation_id == operation_id)
+        return result
+
+    def agent_missing_directory_rollback_cancel(
+        self, agent_id: str, proposal_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        proposal_id = self._missing_rollback_id(proposal_id)
+        response = self._http.post(
+            self._missing_rollback_base(agent_id) + f"/{proposal_id}/cancel",
+            params={"confirmed": self._missing_rollback_confirm(confirmed)},
+        )
+        result = self._missing_rollback_response(response, MissingDirectoryRollbackView)
+        self._missing_rollback_view(result, agent_id)
+        self._missing_rollback_match(result.move.proposal_id == proposal_id)
+        return result
 
     @staticmethod
     def _generated_tree_undo_match(matched: bool) -> None:
