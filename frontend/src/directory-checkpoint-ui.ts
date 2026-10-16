@@ -1,6 +1,7 @@
 /** 原目录捕获事实；写前保存原意图，所有恢复/轮询只查询原任务。 */
 import { ApiError, errorText, requestJson, requestJsonNullable, type AgentView, type DirectoryCheckpointCreate, type DirectoryCheckpointView, type WorkspaceView } from "./api.js";
 import { localDate, t } from "./i18n.js";
+import { DirectoryRestoreUI } from "./directory-restore-ui.js";
 
 type Pending = { request: DirectoryCheckpointCreate; rejected: boolean };
 type State = {
@@ -68,7 +69,9 @@ export class DirectoryCheckpointUI {
   private activeId: string | null = null;
   private generation = 0;
   private timer: number | undefined;
+  private restores: DirectoryRestoreUI;
   constructor(private readonly notice: (message: string, error?: boolean) => void) {
+    this.restores = new DirectoryRestoreUI(notice);
     for (const [id, field] of [["directory-checkpoint-title", "title"], ["directory-checkpoint-path", "path"], ["directory-checkpoint-query", "query"]] as const) {
       input(id).oninput = () => { const state = this.current(); if (state) state[field] = input(id).value; this.controls(); };
     }
@@ -82,6 +85,7 @@ export class DirectoryCheckpointUI {
     for (const [id, delta] of [["directory-checkpoint-prev", -PAGE], ["directory-checkpoint-next", PAGE]] as const) node(id).onclick = () => { const state = this.current(); if (state && !state.loading) { state.offset = Math.max(0, state.offset + delta); void this.refresh(); } };
   }
   setSources(agents: AgentView[]): void {
+    this.restores.setSources(agents);
     const ids = new Set(agents.map(agent => agent.agent_id));
     let changed = false;
     for (const agent of agents) {
@@ -96,10 +100,10 @@ export class DirectoryCheckpointUI {
     if (this.activeId && !this.states.has(this.activeId)) this.deactivate();
     if (changed) { this.stopTimer(); this.render(); if (this.expanded()) void this.refresh(); }
   }
-  async select(id: string): Promise<void> { this.stopTimer(); this.generation++; this.activeId = id; const state = this.current(); if (state) { state.loading = false; state.querying = false; state.loadVersion++; state.queryVersion++; } this.render(); await this.refresh(); }
-  deactivate(): void { this.stopTimer(); this.generation++; this.activeId = null; }
-  refreshLocale(): void { this.render(); }
-  toggled(): void { if (this.expanded()) { const state = this.current(); if (state?.stale) void this.refresh(); else this.schedule(); } else this.stopTimer(); }
+  async select(id: string): Promise<void> { this.stopTimer(); this.generation++; this.activeId = id; const state = this.current(); if (state) { state.loading = false; state.querying = false; state.loadVersion++; state.queryVersion++; } this.render(); await Promise.all([this.refresh(), this.restores.select(id)]); }
+  deactivate(): void { this.stopTimer(); this.generation++; this.activeId = null; this.restores.deactivate(); }
+  refreshLocale(): void { this.render(); this.restores.refreshLocale(); }
+  toggled(): void { this.restores.toggled(); if (this.expanded()) { const state = this.current(); if (state?.stale) void this.refresh(); else this.schedule(); } else this.stopTimer(); }
   private current(): State | undefined { return this.activeId ? this.states.get(this.activeId) : undefined; }
   private valid(state: State, generation: number): boolean { return this.current() === state && this.generation === generation; }
   private expanded(): boolean { return (node("checkpoint-panel") as HTMLDetailsElement).open && !node("checkpoint-directory").hidden; }
@@ -281,6 +285,11 @@ export class DirectoryCheckpointUI {
         line(detail, "完整目录摘要", value.snapshot.snapshot_fingerprint);
         line(detail, "目录节点数", String(value.snapshot.entry_count)); line(detail, "目录数量", String(value.snapshot.directory_count)); line(detail, "文件数量", String(value.snapshot.file_count)); line(detail, "文件总字节", String(value.snapshot.byte_size));
         if (value.status !== "available") line(detail, "捕获材料状态", t("已保存材料不表示捕获成功"));
+      }
+      if (value.status === "available" && value.snapshot) {
+        const restore = document.createElement("button"); restore.type = "button"; restore.textContent = t("恢复完整目录");
+        restore.onclick = () => { if (this.current() === state) void this.restores.useCheckpoint(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true)); };
+        detail.append(restore);
       }
     }
     this.controls();

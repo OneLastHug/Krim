@@ -92,6 +92,21 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
             await client.get("/v1/agents/example/workspace/directory-checkpoints")
         ).status_code == 401
         assert (await client.get("/_test/directory-checkpoint-agent")).status_code == 401
+        for name in (
+            "directory-restore-contract",
+            "directory-restore-recovery",
+            "directory-restore-ui",
+        ):
+            asset = await client.get(f"/ui/{name}.js")
+            assert asset.status_code == 200
+            assert asset.headers["cache-control"] == "no-cache"
+            assert "script-src 'self'" in asset.headers["content-security-policy"]
+            assert (await client.head(f"/ui/{name}.js")).content == b""
+            assert (await client.post(f"/ui/{name}.js")).status_code == 401
+        assert (
+            await client.get("/v1/agents/example/workspace/directory-restores")
+        ).status_code == 401
+        assert (await client.get("/_test/directory-restore-agent")).status_code == 401
         change_script = await client.get("/ui/workspace-changes-ui.js")
         assert change_script.status_code == 200 and "WorkspaceChangesUI" in change_script.text
         command_script = await client.get("/ui/commands-ui.js")

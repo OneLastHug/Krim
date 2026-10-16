@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: ["generated-root-recovery.spec.ts", "directory-checkpoint-recovery.spec.ts"],
+  testIgnore: ["generated-root-recovery.spec.ts", "directory-checkpoint-recovery.spec.ts", "directory-restore-recovery.spec.ts"],
   timeout: 30_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -19,6 +19,7 @@ export default defineConfig({
       KRIM_TEST_MODEL_CHECKPOINTS: "1",
       KRIM_TEST_MODEL_RESTORES: "1",
       KRIM_TEST_DIRECTORY_CHECKPOINTS: "1",
+      KRIM_TEST_DIRECTORY_RESTORES: "1",
     },
     command: "../.venv/bin/python ../tests/fixtures/browser_ui_server.py",
     url: "http://127.0.0.1:8876/healthz",

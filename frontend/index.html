@@ -122,6 +122,21 @@
             <div class="actions"><button id="directory-checkpoint-by-id" type="button" data-i18n="按标识查询">按标识查询</button><button id="directory-checkpoint-by-key" type="button" data-i18n="按原键找回">按原键找回</button><button id="directory-checkpoint-pending" type="button" data-i18n="查询未确认请求">查询未确认请求</button></div>
             <section id="directory-checkpoint-detail" class="checkpoint-detail"></section>
             <div class="actions"><button id="directory-checkpoint-wait" type="button" data-i18n="等待目录捕获">等待目录捕获</button><button id="directory-checkpoint-cancel" type="button" data-i18n="取消目录捕获">取消目录捕获</button></div>
+            <section id="directory-restore-panel" aria-label="完整目录恢复" data-i18n-aria-label="完整目录恢复">
+              <h3 data-i18n="完整目录恢复">完整目录恢复</h3>
+              <p id="directory-restore-target"></p>
+              <div class="actions"><button id="directory-restore-preview" type="button" data-i18n="预览完整目录恢复">预览完整目录恢复</button><button id="directory-restore-refresh" type="button" data-i18n="刷新目录恢复历史">刷新目录恢复历史</button></div>
+              <p id="directory-restore-message" role="status"></p>
+              <h3 data-i18n="目录恢复历史">目录恢复历史</h3><p id="directory-restore-page"></p><div id="directory-restore-items" class="stack"></div>
+              <div class="actions"><button id="directory-restore-prev" type="button" data-i18n="较新恢复计划">较新恢复计划</button><button id="directory-restore-next" type="button" data-i18n="较早恢复计划">较早恢复计划</button></div>
+              <label for="directory-restore-query" data-i18n="目录恢复标识或原请求键">目录恢复标识或原请求键</label><input id="directory-restore-query" maxlength="256" />
+              <div class="actions"><button id="directory-restore-by-id" type="button" data-i18n="按标识查询">按标识查询</button><button id="directory-restore-by-key" type="button" data-i18n="按原预览键找回">按原预览键找回</button><button id="directory-restore-by-operation-key" type="button" data-i18n="按原执行键找回">按原执行键找回</button><button id="directory-restore-pending" type="button" data-i18n="查询未确认请求">查询未确认请求</button></div>
+              <section id="directory-restore-detail" class="checkpoint-detail"></section>
+              <h3 data-i18n="完整目录恢复差异">完整目录恢复差异</h3><p id="directory-restore-diff-page"></p><div id="directory-restore-diff" class="stack"></div>
+              <div class="actions"><button id="directory-restore-diff-prev" type="button" data-i18n="上一页差异">上一页差异</button><button id="directory-restore-diff-next" type="button" data-i18n="下一页差异">下一页差异</button><button id="directory-restore-diff-refresh" type="button" data-i18n="重新读取差异">重新读取差异</button></div>
+              <label class="checkbox-label" for="directory-restore-confirm"><input id="directory-restore-confirm" type="checkbox" /><span data-i18n="我已审阅当前版本的完整目录差异">我已审阅当前版本的完整目录差异</span></label>
+              <div class="actions"><button id="directory-restore-start" type="button" data-i18n="批准发布完整目录">批准发布完整目录</button><button id="directory-restore-backup" type="button" data-i18n="选择原完整备份回退">选择原完整备份回退</button><button id="directory-restore-wait" type="button" data-i18n="等待原恢复操作">等待原恢复操作</button><button id="directory-restore-cancel" type="button" data-i18n="取消原恢复操作">取消原恢复操作</button><button id="directory-restore-verify" type="button" data-i18n="核实原未知操作">核实原未知操作</button></div>
+            </section>
           </section>
         </details>
         <details class="workflow-panel">

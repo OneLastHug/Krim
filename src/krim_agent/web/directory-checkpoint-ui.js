@@ -1,6 +1,7 @@
 /** 原目录捕获事实；写前保存原意图，所有恢复/轮询只查询原任务。 */
 import { ApiError, errorText, requestJson, requestJsonNullable } from "./api.js";
 import { localDate, t } from "./i18n.js";
+import { DirectoryRestoreUI } from "./directory-restore-ui.js";
 const node = (id) => document.getElementById(id);
 const input = (id) => node(id);
 const button = (id) => node(id);
@@ -64,8 +65,10 @@ export class DirectoryCheckpointUI {
     activeId = null;
     generation = 0;
     timer;
+    restores;
     constructor(notice) {
         this.notice = notice;
+        this.restores = new DirectoryRestoreUI(notice);
         for (const [id, field] of [["directory-checkpoint-title", "title"], ["directory-checkpoint-path", "path"], ["directory-checkpoint-query", "query"]]) {
             input(id).oninput = () => { const state = this.current(); if (state)
                 state[field] = input(id).value; this.controls(); };
@@ -85,6 +88,7 @@ export class DirectoryCheckpointUI {
             } };
     }
     setSources(agents) {
+        this.restores.setSources(agents);
         const ids = new Set(agents.map(agent => agent.agent_id));
         let changed = false;
         for (const agent of agents) {
@@ -118,10 +122,10 @@ export class DirectoryCheckpointUI {
         state.querying = false;
         state.loadVersion++;
         state.queryVersion++;
-    } this.render(); await this.refresh(); }
-    deactivate() { this.stopTimer(); this.generation++; this.activeId = null; }
-    refreshLocale() { this.render(); }
-    toggled() { if (this.expanded()) {
+    } this.render(); await Promise.all([this.refresh(), this.restores.select(id)]); }
+    deactivate() { this.stopTimer(); this.generation++; this.activeId = null; this.restores.deactivate(); }
+    refreshLocale() { this.render(); this.restores.refreshLocale(); }
+    toggled() { this.restores.toggled(); if (this.expanded()) {
         const state = this.current();
         if (state?.stale)
             void this.refresh();
@@ -534,6 +538,14 @@ export class DirectoryCheckpointUI {
                 line(detail, "文件总字节", String(value.snapshot.byte_size));
                 if (value.status !== "available")
                     line(detail, "捕获材料状态", t("已保存材料不表示捕获成功"));
+            }
+            if (value.status === "available" && value.snapshot) {
+                const restore = document.createElement("button");
+                restore.type = "button";
+                restore.textContent = t("恢复完整目录");
+                restore.onclick = () => { if (this.current() === state)
+                    void this.restores.useCheckpoint(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true)); };
+                detail.append(restore);
             }
         }
         this.controls();

@@ -4,6 +4,74 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "备份核实状态": "Backup verification status",
+    "已保存备份不表示预览已通过": "A saved backup does not mean the preview passed verification",
+    "恢复完整目录": "Restore complete directory",
+    "完整目录恢复": "Complete directory restore",
+    "目录恢复预览中": "Preparing directory restore",
+    "目录恢复可审阅": "Directory restore ready for review",
+    "目录恢复发布中": "Publishing directory restore",
+    "目录恢复已完成": "Directory restore completed",
+    "目录恢复失败": "Directory restore failed",
+    "目录恢复已取消": "Directory restore cancelled",
+    "目录恢复已中断": "Directory restore interrupted",
+    "目录恢复已过期": "Directory restore expired",
+    "目录恢复结果待核实": "Directory restore requires verification",
+    "目录恢复回程与原事实不一致": "Directory restore response does not match original facts",
+    "目录恢复记录不可用，新预览和发布已停用": (
+        "Directory restore recovery is unavailable; new previews and publishing are disabled"
+    ),
+    "原目录恢复请求未被接受": "The original directory restore request was not accepted",
+    "原目录恢复请求尚未确认，请按原键继续查询": (
+        "Directory restore is not confirmed; keep querying the original key"
+    ),
+    "未找到目录恢复计划或操作": "Directory restore plan or operation not found",
+    "目录恢复目标": "Directory restore target",
+    "请从可用目录检查点或原计划完整备份选择目标": (
+        "Select an available directory checkpoint or a complete backup from an original plan"
+    ),
+    "预览完整目录恢复": "Preview complete directory restore",
+    "刷新目录恢复历史": "Refresh directory restore history",
+    "目录恢复历史": "Directory restore history",
+    "目录恢复历史第{page}页": "Directory restore history page {page}",
+    "目录恢复标识或原请求键": "Directory restore ID or original request key",
+    "按原预览键找回": "Recover by original preview key",
+    "按原执行键找回": "Recover by original execute key",
+    "完整目录恢复差异": "Complete directory restore diff",
+    "目录恢复差异第{page}页": "Directory restore diff page {page}",
+    "上一页差异": "Previous diff page",
+    "下一页差异": "Next diff page",
+    "重新读取差异": "Reload diff",
+    "我已审阅当前版本的完整目录差异": (
+        "I have reviewed the complete directory diff for the current revision"
+    ),
+    "批准发布完整目录": "Approve complete directory publishing",
+    "选择原完整备份回退": "Select original complete backup for rollback",
+    "等待原恢复操作": "Wait for original restore operation",
+    "取消原恢复操作": "Cancel original restore operation",
+    "核实原未知操作": "Verify original uncertain operation",
+    "确认按当前审阅版本发布完整目录恢复？": (
+        "Publish the complete directory restore at the currently reviewed revision?"
+    ),
+    "正在读取目录恢复历史": "Loading directory restore history",
+    "当前会话只能查询目录恢复历史": "This session can only read directory restore history",
+    "查看目录恢复计划": "View directory restore plan",
+    "原预览键": "Original preview key",
+    "审阅版本": "Reviewed revision",
+    "目标完整目录摘要": "Complete target directory fingerprint",
+    "原操作标识": "Original operation ID",
+    "恢复前完整备份摘要": "Complete backup fingerprint before restore",
+    "原执行键": "Original execute key",
+    "原操作已请求取消": "Cancellation was requested for the original operation",
+    "保留材料": "Retained materials",
+    "原完整旧树或暂存材料仍被保留": (
+        "The original complete previous tree or staging materials remain retained"
+    ),
+    "实际发布状态": "Actual publication status",
+    "目录差异路径": "Directory diff path",
+    "目录差异动作": "Directory diff action",
+    "恢复前": "Before restore",
+    "恢复后": "After restore",
     "查看目录检查点": "View directory checkpoints",
     "检查点范围": "Checkpoint scope",
     "完整目录检查点": "Complete directory checkpoints",
