@@ -44,6 +44,7 @@ from krim_agent.application.workspace_model_checkpoints import ModelCheckpointSe
 from krim_agent.application.workspace_model_directory_checkpoints import (
     ModelDirectoryCheckpointService,
 )
+from krim_agent.application.workspace_model_directory_restores import ModelDirectoryRestoreService
 from krim_agent.application.workspace_model_restores import ModelRestoreService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
@@ -376,6 +377,9 @@ class AgentService:
         self.directory_restores.model_close_guard = self.model_checkpoints.assert_external_close
         self.model_checkpoints.directories = ModelDirectoryCheckpointService(
             self.model_checkpoints, self.directory_checkpoints
+        )
+        self.model_checkpoints.directory_restores = ModelDirectoryRestoreService(
+            self.model_checkpoints, self.directory_restores
         )
         self.workspace_restores = WorkspaceRestoreService(
             self.workspace_restore_store,
@@ -758,6 +762,20 @@ class AgentService:
         for definition in definitions:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
+
+    def register_directory_checkpoint_restore_controls(self) -> None:
+        """显式原模型目录恢复；原私有叶也须在冻结工具集合中获授权。"""
+        from krim_agent.tools.workspace_checkpoints import directory_restore_control_tools
+
+        definitions = directory_restore_control_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型目录恢复控制名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+        self.manager.workspace_checkpoint_controls = self.model_checkpoints
+        self.manager.workspace_directory_restores = self.directory_restores
 
     def register_mixed_batch_writes(self) -> None:
         """可信宿主显式启用模型混合批次写工具；权限仍由原ToolRegistry裁决。"""

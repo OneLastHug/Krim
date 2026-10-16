@@ -115,6 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory restores（目录恢复）：显式登记原受控恢复叶，写入仍需原授权",
     )
     serve.add_argument(
+        "--directory-restore-controls",
+        action="store_true",
+        help="directory restore controls（目录恢复控制）：启用原模型恢复五动作",
+    )
+    serve.add_argument(
         "--directory-checkpoint-controls",
         action="store_true",
         help=(
@@ -1345,6 +1350,8 @@ def main() -> None:
             parser.error("serve --directory-checkpoints需要已授权--workspace")
         if args.directory_restores and not args.workspace:
             parser.error("serve --directory-restores需要已授权--workspace")
+        if args.directory_restore_controls and not args.workspace:
+            parser.error("serve --directory-restore-controls需要已授权--workspace")
         if args.directory_checkpoint_controls and not args.workspace:
             parser.error("serve --directory-checkpoint-controls需要已授权--workspace")
         if args.checkpoint_controls and not args.workspace:
@@ -1393,6 +1400,7 @@ def main() -> None:
                 checkpoint_bytes_enabled=args.checkpoint_bytes,
                 directory_checkpoints_enabled=args.directory_checkpoints,
                 directory_restores_enabled=args.directory_restores,
+                directory_restore_controls_enabled=args.directory_restore_controls,
                 directory_checkpoint_controls_enabled=args.directory_checkpoint_controls,
                 checkpoint_controls_enabled=args.checkpoint_controls,
                 checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,

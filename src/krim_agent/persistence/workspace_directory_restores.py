@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -604,10 +604,27 @@ class WorkspaceDirectoryRestoreStore:
         *,
         qualify: Callable[[], None],
     ) -> None:
+        await self.preparation_view(scope, fence, binding, qualify=qualify)
+
+    async def preparation_view(
+        self,
+        scope: str,
+        fence: DirectoryRestoreFence,
+        binding: WorkspaceBinding,
+        *,
+        qualify: Callable[[], None],
+        authorize: Callable[[AsyncSession], Awaitable[None]] | None = None,
+    ) -> DirectoryRestoreView:
+        """原资格与严格投影同事务；不以另一个冷读取窗口补取原View。"""
         async with self._transaction() as sql:
+            if authorize is not None:
+                await authorize(sql)
             row = await self._preparing(sql, scope, fence, binding)
             self._qualify(binding, qualify)
+            result = await self._view(sql, row, None)
+            self._qualify(binding, qualify)
             self._live_prepare(row, fence)
+            return result
 
     async def record_baseline(
         self,
@@ -1116,10 +1133,27 @@ class WorkspaceDirectoryRestoreStore:
         *,
         qualify: Callable[[], None],
     ) -> None:
+        await self.execution_view(scope, fence, binding, qualify=qualify)
+
+    async def execution_view(
+        self,
+        scope: str,
+        fence: DirectoryRestoreFence,
+        binding: WorkspaceBinding,
+        *,
+        qualify: Callable[[], None],
+        authorize: Callable[[AsyncSession], Awaitable[None]] | None = None,
+    ) -> DirectoryRestoreView:
+        """同一原事务保留完整来源/锁/owner核对，投影之后再查原资格。"""
         async with self._transaction() as sql:
+            if authorize is not None:
+                await authorize(sql)
             row, attempt, origin = await self._operating(sql, scope, fence, binding)
             self._qualify(binding, qualify)
+            result = await self._view(sql, row, attempt)
+            self._qualify(binding, qualify)
             self._live_operation(row, attempt, fence, origin)
+            return result
 
     async def inputs(
         self,
@@ -1546,6 +1580,97 @@ class WorkspaceDirectoryRestoreStore:
             row, attempt, _origin = await self._operation_row(sql, scope, identifier)
             await self._expire(sql, row, attempt)
             return await self._operation_view(sql, row, attempt)
+
+    async def source(
+        self, scope: str, identifier: str, phase: Literal["preview", "execute", "verify"]
+    ) -> CheckpointModelSource | None:
+        if phase not in {"preview", "execute", "verify"}:
+            raise _error("input", "目录恢复来源阶段无效", 422)
+        async with self._transaction() as sql:
+            _row, _attempt, origin = await self._base(sql, scope, identifier)
+            return {"preview": origin.preview, "execute": origin.execute, "verify": origin.verify}[
+                phase
+            ]
+
+    async def cancel_model_admission(
+        self,
+        scope: str,
+        source: CheckpointModelSource,
+        phase: Literal["preview", "execute", "verify"],
+        request: DirectoryRestorePreview | DirectoryRestoreExecute | str,
+    ) -> DirectoryRestoreView | None:
+        """丢准入回程只核实原source及完整请求；同事务只关闭自己仍活跃的阶段。"""
+        if valid_source(source) is None:
+            raise _error("model_context", "模型收尾需要原父来源", 403)
+        async with self._transaction() as sql:
+            if phase == "preview" and type(request) is DirectoryRestorePreview:
+                selected = await sql.scalar(
+                    select(WorkspaceDirectoryRestorePlanRow).where(
+                        WorkspaceDirectoryRestorePlanRow.scope_id == scope,
+                        WorkspaceDirectoryRestorePlanRow.request_key == request.request_key,
+                    )
+                )
+                identifier = selected.plan_id if selected is not None else None
+            elif phase == "execute" and type(request) is DirectoryRestoreExecute:
+                selected = await sql.get(WorkspaceDirectoryRestorePlanRow, request.plan_id)
+                identifier = (
+                    selected.plan_id
+                    if selected is not None and selected.scope_id == scope
+                    else None
+                )
+            elif phase == "verify" and type(request) is str:
+                operation = await sql.get(WorkspaceDirectoryRestoreAttemptRow, request)
+                identifier = (
+                    operation.plan_id
+                    if operation is not None and operation.scope_id == scope
+                    else None
+                )
+            else:
+                raise _error("input", "模型收尾阶段与原请求类型不匹配", 422)
+            if identifier is None:
+                return None
+            row, attempt, origin = await self._base(sql, scope, identifier)
+            matched = (
+                origin.preview == source and self._request(row) == request
+                if phase == "preview"
+                else attempt is not None
+                and origin.execute == source
+                and type(request) is DirectoryRestoreExecute
+                and attempt.request_hash == self._execute_hash(row, request, source)
+                if phase == "execute"
+                else attempt is not None
+                and origin.verify == source
+                and attempt.operation_id == request
+            )
+            if not matched:
+                return None
+            if phase == "preview" and row.phase == "preparing" and row.owner_id == self.owner_id:
+                await self._expire(sql, row, attempt)
+                if row.phase == "preparing":
+                    row.cancel_requested = True
+                    self._end_prepare(
+                        row, "cancelled", "cancelled", "workspace_directory_restore_cancelled"
+                    )
+            elif (
+                phase != "preview"
+                and attempt is not None
+                and attempt.mode == phase
+                and row.phase == "executing"
+                and attempt.status == "running"
+                and attempt.owner_id == self.owner_id
+            ):
+                await self._expire(sql, row, attempt)
+                if attempt.status == "running":
+                    row.cancel_requested = True
+                    await self._end_operation(
+                        sql,
+                        row,
+                        attempt,
+                        "cancelled",
+                        "cancelled",
+                        "workspace_directory_restore_cancelled",
+                    )
+            return await self._view(sql, row, attempt)
 
     async def operation_by_key(
         self, scope: str, request_key: str

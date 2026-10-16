@@ -501,6 +501,8 @@ class ToolRegistry:
                         parent.checkpoint_restore,
                         parent.directory_checkpoint_capture,
                         parent.directory_checkpoint_qualify,
+                        parent.directory_restore,
+                        parent.directory_restore_qualify,
                         parent.tree_fence,
                         parent.workspace_batch,
                         parent.mixed_batch,
@@ -628,7 +630,9 @@ class ToolRegistry:
                     _checkpoint_capture_binding(child) if checkpoint_control else None
                 )
                 original_control_base = (
-                    execution_budget_base(child.execution_timeouts) if checkpoint_control else ()
+                    execution_budget_base(child.execution_timeouts)
+                    if checkpoint_control or checkpoint_capture
+                    else ()
                 )
                 original_exchange_binding = _tree_move_binding(child) if tree_exchange else None
                 original_tree_binding = (
@@ -648,6 +652,15 @@ class ToolRegistry:
                 if decision not in {"allow", "audit"}:
                     code = "approval_required" if decision == "ask" else "permission_denied"
                     raise ToolError(code, f"工具没有执行许可: {name}")
+                if (checkpoint_control or checkpoint_capture) and not same_execution_budget(
+                    original_control_base, execution_budget_base(child.execution_timeouts)
+                ):
+                    raise ToolError(
+                        "workspace_checkpoint_model_budget"
+                        if checkpoint_control
+                        else checkpoint_context_code,
+                        "权限策略不能在副作用准入前延长原检查点预算",
+                    )
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
                 original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
                 original_capture_budget = (

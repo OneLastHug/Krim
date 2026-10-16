@@ -16,6 +16,17 @@ from krim_agent.workspace_directory_checkpoint import (
     DirectoryCheckpointView,
 )
 from krim_agent.workspace_directory_checkpoint_control import DirectoryCheckpointQueryResult
+from krim_agent.workspace_directory_restore import (
+    DirectoryRestoreExecute,
+    DirectoryRestorePreview,
+    DirectoryRestoreView,
+)
+from krim_agent.workspace_directory_restore_model import (
+    DirectoryRestoreLookup,
+    DirectoryRestoreOperationLookup,
+    DirectoryRestoreQuery,
+    DirectoryRestoreQueryResult,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -146,5 +157,56 @@ def directory_checkpoint_control_tools() -> tuple[ToolDefinition, ...]:
             "write",
             output_schema=DirectoryCheckpointView,
             output_guard=partial(_guard, "directory_cancel"),
+        ),
+    )
+
+
+@cache
+def directory_restore_control_tools() -> tuple[ToolDefinition, ...]:
+    return (
+        ToolDefinition(
+            "workspace_directory_checkpoint_restore_preview",
+            "在原Run/call内读取完整备份和差异，不创建工作区暂存；返回原审阅版本",
+            DirectoryRestorePreview,
+            partial(_execute, "directory_restore_preview"),
+            "read",
+            output_schema=DirectoryRestoreView,
+            output_guard=partial(_guard, "directory_restore_preview"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_restore_start",
+            "在原父预算和write权限下按原版本原子发布完整目录，等待原操作回执",
+            DirectoryRestoreExecute,
+            partial(_execute, "directory_restore_start"),
+            "write",
+            output_schema=DirectoryRestoreView,
+            output_guard=partial(_guard, "directory_restore_start"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_restore_query",
+            "只读原目录恢复计划/键/差异/execute操作/有界历史，零生产者重放",
+            DirectoryRestoreQuery,
+            partial(_execute, "directory_restore_query"),
+            "read",
+            output_schema=DirectoryRestoreQueryResult,
+            output_guard=partial(_guard, "directory_restore_query"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_restore_cancel",
+            "关闭原目录恢复准入并收束原生产者，原意图后保持未知事实",
+            DirectoryRestoreLookup,
+            partial(_execute, "directory_restore_cancel"),
+            "write",
+            output_schema=DirectoryRestoreView,
+            output_guard=partial(_guard, "directory_restore_cancel"),
+        ),
+        ToolDefinition(
+            "workspace_directory_checkpoint_restore_verify",
+            "只读核实原uncertain execute操作，不重新构树或发布，保留原execute来源",
+            DirectoryRestoreOperationLookup,
+            partial(_execute, "directory_restore_verify"),
+            "read",
+            output_schema=DirectoryRestoreView,
+            output_guard=partial(_guard, "directory_restore_verify"),
         ),
     )

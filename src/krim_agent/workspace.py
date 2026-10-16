@@ -45,23 +45,35 @@ WORKSPACE_DIRECTORY_RESTORE_TOOL_NAMES = frozenset(
         "workspace_directory_restore_verify",
     }
 )
+WORKSPACE_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES = frozenset(
+    {
+        "workspace_directory_checkpoint_restore_preview",
+        "workspace_directory_checkpoint_restore_start",
+        "workspace_directory_checkpoint_restore_query",
+        "workspace_directory_checkpoint_restore_cancel",
+        "workspace_directory_checkpoint_restore_verify",
+    }
+)
 WORKSPACE_MIXED_WRITE_TOOL_NAMES = frozenset({"workspace_mixed_start"})
 WORKSPACE_TREE_MODEL_TOOL_NAMES = frozenset(
     {"workspace_tree_model_prepare", "workspace_tree_start"}
 )
-WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES = frozenset(
-    {
-        "workspace_checkpoint_create",
-        "workspace_checkpoint_query",
-        "workspace_checkpoint_cancel",
-        "workspace_checkpoint_restore_preview",
-        "workspace_checkpoint_restore_start",
-        "workspace_checkpoint_restore_query",
-        "workspace_checkpoint_restore_cancel",
-        "workspace_directory_checkpoint_create",
-        "workspace_directory_checkpoint_query",
-        "workspace_directory_checkpoint_cancel",
-    }
+WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES = (
+    frozenset(
+        {
+            "workspace_checkpoint_create",
+            "workspace_checkpoint_query",
+            "workspace_checkpoint_cancel",
+            "workspace_checkpoint_restore_preview",
+            "workspace_checkpoint_restore_start",
+            "workspace_checkpoint_restore_query",
+            "workspace_checkpoint_restore_cancel",
+            "workspace_directory_checkpoint_create",
+            "workspace_directory_checkpoint_query",
+            "workspace_directory_checkpoint_cancel",
+        }
+    )
+    | WORKSPACE_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES
 )
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
     {
@@ -115,6 +127,9 @@ WORKSPACE_WRITE_TOOL_NAMES = (
             "workspace_checkpoint_query",
             "workspace_checkpoint_restore_query",
             "workspace_directory_checkpoint_query",
+            "workspace_directory_checkpoint_restore_preview",
+            "workspace_directory_checkpoint_restore_query",
+            "workspace_directory_checkpoint_restore_verify",
         }
     )
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})
