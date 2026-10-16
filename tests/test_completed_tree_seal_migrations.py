@@ -25,7 +25,7 @@ async def test_empty_0045_roundtrip_retains_original_plan_sources_and_attempts(r
             await connection.run_sync(lambda sync: command.upgrade(migration_config(sync), "head"))
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0055_directory_restore_plans"
+            ).scalar_one() == "0057_missing_directory_rollbacks"
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
         assert await trees.get(scope, plan.plan_id) == plan
     finally:
