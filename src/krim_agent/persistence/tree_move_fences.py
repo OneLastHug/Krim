@@ -15,6 +15,7 @@ from krim_agent.workspace_tree_writer import PreparedTreeMove
 from krim_agent.workspace_writer import PreparedFileChange
 
 from .database import (
+    WorkspaceContainerRetentionLockRow,
     WorkspaceDirectoryAttemptRow,
     WorkspaceDirectoryLockRow,
     WorkspaceDirectoryRestoreLockRow,
@@ -70,6 +71,27 @@ def directory_keys(change: PreparedDirectoryChange) -> NamespaceKeys:
 async def assert_no_move_lock(
     sql: AsyncSession, keys: NamespaceKeys, *, exclude_operation_id: str | None = None
 ) -> None:
+    retention_query = select(WorkspaceContainerRetentionLockRow.operation_id).where(
+        or_(
+            *(
+                and_(
+                    WorkspaceContainerRetentionLockRow.kind == kind,
+                    WorkspaceContainerRetentionLockRow.lock_key == key,
+                )
+                for kind, key in keys
+            )
+        )
+    )
+    if exclude_operation_id is not None:
+        retention_query = retention_query.where(
+            WorkspaceContainerRetentionLockRow.operation_id != exclude_operation_id
+        )
+    if await sql.scalar(retention_query) is not None:
+        raise ServiceError(
+            "workspace_container_retention_busy",
+            "原命名空间有执行中或未核实容器回收，禁止发布",
+            409,
+        )
     predicate = or_(
         *(
             and_(WorkspaceTreeMoveLockRow.kind == kind, WorkspaceTreeMoveLockRow.lock_key == key)

@@ -151,7 +151,7 @@ async def test_0055_new_columns_constraints_indexes_and_foreign_keys_match_orm(r
         await connection.run_sync(compare)
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0057_missing_directory_rollbacks"
+        ).scalar_one() == "0058_container_retention"
 
 
 async def test_nonempty_preparing_plan_refuses_downgrade_without_losing_original_capture(
@@ -204,4 +204,4 @@ async def test_nonempty_preparing_plan_refuses_downgrade_without_losing_original
         assert await sql.get(WorkspaceDirectoryRestorePlanRow, identifier) is not None
         assert (
             await sql.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0057_missing_directory_rollbacks"
+        ).scalar_one() == "0058_container_retention"
