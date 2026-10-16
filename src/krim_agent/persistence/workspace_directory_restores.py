@@ -12,10 +12,8 @@ from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue
-from sqlalchemy import LargeBinary, Text, and_, case, delete, func, select
-from sqlalchemy import cast as sql_cast
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
@@ -54,8 +52,8 @@ from .database import (
     WorkspaceDirectoryRestorePlanRow,
 )
 from .directory_fences import directory_key
+from .directory_restore_capacity import material_usage, staging_usage
 from .directory_restore_codec import (
-    MAX_METADATA,
     decode_effect,
     decode_prepared,
     decode_stage,
@@ -949,18 +947,7 @@ class WorkspaceDirectoryRestoreStore:
         before = self._summary(row.baseline_summary, row.baseline_fingerprint)
         needed_bytes = max(target.byte_size, before.byte_size)
         needed_entries = max(target.entry_count, before.entry_count) + 1
-        used_bytes, used_entries = (
-            await sql.execute(
-                select(
-                    func.coalesce(
-                        func.sum(WorkspaceDirectoryRestorePlanRow.staging_reserved_bytes), 0
-                    ),
-                    func.coalesce(
-                        func.sum(WorkspaceDirectoryRestorePlanRow.staging_reserved_entries), 0
-                    ),
-                )
-            )
-        ).one()
+        used_bytes, used_entries = await staging_usage(sql)
         if (
             int(used_bytes) + needed_bytes > self.max_staging_bytes
             or int(used_entries) + needed_entries > self.max_staging_entries
@@ -969,44 +956,7 @@ class WorkspaceDirectoryRestoreStore:
         row.staging_reserved_bytes, row.staging_reserved_entries = needed_bytes, needed_entries
 
     async def _material_capacity(self, sql: AsyncSession) -> None:
-        # 未完成/unknown操作预留一个最大effect metadata，避免发布后无法记录回执。
-        p, a = WorkspaceDirectoryRestorePlanRow, WorkspaceDirectoryRestoreAttemptRow
-        size: ColumnElement[int] = func.coalesce(func.length(p.prepared_payload), 0)
-        for column in (
-            p.stage_metadata,
-            p.prepared_metadata,
-            p.target_summary,
-            p.baseline_summary,
-        ):
-            text_value = sql_cast(column, Text)
-            length = (
-                func.length(sql_cast(text_value, LargeBinary))
-                if self.database.engine.dialect.name == "sqlite"
-                else func.octet_length(text_value)
-            )
-            size = size + func.coalesce(length, 0)
-        effect_text = sql_cast(a.effect_metadata, Text)
-        effect_size = func.coalesce(
-            func.length(sql_cast(effect_text, LargeBinary))
-            if self.database.engine.dialect.name == "sqlite"
-            else func.octet_length(effect_text),
-            0,
-        )
-        size = size + case(
-            (
-                and_(p.prepared_metadata.is_not(None), a.status.in_(("running", "uncertain"))),
-                MAX_METADATA,
-            ),
-            else_=effect_size,
-        )
-        used = int(
-            await sql.scalar(
-                select(func.coalesce(func.sum(size), 0))
-                .select_from(p)
-                .outerjoin(a, a.plan_id == p.plan_id)
-            )
-            or 0
-        )
+        used = await material_usage(sql, sqlite=self.database.engine.dialect.name == "sqlite")
         if used > self.max_snapshot_bytes:
             raise _error("capacity", "目录恢复私有材料和回执预留超过配额", 429)
 

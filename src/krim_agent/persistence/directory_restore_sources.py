@@ -18,6 +18,7 @@ from .database import (
     WorkspaceDirectoryRestoreAttemptRow,
     WorkspaceDirectoryRestoreModelSourceRow,
     WorkspaceDirectoryRestorePlanRow,
+    WorkspaceMissingDirectoryRestoreModelSourceRow,
     WorkspaceRestoreModelSourceRow,
 )
 from .workspace_edits import WorkspaceEditStore
@@ -41,6 +42,7 @@ async def assert_new_call(sql: AsyncSession, source: CheckpointModelSource) -> N
         WorkspaceDirectoryCaptureModelSourceRow,
         WorkspaceRestoreModelSourceRow,
         WorkspaceDirectoryRestoreModelSourceRow,
+        WorkspaceMissingDirectoryRestoreModelSourceRow,
     )
     for model in models:
         if (
@@ -61,7 +63,7 @@ async def assert_new_call(sql: AsyncSession, source: CheckpointModelSource) -> N
 async def assert_no_directory_restore_call(
     sql: AsyncSession, source: CheckpointModelSource
 ) -> None:
-    """原三个生产者额外检查本新来源，不改变其原基线/同键幂等例外。"""
+    """旧生产者检查两类目录恢复来源，保留其原基线/同键幂等例外。"""
     if (
         await sql.scalar(
             select(WorkspaceDirectoryRestoreModelSourceRow.run_id).where(
@@ -73,6 +75,20 @@ async def assert_no_directory_restore_call(
     ):
         raise ServiceError(
             "workspace_directory_restore_model_call_conflict", "原调用已绑定目录恢复阶段", 409
+        )
+    if (
+        await sql.scalar(
+            select(WorkspaceMissingDirectoryRestoreModelSourceRow.run_id).where(
+                WorkspaceMissingDirectoryRestoreModelSourceRow.run_id == source.run_id,
+                WorkspaceMissingDirectoryRestoreModelSourceRow.call_id == source.call_id,
+            )
+        )
+        is not None
+    ):
+        raise ServiceError(
+            "workspace_missing_directory_restore_model_call_conflict",
+            "原调用已绑定缺失目录恢复阶段",
+            409,
         )
 
 
