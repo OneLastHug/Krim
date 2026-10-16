@@ -4,6 +4,65 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "缺失基线回退与历史": "Missing baseline rollback and history",
+    "审阅当前目录与完整保留位置": "Review the current directory and preservation path",
+    "原缺失恢复计划标识": "Original missing restore plan ID",
+    "当前整树保留相对路径": "Relative path for the complete current tree",
+    "读取原缺失恢复与当前版本": "Read original restore and current version",
+    "预览缺失基线回退": "Preview missing baseline rollback",
+    "缺失回退原请求键": "Original missing rollback request key",
+    "按键查看缺失回退提案": "Find missing rollback proposal by key",
+    "按键查看缺失回退操作": "Find missing rollback operation by key",
+    "刷新缺失回退历史": "Refresh missing rollback history",
+    "上一页缺失回退提案": "Previous missing rollback proposals",
+    "下一页缺失回退提案": "Next missing rollback proposals",
+    "上一页缺失回退操作": "Previous missing rollback operations",
+    "下一页缺失回退操作": "Next missing rollback operations",
+    "完整保留并回到缺失": "Preserve the complete tree and return to absence",
+    "还原保留的完整树": "Restore the complete preserved tree",
+    "确认保留当前整树": "Confirm the preserved complete tree",
+    "审阅完整保留并回到缺失": "Review preservation and return to absence",
+    "取消进行中的缺失回退": "Cancel the active missing rollback",
+    "取消缺失回退操作": "Cancel missing rollback operation",
+    "核实原缺失回退结果": "Verify original missing rollback result",
+    "查看缺失回退提案": "View missing rollback proposal",
+    "查看缺失回退操作": "View missing rollback operation",
+    "原缺失恢复已完成": "Original missing restore completed",
+    "原恢复操作": "Original restore operation",
+    "原缺失基线": "Original absent baseline",
+    "原发布指纹": "Original published fingerprint",
+    "当前批准指纹": "Current approved fingerprint",
+    "当前目录的新增文件和二进制变化将完整保留": (
+        "New files and binary changes in the current directory will be preserved completely"
+    ),
+    "确认按当前审阅版本执行缺失回退？": "Execute missing rollback for the reviewed version?",
+    "确认取消原缺失回退操作？": "Cancel the original missing rollback operation?",
+    "确认核实原缺失回退结果？": "Verify the original missing rollback result?",
+    "缺失回退待确认": "Missing rollback awaiting approval",
+    "缺失回退保留中": "Preserving the current tree",
+    "当前整树已保留": "Complete current tree preserved",
+    "缺失回退还原中": "Restoring the preserved tree",
+    "保留整树已还原": "Complete preserved tree restored",
+    "缺失回退保留核实中": "Verifying the preserved tree",
+    "缺失回退保留已确认": "Complete tree preservation confirmed",
+    "缺失回退已拒绝": "Missing rollback rejected",
+    "缺失回退结果待核实": "Missing rollback result requires verification",
+    "缺失回退已取消": "Missing rollback cancelled",
+    "当前会话未授权缺失回退查询": "Missing rollback queries are unavailable in this session",
+    "未找到原缺失回退请求，请保留原键继续查询": (
+        "Original missing rollback request not found; keep its key and query again"
+    ),
+    "原缺失回退请求尚未确认，请按原键继续查询": (
+        "Original missing rollback request is unconfirmed; query its original key"
+    ),
+    "原缺失回退取消已请求，请读取原操作": (
+        "Original missing rollback cancellation requested; read its original operation"
+    ),
+    "查询待确认缺失回退请求": "Query unconfirmed missing rollback request",
+    "缺失基线回退回程与原事实不一致": "Missing rollback response conflicts with original facts",
+    "缺失基线回退记录不可用，写操作已停用": (
+        "Missing rollback recovery storage is unavailable; writes are disabled"
+    ),
     "缺失目录恢复": "Missing directory restore",
     "缺失目录恢复预览中": "Preparing missing directory restore",
     "缺失目录恢复可审阅": "Missing directory restore ready for review",

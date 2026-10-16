@@ -21,6 +21,12 @@ from sqlalchemy import func, select
 from krim_agent.agents import AgentDefinition
 from krim_agent.agents.permissions import profile_policy
 from krim_agent.api import create_app
+
+if os.environ.get("KRIM_REQUIRE_INSTALLED_PACKAGE") == "1":
+    import krim_agent
+
+    assert "/site-packages/" in str(krim_agent.__file__), krim_agent.__file__
+
 from krim_agent.config import Settings
 from krim_agent.execution import LinuxSandboxRunner
 from krim_agent.execution.binding import COMMAND_TOOL_NAMES
@@ -284,6 +290,10 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
     app.state.agents.register_tree_moves()
     app.state.agents.register_tree_exchanges()
     app.state.agents.register_generated_tree_undos()
+    if os.environ.get("KRIM_TEST_MISSING_DIRECTORY_ROLLBACKS") == "1":
+        from browser_missing_directory_rollbacks import configure_missing_directory_rollbacks
+
+        configure_missing_directory_rollbacks(app, write_root)
     app.state.agents.register_checkpoint_bytes()
     if os.environ.get("KRIM_TEST_DIRECTORY_CHECKPOINTS") == "1":
         from browser_directory_checkpoints import configure_directory_checkpoints

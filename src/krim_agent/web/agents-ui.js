@@ -8,6 +8,7 @@ import { DirectoryChangesUI } from "./directory-changes-ui.js";
 import { TreeMovesUI } from "./tree-moves-ui.js";
 import { TreeExchangesUI } from "./tree-exchanges-ui.js";
 import { GeneratedTreeUndosUI } from "./generated-tree-undos-ui.js";
+import { MissingDirectoryRollbackUI } from "./missing-directory-rollback-ui.js";
 import { CommandsUI } from "./commands-ui.js";
 export class AgentsUI {
     root;
@@ -16,6 +17,12 @@ export class AgentsUI {
     constructor(root, actions) {
         this.root = root;
         this.actions = actions;
+    }
+    async focusMissingRollback(agentId, planId) {
+        const card = this.cards.get(agentId);
+        if (!card)
+            throw new Error(t("Agent不存在或尚未读取"));
+        await card.missingDirectoryRollbacks.useSource(planId);
     }
     async focusWorkspaceProposal(agentId, proposalId, operationId) {
         const card = this.cards.get(agentId);
@@ -39,6 +46,7 @@ export class AgentsUI {
                 card.treeMoves.dispose();
                 card.treeExchanges.dispose();
                 card.generatedTreeUndos.dispose();
+                card.missingDirectoryRollbacks.dispose();
                 card.root.remove();
                 this.cards.delete(id);
             }
@@ -61,6 +69,7 @@ export class AgentsUI {
             card.treeMoves.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.treeExchanges.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.generatedTreeUndos.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
+            card.missingDirectoryRollbacks.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
             card.commands.update(agent);
             card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
             const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
@@ -141,9 +150,10 @@ export class AgentsUI {
         const treeMoves = new TreeMovesUI(agent.agent_id, this.actions.notice);
         const treeExchanges = new TreeExchangesUI(agent.agent_id, this.actions.notice);
         const generatedTreeUndos = new GeneratedTreeUndosUI(agent.agent_id, this.actions.notice);
+        const missingDirectoryRollbacks = new MissingDirectoryRollbackUI(agent.agent_id, this.actions.notice, agent.session_id, agent.session.permissions.workspace);
         const commands = new CommandsUI(agent.agent_id, this.actions.notice, (proposalId, operationId) => changes.focusProposal(proposalId, operationId), (proposalId, operationId) => directories.focusProposal(proposalId, operationId));
-        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, generatedTreeUndos.root, commands.root);
-        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, commands, checkpoints, directoryCheckpoints };
+        root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, generatedTreeUndos.root, missingDirectoryRollbacks.root, commands.root);
+        const card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, missingDirectoryRollbacks, commands, checkpoints, directoryCheckpoints };
         execute.onclick = () => {
             const prompt = input.value.trim() || this.actions.prompt();
             if (!prompt) {

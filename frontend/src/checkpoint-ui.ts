@@ -28,9 +28,10 @@ export class CheckpointUI {
     private readonly notice: (message: string, error?: boolean) => void,
     private readonly request: (channel: string, data: HostJson) => Promise<HostJson>,
     openProposal: (agentId: string, proposalId: string, operationId?: string) => Promise<void>,
+    openMissingRollback?: (agentId: string, planId: string) => Promise<void>,
   ) {
     this.native = new NativeCheckpointUI(notice, openProposal);
-    this.directory = new DirectoryCheckpointUI(notice);
+    this.directory = new DirectoryCheckpointUI(notice, openMissingRollback);
     node("checkpoint-refresh").onclick = () => void this.load();
     node("checkpoint-create").onclick = () => void this.create();
     (node("checkpoint-source") as HTMLSelectElement).onchange = () => void this.switchSource((node("checkpoint-source") as HTMLSelectElement).value);

@@ -37,7 +37,7 @@ export class MissingDirectoryRestoreUI {
   private activeId: string | null = null;
   private generation = 0;
   private timer: number | undefined;
-  constructor(private readonly notice: (message: string, error?: boolean) => void) {
+  constructor(private readonly notice: (message: string, error?: boolean) => void, private readonly openRollback?: (agentId: string, planId: string) => Promise<void>) {
     input("missing-directory-restore-query").oninput = () => { const state = this.current(); if (state) state.query = input("missing-directory-restore-query").value; this.controls(); };
     input("missing-directory-restore-confirm").onchange = () => this.controls();
     node("missing-directory-restore-preview").onclick = () => void this.preview();
@@ -308,6 +308,11 @@ export class MissingDirectoryRestoreUI {
       if (plan.cancel_requested) line(detail, "取消请求", t("原操作已请求取消"));
       if (plan.cleanup_pending) line(detail, "保留材料", t("原操作私有暂存材料仍被保留"));
       if (plan.receipt) line(detail, "实际发布状态", plan.receipt.status);
+      if (plan.phase === "finished" && this.openRollback) {
+        const rollback = document.createElement("button"); rollback.type = "button"; rollback.textContent = t("审阅完整保留并回到缺失");
+        rollback.onclick = () => { if (this.current() === state) void this.openRollback!(state.agent.agent_id, plan.plan_id).catch(error => this.notice(t(errorText(error)), true)); };
+        detail.append(rollback);
+      }
     }
     const diff = node("missing-directory-restore-diff"); diff.replaceChildren();
     node("missing-directory-restore-diff-page").textContent = t("缺失目录恢复差异第{page}页", { page: state.diffBack.length + 1 });
