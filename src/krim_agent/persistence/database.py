@@ -655,6 +655,12 @@ class WorkspaceTreeMoveProposalRow(Base):
     __table_args__ = (
         UniqueConstraint("scope_id", "request_key"),
         CheckConstraint(
+            "(missing_restore_plan_id IS NULL AND missing_restore_hash IS NULL) OR "
+            "(missing_restore_plan_id IS NOT NULL AND missing_restore_hash IS NOT NULL "
+            "AND length(missing_restore_hash) = 64)",
+            name="ck_tree_move_missing_origin",
+        ),
+        CheckConstraint(
             "revision >= 0 AND revision <= 9007199254740991", name="ck_tree_move_revision"
         ),
         CheckConstraint(
@@ -679,6 +685,13 @@ class WorkspaceTreeMoveProposalRow(Base):
         ForeignKey("workspace_tree_completed_seals.plan_id", name="fk_move_generated_plan"),
         nullable=True,
     )
+    missing_restore_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_missing_directory_restore_plans.plan_id", name="fk_move_missing_plan"
+        ),
+        nullable=True,
+    )
+    missing_restore_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="proposed")
     revision: Mapped[int] = mapped_column(Integer, default=0)
     expires_at: Mapped[float] = mapped_column(Float)
@@ -1694,6 +1707,31 @@ class WorkspaceDirectoryRestoreModelSourceRow(Base):
     plan_id: Mapped[str] = mapped_column(ForeignKey("workspace_directory_restore_plans.plan_id"))
     phase: Mapped[str] = mapped_column(String(16))
     operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class WorkspaceMissingDirectoryRollbackRow(Base):
+    __tablename__ = "workspace_missing_directory_rollbacks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_operation_id", "source_plan_id"],
+            [
+                "workspace_missing_directory_restore_attempts.operation_id",
+                "workspace_missing_directory_restore_attempts.plan_id",
+            ],
+        ),
+        CheckConstraint("length(source_hash) = 64", name="ck_missing_rollback_source_hash"),
+    )
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_tree_move_proposals.proposal_id"), primary_key=True
+    )
+    source_plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_missing_directory_restore_plans.plan_id"), index=True
+    )
+    source_operation_id: Mapped[str] = mapped_column(String(36))
+    scope_id: Mapped[str] = mapped_column(String(80))
+    source_hash: Mapped[str] = mapped_column(String(64))
+    source_metadata: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class WorkspaceMissingDirectoryRestorePlanRow(Base):

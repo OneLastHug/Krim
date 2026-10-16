@@ -24,6 +24,11 @@ from krim_agent.generated_tree_undo import (
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
+from krim_agent.workspace_missing_directory_rollback import (
+    MissingDirectoryRollbackPage,
+    MissingDirectoryRollbackSource,
+    MissingDirectoryRollbackView,
+)
 from krim_agent.workspace_tree_move import (
     TreeMoveAction,
     TreeMoveActionKind,
@@ -47,12 +52,14 @@ from krim_agent.workspace_tree_writer import (
 from .completed_tree_seals import CompletedTreeSealStore, SealedTreeOrigin
 from .database import (
     WorkspaceGeneratedTreeUndoRow,
+    WorkspaceMissingDirectoryRollbackRow,
     WorkspaceTreeMoveAttemptRow,
     WorkspaceTreeMoveLockRow,
     WorkspaceTreeMoveModelSourceRow,
     WorkspaceTreeMoveProposalRow,
     WorkspaceTreePlanRow,
 )
+from .missing_directory_rollback_sources import MissingDirectoryRollbackSources, preview_hash
 from .tree_model_sources import run_scope
 from .tree_move_codec import decode_move, encode_move
 from .tree_move_fences import assert_namespace_available, move_keys
@@ -104,6 +111,7 @@ class WorkspaceTreeMoveStore:
         ):
             raise ValueError("树移动租约无效")
         self.files, self.database, self.owner_id = files, files.database, files.owner_id
+        self.missing_rollbacks = MissingDirectoryRollbackSources(files)
         self.seals = CompletedTreeSealStore(
             WorkspaceTreePlanStore(
                 files, WorkspaceDirectoryStore(files.database, owner_id=files.owner_id)
@@ -116,8 +124,44 @@ class WorkspaceTreeMoveStore:
         )
 
     @staticmethod
-    def _wanted(request: TreeMovePreviewRequest | TreeMoveAction, fingerprint: str) -> str:
+    def _wanted(
+        request: TreeMovePreviewRequest | TreeMoveAction,
+        fingerprint: str,
+        *,
+        missing_plan_id: str | None = None,
+        missing_source_hash: str | None = None,
+    ) -> str:
+        if isinstance(request, TreeMovePreviewRequest):
+            return preview_hash(request, fingerprint, missing_plan_id, missing_source_hash)
         return digest({"request": request.model_dump(mode="json"), "resource": fingerprint})
+
+    @staticmethod
+    def _action_wanted(
+        request: TreeMoveAction,
+        proposal: WorkspaceTreeMoveProposalRow,
+        source: TreeMoveModelSource | None,
+    ) -> str:
+        value: dict[str, object] = {
+            "request": request.model_dump(mode="json"),
+            "resource": proposal.resource_fingerprint,
+        }
+        if proposal.missing_restore_plan_id is not None:
+            value["missing_directory_rollback"] = {
+                "plan_id": proposal.missing_restore_plan_id,
+                "source_hash": proposal.missing_restore_hash,
+                "model_source": asdict(source) if source is not None else None,
+            }
+        return digest(value)
+
+    @staticmethod
+    def _action_source(row: WorkspaceTreeMoveAttemptRow) -> TreeMoveModelSource | None:
+        if (row.run_id is None) != (row.call_id is None):
+            raise _corrupt()
+        return (
+            TreeMoveModelSource(row.run_id, row.call_id)
+            if row.run_id is not None and row.call_id is not None
+            else None
+        )
 
     @staticmethod
     def _source_valid(source: TreeMoveModelSource) -> None:
@@ -414,6 +458,12 @@ class WorkspaceTreeMoveStore:
                         func.length(WorkspaceTreeMoveProposalRow.payload)
                         + func.length(WorkspaceTreeMoveProposalRow.prepared)
                         + func.length(WorkspaceTreeMoveProposalRow.request)
+                        + func.coalesce(
+                            func.length(WorkspaceTreeMoveProposalRow.missing_restore_plan_id), 0
+                        )
+                        + func.coalesce(
+                            func.length(WorkspaceTreeMoveProposalRow.missing_restore_hash), 0
+                        )
                     ),
                     0,
                 )
@@ -427,6 +477,7 @@ class WorkspaceTreeMoveStore:
                         + func.length(WorkspaceTreeMoveAttemptRow.prepared)
                         + func.coalesce(func.length(WorkspaceTreeMoveAttemptRow.after_payload), 0)
                         + func.coalesce(func.length(WorkspaceTreeMoveAttemptRow.after_prepared), 0)
+                        + func.coalesce(func.length(WorkspaceTreeMoveAttemptRow.receipt), 0)
                         + func.length(WorkspaceTreeMoveAttemptRow.receipt_history)
                     ),
                     0,
@@ -456,8 +507,27 @@ class WorkspaceTreeMoveStore:
                 )
             )
         )
+        missing_origins = await sql.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.length(WorkspaceMissingDirectoryRollbackRow.proposal_id)
+                        + func.length(WorkspaceMissingDirectoryRollbackRow.source_plan_id)
+                        + func.length(WorkspaceMissingDirectoryRollbackRow.source_operation_id)
+                        + func.length(WorkspaceMissingDirectoryRollbackRow.scope_id)
+                        + func.length(WorkspaceMissingDirectoryRollbackRow.source_hash)
+                        + func.length(WorkspaceMissingDirectoryRollbackRow.source_metadata)
+                    ),
+                    0,
+                )
+            )
+        )
         if (
-            int(before or 0) + int(operations or 0) + int(origins or 0) + added
+            int(before or 0)
+            + int(operations or 0)
+            + int(origins or 0)
+            + int(missing_origins or 0)
+            + added
             > self.max_snapshot_bytes
         ):
             raise ServiceError(
@@ -477,7 +547,12 @@ class WorkspaceTreeMoveStore:
                 or request.expected_fingerprint != prepared.before.fingerprint
                 or request.request_key != row.request_key
                 or row.request_hash
-                != WorkspaceTreeMoveStore._wanted(request, row.resource_fingerprint)
+                != WorkspaceTreeMoveStore._wanted(
+                    request,
+                    row.resource_fingerprint,
+                    missing_plan_id=row.missing_restore_plan_id,
+                    missing_source_hash=row.missing_restore_hash,
+                )
             ):
                 raise _corrupt()
             return StoredTreeMove(
@@ -513,9 +588,10 @@ class WorkspaceTreeMoveStore:
         if row.topic_id != topic:
             raise _corrupt()
         await self.files._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
-        self._proposal_value(row)
+        stored = self._proposal_value(row)
         await self._stored_source(sql, row)
         await self._generated_origin(sql, row)
+        await self.missing_rollbacks.validate(sql, row, stored.prepared)
         pending = {"applying", "undoing", "keeping", "uncertain"}
         if (row.active_operation_id is not None) != (row.status in pending):
             raise _corrupt()
@@ -545,15 +621,41 @@ class WorkspaceTreeMoveStore:
         *,
         model_source: TreeMoveModelSource | None = None,
         generated_origin: GeneratedTreeUndoSource | None = None,
+        missing_origin: MissingDirectoryRollbackSource | None = None,
     ) -> tuple[StoredTreeMove, bool]:
         request = TreeMovePreviewRequest.model_validate(request.model_dump())
         if generated_origin is not None:
             self._generated_source_valid(generated_origin)
+        if generated_origin is not None and missing_origin is not None:
+            raise ServiceError(
+                "workspace_missing_directory_rollback_source", "缺失与生成根来源不能混用", 403
+            )
+        if model_source is not None:
+            self._source_valid(model_source)
         wanted = self._wanted(request, binding.fingerprint)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             topic = await self.files._scope(sql, scope, writing=True)
             await self.files._resource(sql, scope, binding.key, binding.fingerprint)
+            missing_metadata = None
+            missing_hash = None
+            if missing_origin is not None:
+                missing_metadata, missing_hash = await self.missing_rollbacks.candidate(
+                    sql,
+                    scope,
+                    binding.key,
+                    binding.fingerprint,
+                    missing_origin,
+                    request,
+                    prepared,
+                    model_source,
+                )
+                wanted = self._wanted(
+                    request,
+                    binding.fingerprint,
+                    missing_plan_id=missing_origin.plan_id,
+                    missing_source_hash=missing_hash,
+                )
             previous = await sql.scalar(
                 select(WorkspaceTreeMoveProposalRow).where(
                     WorkspaceTreeMoveProposalRow.scope_id == scope,
@@ -567,6 +669,9 @@ class WorkspaceTreeMoveStore:
                     )
                 await self._retry_source(sql, previous, model_source)
                 await self._generated_origin(sql, previous)
+                await self.missing_rollbacks.validate(
+                    sql, previous, self._proposal_value(previous).prepared
+                )
                 if generated_origin is not None:
                     origin = await sql.get(WorkspaceGeneratedTreeUndoRow, previous.proposal_id)
                     if origin is None or (
@@ -620,6 +725,16 @@ class WorkspaceTreeMoveStore:
                     + len(generated_origin.previous_restore_operation_id or "")
                     if sealed is not None and generated_origin is not None
                     else 0
+                )
+                + (
+                    len(json.dumps(missing_metadata).encode())
+                    + 36
+                    + 2 * len(str(missing_metadata["source_plan_id"]))
+                    + len(str(missing_metadata["source_operation_id"]))
+                    + len(scope)
+                    + 128
+                    if missing_metadata is not None
+                    else 0
                 ),
             )
             now = utc_now()
@@ -639,6 +754,10 @@ class WorkspaceTreeMoveStore:
                 generated_plan_id=generated_origin.plan_id
                 if generated_origin is not None
                 else None,
+                missing_restore_plan_id=missing_origin.plan_id
+                if missing_origin is not None
+                else None,
+                missing_restore_hash=missing_hash,
                 status="proposed",
                 revision=0,
                 expires_at=time.time() + request.ttl_seconds,
@@ -665,17 +784,103 @@ class WorkspaceTreeMoveStore:
                     )
                 )
                 await sql.flush()
+            if (
+                missing_metadata is not None
+                and missing_origin is not None
+                and missing_hash is not None
+            ):
+                sql.add(
+                    WorkspaceMissingDirectoryRollbackRow(
+                        proposal_id=row.proposal_id,
+                        source_plan_id=missing_origin.plan_id,
+                        source_operation_id=cast(str, missing_metadata["source_operation_id"]),
+                        scope_id=scope,
+                        source_hash=missing_hash,
+                        source_metadata=missing_metadata,
+                        created_at=now,
+                    )
+                )
+                await sql.flush()
             await self._generated_origin(sql, row)
-            return self._proposal_value(row), True
+            stored = self._proposal_value(row)
+            await self.missing_rollbacks.validate(sql, row, stored.prepared)
+            return stored, True
 
     async def proposal(self, scope: str, identifier: str) -> StoredTreeMove:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row = await self._proposal(sql, scope, identifier)
             if row.active_operation_id is not None:
                 operation, _ = await self._operation(sql, scope, row.active_operation_id)
                 await self._expire(sql, operation, row)
             return self._proposal_value(row)
+
+    async def missing_rollback_proposal(
+        self,
+        scope: str,
+        identifier: str,
+    ) -> MissingDirectoryRollbackView:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
+            await self.files._writer(sql)
+            row = await self._proposal(sql, scope, identifier)
+            if row.active_operation_id is not None:
+                operation, _ = await self._operation(sql, scope, row.active_operation_id)
+                await self._expire(sql, operation, row)
+            return await self._missing_rollback_view(sql, row)
+
+    async def _missing_rollback_view(
+        self,
+        sql: AsyncSession,
+        row: WorkspaceTreeMoveProposalRow,
+    ) -> MissingDirectoryRollbackView:
+        link = await sql.get(WorkspaceMissingDirectoryRollbackRow, row.proposal_id)
+        if link is None or row.missing_restore_hash is None:
+            raise ServiceError(
+                "workspace_missing_directory_rollback_required", "原提案不是缺失基线回退", 409
+            )
+        from .missing_directory_rollback_sources import decode_origin
+
+        origin = decode_origin(link.source_metadata, row.missing_restore_hash)
+        return self.missing_rollbacks.view(origin, row, self._proposal_value(row).view)
+
+    async def missing_rollback_list(
+        self,
+        scope: str,
+        *,
+        after: str | None = None,
+        limit: int = 32,
+    ) -> MissingDirectoryRollbackPage:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ServiceError(
+                "workspace_missing_directory_rollback_pagination", "回退分页无效", 422
+            )
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
+            await self.files._writer(sql)
+            await self.files._scope(sql, scope, writing=False)
+            # 先分页核实同Scope原提案，再投影来源；不能以可丢失的标记过滤掉损坏事实。
+            query = select(WorkspaceTreeMoveProposalRow).where(
+                WorkspaceTreeMoveProposalRow.scope_id == scope,
+            )
+            if after is not None:
+                await self._proposal(sql, scope, after)
+                query = query.where(WorkspaceTreeMoveProposalRow.proposal_id > after)
+            selected = list(
+                await sql.scalars(
+                    query.order_by(WorkspaceTreeMoveProposalRow.proposal_id).limit(limit + 1)
+                )
+            )
+            result = []
+            for item in selected[:limit]:
+                row = await self._proposal(sql, scope, item.proposal_id)
+                if row.active_operation_id is not None:
+                    operation, _ = await self._operation(sql, scope, row.active_operation_id)
+                    await self._expire(sql, operation, row)
+                if row.missing_restore_plan_id is not None:
+                    result.append(await self._missing_rollback_view(sql, row))
+            return MissingDirectoryRollbackPage(
+                items=result,
+                next_after=selected[limit - 1].proposal_id if len(selected) > limit else None,
+            )
 
     async def _generated_view(
         self, sql: AsyncSession, row: WorkspaceTreeMoveProposalRow
@@ -714,7 +919,7 @@ class WorkspaceTreeMoveStore:
         )
 
     async def generated_proposal(self, scope: str, identifier: str) -> GeneratedTreeUndoPreviewView:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row = await self._proposal(sql, scope, identifier)
             if row.active_operation_id is not None:
@@ -727,7 +932,7 @@ class WorkspaceTreeMoveStore:
     ) -> GeneratedTreeUndoPage:
         if type(limit) is not int or not 1 <= limit <= 32:
             raise ServiceError("workspace_tree_move_page", "原生成根历史页大小无效", 422)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=False)
             linked = (
@@ -763,7 +968,7 @@ class WorkspaceTreeMoveStore:
 
     async def proposal_by_key(self, scope: str, key: str) -> StoredTreeMove | None:
         self.files._key(key)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=False)
             row = await sql.scalar(
@@ -848,7 +1053,7 @@ class WorkspaceTreeMoveStore:
         original = self._proposal_value(proposal).prepared
         if (
             row.scope_id != proposal.scope_id
-            or row.request_hash != self._wanted(request, proposal.resource_fingerprint)
+            or row.request_hash != self._action_wanted(request, proposal, self._action_source(row))
             or row.action in {"apply", "keep"}
             and prepared != original
             or row.action == "undo"
@@ -924,18 +1129,34 @@ class WorkspaceTreeMoveStore:
         await self.files._resource(
             sql, row.scope_id, proposal.workspace_key, proposal.resource_fingerprint
         )
+        self._assert_lease(row, proposal, allow_cancelled=False)
+        await self._stored_source(sql, proposal, row, live=True)
+        prepared = decode_move(row.prepared, row.payload)
+        await self._locks(sql, row, prepared)
+        await assert_namespace_available(sql, prepared, exclude_operation_id=row.operation_id)
+        self._assert_lease(row, proposal, allow_cancelled=False)
+
+    def _assert_lease(
+        self,
+        row: WorkspaceTreeMoveAttemptRow,
+        proposal: WorkspaceTreeMoveProposalRow,
+        *,
+        allow_cancelled: bool,
+    ) -> None:
         if (
             row.status != "running"
             or row.owner_id != self.owner_id
             or (row.lease_expires_at or 0) <= time.time()
             or row.cancelled
+            and not allow_cancelled
             or proposal.active_operation_id != row.operation_id
         ):
             raise ServiceError("workspace_tree_move_fenced", "原树移动生产者/租约/准入已失效", 409)
-        await self._stored_source(sql, proposal, row, live=True)
-        prepared = decode_move(row.prepared, row.payload)
-        await self._locks(sql, row, prepared)
-        await assert_namespace_available(sql, prepared, exclude_operation_id=row.operation_id)
+
+    @staticmethod
+    def _assert_deadline(deadline: float | None) -> None:
+        if (deadline or 0) <= time.time():
+            raise ServiceError("workspace_tree_move_fenced", "原树移动生产者/租约/准入已失效", 409)
 
     async def reserve(
         self,
@@ -947,9 +1168,8 @@ class WorkspaceTreeMoveStore:
         model_source: TreeMoveModelSource | None = None,
     ) -> tuple[StoredTreeMoveAttempt, bool]:
         request = TreeMoveAction.model_validate(request.model_dump())
-        wanted = self._wanted(request, resource_fingerprint)
         metadata, payload = encode_move(prepared)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=True)
             proposal = await self._proposal(sql, scope, request.proposal_id)
@@ -963,13 +1183,18 @@ class WorkspaceTreeMoveStore:
                 )
             )
             if previous is not None:
-                if previous.request_hash != wanted or previous.proposal_id != proposal.proposal_id:
+                if (
+                    previous.request_hash
+                    != self._action_wanted(request, proposal, self._action_source(previous))
+                    or previous.proposal_id != proposal.proposal_id
+                ):
                     raise ServiceError(
                         "workspace_tree_move_idempotency_conflict", "原树动作键已绑定其他请求", 409
                     )
                 await self._retry_source(sql, proposal, model_source, previous)
                 return await self._attempt_value(sql, previous, proposal), False
             await self._new_source(sql, scope, model_source)
+            wanted = self._action_wanted(request, proposal, model_source)
             allowed = {"apply": {"proposed"}, "undo": {"applied", "kept"}, "keep": {"applied"}}
             if (
                 proposal.status not in allowed[request.action]
@@ -1072,7 +1297,9 @@ class WorkspaceTreeMoveStore:
                 )
             await self._bind_source(sql, proposal, request.action, model_source, row.operation_id)
             await sql.flush()
-            return await self._attempt_value(sql, row, proposal), True
+            result = await self._attempt_value(sql, row, proposal)
+            self._assert_lease(row, proposal, allow_cancelled=False)
+            return result, True
 
     async def _expire(
         self,
@@ -1090,7 +1317,7 @@ class WorkspaceTreeMoveStore:
             proposal.revision += 1
 
     async def operation(self, scope: str, identifier: str) -> StoredTreeMoveAttempt:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row, proposal = await self._operation(sql, scope, identifier)
             await self._expire(sql, row, proposal)
@@ -1098,7 +1325,7 @@ class WorkspaceTreeMoveStore:
 
     async def operation_by_key(self, scope: str, key: str) -> StoredTreeMoveAttempt | None:
         self.files._key(key)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=False)
             row = await sql.scalar(
@@ -1121,7 +1348,7 @@ class WorkspaceTreeMoveStore:
         *,
         model_source: TreeMoveModelSource | None = None,
     ) -> StoredTreeMoveAttempt | None:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             proposal = await self._proposal(sql, scope, request.proposal_id)
             if proposal.resource_fingerprint != fingerprint:
@@ -1135,7 +1362,7 @@ class WorkspaceTreeMoveStore:
             if row is None:
                 return None
             if (
-                row.request_hash != self._wanted(request, fingerprint)
+                row.request_hash != self._action_wanted(request, proposal, self._action_source(row))
                 or row.proposal_id != proposal.proposal_id
             ):
                 raise ServiceError(
@@ -1151,23 +1378,24 @@ class WorkspaceTreeMoveStore:
             await self._live(sql, row, proposal)
 
     async def renew(self, scope: str, identifier: str) -> None:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row, proposal = await self._operation(sql, scope, identifier)
             await self._live(sql, row, proposal)
             row.lease_expires_at, row.updated_at = time.time() + self.lease_seconds, utc_now()
 
     async def record_intent(self, scope: str, identifier: str, prepared: PreparedTreeMove) -> None:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row, proposal = await self._operation(sql, scope, identifier)
             await self._live(sql, row, proposal)
             if decode_move(row.prepared, row.payload) != prepared:
                 raise ServiceError("workspace_tree_move_reference", "原intent材料不匹配", 409)
+            self._assert_lease(row, proposal, allow_cancelled=False)
             row.intent_recorded, row.updated_at = True, utc_now()
 
     async def cancel(self, scope: str, identifier: str) -> StoredTreeMove:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=True)
             proposal = await self._proposal(sql, scope, identifier)
@@ -1192,7 +1420,7 @@ class WorkspaceTreeMoveStore:
         resolving: bool = False,
     ) -> StoredTreeMoveAttempt:
         raw = cast(dict[str, JsonValue], asdict(effect.receipt))
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row, proposal = await self._operation(sql, scope, identifier)
             if row.status in {"done", "rejected"}:
@@ -1209,6 +1437,7 @@ class WorkspaceTreeMoveStore:
                 or (row.lease_expires_at or 0) <= time.time()
             ):
                 raise ServiceError("workspace_tree_move_fenced", "原回执未由当前producer持有", 409)
+            original_deadline = row.lease_expires_at
             if proposal.active_operation_id != row.operation_id or len(row.receipt_history) >= 16:
                 raise _corrupt()
             prepared = decode_move(row.prepared, row.payload)
@@ -1227,6 +1456,7 @@ class WorkspaceTreeMoveStore:
             candidate_history = [*row.receipt_history, raw]
             added = (
                 len(json.dumps(raw))
+                - (len(json.dumps(row.receipt)) if row.receipt is not None else 0)
                 + len(json.dumps(candidate_history))
                 - len(json.dumps(row.receipt_history))
             )
@@ -1239,6 +1469,9 @@ class WorkspaceTreeMoveStore:
             await self._bytes(sql, added)
             if row.action == "keep" and effect.receipt.status == "done" and not resolving:
                 await self._live(sql, row, proposal)
+            if not resolving:
+                # 查询/编码/容量核实均计入原租约；取消后的真实回执仍可收束。
+                self._assert_lease(row, proposal, allow_cancelled=True)
             row.status, row.receipt, row.receipt_history = (
                 effect.receipt.status,
                 raw,
@@ -1265,10 +1498,13 @@ class WorkspaceTreeMoveStore:
                     )
                 )
             await sql.flush()
-            return await self._attempt_value(sql, row, proposal)
+            result = await self._attempt_value(sql, row, proposal)
+            if not resolving:
+                self._assert_deadline(original_deadline)
+            return result
 
     async def recover_interrupted(self) -> int:
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             rows = list(
                 await sql.scalars(
@@ -1306,7 +1542,7 @@ class WorkspaceTreeMoveStore:
     ) -> TreeMoveAttemptPage:
         if type(limit) is not int or not 1 <= limit <= 32:
             raise ServiceError("workspace_tree_move_page", "原树历史页大小无效", 422)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             proposal = await self._proposal(sql, scope, identifier)
             query = select(WorkspaceTreeMoveAttemptRow).where(
@@ -1332,7 +1568,7 @@ class WorkspaceTreeMoveStore:
 
     async def mark_uncertain(self, scope: str, identifier: str) -> StoredTreeMoveAttempt:
         """回执持久失败时关闭原producer，保留材料/锁供同operation核实。"""
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             row, proposal = await self._operation(sql, scope, identifier)
             if row.status != "running":
@@ -1346,7 +1582,7 @@ class WorkspaceTreeMoveStore:
     async def list(self, scope: str, *, after: str | None = None, limit: int = 32) -> TreeMovePage:
         if type(limit) is not int or not 1 <= limit <= 32:
             raise ServiceError("workspace_tree_move_page", "原树历史页大小无效", 422)
-        async with self.database.write_lock, self.database.sessions.begin() as sql:
+        async with self.database.write_lock, self.database.sessions() as sql, sql.begin():
             await self.files._writer(sql)
             await self.files._scope(sql, scope, writing=False)
             query = select(WorkspaceTreeMoveProposalRow).where(

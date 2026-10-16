@@ -186,7 +186,7 @@ async def test_0054_model_source_or_marker_only_cannot_be_lossily_downgraded(con
     async with store.database.engine.connect() as sql:
         assert (
             await sql.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0055_directory_restore_plans"
+        ).scalar_one() == "0057_missing_directory_rollbacks"
         assert (
             await sql.execute(text("SELECT request_hash FROM workspace_directory_captures"))
         ).scalar_one()

@@ -107,7 +107,7 @@ async def test_actual_0048_restore_rows_roundtrip_preserves_old_json_hash_blob_a
         async with database.engine.connect() as connection:
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0055_directory_restore_plans"
+            ).scalar_one() == "0057_missing_directory_rollbacks"
         with pytest.raises(IntegrityError):
             async with database.engine.begin() as connection:
                 await connection.execute(
