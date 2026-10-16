@@ -363,7 +363,7 @@ class WorkspaceDirectoryRestoreService:
         self._qualify(context)
         wanted = DirectoryRestoreStepInput.model_validate(payload)
         fence = context.directory_restore
-        assert fence is not None
+        assert type(fence) is DirectoryRestoreFence
         if kind != fence.kind or (wanted.plan_id, wanted.operation_id) != (
             fence.plan_id,
             fence.operation_id,

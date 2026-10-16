@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
     from krim_agent.workspace_directory_restore import DirectoryRestoreFence
     from krim_agent.workspace_list import NativeBatchFence
+    from krim_agent.workspace_missing_directory_restore import MissingDirectoryRestoreFence
     from krim_agent.workspace_mixed_batch import MixedBatchFence
     from krim_agent.workspace_restore import CheckpointRestoreFence
     from krim_agent.workspace_tree import TreePlanFence, TreePlanRequest, TreePlanView
@@ -297,7 +298,7 @@ class ToolContext:
     directory_checkpoint_qualify: Callable[[], None] | None = field(default=None, repr=False)
     workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
     _directory_checkpoint_capture_response: str | None = field(default=None, repr=False)
-    directory_restore: DirectoryRestoreFence | None = None
+    directory_restore: DirectoryRestoreFence | MissingDirectoryRestoreFence | None = None
     directory_restore_qualify: Callable[[], None] | None = field(default=None, repr=False)
     workspace_directory_restores: DirectoryRestoreBackend | None = None
     _directory_restore_response: str | None = field(default=None, repr=False)
