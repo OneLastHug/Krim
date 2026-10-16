@@ -1,5 +1,12 @@
 """Python 生成 SDK；参考 Vercel AI SDK 的语义，运行时全部为 Python。"""
 
+from krim_agent.conversation_recovery import (
+    ConversationRecoveryPreview,
+    ConversationRecoveryRecord,
+    ConversationRecoveryRequest,
+    RecoveryAnsweredReference,
+    RecoveryToolReference,
+)
 from krim_agent.evaluation import EvalCase, EvalConfig, EvalDataset, EvalReport
 from krim_agent.evaluation.remote import AsyncEvalClient, SyncEvalClient
 from krim_agent.evaluation.service import EvalRunHandle
@@ -220,6 +227,11 @@ from .types import (
 )
 
 __all__ = [
+    "ConversationRecoveryPreview",
+    "ConversationRecoveryRecord",
+    "ConversationRecoveryRequest",
+    "RecoveryAnsweredReference",
+    "RecoveryToolReference",
     "MissingDirectoryRollbackAction",
     "MissingDirectoryRollbackAttemptView",
     "MissingDirectoryRollbackPreview",

@@ -255,6 +255,7 @@ from krim_agent.workspace_tree_move import (
 )
 
 from .boundary import LocalBoundary
+from .conversation_recovery import register_conversation_recovery_routes
 from .directory_restores import register_directory_restore_routes
 from .missing_directory_restores import register_missing_directory_restore_routes
 from .missing_directory_rollbacks import register_missing_directory_rollback_routes
@@ -1835,6 +1836,7 @@ def create_app(
     register_directory_restore_routes(app, agent_service)
     register_missing_directory_restore_routes(app, agent_service)
     register_missing_directory_rollback_routes(app, agent_service)
+    register_conversation_recovery_routes(app, agent_service)
 
     @app.post("/v1/agents/{agent_id}/workspace/directory-checkpoints", status_code=202)
     async def agent_workspace_directory_checkpoint_create(

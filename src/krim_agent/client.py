@@ -49,6 +49,14 @@ from .context_engine import (
     ContextProposalDecision,
     ContextProposalView,
 )
+from .conversation_recovery import ID as RECOVERY_ID
+from .conversation_recovery import KEY as RECOVERY_KEY
+from .conversation_recovery import (
+    ConversationRecoveryPreview,
+    ConversationRecoveryRecord,
+    ConversationRecoveryRequest,
+    recovery_message_identifier,
+)
 from .drag import DragPreview, DragState
 from .evaluation.remote import SyncEvalClient
 from .execution.agent_models import (
@@ -1048,6 +1056,107 @@ class KrimClient:
             value.proposal_id == proposal_id and value.scope_id == "session:" + agent_id
         )
         return value
+
+    @staticmethod
+    def _conversation_recovery_error(*, response: bool) -> ClientError:
+        return ClientError(
+            "会话恢复回程与原身份/请求不一致" if response else "会话恢复输入无效",
+            code="conversation_recovery_response"
+            if response
+            else "conversation_recovery_parameters",
+            status=502 if response else 422,
+        )
+
+    @classmethod
+    def _conversation_recovery_base(cls, agent_id: str) -> str:
+        if type(agent_id) is not str or re.fullmatch(RECOVERY_ID, agent_id) is None:
+            raise cls._conversation_recovery_error(response=False)
+        return f"/v1/agents/{agent_id}/conversation-recovery"
+
+    @classmethod
+    def _conversation_recovery_key(cls, request_key: str) -> str:
+        try:
+            if type(request_key) is not str or re.fullmatch(RECOVERY_KEY, request_key) is None:
+                raise ValueError("原键无效")
+            request_key.encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise cls._conversation_recovery_error(response=False) from None
+        return request_key
+
+    @classmethod
+    def _conversation_recovery_scope(
+        cls, value: ConversationRecoveryPreview, agent_id: str
+    ) -> None:
+        if (
+            value.agent_id != agent_id
+            or value.session_id != agent_id
+            or value.session_revision is None
+        ):
+            raise cls._conversation_recovery_error(response=True)
+
+    @classmethod
+    def _conversation_recovery_record(
+        cls, value: ConversationRecoveryRecord, agent_id: str
+    ) -> None:
+        cls._conversation_recovery_scope(value.source, agent_id)
+        if value.recovery_message_id != recovery_message_identifier(
+            value.source.topic_id, value.request.request_key
+        ):
+            raise cls._conversation_recovery_error(response=True)
+
+    def agent_conversation_recovery_preview(self, agent_id: str) -> ConversationRecoveryPreview:
+        response = self._http.get(self._conversation_recovery_base(agent_id) + "/preview")
+        self._check(response)
+        try:
+            value = ConversationRecoveryPreview.model_validate_json(response.content)
+            self._conversation_recovery_scope(value, agent_id)
+            return value
+        except (TypeError, ValueError, ServiceError):
+            raise self._conversation_recovery_error(response=True) from None
+
+    def agent_conversation_recovery_apply(
+        self, agent_id: str, request: ConversationRecoveryRequest, *, confirmed: bool = False
+    ) -> ConversationRecoveryRecord:
+        base = self._conversation_recovery_base(agent_id)
+        try:
+            if type(confirmed) is not bool or not isinstance(request, ConversationRecoveryRequest):
+                raise ValueError("确认与请求类型无效")
+            request = ConversationRecoveryRequest.model_validate(request.model_dump(mode="json"))
+            self._conversation_recovery_key(request.request_key)
+            if request.expected_session_revision is None:
+                raise ValueError("Agent会话版本不能为空")
+        except (TypeError, ValueError, ServiceError):
+            raise self._conversation_recovery_error(response=False) from None
+        response = self._http.post(
+            base, params={"confirmed": str(confirmed).lower()}, json=request.model_dump(mode="json")
+        )
+        self._check(response)
+        try:
+            value = ConversationRecoveryRecord.model_validate_json(response.content)
+            self._conversation_recovery_record(value, agent_id)
+            if value.request != request:
+                raise ValueError("原请求被改变")
+            return value
+        except (TypeError, ValueError, ServiceError):
+            raise self._conversation_recovery_error(response=True) from None
+
+    def agent_conversation_recovery_by_key(
+        self, agent_id: str, request_key: str
+    ) -> ConversationRecoveryRecord | None:
+        base = self._conversation_recovery_base(agent_id)
+        request_key = self._conversation_recovery_key(request_key)
+        response = self._http.get(base + "/by-key", params={"request_key": request_key})
+        self._check(response)
+        if response.content.strip() == b"null":
+            return None
+        try:
+            value = ConversationRecoveryRecord.model_validate_json(response.content)
+            self._conversation_recovery_record(value, agent_id)
+            if value.request.request_key != request_key:
+                raise ValueError("原键回程不一致")
+            return value
+        except (TypeError, ValueError, ServiceError):
+            raise self._conversation_recovery_error(response=True) from None
 
     @staticmethod
     def _missing_rollback_bad_response() -> ClientError:

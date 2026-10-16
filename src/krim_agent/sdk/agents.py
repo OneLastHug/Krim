@@ -8,6 +8,11 @@ from uuid import uuid4
 
 from krim_agent.agents import AgentSessionView, AgentTurnView, ExecResult
 from krim_agent.application.agents import AgentPromptRequest, AgentService, AgentView
+from krim_agent.conversation_recovery import (
+    ConversationRecoveryPreview,
+    ConversationRecoveryRecord,
+    ConversationRecoveryRequest,
+)
 from krim_agent.execution.agent_models import (
     AgentCommandRequest,
     CommandLookup,
@@ -177,6 +182,21 @@ class AgentSession:
         self, request: AgentCommandRequest, *, confirmed: bool = False
     ) -> CommandSummary:
         return await self.service.command_execute(self.agent_id, request, confirmed=confirmed)
+
+    async def preview_conversation_recovery(self) -> ConversationRecoveryPreview:
+        return await self.service.conversation_recovery_preview(self.agent_id)
+
+    async def recover_conversation(
+        self, request: ConversationRecoveryRequest, *, confirmed: bool = False
+    ) -> ConversationRecoveryRecord:
+        return await self.service.conversation_recovery_apply(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def conversation_recovery_by_key(
+        self, request_key: str
+    ) -> ConversationRecoveryRecord | None:
+        return await self.service.conversation_recovery_by_key(self.agent_id, request_key)
 
     async def start_command(
         self, request: AgentCommandRequest, *, confirmed: bool = False

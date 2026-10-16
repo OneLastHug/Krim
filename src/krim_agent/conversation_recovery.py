@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -57,6 +58,11 @@ def path_fingerprint(path: list[MessageView]) -> str:
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
     return digest.hexdigest()
+
+
+def recovery_message_identifier(topic_id: str, request_key: str) -> str:
+    value = canonical(["krim-conversation-recovery-v1", topic_id, request_key])
+    return str(uuid5(NAMESPACE_URL, value.decode("utf-8")))
 
 
 class RecoveryToolReference(StrictModel):
