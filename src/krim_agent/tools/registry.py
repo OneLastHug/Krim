@@ -19,6 +19,7 @@ from krim_agent.protocol.models import check_json
 from krim_agent.workspace import (
     WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES,
     WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES,
+    WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES,
     WORKSPACE_TREE_EXCHANGE_TOOL_NAMES,
     WORKSPACE_TREE_MOVE_TOOL_NAMES,
 )
@@ -338,7 +339,12 @@ class ToolRegistry:
                 async with parent.tree_exchanges.call_scope():
                     return await self._execute_observed(name, arguments, parent, consume)
             if (
-                name in (WORKSPACE_TREE_MOVE_TOOL_NAMES | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES)
+                name
+                in (
+                    WORKSPACE_TREE_MOVE_TOOL_NAMES
+                    | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
+                    | WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES
+                )
                 and parent.tree_moves is not None
             ):
                 async with parent.tree_moves.call_scope():
@@ -358,7 +364,8 @@ class ToolRegistry:
         tree_query = name == "workspace_tree_query"
         tree_model = name in {"workspace_tree_model_prepare", "workspace_tree_start"}
         generated_undo = name in WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
-        tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo
+        missing_rollback = name in WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES
+        tree_move = name in WORKSPACE_TREE_MOVE_TOOL_NAMES or generated_undo or missing_rollback
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
         directory_capture = name == "workspace_directory_checkpoint_capture"
@@ -645,7 +652,10 @@ class ToolRegistry:
                 )
                 original_control_base = (
                     execution_budget_base(child.execution_timeouts)
-                    if checkpoint_control or checkpoint_capture
+                    if checkpoint_control
+                    or checkpoint_capture
+                    or missing_rollback
+                    or generated_undo
                     else ()
                 )
                 original_exchange_binding = _tree_move_binding(child) if tree_exchange else None
@@ -666,17 +676,29 @@ class ToolRegistry:
                 if decision not in {"allow", "audit"}:
                     code = "approval_required" if decision == "ask" else "permission_denied"
                     raise ToolError(code, f"工具没有执行许可: {name}")
-                if (checkpoint_control or checkpoint_capture) and not same_execution_budget(
+                if (
+                    checkpoint_control or checkpoint_capture or missing_rollback or generated_undo
+                ) and not same_execution_budget(
                     original_control_base, execution_budget_base(child.execution_timeouts)
                 ):
                     raise ToolError(
-                        "workspace_checkpoint_model_budget"
+                        "workspace_missing_directory_rollback_budget"
+                        if missing_rollback
+                        else "workspace_generated_undo_budget"
+                        if generated_undo
+                        else "workspace_checkpoint_model_budget"
                         if checkpoint_control
                         else checkpoint_context_code,
-                        "权限策略不能在副作用准入前延长原检查点预算",
+                        "权限策略不能在副作用准入前延长原缺失回退预算"
+                        if missing_rollback
+                        else "权限策略不能在副作用准入前延长原生成根预算"
+                        if generated_undo
+                        else "权限策略不能在副作用准入前延长原检查点预算",
                     )
                 original_exchange_budget = _tree_exchange_budget(child) if tree_exchange else None
-                original_generated_budget = _tree_exchange_budget(child) if generated_undo else None
+                original_generated_budget = (
+                    _tree_exchange_budget(child) if generated_undo or missing_rollback else None
+                )
                 original_capture_budget = (
                     _tree_exchange_budget(child)
                     if byte_capture or directory_capture or directory_restore
@@ -744,7 +766,7 @@ class ToolRegistry:
                 if tree_move and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_move_binding
-                    or generated_undo
+                    or (generated_undo or missing_rollback)
                     and _tree_exchange_budget(child) != original_generated_budget
                 ):
                     raise ToolError(
@@ -935,7 +957,7 @@ class ToolRegistry:
                 if tree_move and (
                     child.arguments != original_arguments
                     or _tree_move_binding(child) != original_move_binding
-                    or generated_undo
+                    or (generated_undo or missing_rollback)
                     and _tree_exchange_budget(child) != original_generated_budget
                 ):
                     raise ToolError(

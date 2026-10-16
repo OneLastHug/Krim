@@ -116,6 +116,15 @@ WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES = frozenset(
         "generated_tree_undo_cancel",
     }
 )
+WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES = frozenset(
+    {
+        "missing_directory_rollback_preview",
+        "missing_directory_rollback_query",
+        "missing_directory_rollback_change",
+        "missing_directory_rollback_reconcile",
+        "missing_directory_rollback_cancel",
+    }
+)
 WORKSPACE_WRITE_TOOL_NAMES = (
     WORKSPACE_CHANGE_TOOL_NAMES
     | {"workspace_directory_restore_apply"}
@@ -134,6 +143,7 @@ WORKSPACE_WRITE_TOOL_NAMES = (
     )
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})
     | (WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES - {"generated_tree_undo_query"})
+    | (WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES - {"missing_directory_rollback_query"})
     | (
         WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         - {"tree_exchange_inspect", "tree_exchange_query", "tree_exchange_seal_query"}
@@ -154,6 +164,7 @@ WORKSPACE_TOOL_NAMES = (
     | WORKSPACE_TREE_MOVE_TOOL_NAMES
     | WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
     | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
+    | WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES
 )
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000

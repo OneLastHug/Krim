@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from threading import Event
 from typing import TYPE_CHECKING, Any, cast
 
@@ -31,6 +30,8 @@ from krim_agent.workspace_tree_move import (
     TreeMoveQueryRequest,
 )
 
+from .tree_move_budget import TreeMoveBudget
+
 if TYPE_CHECKING:
     from .workspace_tree_moves import TreeMoveService
 
@@ -39,30 +40,15 @@ class GeneratedTreeUndoOperations:
     def __init__(self, moves: TreeMoveService) -> None:
         self.moves = moves
         self.store = moves.store
+        self._budget = TreeMoveBudget("workspace_generated_undo")
 
-    @staticmethod
-    def budget(context: ToolContext) -> None:
-        if not context.execution_timeouts:
-            raise ServiceError(
-                "workspace_generated_undo_context", "生成根工具须原Registry执行预算", 403
-            )
-        now = asyncio.get_running_loop().time()
-        for execution in context.execution_timeouts:
-            when = execution.deadline.when()
-            if (
-                not execution.active
-                or execution.deadline.expired()
-                or when is not None
-                and when <= now
-            ):
-                raise ServiceError(
-                    "workspace_generated_undo_deadline", "原生成根执行预算已到期", 409
-                )
+    def budget(self, context: ToolContext) -> None:
+        self._budget.check(context)
 
     async def execute(
         self, operation: str, payload: dict[str, Any], context: ToolContext, abort: Event
     ) -> dict[str, JsonValue]:
-        self.budget(context)
+        self._budget.start(context)
         if operation == "generated_undo_preview":
             value = await self.preview(
                 GeneratedTreeUndoPreviewRequest.model_validate(payload), context, abort

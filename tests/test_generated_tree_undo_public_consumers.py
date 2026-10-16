@@ -341,30 +341,47 @@ async def test_rest_cancel_closes_same_sdk_admission_without_second_producer(
 ):
     service, agent, scope, trees, plan, binding, snapshot, request = await setup(runtime, tmp_path)
     entered, release = Event(), Event()
-    worker = None
+    worker = cancelling = None
+    saved_cancel = asyncio.Event()
     original = WorkspaceTreeWriter.apply
     try:
         proposal = await agent.preview_generated_tree_undo(request)
 
         def paused(writer, prepared, **kwargs):
             entered.set()
-            assert release.wait(10)
+            assert release.wait(5)
             return original(writer, prepared, **kwargs)
 
         monkeypatch.setattr(WorkspaceTreeWriter, "apply", paused)
+        original_cancel = service.manager.tree_moves.store.cancel
+
+        async def recorded_cancel(*args):
+            value = await original_cancel(*args)
+            saved_cancel.set()
+            return value
+
+        monkeypatch.setattr(service.manager.tree_moves.store, "cancel", recorded_cancel)
         worker = asyncio.create_task(agent.change_generated_tree_undo(action(proposal)))
         await wait_event(entered)
         async with api_for(runtime, service, monkeypatch) as (_, api):
-            response = await api.post(
-                f"/v1/agents/{agent.agent_id}/workspace/generated-tree-undos/{proposal.move.proposal_id}/cancel"
+            cancelling = asyncio.create_task(
+                api.post(
+                    f"/v1/agents/{agent.agent_id}/workspace/generated-tree-undos/{proposal.move.proposal_id}/cancel"
+                )
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["move"]["active_operation_id"] is not None
+            async with asyncio.timeout(5):
+                await saved_cancel.wait()
             assert (
                 await service.manager.tree_moves.store.operation_by_key(scope, "root-remove")
             ).view.cancelled
+            done, _ = await asyncio.wait({cancelling}, timeout=0.3)
+            assert not done, "REST取消必须等待原已接纳worker收束"
             release.set()
             result = await worker
+            response = await cancelling
+            assert response.status_code == 200, response.text
+            assert response.json()["move"]["active_operation_id"] is None
+            assert response.json()["root_state"] == "cancelled"
             assert result.operation.status == "rejected" and result.operation.cancelled
             assert (
                 await agent.query_generated_tree_undo(
@@ -376,8 +393,9 @@ async def test_rest_cancel_closes_same_sdk_admission_without_second_producer(
         )[:4] == [1, 1, 1, 0]
     finally:
         release.set()
-        if worker is not None:
-            await asyncio.gather(worker, return_exceptions=True)
+        await asyncio.gather(
+            *(task for task in (worker, cancelling) if task is not None), return_exceptions=True
+        )
         await service.close()
 
 
