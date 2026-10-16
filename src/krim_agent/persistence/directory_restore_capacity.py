@@ -7,6 +7,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.expression import SQLColumnExpression
 
 from .database import (
+    WorkspaceContainerRetentionModelSourceRow,
     WorkspaceContainerRetentionRow,
     WorkspaceDirectoryRestoreAttemptRow,
     WorkspaceDirectoryRestorePlanRow,
@@ -81,12 +82,28 @@ async def material_usage(sql: AsyncSession, *, sqlite: bool) -> int:
     retention_size = retention_size + _json_bytes(
         WorkspaceContainerRetentionRow.request_metadata, sqlite
     )
+    retention_size = retention_size + _json_bytes(
+        WorkspaceContainerRetentionRow.model_sources_metadata, sqlite
+    )
     # 已准入的回收/unknown预留有界回执和核实历史，避免其他来源填满容量后无法收束。
     retention_size = retention_size + case(
         (WorkspaceContainerRetentionRow.status.in_(("running", "unknown")), 69632),
         else_=_json_bytes(WorkspaceContainerRetentionRow.receipt_metadata, sqlite)
         + _json_bytes(WorkspaceContainerRetentionRow.verification_metadata, sqlite),
     )
+    source_bytes = sum(
+        (
+            _json_bytes(column, sqlite)
+            for column in (
+                WorkspaceContainerRetentionModelSourceRow.run_id,
+                WorkspaceContainerRetentionModelSourceRow.call_id,
+                WorkspaceContainerRetentionModelSourceRow.operation_id,
+                WorkspaceContainerRetentionModelSourceRow.phase,
+            )
+        ),
+        8,
+    )
+    used += int(await sql.scalar(select(func.coalesce(func.sum(source_bytes), 0))) or 0)
     return used + int(
         await sql.scalar(
             select(func.coalesce(func.sum(retention_size), 0)).select_from(

@@ -14,6 +14,7 @@ from krim_agent.workspace_directory_restore import directory_restore_model_sourc
 
 from .database import (
     NativeCheckpointModelSourceRow,
+    WorkspaceContainerRetentionModelSourceRow,
     WorkspaceDirectoryCaptureModelSourceRow,
     WorkspaceDirectoryRestoreAttemptRow,
     WorkspaceDirectoryRestoreModelSourceRow,
@@ -43,6 +44,7 @@ async def assert_new_call(sql: AsyncSession, source: CheckpointModelSource) -> N
         WorkspaceRestoreModelSourceRow,
         WorkspaceDirectoryRestoreModelSourceRow,
         WorkspaceMissingDirectoryRestoreModelSourceRow,
+        WorkspaceContainerRetentionModelSourceRow,
     )
     for model in models:
         if (
@@ -64,6 +66,18 @@ async def assert_no_directory_restore_call(
     sql: AsyncSession, source: CheckpointModelSource
 ) -> None:
     """旧生产者检查两类目录恢复来源，保留其原基线/同键幂等例外。"""
+    if (
+        await sql.scalar(
+            select(WorkspaceContainerRetentionModelSourceRow.run_id).where(
+                WorkspaceContainerRetentionModelSourceRow.run_id == source.run_id,
+                WorkspaceContainerRetentionModelSourceRow.call_id == source.call_id,
+            )
+        )
+        is not None
+    ):
+        raise ServiceError(
+            "workspace_container_retention_model_call_conflict", "原调用已绑定容器回收阶段", 409
+        )
     if (
         await sql.scalar(
             select(WorkspaceDirectoryRestoreModelSourceRow.run_id).where(

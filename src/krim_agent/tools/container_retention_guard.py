@@ -19,7 +19,14 @@ def retention_binding(context: ToolContext) -> tuple[object, ...] | None:
     if type(fence) is ContainerRetentionInspection:
         return (type(fence), fence.inspection_id, fence.source_plan_id, fence.kind, fence.token)
     if type(fence) is ContainerRetentionFence:
-        return (type(fence), fence.operation_id, fence.epoch, fence.kind, fence.token)
+        return (
+            type(fence),
+            fence.operation_id,
+            fence.epoch,
+            fence.kind,
+            fence.token,
+            fence.model_source,
+        )
     raise ToolError("workspace_container_retention_context", "回收私有围栏类型无效")
 
 
@@ -77,6 +84,7 @@ def validate_container_retention_parent(name: str, context: ToolContext) -> None
             and type(fence.epoch) is int
             and 0 <= fence.epoch <= 128
             and fence.kind in {"remove", "verify"}
+            and fence.model_source is None
         )
     if not valid:
         raise ToolError("workspace_container_retention_context", "回收原选择器或epoch无效")

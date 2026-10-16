@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.models import utc_now
 from krim_agent.workspace import WorkspaceBinding
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_container_retention import (
     ContainerRetentionFence,
     ContainerRetentionReceipt,
@@ -33,6 +34,7 @@ from krim_agent.workspace_empty_container_retention import (
     EmptyContainerReceipt,
 )
 
+from . import container_retention_model_sources as model_origins
 from .container_retention_sources import ContainerRetentionSources, corrupt, decode_origin, error
 from .database import WorkspaceContainerRetentionLockRow as Lock
 from .database import WorkspaceContainerRetentionRow as Row
@@ -57,6 +59,7 @@ class WorkspaceContainerRetentionStore:
         lease_seconds: float = 60,
         max_operations: int = 500,
         max_checks: int = 16,
+        max_model_sources: int = 2000,
     ) -> None:
         if (
             type(lease_seconds) not in {int, float}
@@ -65,6 +68,8 @@ class WorkspaceContainerRetentionStore:
             or not 1 <= max_operations <= 5000
             or type(max_checks) is not int
             or not 1 <= max_checks <= 128
+            or type(max_model_sources) is not int
+            or not 1 <= max_model_sources <= 20000
             or owner_id is not None
             and (type(owner_id) is not str or re.fullmatch(IDENTIFIER, owner_id) is None)
         ):
@@ -73,6 +78,7 @@ class WorkspaceContainerRetentionStore:
         self.database = self.edits.database
         self.sources = ContainerRetentionSources(restores)
         self.owner_id = owner_id if owner_id is not None else str(uuid4())
+        self.max_model_sources = max_model_sources
         self.lease_seconds, self.max_operations, self.max_checks = (
             lease_seconds,
             max_operations,
@@ -244,7 +250,7 @@ class WorkspaceContainerRetentionStore:
 
     async def _base(
         self, sql: AsyncSession, scope: str, identifier: str
-    ) -> tuple[Row, StoredContainerRetentionSource]:
+    ) -> tuple[Row, StoredContainerRetentionSource, model_origins.ContainerRetentionModelSources]:
         row = await sql.get(Row, identifier)
         if row is None or row.scope_id != scope:
             raise error("not_found", "容器回收操作不在此作用域", 404)
@@ -269,7 +275,8 @@ class WorkspaceContainerRetentionStore:
         ):
             raise corrupt()
         self._view(row, source)
-        return row, source
+        origins = await model_origins.sources(sql, self.edits, row, self._history(row))
+        return row, source, origins
 
     @staticmethod
     def _qualify(binding: WorkspaceBinding, qualify: Callable[[], None]) -> None:
@@ -287,9 +294,17 @@ class WorkspaceContainerRetentionStore:
     ) -> tuple[Row, StoredContainerRetentionSource]:
         if type(fence) is not ContainerRetentionFence or type(fence.epoch) is not int:
             raise error("fenced", "回收须使用原私有Fence", 403)
-        row, source = await self._base(sql, scope, fence.operation_id)
+        row, source, origins = await self._base(sql, scope, fence.operation_id)
+        current_source = model_origins.model_source(fence.model_source)
+        if current_source != origins.at(row.epoch):
+            raise error("model_context", "回收私有围栏丢失或替换当前模型来源", 403)
         self._qualify(binding, qualify)
-        await self.edits._scope(sql, scope, writing=True)
+        await self.edits._scope(
+            sql,
+            scope,
+            writing=True,
+            run_id=current_source.run_id if current_source is not None else None,
+        )
         if (
             (source.view.workspace_key, source.view.resource_fingerprint)
             != (binding.key, binding.fingerprint)
@@ -326,8 +341,15 @@ class WorkspaceContainerRetentionStore:
 
     async def get(self, scope: str, operation_id: str) -> ContainerRetentionView:
         async with self.database.write_lock, self.database.sessions() as sql:
-            row, source = await self._base(sql, scope, operation_id)
+            row, source, _origins = await self._base(sql, scope, operation_id)
             return self._view(row, source)
+
+    async def model_sources(
+        self, scope: str, operation_id: str
+    ) -> model_origins.ContainerRetentionModelSources:
+        async with self.database.write_lock, self.database.sessions() as sql:
+            _row, _source, origins = await self._base(sql, scope, operation_id)
+            return origins
 
     async def by_key(self, scope: str, request_key: str) -> ContainerRetentionView | None:
         self._key(request_key)
@@ -338,7 +360,7 @@ class WorkspaceContainerRetentionStore:
             )
             if row is None:
                 return None
-            row, source = await self._base(sql, scope, row.operation_id)
+            row, source, _origins = await self._base(sql, scope, row.operation_id)
             return self._view(row, source)
 
     async def reserve(
@@ -348,7 +370,9 @@ class WorkspaceContainerRetentionStore:
         request: ContainerRetentionRequest,
         *,
         qualify: Callable[[], None],
+        model_source: CheckpointModelSource | None = None,
     ) -> tuple[ContainerRetentionView, bool]:
+        model_source = model_origins.model_source(model_source)
         try:
             if (
                 type(request) is not ContainerRetentionRequest
@@ -363,12 +387,21 @@ class WorkspaceContainerRetentionStore:
                 select(Row).where(Row.scope_id == scope, Row.request_key == request.request_key)
             )
             if previous is not None:
-                previous, source = await self._base(sql, scope, previous.operation_id)
+                previous, source, origins = await self._base(sql, scope, previous.operation_id)
                 if previous.request_hash != self._request_hash(scope, request):
                     raise error("key_conflict", "原回收键已绑定不同请求")
+                if model_source is not None and origins.remove != model_source:
+                    raise error("model_context", "模型不能冒认其他调用的原回收准入", 403)
                 return self._view(previous, source), False
             self._qualify(binding, qualify)
-            await self.edits._scope(sql, scope, writing=True)
+            if model_source is not None and not scope.startswith("session:"):
+                raise error("model_context", "模型回收需要原session", 403)
+            await self.edits._scope(
+                sql,
+                scope,
+                writing=True,
+                run_id=model_source.run_id if model_source is not None else None,
+            )
             source = await self.sources.read(
                 sql,
                 scope,
@@ -425,19 +458,25 @@ class WorkspaceContainerRetentionStore:
             for kind, key in sorted(keys):
                 sql.add(Lock(operation_id=row.operation_id, kind=kind, lock_key=key))
             await sql.flush()
+            await model_origins.admit(
+                sql, self.edits, row, model_source, max_sources=self.max_model_sources
+            )
+            await sql.flush()
             if (
                 await material_usage(sql, sqlite=self.database.engine.dialect.name == "sqlite")
                 > self.restores.max_snapshot_bytes
             ):
                 raise error("capacity", "回收与原恢复材料总容量已满", 429)
             result = self._view(row, source)
-            fence = ContainerRetentionFence(row.operation_id, row.epoch, row.token, "remove")
+            fence = ContainerRetentionFence(
+                row.operation_id, row.epoch, row.token, "remove", model_source
+            )
             await self._last(sql, scope, fence, binding, qualify)
             return result, True
 
     async def execution(self, scope: str, operation_id: str) -> ContainerRetentionFence:
         async with self.database.write_lock, self.database.sessions() as sql:
-            row, _source = await self._base(sql, scope, operation_id)
+            row, _source, _origins = await self._base(sql, scope, operation_id)
             if (
                 row.status != "running"
                 or row.owner_id != self.owner_id
@@ -450,6 +489,7 @@ class WorkspaceContainerRetentionStore:
                 row.epoch,
                 row.token,
                 cast(Literal["remove", "verify"], row.active_kind),
+                _origins.at(row.epoch),
             )
 
     async def inputs(
@@ -557,7 +597,13 @@ class WorkspaceContainerRetentionStore:
             await sql.flush()
             result = self._view(row, source)
             self._qualify(binding, qualify)
-            await self.edits._scope(sql, scope, writing=True)
+            current_source = model_origins.model_source(fence.model_source)
+            await self.edits._scope(
+                sql,
+                scope,
+                writing=True,
+                run_id=current_source.run_id if current_source is not None else None,
+            )
             if lease <= time.time():
                 raise error("fenced", "保存回收结果前原租约已失效")
             return result
@@ -726,7 +772,7 @@ class WorkspaceContainerRetentionStore:
         if type(expected_revision) is not int or not 0 <= expected_revision <= 9007199254740989:
             raise error("parameters", "回收取消须使用实际原版本", 422)
         async with self._transaction() as sql:
-            row, source = await self._base(sql, scope, operation_id)
+            row, source, _origins = await self._base(sql, scope, operation_id)
             if row.status not in {"running", "unknown"} or row.cancel_requested:
                 return self._view(row, source)
             self._qualify(binding, qualify)
@@ -760,11 +806,12 @@ class WorkspaceContainerRetentionStore:
         ):
             raise error("parameters", "回收收束须使用原Fence和原因", 422)
         async with self._transaction() as sql:
-            row, source = await self._base(sql, scope, fence.operation_id)
+            row, source, _origins = await self._base(sql, scope, fence.operation_id)
             if row.status != "running":
                 return self._view(row, source)
             if (
-                row.owner_id != self.owner_id
+                model_origins.model_source(fence.model_source) != _origins.at(row.epoch)
+                or row.owner_id != self.owner_id
                 or row.token != fence.token
                 or row.epoch != fence.epoch
                 or row.active_kind != fence.kind
@@ -788,7 +835,7 @@ class WorkspaceContainerRetentionStore:
                 row = await sql.get(Row, identifier)
                 if row is None:
                     raise corrupt()
-                row, _source = await self._base(sql, row.scope_id, row.operation_id)
+                row, _source, _origins = await self._base(sql, row.scope_id, row.operation_id)
                 await self._end(sql, row, "workspace_container_retention_interrupted")
             await sql.flush()
             return len(identifiers)
@@ -815,7 +862,9 @@ class WorkspaceContainerRetentionStore:
         expected_revision: int,
         request_key: str,
         qualify: Callable[[], None],
+        model_source: CheckpointModelSource | None = None,
     ) -> tuple[ContainerRetentionView, ContainerRetentionFence | None]:
+        model_source = model_origins.model_source(model_source)
         self._key(request_key)
         if type(expected_revision) is not int or not 0 <= expected_revision <= 9007199254740989:
             raise error("parameters", "核实回收须使用实际原版本", 422)
@@ -827,12 +876,16 @@ class WorkspaceContainerRetentionStore:
             }
         )
         async with self._transaction() as sql:
-            row, source = await self._base(sql, scope, operation_id)
+            row, source, _origins = await self._base(sql, scope, operation_id)
             history = self._history(row)
             previous = next((item for item in history if item["request_key"] == request_key), None)
             if previous is not None:
                 if previous["request_hash"] != checksum:
                     raise error("key_conflict", "原核实键已绑定不同请求")
+                epoch = previous["epoch"]
+                assert type(epoch) is int
+                if model_source is not None and _origins.at(epoch) != model_source:
+                    raise error("model_context", "模型不能冒认原核实调用", 403)
                 return self._view(row, source), None
             if row.status in {"done", "rejected", "cancelled", "interrupted"}:
                 return self._view(row, source), None
@@ -843,7 +896,14 @@ class WorkspaceContainerRetentionStore:
             if row.verification_count >= self.max_checks:
                 raise error("capacity", "回收核实次数已满", 429)
             self._qualify(binding, qualify)
-            await self.edits._scope(sql, scope, writing=True)
+            if model_source is not None and not scope.startswith("session:"):
+                raise error("model_context", "模型核实须保留原session", 403)
+            await self.edits._scope(
+                sql,
+                scope,
+                writing=True,
+                run_id=model_source.run_id if model_source is not None else None,
+            )
             if (source.view.workspace_key, source.view.resource_fingerprint) != (
                 binding.key,
                 binding.fingerprint,
@@ -885,10 +945,21 @@ class WorkspaceContainerRetentionStore:
             item["material_sha256"] = self._check_hash(row, item)
             row.verification_metadata = [*history, item]
             await sql.flush()
+            await model_origins.admit(
+                sql, self.edits, row, model_source, max_sources=self.max_model_sources
+            )
+            await sql.flush()
+            if (
+                await material_usage(sql, sqlite=self.database.engine.dialect.name == "sqlite")
+                > self.restores.max_snapshot_bytes
+            ):
+                raise error("capacity", "模型核实与原材料总容量已满", 429)
             if len(json.dumps(row.verification_metadata).encode()) > 65536:
                 raise error("capacity", "回收核实历史JSON容量已满", 429)
             result = self._view(row, source)
-            fence = ContainerRetentionFence(row.operation_id, row.epoch, row.token, "verify")
+            fence = ContainerRetentionFence(
+                row.operation_id, row.epoch, row.token, "verify", model_source
+            )
             await self._last(sql, scope, fence, binding, qualify)
             return result, fence
 
@@ -970,7 +1041,13 @@ class WorkspaceContainerRetentionStore:
             await sql.flush()
             result = self._view(row, source)
             self._qualify(binding, qualify)
-            await self.edits._scope(sql, scope, writing=True)
+            current_source = model_origins.model_source(fence.model_source)
+            await self.edits._scope(
+                sql,
+                scope,
+                writing=True,
+                run_id=current_source.run_id if current_source is not None else None,
+            )
             if lease <= time.time():
                 raise error("fenced", "保存核实结果前原租约已失效")
             return result

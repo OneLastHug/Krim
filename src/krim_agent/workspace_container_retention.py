@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from krim_agent.protocol.models import StrictModel, check_json
+from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_directory_restore import FINGERPRINT, IDENTIFIER, REQUEST_KEY
 from krim_agent.workspace_directory_restore_writer import DirectoryRestoreStage
 from krim_agent.workspace_tree_snapshot import _path
@@ -171,3 +172,4 @@ class ContainerRetentionFence:
     epoch: int
     token: str = field(repr=False)
     kind: Literal["remove", "verify"] = "remove"
+    model_source: CheckpointModelSource | None = None
