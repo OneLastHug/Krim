@@ -44,6 +44,38 @@ async function original(page: Page, id: string, root: string, requestKey: string
   expect(waited.ok()).toBeTruthy(); return waited.json();
 }
 
+test("已接受捕获的确认GET失败不能冒充原POST拒绝，刷新保持原意图", async ({ page }) => {
+  const name = "directory-confirm-read-error", value = await actor(page, name);
+  let posts = 0, queries = 0, checkpointId: string | undefined;
+  try {
+    await connect(page, value.topic_id); await open(page, value.agent_id);
+    await page.route(`**${endpoint(value.agent_id)}?confirmed=true`, async route => {
+      posts++; const response = await route.fetch(); checkpointId = (await response.json()).checkpoint_id;
+      await route.fulfill({ response });
+    });
+    await page.route(`**${endpoint(value.agent_id)}/by-key?*`, route => {
+      queries++;
+      return queries === 1
+        ? route.fulfill({ status: 404, json: { error: { code: "synthetic_lookup_failure", message: "synthetic lookup failure" } } })
+        : route.fulfill({ json: null });
+    });
+    await page.locator("#directory-checkpoint-path").fill(name); await page.locator("#directory-checkpoint-create").click();
+    await expect.poll(() => queries).toBeGreaterThanOrEqual(2);
+    await expect(page.locator("#directory-checkpoint-status")).toContainText("原目录捕获请求尚未确认");
+    const pending = (await saved(page, value.session_id)).pending;
+    expect(pending).not.toBeNull(); expect(pending.rejected).toBe(false); expect(pending.request.root_path).toBe(name);
+    await connect(page, value.topic_id); await open(page, value.agent_id);
+    expect((await saved(page, value.session_id)).pending).toEqual(pending);
+    const waited = await page.request.post(`${endpoint(value.agent_id)}/${checkpointId}/wait?timeout_seconds=10`, { headers });
+    expect(waited.ok(), await waited.text()).toBeTruthy(); expect((await waited.json()).status).toBe("available");
+    const before = await proof(page, value.agent_id); expect(before.reads).toBe(1);
+    await page.unrouteAll({ behavior: "wait" });
+    await expect.poll(async () => (await saved(page, value.session_id)).pending).toBeNull();
+    await expect(page.locator("#directory-checkpoint-detail")).toHaveAttribute("data-checkpoint-id", checkpointId!);
+    expect(posts).toBe(1); expect(await proof(page, value.agent_id)).toEqual(before);
+  } finally { await destroyAgent(page, value.agent_id); }
+});
+
 test("未确认查询拒绝同Scope的其他原请求键且保留原意图", async ({ page }) => {
   const value = await actor(page, "directory-wrong-key");
   try {
