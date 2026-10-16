@@ -116,6 +116,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 #checkpoint-directory > label { display: block; margin-top: 10px; font-size: 0.8rem; }
 #checkpoint-directory button { border: 0; border-radius: 7px; padding: 7px 10px; color: var(--accent); background: var(--accent-soft); font-size: 0.78rem; font-weight: 600; }
 #checkpoint-directory input { max-width: 100%; box-sizing: border-box; }
+#directory-restore-panel { min-width: 0; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+#directory-restore-query { display: block; width: 100%; margin: 6px 0; }
+#directory-restore-panel > label { display: block; margin-top: 10px; font-size: 0.8rem; }
+#directory-restore-panel .checkbox-label { display: flex; align-items: flex-start; gap: 7px; line-height: 1.5; }
+#directory-restore-panel .checkbox-label input { width: auto; flex-shrink: 0; margin-top: 3px; }
+#directory-restore-panel #directory-restore-start { color: white; background: var(--accent); }
 #checkpoint-panel .actions { flex-wrap: wrap; margin-top: 8px; }
 #checkpoint-panel input, #checkpoint-panel select { padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface); }
 #native-checkpoint-query { display: block; width: 100%; margin: 6px 0; }

@@ -286,6 +286,10 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
         from browser_directory_checkpoints import configure_directory_checkpoints
 
         configure_directory_checkpoints(app, write_root)
+    if os.environ.get("KRIM_TEST_DIRECTORY_RESTORES") == "1":
+        from browser_directory_restores import configure_directory_restores
+
+        configure_directory_restores(app, write_root)
     if os.environ.get("KRIM_TEST_MODEL_CHECKPOINTS") == "1":
         from browser_model_checkpoints import configure_model_checkpoints
 
