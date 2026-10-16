@@ -1989,6 +1989,100 @@ class WorkspaceMissingDirectoryRestoreModelSourceRow(Base):
     operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
+class WorkspaceContainerRetentionRow(Base):
+    __tablename__ = "workspace_container_retentions"
+    __table_args__ = (
+        UniqueConstraint("scope_id", "request_key", name="uq_container_retention_key"),
+        UniqueConstraint("active_source_id", name="uq_container_retention_source"),
+        ForeignKeyConstraint(
+            ["source_operation_id", "source_plan_id"],
+            [
+                "workspace_missing_directory_restore_attempts.operation_id",
+                "workspace_missing_directory_restore_attempts.plan_id",
+            ],
+        ),
+        CheckConstraint(
+            "status IN ('running','done','rejected','unknown','cancelled','interrupted') "
+            "AND active_kind IN ('remove','verify')",
+            name="ck_container_retention_status",
+        ),
+        CheckConstraint(
+            "(status IN ('running','done','unknown') AND active_source_id IS NOT NULL "
+            "AND active_source_id = source_plan_id) "
+            "OR (status IN ('rejected','cancelled','interrupted') AND active_source_id IS NULL)",
+            name="ck_container_retention_source_slot",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status != 'running' AND owner_id IS NULL AND lease_expires_at IS NULL)",
+            name="ck_container_retention_owner",
+        ),
+        CheckConstraint(
+            "intent_recorded IN (FALSE,TRUE) AND cancel_requested IN (FALSE,TRUE) "
+            "AND (status != 'unknown' OR intent_recorded = TRUE) "
+            "AND (status NOT IN ('cancelled','interrupted') OR intent_recorded = FALSE) "
+            "AND (status != 'cancelled' OR cancel_requested = TRUE) "
+            "AND (status NOT IN ('done','unknown') OR receipt_metadata IS NOT NULL)",
+            name="ck_container_retention_effect",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64 AND length(request_hash) = 64 AND length(token) = 64 "
+            "AND length(request_key) BETWEEN 1 AND 128 "
+            "AND revision >= 0 AND revision <= 9007199254740991 "
+            "AND epoch >= 0 AND epoch <= 9007199254740991 "
+            "AND verification_count >= 0 AND verification_count <= 128 "
+            "AND (active_kind != 'verify' OR verification_count > 0)",
+            name="ck_container_retention_bounds",
+        ),
+    )
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_plan_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_missing_directory_restore_plans.plan_id")
+    )
+    source_operation_id: Mapped[str] = mapped_column(String(36))
+    active_source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_missing_directory_restore_plans.plan_id"), nullable=True
+    )
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"))
+    source_hash: Mapped[str] = mapped_column(String(64))
+    source_metadata: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    request_metadata: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    active_kind: Mapped[str] = mapped_column(String(8), default="remove")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token: Mapped[str] = mapped_column(String(64))
+    intent_recorded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    receipt_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    verification_count: Mapped[int] = mapped_column(Integer, default=0)
+    verification_metadata: Mapped[list[dict[str, JsonValue]]] = mapped_column(JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceContainerRetentionLockRow(Base):
+    __tablename__ = "workspace_container_retention_locks"
+    __table_args__ = (
+        UniqueConstraint("kind", "lock_key", name="uq_container_retention_physical_lock"),
+        CheckConstraint("kind IN ('entry','directory')", name="ck_container_retention_lock_kind"),
+        CheckConstraint("length(lock_key) = 64", name="ck_container_retention_lock_key"),
+    )
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_container_retentions.operation_id"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
 class NativeWorkspaceCheckpointRow(Base):
     __tablename__ = "native_workspace_checkpoints"
     __table_args__ = (
