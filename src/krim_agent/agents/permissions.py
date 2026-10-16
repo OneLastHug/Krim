@@ -11,7 +11,7 @@ def profile_policy(mode: Literal["agent", "ask", "plan", "auto"], host: Policy |
             return "deny"
         result: Decision = (
             await host(definition, context)
-            if host
+            if host is not None
             else ("allow" if definition.risk == "read" else "deny")
         )
         if mode == "auto" and result == "allow":
