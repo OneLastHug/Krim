@@ -68,10 +68,10 @@ export class DirectoryCheckpointUI {
     timer;
     restores;
     missingRestores;
-    constructor(notice) {
+    constructor(notice, openMissingRollback) {
         this.notice = notice;
         this.restores = new DirectoryRestoreUI(notice);
-        this.missingRestores = new MissingDirectoryRestoreUI(notice);
+        this.missingRestores = new MissingDirectoryRestoreUI(notice, openMissingRollback);
         node("directory-restore-missing-backup").onclick = () => {
             const state = this.current(), value = this.restores.missingBaseline();
             if (state && value)

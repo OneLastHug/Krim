@@ -124,7 +124,8 @@ const changeListUI = new ChangeListUI(
   (agentId, proposalId) => agentsUI.focusDirectoryProposal(agentId, proposalId),
 );
 const checkpointUI: CheckpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000),
-  (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));
+  (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId),
+  (agentId, planId) => agentsUI.focusMissingRollback(agentId, planId));
 let localeChangeQueue: Promise<unknown> = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice: string | (() => string) = "";

@@ -101,7 +101,7 @@ const skillsUI = new SkillsUI(showNotice);
 const attachmentsUI = new AttachmentsUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice);
 const dragDropUI = new DragDropUI((topicId, reference) => promptContextUI.acceptDrop(topicId, reference), showNotice, (topicId, file) => attachmentsUI.uploadFile(file, topicId));
 const changeListUI = new ChangeListUI(showNotice, (data) => hostEndpoint.request("changeList/invoke", data, 15_000), (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId), (agentId, proposalId) => agentsUI.focusDirectoryProposal(agentId, proposalId));
-const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000), (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId));
+const checkpointUI = new CheckpointUI(showNotice, (channel, data) => hostEndpoint.request(channel, data, 15_000), (agentId, proposalId, operationId) => agentsUI.focusWorkspaceProposal(agentId, proposalId, operationId), (agentId, planId) => agentsUI.focusMissingRollback(agentId, planId));
 let localeChangeQueue = Promise.resolve();
 let localeLoadVersion = 0;
 let lastNotice = "";

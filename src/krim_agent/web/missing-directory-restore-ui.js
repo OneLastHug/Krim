@@ -19,12 +19,14 @@ function mismatch() { throw new Error(t("缺失目录恢复回程与原事实不
 function reviewedAbsence(plan) { return !!plan?.baseline && (plan.phase === "ready" || plan.execute_key !== null); }
 export class MissingDirectoryRestoreUI {
     notice;
+    openRollback;
     states = new Map();
     activeId = null;
     generation = 0;
     timer;
-    constructor(notice) {
+    constructor(notice, openRollback) {
         this.notice = notice;
+        this.openRollback = openRollback;
         input("missing-directory-restore-query").oninput = () => { const state = this.current(); if (state)
             state.query = input("missing-directory-restore-query").value; this.controls(); };
         input("missing-directory-restore-confirm").onchange = () => this.controls();
@@ -607,6 +609,14 @@ export class MissingDirectoryRestoreUI {
                 line(detail, "保留材料", t("原操作私有暂存材料仍被保留"));
             if (plan.receipt)
                 line(detail, "实际发布状态", plan.receipt.status);
+            if (plan.phase === "finished" && this.openRollback) {
+                const rollback = document.createElement("button");
+                rollback.type = "button";
+                rollback.textContent = t("审阅完整保留并回到缺失");
+                rollback.onclick = () => { if (this.current() === state)
+                    void this.openRollback(state.agent.agent_id, plan.plan_id).catch(error => this.notice(t(errorText(error)), true)); };
+                detail.append(rollback);
+            }
         }
         const diff = node("missing-directory-restore-diff");
         diff.replaceChildren();

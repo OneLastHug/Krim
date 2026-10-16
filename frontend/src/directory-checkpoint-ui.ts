@@ -72,9 +72,9 @@ export class DirectoryCheckpointUI {
   private timer: number | undefined;
   private restores: DirectoryRestoreUI;
   private missingRestores: MissingDirectoryRestoreUI;
-  constructor(private readonly notice: (message: string, error?: boolean) => void) {
+  constructor(private readonly notice: (message: string, error?: boolean) => void, openMissingRollback?: (agentId: string, planId: string) => Promise<void>) {
     this.restores = new DirectoryRestoreUI(notice);
-    this.missingRestores = new MissingDirectoryRestoreUI(notice);
+    this.missingRestores = new MissingDirectoryRestoreUI(notice, openMissingRollback);
     node("directory-restore-missing-backup").onclick = () => {
       const state = this.current(), value = this.restores.missingBaseline();
       if (state && value) void this.missingRestores.useBaseline(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true));

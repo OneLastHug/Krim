@@ -252,3 +252,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .messages { min-height: 100px; }
 .conversation-heading, .context-bar, .composer, .compact-panel, .notice { flex-shrink: 0; }
 @media (max-width: 780px) { .topbar { padding: 18px; gap: 12px; } .key-panel { flex-wrap: wrap; padding: 16px; } .sidebar { grid-template-columns: 1fr; max-height: 300px; } .context-bar { padding: 12px 16px; } .layout { height: auto; } .conversation { height: 680px; } }
+
+.missing-directory-rollbacks label { display: grid; gap: 4px; margin: 6px 0; }
+.missing-directory-rollbacks pre, .missing-directory-rollbacks p, .missing-directory-rollbacks code, .missing-directory-rollbacks button { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.missing-directory-rollbacks pre { font-size: .78rem; }
+.missing-directory-rollbacks fieldset { min-width: 0; }
+.missing-directory-rollbacks input { min-width: 0; width: 100%; box-sizing: border-box; }
+@media (max-width: 480px) { .topbar { flex-wrap: wrap; } .topbar > .actions { flex-wrap: wrap; max-width: 100%; } }

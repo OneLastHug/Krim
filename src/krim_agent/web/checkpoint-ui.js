@@ -20,11 +20,11 @@ export class CheckpointUI {
     native;
     directory;
     kind = "files";
-    constructor(notice, request, openProposal) {
+    constructor(notice, request, openProposal, openMissingRollback) {
         this.notice = notice;
         this.request = request;
         this.native = new NativeCheckpointUI(notice, openProposal);
-        this.directory = new DirectoryCheckpointUI(notice);
+        this.directory = new DirectoryCheckpointUI(notice, openMissingRollback);
         node("checkpoint-refresh").onclick = () => void this.load();
         node("checkpoint-create").onclick = () => void this.create();
         node("checkpoint-source").onchange = () => void this.switchSource(node("checkpoint-source").value);
