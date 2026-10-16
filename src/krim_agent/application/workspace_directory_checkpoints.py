@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Any
 
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
 from krim_agent.persistence.workspace_directory_captures import WorkspaceDirectoryCaptureStore
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.tools.core import (
@@ -257,16 +261,33 @@ class WorkspaceDirectoryCheckpointService:
                 raise ServiceError("tool_timeout", "目录捕获原调用预算已结束", 408)
 
     async def _context(
-        self, payload: dict[str, Any], context: ToolContext
+        self,
+        payload: dict[str, Any],
+        context: ToolContext,
+        *,
+        sql_session: AsyncSession | None = None,
     ) -> tuple[
         str, WorkspaceBinding, DirectoryCheckpointCaptureFence, DirectoryCheckpointCaptureInput
     ]:
         self._qualify(context)
+        if sql_session is None:
+            async with self.store.database.write_lock, self.store.database.sessions() as sql:
+                retained: list[object] = []
+
+                def retain(_session: Session, row: object) -> None:
+                    retained.append(row)
+
+                # 仅本次资格检查保留行；下一节点仍使用全新会话读取最新授权。
+                event.listen(sql.sync_session, "loaded_as_persistent", retain)
+                try:
+                    return await self._context(payload, context, sql_session=sql)
+                finally:
+                    event.remove(sql.sync_session, "loaded_as_persistent", retain)
         request = DirectoryCheckpointCaptureInput.model_validate(payload)
-        scope, binding = await self.changes._guard(context)
+        scope, binding = await self.changes._guard(context, sql_session=sql_session)
         fence = context.directory_checkpoint_capture
         assert fence is not None
-        await self.store.assert_capture(scope, fence, request.root_path)
+        await self.store.assert_capture(scope, fence, request.root_path, sql_session=sql_session)
         self._qualify(context)
         return scope, binding, fence, request
 

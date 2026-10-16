@@ -301,6 +301,7 @@ class ToolContext:
     directory_restore: DirectoryRestoreFence | MissingDirectoryRestoreFence | None = None
     directory_restore_qualify: Callable[[], None] | None = field(default=None, repr=False)
     workspace_directory_restores: DirectoryRestoreBackend | None = None
+    workspace_missing_directory_restores: DirectoryRestoreBackend | None = None
     _directory_restore_response: str | None = field(default=None, repr=False)
     checkpoint_restore: CheckpointRestoreFence | None = None
     workspace_checkpoints: WorkspaceCheckpointBackend | None = None
@@ -358,6 +359,7 @@ class ToolContext:
             directory_restore=self.directory_restore,
             directory_restore_qualify=self.directory_restore_qualify,
             workspace_directory_restores=self.workspace_directory_restores,
+            workspace_missing_directory_restores=self.workspace_missing_directory_restores,
             checkpoint_restore=self.checkpoint_restore,
             workspace_checkpoints=self.workspace_checkpoints,
             workspace_checkpoint_controls=self.workspace_checkpoint_controls,

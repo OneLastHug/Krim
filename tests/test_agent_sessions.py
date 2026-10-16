@@ -3,6 +3,7 @@
 import asyncio
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -505,7 +506,8 @@ async def test_real_crash_after_session_run_commit_restores_without_repeating_mo
     async def worker(mode, *arguments):
         process = await asyncio.create_subprocess_exec(
             sys.executable,
-            "tests/fixtures/agent_session_worker.py",
+            "-I",
+            str(Path(__file__).parent / "fixtures/agent_session_worker.py"),
             str(tmp_path / "crash.sqlite"),
             mode,
             *arguments,
