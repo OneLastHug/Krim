@@ -256,6 +256,7 @@ from krim_agent.workspace_tree_move import (
 
 from .boundary import LocalBoundary
 from .directory_restores import register_directory_restore_routes
+from .missing_directory_restores import register_missing_directory_restore_routes
 from .web import mount_browser_ui
 
 WorkspaceIdentifier = Annotated[
@@ -331,6 +332,8 @@ def create_app(
     directory_checkpoint_controls_enabled: bool = False,
     directory_restores_enabled: bool = False,
     directory_restore_controls_enabled: bool = False,
+    missing_directory_restores_enabled: bool = False,
+    missing_directory_restore_controls_enabled: bool = False,
     checkpoint_controls_enabled: bool = False,
     checkpoint_restore_controls_enabled: bool = False,
     execution_runner: LinuxSandboxRunner | None = None,
@@ -382,6 +385,10 @@ def create_app(
         agent_service.register_directory_restores()
     if directory_restore_controls_enabled:
         agent_service.register_directory_checkpoint_restore_controls()
+    if missing_directory_restores_enabled:
+        agent_service.register_missing_directory_restores()
+    if missing_directory_restore_controls_enabled:
+        agent_service.register_missing_directory_checkpoint_restore_controls()
     if checkpoint_controls_enabled:
         agent_service.register_checkpoint_controls()
     if checkpoint_restore_controls_enabled:
@@ -1822,6 +1829,7 @@ def create_app(
         return await agent_service.workspace_cancel_mixed_batch(agent_id, batch_id)
 
     register_directory_restore_routes(app, agent_service)
+    register_missing_directory_restore_routes(app, agent_service)
 
     @app.post("/v1/agents/{agent_id}/workspace/directory-checkpoints", status_code=202)
     async def agent_workspace_directory_checkpoint_create(
