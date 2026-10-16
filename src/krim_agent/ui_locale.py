@@ -4,6 +4,54 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "会话上下文恢复": "Conversation context recovery",
+    "原工具组保留在历史中；恢复上下文不会确认工作区效果，也不会重发原工具": (
+        "The original tool group stays in history. Context recovery does not verify "
+        "workspace effects or resend tools."
+    ),
+    "读取会话恢复快照": "Read conversation recovery preview",
+    "确认恢复上下文": "Confirm context recovery",
+    "查询原会话恢复请求": "Read original conversation recovery request",
+    "查询会话恢复历史": "Read conversation recovery history",
+    "会话恢复请求键": "Conversation recovery request key",
+    "会话恢复请求键无效": "Invalid conversation recovery request key",
+    "会话恢复回程与原事实不一致": (
+        "Conversation recovery response does not match the original facts"
+    ),
+    "会话恢复记录不可用，写操作已停用": (
+        "Conversation recovery storage is unavailable; changes are disabled"
+    ),
+    "确认保留原工具组并恢复当前审阅的上下文？": (
+        "Keep the original tool group and recover the reviewed context?"
+    ),
+    "工作区效果仍需按原操作核实；新任务须另行发起": (
+        "Verify workspace effects through the original operation. Start any new task explicitly."
+    ),
+    "原会话恢复请求尚未确认，请保留原键继续查询": (
+        "The original conversation recovery request is unconfirmed. Keep its key and read it again."
+    ),
+    "原会话恢复请求已拒绝，请重新审阅当前快照": (
+        "The original conversation recovery request was rejected. Review the current preview again."
+    ),
+    "未找到原会话恢复请求，请保留原键继续查询": (
+        "The original conversation recovery request was not found. Keep its key and read it again."
+    ),
+    "当前上下文完整，无需恢复": "The current context is complete; recovery is unnecessary",
+    "Agent正在执行、排队或会话已关闭；可按原键查询历史": (
+        "The Agent is running, queued, or closed. Read history with the original key."
+    ),
+    "原运行中断": "Original run interrupted",
+    "原运行失败": "Original run failed",
+    "原运行已停止": "Original run stopped",
+    "源路径指纹": "Source path fingerprint",
+    "源分支指纹": "Source branch fingerprint",
+    "审阅会话版本": "Reviewed session revision",
+    "恢复会话版本": "Recovered session revision",
+    "保留的原消息组": "Preserved original message group",
+    "完整前缀锚点": "Complete prefix anchor",
+    "未闭合调用": "Unanswered tool calls",
+    "已收到的原工具回程": "Original tool replies already received",
+    "上下文已恢复": "Context recovered",
     "缺失基线回退与历史": "Missing baseline rollback and history",
     "审阅当前目录与完整保留位置": "Review the current directory and preservation path",
     "原缺失恢复计划标识": "Original missing restore plan ID",
