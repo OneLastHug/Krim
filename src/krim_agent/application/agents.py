@@ -1028,6 +1028,7 @@ class AgentService:
             item.name
             for item in handle.runtime.tools.definitions
             if item.name in WORKSPACE_TOOL_NAMES
+            or item.name in MISSING_DIRECTORY_RESTORE_STEP_TOOLS.values()
         )
         view = binding.view(names)
         session = await handle.session()
