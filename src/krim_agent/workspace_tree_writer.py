@@ -212,7 +212,7 @@ class WorkspaceTreeWriter:
         record_intent: Callable[[PreparedTreeMove], None] | None = None,
     ) -> TreeMoveEffect:
         source_parent, source_name, target_parent, target_name = self._validate(change)
-        abort = cancelled or (lambda: False)
+        abort = cancelled if cancelled is not None else lambda: False
         deadline = time.monotonic() + self.lock_timeout
         attempted = False
 
@@ -225,10 +225,10 @@ class WorkspaceTreeWriter:
             ) as parents:
                 source_fd, target_fd = parents[source_parent], parents[target_parent]
 
-                def original_conditions() -> None:
+                def original_conditions(*, authorize_current: bool = True) -> None:
                     check()
                     self._parents(change, parents)
-                    if authorize is not None:
+                    if authorize is not None and authorize_current:
                         authorize()
                     current = self._capture(source_fd, source_name, change.before.root_path, check)
                     if current != change.before or not self._missing(target_fd, target_name):
@@ -245,6 +245,8 @@ class WorkspaceTreeWriter:
                 # 完整扫描后再核实原资格，避免扫描期间Run/租约已失效仍发布。
                 if authorize is not None:
                     authorize()
+                    # 最后授权也可能改变实际树；保留原三次授权，重新核对原完整版本。
+                    original_conditions(authorize_current=False)
                 self._parents(change, parents)
                 check()
                 attempted = True
@@ -351,7 +353,7 @@ class WorkspaceTreeWriter:
         authorize: Callable[[], None] | None = None,
     ) -> TreeMoveEffect:
         source_parent, source_name, target_parent, target_name = self._validate(change)
-        abort = cancelled or (lambda: False)
+        abort = cancelled if cancelled is not None else lambda: False
         deadline = time.monotonic() + self.lock_timeout
 
         def check() -> None:
@@ -386,6 +388,15 @@ class WorkspaceTreeWriter:
                     )
                 if authorize is not None:
                     authorize()
+                    after = self._capture(
+                        parents[target_parent], target_name, change.target_path, check
+                    )
+                    if after != effect.observed_after or not self._missing(
+                        parents[source_parent], source_name
+                    ):
+                        raise ServiceError(
+                            "workspace_tree_move_conflict", "最后授权后原保留树条件已变化", 409
+                        )
                 check()
                 self._parents(change, parents)
                 return self._effect(change, "done", after=after, changed=False)
