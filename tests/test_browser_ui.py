@@ -99,6 +99,9 @@ async def test_static_assets_are_public_but_business_api_still_requires_bearer_k
             "missing-directory-rollback-contract",
             "missing-directory-rollback-recovery",
             "missing-directory-rollback-ui",
+            "conversation-recovery-contract",
+            "conversation-recovery-storage",
+            "conversation-recovery-ui",
         ):
             asset = await client.get(f"/ui/{name}.js")
             assert asset.status_code == 200

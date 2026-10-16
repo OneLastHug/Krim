@@ -5,7 +5,7 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: ["generated-root-recovery.spec.ts", "directory-checkpoint-recovery.spec.ts", "directory-restore-recovery.spec.ts", "missing-directory-restore-recovery.spec.ts", "missing-directory-rollback-recovery.spec.ts"],
+  testIgnore: ["generated-root-recovery.spec.ts", "directory-checkpoint-recovery.spec.ts", "directory-restore-recovery.spec.ts", "missing-directory-restore-recovery.spec.ts", "missing-directory-rollback-recovery.spec.ts", "conversation-recovery.spec.ts", "conversation-recovery-boundaries.spec.ts", "conversation-recovery-process.spec.ts"],
   timeout: 30_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

@@ -11,6 +11,7 @@ import { TreeExchangesUI } from "./tree-exchanges-ui.js";
 import { GeneratedTreeUndosUI } from "./generated-tree-undos-ui.js";
 import { MissingDirectoryRollbackUI } from "./missing-directory-rollback-ui.js";
 import { CommandsUI } from "./commands-ui.js";
+import { ConversationRecoveryUI } from "./conversation-recovery-ui.js";
 
 type Actions = {
   start: (agent: AgentView, prompt: string) => Promise<void>;
@@ -39,6 +40,7 @@ type Card = {
   generatedTreeUndos: GeneratedTreeUndosUI;
   missingDirectoryRollbacks: MissingDirectoryRollbackUI;
   commands: CommandsUI;
+  conversationRecovery: ConversationRecoveryUI;
   checkpoints: HTMLButtonElement;
   directoryCheckpoints: HTMLButtonElement;
 };
@@ -64,7 +66,7 @@ export class AgentsUI {
 
   render(agents: AgentView[], sessionFor: (topicId: string) => RunSession | undefined): void {
     const live = new Set(agents.map(agent => agent.agent_id));
-    for (const [id, card] of this.cards) if (!live.has(id)) { card.commands.dispose(); card.directories.dispose(); card.treeMoves.dispose(); card.treeExchanges.dispose(); card.generatedTreeUndos.dispose(); card.missingDirectoryRollbacks.dispose(); card.root.remove(); this.cards.delete(id); }
+    for (const [id, card] of this.cards) if (!live.has(id)) { card.commands.dispose(); card.directories.dispose(); card.treeMoves.dispose(); card.treeExchanges.dispose(); card.generatedTreeUndos.dispose(); card.missingDirectoryRollbacks.dispose(); card.conversationRecovery.dispose(); card.root.remove(); this.cards.delete(id); }
     for (const agent of agents) {
       let card = this.cards.get(agent.agent_id);
       if (!card) { card = this.create(agent); this.cards.set(agent.agent_id, card); this.root.append(card.root); }
@@ -88,12 +90,13 @@ export class AgentsUI {
       card.generatedTreeUndos.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
       card.missingDirectoryRollbacks.update(Boolean(agent.session.permissions.workspace), agent.session.status === "open", agent.session.permissions.mode);
       card.commands.update(agent);
+      card.conversationRecovery.update(agent);
       card.title.textContent = `${agent.name} · ${this.actions.status(agent.status)}`;
       const sessionLabels = { open: "会话开启", closed: "会话关闭", expired: "会话过期", destroyed: "会话销毁" };
       card.meta.textContent = `${t(sessionLabels[agent.session.status])} · ${t("轮次")} ${agent.turn}/${Number(agent.session.permissions.max_turns || 0)} · ${t("配置版本")} ${agent.session.profile_revision ?? "—"}`;
       const busy = ["queued", "running"].includes(agent.status);
       card.execute.textContent = t(agent.status === "created" ? "执行任务" : "继续任务");
-      card.execute.disabled = busy || agent.session.status !== "open";
+      card.execute.disabled = busy || agent.session.status !== "open" || card.conversationRecovery.blocksInput();
       card.stop.disabled = !busy;
       card.control.textContent = t(agent.session.status === "open" ? "关闭会话" : "重开会话");
       card.control.disabled = ["expired", "destroyed"].includes(agent.session.status);
@@ -138,13 +141,15 @@ export class AgentsUI {
     const generatedTreeUndos = new GeneratedTreeUndosUI(agent.agent_id, this.actions.notice);
     const missingDirectoryRollbacks = new MissingDirectoryRollbackUI(agent.agent_id, this.actions.notice, agent.session_id, agent.session.permissions.workspace);
     const commands = new CommandsUI(agent.agent_id, this.actions.notice, (proposalId, operationId) => changes.focusProposal(proposalId, operationId), (proposalId, operationId) => directories.focusProposal(proposalId, operationId));
-    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, generatedTreeUndos.root, missingDirectoryRollbacks.root, commands.root);
-    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, missingDirectoryRollbacks, commands, checkpoints, directoryCheckpoints };
+    const conversationRecovery = new ConversationRecoveryUI(agent, this.actions.notice, () => { execute.disabled = conversationRecovery.blocksInput() || ["queued", "running"].includes(card.view.status) || card.view.session.status !== "open"; });
+    root.append(title, meta, identifier, draft, activityPanel, result, input, controls, history, conversationRecovery.root, tasks.root, workspace.root, changes.root, directories.root, treeMoves.root, treeExchanges.root, generatedTreeUndos.root, missingDirectoryRollbacks.root, commands.root);
+    const card: Card = { root, view: agent, title, meta, draft, result, activity, input, execute, stop, control, history, turns, transcript, historyTurn: -1, historyVersion: 0, tasks, workspace, changes, directories, treeMoves, treeExchanges, generatedTreeUndos, missingDirectoryRollbacks, commands, conversationRecovery, checkpoints, directoryCheckpoints };
     execute.onclick = () => {
+      if (card.conversationRecovery.blocksInput()) return;
       const prompt = input.value.trim() || this.actions.prompt();
       if (!prompt) { this.actions.notice(t("请先输入要继续的 Agent 任务")); return; }
       execute.disabled = true;
-      void this.actions.start(card.view, prompt).then(() => { if (input.value.trim() === prompt) input.value = ""; }).catch(error => this.actions.notice(String(error), true)).finally(() => { execute.disabled = ["queued", "running"].includes(card.view.status) || card.view.session.status !== "open"; });
+      void this.actions.start(card.view, prompt).then(() => { if (input.value.trim() === prompt) input.value = ""; }).catch(error => this.actions.notice(String(error), true)).finally(() => { execute.disabled = ["queued", "running"].includes(card.view.status) || card.view.session.status !== "open" || card.conversationRecovery.blocksInput(); });
     };
     stop.onclick = () => void this.actions.stop(card.view).catch(error => this.actions.notice(String(error), true));
     control.onclick = () => void this.actions.control(card.view, card.view.session.status === "open" ? "close" : "reopen").catch(error => this.actions.notice(String(error), true));

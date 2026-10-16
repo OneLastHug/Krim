@@ -259,3 +259,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .missing-directory-rollbacks fieldset { min-width: 0; }
 .missing-directory-rollbacks input { min-width: 0; width: 100%; box-sizing: border-box; }
 @media (max-width: 480px) { .topbar { flex-wrap: wrap; } .topbar > .actions { flex-wrap: wrap; max-width: 100%; } }
+
+.conversation-recovery label { display: grid; gap: 4px; margin-top: 8px; }
+.conversation-recovery pre, .conversation-recovery li, .conversation-recovery p, .conversation-recovery code, .conversation-recovery button { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.conversation-recovery input { min-width: 0; width: 100%; box-sizing: border-box; }
