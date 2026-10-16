@@ -117,6 +117,15 @@ from krim_agent.workspace_list import (
     NativeChangeItem,
     NativeChangePage,
 )
+from krim_agent.workspace_missing_directory_restore import (
+    MissingDirectoryRestoreExecute,
+    MissingDirectoryRestoreOperationView,
+    MissingDirectoryRestorePreview,
+    MissingDirectoryRestoreView,
+)
+from krim_agent.workspace_missing_directory_restore_public import (
+    MissingDirectoryRestoreDiffPage,
+)
 from krim_agent.workspace_mixed_batch import (
     MixedBatchHistoryPage,
     MixedBatchItemView,
@@ -200,6 +209,11 @@ from .types import (
 )
 
 __all__ = [
+    "MissingDirectoryRestoreExecute",
+    "MissingDirectoryRestoreOperationView",
+    "MissingDirectoryRestorePreview",
+    "MissingDirectoryRestoreView",
+    "MissingDirectoryRestoreDiffPage",
     "DirectoryRestoreLookup",
     "DirectoryRestoreOperationLookup",
     "DirectoryRestoreQuery",

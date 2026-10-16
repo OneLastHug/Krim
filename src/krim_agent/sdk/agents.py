@@ -94,6 +94,16 @@ from krim_agent.workspace_list import (
     NativeChangePage,
     NativeListFilter,
 )
+from krim_agent.workspace_missing_directory_restore import (
+    MissingDirectoryRestoreExecute,
+    MissingDirectoryRestoreOperationView,
+    MissingDirectoryRestorePreview,
+    MissingDirectoryRestoreView,
+)
+from krim_agent.workspace_missing_directory_restore_public import (
+    MissingDirectoryRestoreDiffPage,
+    missing_directory_restore_diff_page,
+)
 from krim_agent.workspace_mixed_batch import (
     MixedBatchHistoryPage,
     MixedBatchRequest,
@@ -625,6 +635,81 @@ class AgentSession:
 
     async def cancel_directory_checkpoint_restore(self, plan_id: str) -> DirectoryRestoreView:
         return await self.service.workspace_directory_restore_cancel(self.agent_id, plan_id)
+
+    async def preview_missing_directory_checkpoint_restore(
+        self, request: MissingDirectoryRestorePreview, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_preview_missing_directory_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def execute_missing_directory_checkpoint_restore(
+        self, request: MissingDirectoryRestoreExecute, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_start_missing_directory_restore(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def verify_missing_directory_checkpoint_restore(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_verify_missing_directory_restore(
+            self.agent_id, operation_id, confirmed=confirmed
+        )
+
+    async def missing_directory_checkpoint_restore(
+        self, plan_id: str
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_missing_directory_restore(self.agent_id, plan_id)
+
+    async def missing_directory_checkpoint_restore_by_key(
+        self, request_key: str
+    ) -> MissingDirectoryRestoreView | None:
+        return await self.service.workspace_missing_directory_restore_by_key(
+            self.agent_id, request_key
+        )
+
+    async def missing_directory_checkpoint_restores(
+        self, *, offset: int = 0, limit: int = 32
+    ) -> list[MissingDirectoryRestoreView]:
+        return await self.service.workspace_missing_directory_restore_list(
+            self.agent_id, offset=offset, limit=limit
+        )
+
+    async def missing_directory_checkpoint_restore_diff(
+        self, plan_id: str, *, offset: int = 0, limit: int = 128
+    ) -> MissingDirectoryRestoreDiffPage:
+        entries = await self.service.workspace_missing_directory_restore_diff(
+            self.agent_id, plan_id, offset=offset, limit=limit
+        )
+        plan = await self.service.workspace_missing_directory_restore(self.agent_id, plan_id)
+        return missing_directory_restore_diff_page(plan, entries, offset, limit)
+
+    async def missing_directory_checkpoint_restore_operation(
+        self, operation_id: str
+    ) -> MissingDirectoryRestoreOperationView:
+        return await self.service.workspace_missing_directory_restore_operation(
+            self.agent_id, operation_id
+        )
+
+    async def missing_directory_checkpoint_restore_operation_by_key(
+        self, request_key: str
+    ) -> MissingDirectoryRestoreOperationView | None:
+        return await self.service.workspace_missing_directory_restore_operation_by_key(
+            self.agent_id, request_key
+        )
+
+    async def wait_missing_directory_checkpoint_restore(
+        self, plan_id: str, *, timeout_seconds: float = 30
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_missing_directory_restore_wait(
+            self.agent_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def cancel_missing_directory_checkpoint_restore(
+        self, plan_id: str
+    ) -> MissingDirectoryRestoreView:
+        return await self.service.workspace_missing_directory_restore_cancel(self.agent_id, plan_id)
 
     async def create_file_checkpoint(
         self, request: WorkspaceCheckpointCreate, *, confirmed: bool = False
