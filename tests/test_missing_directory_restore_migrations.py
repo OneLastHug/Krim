@@ -142,7 +142,7 @@ async def test_0056_columns_checks_keys_indexes_and_foreign_keys_match_orm(repos
         await sql.run_sync(compare)
         assert (
             await sql.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0058_container_retention"
+        ).scalar_one() == "0059_container_retention_models"
 
 
 @pytest.mark.parametrize("last_row", ["plan", "attempt", "lock", "source"])
@@ -229,6 +229,6 @@ async def test_each_nonempty_family_refuses_downgrade_before_any_drop(
         } == rows
         assert (
             await sql.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0058_container_retention"
+        ).scalar_one() == "0059_container_retention_models"
         assert not (await sql.execute(text("PRAGMA foreign_key_check"))).all()
     assert (await captures.get(scope, checkpoint_id)).status == "available"

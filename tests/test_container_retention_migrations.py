@@ -116,7 +116,7 @@ async def test_new_tables_match_orm_columns_constraints_and_normal_head(tmp_path
                 assert {item["name"] for item in checks} == wanted
             assert (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0058_container_retention"
+            ).scalar_one() == "0059_container_retention_models"
     finally:
         await database.close()
 
@@ -179,4 +179,4 @@ async def test_nonempty_retention_rejects_lossy_downgrade_and_preserves_original
     async with store.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0058_container_retention"
+        ).scalar_one() == "0059_container_retention_models"

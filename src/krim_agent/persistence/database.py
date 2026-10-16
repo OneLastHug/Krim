@@ -2064,6 +2064,9 @@ class WorkspaceContainerRetentionRow(Base):
     )
     verification_count: Mapped[int] = mapped_column(Integer, default=0)
     verification_metadata: Mapped[list[dict[str, JsonValue]]] = mapped_column(JSON, default=list)
+    model_sources_metadata: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -2081,6 +2084,26 @@ class WorkspaceContainerRetentionLockRow(Base):
     )
     kind: Mapped[str] = mapped_column(String(16), primary_key=True)
     lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class WorkspaceContainerRetentionModelSourceRow(Base):
+    __tablename__ = "workspace_container_retention_model_sources"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "epoch", name="uq_container_retention_model_epoch"),
+        CheckConstraint(
+            "phase IN ('remove','verify') AND length(call_id) BETWEEN 1 AND 128 "
+            "AND ((phase = 'remove' AND epoch = 0) "
+            "OR (phase = 'verify' AND epoch >= 1 AND epoch <= 128))",
+            name="ck_container_retention_model_source",
+        ),
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    call_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_container_retentions.operation_id")
+    )
+    phase: Mapped[str] = mapped_column(String(8))
+    epoch: Mapped[int] = mapped_column(Integer)
 
 
 class NativeWorkspaceCheckpointRow(Base):

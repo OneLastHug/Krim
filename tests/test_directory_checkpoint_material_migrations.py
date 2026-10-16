@@ -126,7 +126,7 @@ async def test_nonempty_0052_downgrade_refuses_loss_and_keeps_original_material(
     async with store.database.engine.connect() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
-        ).scalar_one() == "0058_container_retention"
+        ).scalar_one() == "0059_container_retention_models"
         assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
 
 
