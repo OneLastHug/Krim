@@ -29,6 +29,10 @@ from krim_agent.workspace_directory_checkpoint import (
 )
 from krim_agent.workspace_directory_restore import DirectoryRestoreFence
 from krim_agent.workspace_directory_restore_control import DIRECTORY_RESTORE_STEP_TOOLS
+from krim_agent.workspace_missing_directory_restore import MissingDirectoryRestoreFence
+from krim_agent.workspace_missing_directory_restore_control import (
+    MISSING_DIRECTORY_RESTORE_STEP_TOOLS,
+)
 from krim_agent.workspace_restore import CheckpointRestoreFence
 
 from .core import (
@@ -138,13 +142,16 @@ def _checkpoint_capture_binding(context: ToolContext) -> tuple[object, ...]:
     directory_restore = context.directory_restore
     if directory_restore is not None:
         if (
-            type(directory_restore) is not DirectoryRestoreFence
+            type(directory_restore) not in {DirectoryRestoreFence, MissingDirectoryRestoreFence}
             or type(directory_restore.kind) is not str
         ):
             raise ToolError("workspace_directory_restore_context", "目录恢复围栏类型无效")
-        validate_directory_restore_parent(
-            DIRECTORY_RESTORE_STEP_TOOLS.get(directory_restore.kind, ""), context
+        steps = (
+            MISSING_DIRECTORY_RESTORE_STEP_TOOLS
+            if type(directory_restore) is MissingDirectoryRestoreFence
+            else DIRECTORY_RESTORE_STEP_TOOLS
         )
+        validate_directory_restore_parent(steps.get(directory_restore.kind, ""), context)
     if directory is not None and type(directory) is not DirectoryCheckpointCaptureFence:
         raise ToolError("workspace_directory_capture_context", "目录围栏类型无效")
     try:
@@ -355,7 +362,10 @@ class ToolRegistry:
         tree_exchange = name in WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
         byte_capture = name == "workspace_checkpoint_capture"
         directory_capture = name == "workspace_directory_checkpoint_capture"
-        directory_restore = name in DIRECTORY_RESTORE_STEP_TOOLS.values()
+        missing_directory_restore = name in MISSING_DIRECTORY_RESTORE_STEP_TOOLS.values()
+        directory_restore = (
+            name in DIRECTORY_RESTORE_STEP_TOOLS.values() or missing_directory_restore
+        )
         checkpoint_control = name in WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES
         restore_model = (
             isinstance(parent.checkpoint_restore, CheckpointRestoreFence)
@@ -382,7 +392,9 @@ class ToolRegistry:
             )
         )
         checkpoint_context_code = (
-            "workspace_directory_restore_context"
+            "workspace_missing_directory_restore_context"
+            if missing_directory_restore
+            else "workspace_directory_restore_context"
             if directory_restore
             else "workspace_directory_capture_context"
             if directory_capture
@@ -391,7 +403,9 @@ class ToolRegistry:
             else "workspace_checkpoint_context"
         )
         checkpoint_unverified_code = (
-            "workspace_directory_restore_unverified"
+            "workspace_missing_directory_restore_unverified"
+            if missing_directory_restore
+            else "workspace_directory_restore_unverified"
             if directory_restore
             else "workspace_directory_capture_unverified"
             if directory_capture

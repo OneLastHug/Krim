@@ -39,6 +39,9 @@ from krim_agent.application.workspace_directory_checkpoints import (
     WorkspaceDirectoryCheckpointService,
 )
 from krim_agent.application.workspace_directory_restores import WorkspaceDirectoryRestoreService
+from krim_agent.application.workspace_missing_directory_restores import (
+    WorkspaceMissingDirectoryRestoreService,
+)
 from krim_agent.application.workspace_mixed_batches import MixedBatchService
 from krim_agent.application.workspace_model_checkpoints import ModelCheckpointService
 from krim_agent.application.workspace_model_directory_checkpoints import (
@@ -98,6 +101,9 @@ from krim_agent.persistence.workspace_directory_captures import WorkspaceDirecto
 from krim_agent.persistence.workspace_directory_checkpoints import WorkspaceDirectoryCheckpointStore
 from krim_agent.persistence.workspace_directory_restores import WorkspaceDirectoryRestoreStore
 from krim_agent.persistence.workspace_list import NativeChangeListStore
+from krim_agent.persistence.workspace_missing_directory_restores import (
+    WorkspaceMissingDirectoryRestoreStore,
+)
 from krim_agent.persistence.workspace_mixed_batches import MixedBatchStore
 from krim_agent.persistence.workspace_restores import WorkspaceRestoreStore
 from krim_agent.persistence.workspace_tree_plans import WorkspaceTreePlanStore
@@ -114,6 +120,7 @@ from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.directory_checkpoint_capture import directory_checkpoint_capture_tool
 from krim_agent.tools.directory_restore import directory_restore_tools
 from krim_agent.tools.generated_tree_undo import generated_tree_undo_tools
+from krim_agent.tools.missing_directory_restore import missing_directory_restore_tools
 from krim_agent.tools.tree_exchanges import tree_exchange_tools
 from krim_agent.tools.tree_moves import tree_move_tools
 from krim_agent.tools.workspace import ListFilesInput, ReadFileInput, SearchFilesInput, workspace_io
@@ -183,6 +190,17 @@ from krim_agent.workspace_list import (
     NativeBatchView,
     NativeChangePage,
     NativeListFilter,
+)
+from krim_agent.workspace_missing_directory_restore import (
+    MissingDirectoryRestoreExecute,
+    MissingDirectoryRestoreFence,
+    MissingDirectoryRestoreOperationView,
+    MissingDirectoryRestorePreview,
+    MissingDirectoryRestoreView,
+)
+from krim_agent.workspace_missing_directory_restore_control import (
+    MISSING_DIRECTORY_RESTORE_STEP_TOOLS,
+    MissingDirectoryRestoreStepInput,
 )
 from krim_agent.workspace_mixed_batch import (
     MixedBatchDispatch,
@@ -364,6 +382,15 @@ class AgentService:
             self._directory_restore_authorize,
             self._directory_restore_child,
         )
+        self.missing_directory_restore_store = WorkspaceMissingDirectoryRestoreStore(
+            self.directory_checkpoint_store
+        )
+        self.missing_directory_restores = WorkspaceMissingDirectoryRestoreService(
+            self.missing_directory_restore_store,
+            self.manager.workspace_changes,
+            self._missing_directory_restore_authorize,
+            self._missing_directory_restore_child,
+        )
         self.workspace_checkpoints = WorkspaceCheckpointService(
             self.workspace_checkpoint_store,
             self.manager.workspace_changes,
@@ -375,6 +402,9 @@ class AgentService:
         self.model_checkpoints = ModelCheckpointService(self.workspace_checkpoints)
         self.directory_checkpoints.model_close_guard = self.model_checkpoints.assert_external_close
         self.directory_restores.model_close_guard = self.model_checkpoints.assert_external_close
+        self.missing_directory_restores.model_close_guard = (
+            self.model_checkpoints.assert_external_close
+        )
         self.model_checkpoints.directories = ModelDirectoryCheckpointService(
             self.model_checkpoints, self.directory_checkpoints
         )
@@ -763,6 +793,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_missing_directory_restores(self) -> None:
+        """显式登记原私有恢复叶；不自动提升旧冻结Agent或开放模型来源。"""
+        definitions = missing_directory_restore_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("缺失目录恢复工具名称已被其它定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_directory_checkpoint_restore_controls(self) -> None:
         """显式原模型目录恢复；原私有叶也须在冻结工具集合中获授权。"""
         from krim_agent.tools.workspace_checkpoints import directory_restore_control_tools
@@ -961,6 +1001,7 @@ class AgentService:
         recovered += await self.workspace_restore_store.recover_interrupted()
         recovered += await self.directory_checkpoint_store.recover_interrupted()
         recovered += await self.directory_restore_store.recover_interrupted()
+        recovered += await self.missing_directory_restore_store.recover_interrupted()
         recovered += await self.manager.tree_moves.store.recover_interrupted()
         recovered += await self.manager.tree_exchanges.store.recover_interrupted()
         self._workspace_recovered = True
@@ -978,7 +1019,7 @@ class AgentService:
         tree_fence: TreePlanFence | None = None,
         checkpoint_capture: CheckpointCaptureFence | None = None,
         directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None,
-        directory_restore: DirectoryRestoreFence | None = None,
+        directory_restore: DirectoryRestoreFence | MissingDirectoryRestoreFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
         command_admitted: Callable[[str], None] | None = None,
     ) -> object:
@@ -1077,7 +1118,11 @@ class AgentService:
                     directory_checkpoint_capture=directory_checkpoint_capture,
                     workspace_directory_checkpoints=self.directory_checkpoints,
                     directory_restore=directory_restore,
-                    workspace_directory_restores=self.directory_restores,
+                    workspace_directory_restores=(
+                        self.missing_directory_restores
+                        if type(directory_restore) is MissingDirectoryRestoreFence
+                        else self.directory_restores
+                    ),
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
                     call_id=call_id,
@@ -1103,6 +1148,12 @@ class AgentService:
                 "permission_denied": 403,
                 "approval_required": 409,
                 "workspace_unbound": 409,
+                "workspace_missing_directory_restore_context": 403,
+                "workspace_missing_directory_restore_unavailable": 403,
+                "workspace_missing_directory_restore_closed": 503,
+                "workspace_missing_directory_restore_busy": 429,
+                "workspace_missing_directory_restore_timeout": 408,
+                "workspace_missing_directory_restore_reentrant": 409,
                 "workspace_directory_restore_context": 403,
                 "workspace_directory_restore_unavailable": 403,
                 "workspace_directory_restore_closed": 503,
@@ -2120,6 +2171,112 @@ class AgentService:
     ) -> DirectoryCheckpointView:
         return await self.directory_checkpoints.create(agent_id, request, confirmed=confirmed)
 
+    async def _missing_directory_restore_authorize(
+        self, agent_id: str, kind: DirectoryRestoreStepKind
+    ) -> tuple[str, WorkspaceBinding]:
+        scope, binding = await self._workspace_checkpoint_authorize(agent_id)
+        name = MISSING_DIRECTORY_RESTORE_STEP_TOOLS[kind]
+        if name not in {item.name for item in self._handle(agent_id).runtime.tools.definitions}:
+            raise ServiceError(
+                "workspace_missing_directory_restore_unavailable", "原冻结Agent未授此恢复阶段", 403
+            )
+        return scope, binding
+
+    async def _missing_directory_restore_child(
+        self, agent_id: str, fence: MissingDirectoryRestoreFence, confirmed: bool
+    ) -> object:
+        return await self._workspace_call(
+            agent_id,
+            MISSING_DIRECTORY_RESTORE_STEP_TOOLS[fence.kind],
+            MissingDirectoryRestoreStepInput(
+                plan_id=fence.plan_id, operation_id=fence.operation_id
+            ).model_dump(),
+            confirmed=confirmed,
+            # Hook持有调用副本；即使绕过frozen原地改写，也不能破坏worker收尾资格。
+            directory_restore=replace(fence),
+        )
+
+    async def workspace_preview_missing_directory_restore(
+        self, agent_id: str, request: MissingDirectoryRestorePreview, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.missing_directory_restores.preview(agent_id, request, confirmed=confirmed)
+
+    async def workspace_start_missing_directory_restore(
+        self, agent_id: str, request: MissingDirectoryRestoreExecute, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.missing_directory_restores.start(agent_id, request, confirmed=confirmed)
+
+    async def workspace_verify_missing_directory_restore(
+        self, agent_id: str, operation_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRestoreView:
+        return await self.missing_directory_restores.verify(
+            agent_id, operation_id, confirmed=confirmed
+        )
+
+    async def workspace_missing_directory_restore(
+        self, agent_id: str, plan_id: str
+    ) -> MissingDirectoryRestoreView:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.get(
+            "session:" + session.session_id, plan_id
+        )
+
+    async def workspace_missing_directory_restore_by_key(
+        self, agent_id: str, request_key: str
+    ) -> MissingDirectoryRestoreView | None:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.by_key(
+            "session:" + session.session_id, request_key
+        )
+
+    async def workspace_missing_directory_restore_list(
+        self, agent_id: str, *, offset: int = 0, limit: int = 32
+    ) -> list[MissingDirectoryRestoreView]:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.list(
+            "session:" + session.session_id, offset=offset, limit=limit
+        )
+
+    async def workspace_missing_directory_restore_diff(
+        self, agent_id: str, plan_id: str, *, offset: int = 0, limit: int = 128
+    ) -> list[DirectoryRestoreDiffEntry]:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.diff(
+            "session:" + session.session_id, plan_id, offset=offset, limit=limit
+        )
+
+    async def workspace_missing_directory_restore_operation(
+        self, agent_id: str, operation_id: str
+    ) -> MissingDirectoryRestoreOperationView:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.operation(
+            "session:" + session.session_id, operation_id
+        )
+
+    async def workspace_missing_directory_restore_operation_by_key(
+        self, agent_id: str, request_key: str
+    ) -> MissingDirectoryRestoreOperationView | None:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restore_store.operation_by_key(
+            "session:" + session.session_id, request_key
+        )
+
+    async def workspace_missing_directory_restore_wait(
+        self, agent_id: str, plan_id: str, *, timeout_seconds: float = 30
+    ) -> MissingDirectoryRestoreView:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restores.wait(
+            "session:" + session.session_id, plan_id, timeout_seconds=timeout_seconds
+        )
+
+    async def workspace_missing_directory_restore_cancel(
+        self, agent_id: str, plan_id: str
+    ) -> MissingDirectoryRestoreView:
+        session = await self.session(agent_id)
+        return await self.missing_directory_restores.cancel(
+            "session:" + session.session_id, plan_id
+        )
+
     async def workspace_directory_checkpoint(
         self, agent_id: str, checkpoint_id: str
     ) -> DirectoryCheckpointView:
@@ -2912,6 +3069,7 @@ class AgentService:
 
     async def close(self) -> None:
         self.directory_restores.assert_external_close()
+        self.missing_directory_restores.assert_external_close()
         self.directory_checkpoints.assert_external_close()
         self.model_checkpoints.assert_external_close()
         self.manager.tree_exchanges.assert_external_close()
@@ -2937,6 +3095,7 @@ class AgentService:
                     task.cancel()
             await asyncio.gather(*(entry[2] for entry in launches), return_exceptions=True)
             await self.directory_restores.close()
+            await self.missing_directory_restores.close()
             await self.workspace_restores.close()
             await self.model_checkpoints.close()
             await self.workspace_checkpoints.close()

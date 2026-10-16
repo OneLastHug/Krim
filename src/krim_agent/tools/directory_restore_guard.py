@@ -8,11 +8,22 @@ from krim_agent.workspace_directory_restore import (
     directory_restore_model_source,
 )
 from krim_agent.workspace_directory_restore_control import DIRECTORY_RESTORE_STEP_TOOLS
+from krim_agent.workspace_missing_directory_restore import MissingDirectoryRestoreFence
+from krim_agent.workspace_missing_directory_restore_control import (
+    MISSING_DIRECTORY_RESTORE_STEP_TOOLS,
+)
 
 from .core import ToolContext, ToolError
+from .missing_directory_restore_guard import validate_missing_directory_restore_parent
 
 
 def validate_directory_restore_parent(name: str, context: ToolContext) -> None:
+    if (
+        type(context.directory_restore) is MissingDirectoryRestoreFence
+        or name in MISSING_DIRECTORY_RESTORE_STEP_TOOLS.values()
+    ):
+        validate_missing_directory_restore_parent(name, context)
+        return
     fence = context.directory_restore
     leaf = name in DIRECTORY_RESTORE_STEP_TOOLS.values()
     if fence is None:
