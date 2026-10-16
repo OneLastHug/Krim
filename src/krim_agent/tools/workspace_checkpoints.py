@@ -27,6 +27,17 @@ from krim_agent.workspace_directory_restore_model import (
     DirectoryRestoreQuery,
     DirectoryRestoreQueryResult,
 )
+from krim_agent.workspace_missing_directory_restore import (
+    MissingDirectoryRestoreExecute,
+    MissingDirectoryRestorePreview,
+    MissingDirectoryRestoreView,
+)
+from krim_agent.workspace_missing_directory_restore_model import (
+    MissingDirectoryRestoreLookup,
+    MissingDirectoryRestoreOperationLookup,
+    MissingDirectoryRestoreQuery,
+    MissingDirectoryRestoreQueryResult,
+)
 from krim_agent.workspace_restore import (
     CheckpointRestoreExecute,
     CheckpointRestorePreview,
@@ -208,5 +219,56 @@ def directory_restore_control_tools() -> tuple[ToolDefinition, ...]:
             "read",
             output_schema=DirectoryRestoreView,
             output_guard=partial(_guard, "directory_restore_verify"),
+        ),
+    )
+
+
+@cache
+def missing_directory_restore_control_tools() -> tuple[ToolDefinition, ...]:
+    return (
+        ToolDefinition(
+            "workspace_missing_directory_checkpoint_restore_preview",
+            "在原Run/call内观察真实缺失baseline与差异，保留原Reader资格，不创建暂存",
+            MissingDirectoryRestorePreview,
+            partial(_execute, "missing_directory_restore_preview"),
+            "read",
+            output_schema=MissingDirectoryRestoreView,
+            output_guard=partial(_guard, "missing_directory_restore_preview"),
+        ),
+        ToolDefinition(
+            "workspace_missing_directory_checkpoint_restore_start",
+            "按原版本/缺失活观察与父预算一次发布完整目录，等原操作回执",
+            MissingDirectoryRestoreExecute,
+            partial(_execute, "missing_directory_restore_start"),
+            "write",
+            output_schema=MissingDirectoryRestoreView,
+            output_guard=partial(_guard, "missing_directory_restore_start"),
+        ),
+        ToolDefinition(
+            "workspace_missing_directory_checkpoint_restore_query",
+            "只读原缺失计划/预览键/execute操作/差异/有界历史，不重放",
+            MissingDirectoryRestoreQuery,
+            partial(_execute, "missing_directory_restore_query"),
+            "read",
+            output_schema=MissingDirectoryRestoreQueryResult,
+            output_guard=partial(_guard, "missing_directory_restore_query"),
+        ),
+        ToolDefinition(
+            "workspace_missing_directory_checkpoint_restore_cancel",
+            "关闭匹配的原缺失恢复准入并收束worker，意图后保持unknown",
+            MissingDirectoryRestoreLookup,
+            partial(_execute, "missing_directory_restore_cancel"),
+            "write",
+            output_schema=MissingDirectoryRestoreView,
+            output_guard=partial(_guard, "missing_directory_restore_cancel"),
+        ),
+        ToolDefinition(
+            "workspace_missing_directory_checkpoint_restore_verify",
+            "只读核实同一原unknown缺失execute，保持原来源且不重新构树发布",
+            MissingDirectoryRestoreOperationLookup,
+            partial(_execute, "missing_directory_restore_verify"),
+            "read",
+            output_schema=MissingDirectoryRestoreView,
+            output_guard=partial(_guard, "missing_directory_restore_verify"),
         ),
     )

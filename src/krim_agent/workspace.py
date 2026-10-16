@@ -55,6 +55,15 @@ WORKSPACE_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES = frozenset(
     }
 )
 WORKSPACE_MIXED_WRITE_TOOL_NAMES = frozenset({"workspace_mixed_start"})
+WORKSPACE_MISSING_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES = frozenset(
+    {
+        "workspace_missing_directory_checkpoint_restore_preview",
+        "workspace_missing_directory_checkpoint_restore_start",
+        "workspace_missing_directory_checkpoint_restore_query",
+        "workspace_missing_directory_checkpoint_restore_cancel",
+        "workspace_missing_directory_checkpoint_restore_verify",
+    }
+)
 WORKSPACE_TREE_MODEL_TOOL_NAMES = frozenset(
     {"workspace_tree_model_prepare", "workspace_tree_start"}
 )
@@ -74,6 +83,7 @@ WORKSPACE_CHECKPOINT_CONTROL_TOOL_NAMES = (
         }
     )
     | WORKSPACE_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES
+    | WORKSPACE_MISSING_DIRECTORY_RESTORE_CONTROL_TOOL_NAMES
 )
 WORKSPACE_DIRECTORY_TOOL_NAMES = frozenset(
     {
@@ -139,6 +149,9 @@ WORKSPACE_WRITE_TOOL_NAMES = (
             "workspace_directory_checkpoint_restore_preview",
             "workspace_directory_checkpoint_restore_query",
             "workspace_directory_checkpoint_restore_verify",
+            "workspace_missing_directory_checkpoint_restore_preview",
+            "workspace_missing_directory_checkpoint_restore_query",
+            "workspace_missing_directory_checkpoint_restore_verify",
         }
     )
     | (WORKSPACE_TREE_MOVE_TOOL_NAMES - {"tree_move_inspect", "tree_move_query"})

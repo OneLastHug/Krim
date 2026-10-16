@@ -46,6 +46,7 @@ from .workspace_execution import (
 if TYPE_CHECKING:
     from .workspace_model_directory_checkpoints import ModelDirectoryCheckpointService
     from .workspace_model_directory_restores import ModelDirectoryRestoreService
+    from .workspace_model_missing_directory_restores import ModelMissingDirectoryRestoreService
     from .workspace_model_restores import ModelRestoreService
 
 
@@ -62,6 +63,7 @@ class ModelCheckpointService:
         self.restores: ModelRestoreService | None = None
         self.directories: ModelDirectoryCheckpointService | None = None
         self.directory_restores: ModelDirectoryRestoreService | None = None
+        self.missing_directory_restores: ModelMissingDirectoryRestoreService | None = None
 
     @asynccontextmanager
     async def call_scope(self) -> AsyncIterator[None]:
@@ -170,6 +172,16 @@ class ModelCheckpointService:
         self, operation: str, payload: dict[str, Any], context: ToolContext
     ) -> dict[str, JsonValue]:
         try:
+            if operation.startswith("missing_directory_restore_"):
+                if self.missing_directory_restores is None:
+                    raise ServiceError(
+                        "workspace_missing_directory_restore_model_backend",
+                        "缺少模型缺失目录恢复后端",
+                        503,
+                    )
+                return await self.missing_directory_restores.tool_operation(
+                    operation.removeprefix("missing_directory_restore_"), payload, context
+                )
             if operation.startswith("directory_restore_"):
                 if self.directory_restores is None:
                     raise ServiceError(

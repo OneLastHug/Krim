@@ -110,6 +110,7 @@ def _tree_query_binding(context: ToolContext) -> tuple[object, ...]:
         id(context.directory_restore),
         id(context.directory_restore_qualify),
         id(context.workspace_directory_restores),
+        id(context.workspace_missing_directory_restores),
         id(context.checkpoint_restore),
         id(context.command_capture),
     )

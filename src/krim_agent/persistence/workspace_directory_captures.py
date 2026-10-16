@@ -123,6 +123,12 @@ class WorkspaceDirectoryCaptureStore:
     async def _row(
         self, sql: AsyncSession, scope: str, identifier: str, *, resource: bool = True
     ) -> WorkspaceDirectoryCaptureRow:
+        row, _source = await self._base(sql, scope, identifier, resource=resource)
+        return row
+
+    async def _base(
+        self, sql: AsyncSession, scope: str, identifier: str, *, resource: bool = True
+    ) -> tuple[WorkspaceDirectoryCaptureRow, CheckpointModelSource | None]:
         row = await sql.get(WorkspaceDirectoryCaptureRow, identifier)
         if row is None or row.scope_id != scope:
             raise _error("not_found", "目录捕获不在此作用域中", 404)
@@ -145,7 +151,7 @@ class WorkspaceDirectoryCaptureStore:
             raise _error("corrupt", "目录捕获不属于原话题")
         if resource:
             await self.edits._resource(sql, scope, row.workspace_key, row.resource_fingerprint)
-        return row
+        return row, source
 
     @staticmethod
     def _end(
@@ -353,10 +359,12 @@ class WorkspaceDirectoryCaptureStore:
         self, sql: AsyncSession, scope: str, fence: DirectoryCheckpointCaptureFence
     ) -> WorkspaceDirectoryCaptureRow:
         self._valid_fence(fence)
-        row = await self._row(sql, scope, fence.checkpoint_id)
+        row, source = await self._base(sql, scope, fence.checkpoint_id)
         self._assert_live(row, fence)
         await self.edits._scope(sql, scope, writing=True)
-        if await self._source(sql, row, live=True) != fence.model_source:
+        if source is not None:
+            await self.edits._scope(sql, scope, writing=True, run_id=source.run_id)
+        if source != fence.model_source:
             raise _error("model_context", "目录围栏未保留原父调用来源", 403)
         self._assert_live(row, fence)
         return row
@@ -372,8 +380,18 @@ class WorkspaceDirectoryCaptureStore:
             return fence
 
     async def assert_capture(
-        self, scope: str, fence: DirectoryCheckpointCaptureFence, root_path: str
+        self,
+        scope: str,
+        fence: DirectoryCheckpointCaptureFence,
+        root_path: str,
+        *,
+        sql_session: AsyncSession | None = None,
     ) -> None:
+        if sql_session is not None:
+            row = await self._live(sql_session, scope, fence)
+            if row.root_path != root_path:
+                raise _error("target", "目录捕获未保留原冻结根", 403)
+            return
         async with self.database.write_lock, self.database.sessions() as sql:
             row = await self._live(sql, scope, fence)
             if row.root_path != root_path:

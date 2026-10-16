@@ -48,6 +48,9 @@ from krim_agent.application.workspace_model_directory_checkpoints import (
     ModelDirectoryCheckpointService,
 )
 from krim_agent.application.workspace_model_directory_restores import ModelDirectoryRestoreService
+from krim_agent.application.workspace_model_missing_directory_restores import (
+    ModelMissingDirectoryRestoreService,
+)
 from krim_agent.application.workspace_model_restores import ModelRestoreService
 from krim_agent.application.workspace_restores import WorkspaceRestoreService
 from krim_agent.application.workspace_trees import WorkspaceTreeService
@@ -422,6 +425,9 @@ class AgentService:
         )
         self.model_checkpoints.directory_restores = ModelDirectoryRestoreService(
             self.model_checkpoints, self.directory_restores
+        )
+        self.model_checkpoints.missing_directory_restores = ModelMissingDirectoryRestoreService(
+            self.model_checkpoints, self.missing_directory_restores
         )
         self.workspace_restores = WorkspaceRestoreService(
             self.workspace_restore_store,
@@ -828,6 +834,20 @@ class AgentService:
                 self.runtime.tools.register(definition)
         self.manager.workspace_checkpoint_controls = self.model_checkpoints
         self.manager.workspace_directory_restores = self.directory_restores
+
+    def register_missing_directory_checkpoint_restore_controls(self) -> None:
+        """显式原模型缺失父工具，不提升旧Agent或暗中登记/授权私有叶。"""
+        from krim_agent.tools.workspace_checkpoints import missing_directory_restore_control_tools
+
+        definitions = missing_directory_restore_control_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("模型缺失目录恢复控制名称已被其他定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+        self.manager.workspace_checkpoint_controls = self.model_checkpoints
+        self.manager.workspace_missing_directory_restores = self.missing_directory_restores
 
     def register_mixed_batch_writes(self) -> None:
         """可信宿主显式启用模型混合批次写工具；权限仍由原ToolRegistry裁决。"""
