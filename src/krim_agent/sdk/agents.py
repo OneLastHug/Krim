@@ -104,6 +104,17 @@ from krim_agent.workspace_missing_directory_restore_public import (
     MissingDirectoryRestoreDiffPage,
     missing_directory_restore_diff_page,
 )
+from krim_agent.workspace_missing_directory_rollback import (
+    MissingDirectoryRollbackAction,
+    MissingDirectoryRollbackAttemptView,
+    MissingDirectoryRollbackPreview,
+    MissingDirectoryRollbackView,
+)
+from krim_agent.workspace_missing_directory_rollback_control import (
+    MissingDirectoryRollbackCancel,
+    MissingDirectoryRollbackQuery,
+    MissingDirectoryRollbackQueryResult,
+)
 from krim_agent.workspace_mixed_batch import (
     MixedBatchHistoryPage,
     MixedBatchRequest,
@@ -269,6 +280,43 @@ class AgentSession:
 
     async def cancel_tree_move(self, proposal_id: str) -> TreeMovePreviewView:
         return await self.service.tree_move_cancel(self.agent_id, proposal_id)
+
+    async def preview_missing_directory_rollback(
+        self, request: MissingDirectoryRollbackPreview, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        return await self.service.missing_directory_rollback_preview(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def change_missing_directory_rollback(
+        self, request: MissingDirectoryRollbackAction, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        return await self.service.missing_directory_rollback_change(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def query_missing_directory_rollback(
+        self, request: MissingDirectoryRollbackQuery, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackQueryResult:
+        return await self.service.missing_directory_rollback_query(
+            self.agent_id, request, confirmed=confirmed
+        )
+
+    async def reconcile_missing_directory_rollback(
+        self, operation_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackAttemptView:
+        return await self.service.missing_directory_rollback_reconcile(
+            self.agent_id, TreeMoveOperationRequest(operation_id=operation_id), confirmed=confirmed
+        )
+
+    async def cancel_missing_directory_rollback(
+        self, proposal_id: str, *, confirmed: bool = False
+    ) -> MissingDirectoryRollbackView:
+        return await self.service.missing_directory_rollback_cancel(
+            self.agent_id,
+            MissingDirectoryRollbackCancel(proposal_id=proposal_id),
+            confirmed=confirmed,
+        )
 
     async def preview_generated_tree_undo(
         self, request: GeneratedTreeUndoPreviewRequest, *, confirmed: bool = False

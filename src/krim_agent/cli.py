@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="missing directory restore controls（缺失目录恢复控制）：登记原模型五动作",
     )
     serve.add_argument(
+        "--missing-directory-rollbacks",
+        action="store_true",
+        help="missing directory rollbacks（缺失基线回退）：显式登记原完整保留五动作",
+    )
+    serve.add_argument(
         "--directory-checkpoint-controls",
         action="store_true",
         help=(
@@ -203,6 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .missing_directory_restore_cli import add_parser as add_missing_directory_restore_parser
 
     add_missing_directory_restore_parser(subparsers)
+    from .missing_directory_rollback_cli import add_parser as add_missing_directory_rollback_parser
+
+    add_missing_directory_rollback_parser(subparsers)
     workspace = subparsers.add_parser(
         "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
     )
@@ -1369,6 +1377,8 @@ def main() -> None:
             parser.error("serve --missing-directory-restores需要已授权--workspace")
         if args.missing_directory_restore_controls and not args.workspace:
             parser.error("serve --missing-directory-restore-controls需要已授权--workspace")
+        if args.missing_directory_rollbacks and not args.workspace:
+            parser.error("serve --missing-directory-rollbacks需要已授权--workspace")
         if args.directory_checkpoint_controls and not args.workspace:
             parser.error("serve --directory-checkpoint-controls需要已授权--workspace")
         if args.checkpoint_controls and not args.workspace:
@@ -1420,6 +1430,7 @@ def main() -> None:
                 directory_restore_controls_enabled=args.directory_restore_controls,
                 missing_directory_restores_enabled=args.missing_directory_restores,
                 missing_directory_restore_controls_enabled=args.missing_directory_restore_controls,
+                missing_directory_rollbacks_enabled=args.missing_directory_rollbacks,
                 directory_checkpoint_controls_enabled=args.directory_checkpoint_controls,
                 checkpoint_controls_enabled=args.checkpoint_controls,
                 checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,
@@ -1497,6 +1508,13 @@ def main() -> None:
                 )
 
                 missing_directory_restore_command(client, args, parser)
+                return
+            if args.command == "missing-directory-rollbacks":
+                from .missing_directory_rollback_cli import (
+                    run_command as missing_directory_rollback_command,
+                )
+
+                missing_directory_rollback_command(client, args, parser)
                 return
             if args.command == "directories":
                 _directory_command(client, args, parser)

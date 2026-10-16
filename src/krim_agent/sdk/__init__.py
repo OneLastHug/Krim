@@ -126,6 +126,17 @@ from krim_agent.workspace_missing_directory_restore import (
 from krim_agent.workspace_missing_directory_restore_public import (
     MissingDirectoryRestoreDiffPage,
 )
+from krim_agent.workspace_missing_directory_rollback import (
+    MissingDirectoryRollbackAction,
+    MissingDirectoryRollbackAttemptView,
+    MissingDirectoryRollbackPreview,
+    MissingDirectoryRollbackView,
+)
+from krim_agent.workspace_missing_directory_rollback_control import (
+    MissingDirectoryRollbackCancel,
+    MissingDirectoryRollbackQuery,
+    MissingDirectoryRollbackQueryResult,
+)
 from krim_agent.workspace_mixed_batch import (
     MixedBatchHistoryPage,
     MixedBatchItemView,
@@ -209,6 +220,13 @@ from .types import (
 )
 
 __all__ = [
+    "MissingDirectoryRollbackAction",
+    "MissingDirectoryRollbackAttemptView",
+    "MissingDirectoryRollbackPreview",
+    "MissingDirectoryRollbackView",
+    "MissingDirectoryRollbackCancel",
+    "MissingDirectoryRollbackQuery",
+    "MissingDirectoryRollbackQueryResult",
     "MissingDirectoryRestoreExecute",
     "MissingDirectoryRestoreOperationView",
     "MissingDirectoryRestorePreview",
