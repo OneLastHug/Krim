@@ -20,6 +20,7 @@ from .database import (
     WorkspaceDirectoryRestoreLockRow,
     WorkspaceEditAttemptRow,
     WorkspaceFileLockRow,
+    WorkspaceMissingDirectoryRestoreLockRow,
     WorkspaceTreeExchangeLockRow,
     WorkspaceTreeMoveLockRow,
 )
@@ -119,6 +120,27 @@ async def assert_no_move_lock(
     if await sql.scalar(restore_query) is not None:
         raise ServiceError(
             "workspace_directory_restore_busy", "原目录有执行中或未核实恢复，禁止命名空间发布", 409
+        )
+    missing_query = select(WorkspaceMissingDirectoryRestoreLockRow.operation_id).where(
+        or_(
+            *(
+                and_(
+                    WorkspaceMissingDirectoryRestoreLockRow.kind == kind,
+                    WorkspaceMissingDirectoryRestoreLockRow.lock_key == key,
+                )
+                for kind, key in keys
+            )
+        )
+    )
+    if exclude_operation_id is not None:
+        missing_query = missing_query.where(
+            WorkspaceMissingDirectoryRestoreLockRow.operation_id != exclude_operation_id
+        )
+    if await sql.scalar(missing_query) is not None:
+        raise ServiceError(
+            "workspace_missing_directory_restore_busy",
+            "原目录有执行中或未核实缺失恢复，禁止命名空间发布",
+            409,
         )
 
 
