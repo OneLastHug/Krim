@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from krim_agent.protocol.domain import ServiceError
 from krim_agent.protocol.models import StrictModel
 from krim_agent.workspace_checkpoint import CheckpointModelSource
 from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointSummary
@@ -17,6 +18,26 @@ from krim_agent.workspace_tree_snapshot import _path
 IDENTIFIER = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$"
 REQUEST_KEY = r"^[^\x00-\x1f\x7f]{1,128}$"
 FINGERPRINT = r"^[a-f0-9]{64}$"
+
+
+def directory_restore_model_source(value: object) -> CheckpointModelSource | None:
+    """先分类原父来源，falsey对象不能降为Host；不接受旧文件恢复基线标记。"""
+    if value is None:
+        return None
+    if (
+        type(value) is not CheckpointModelSource
+        or type(value.run_id) is not str
+        or not 1 <= len(value.run_id) <= 36
+        or value.run_id == "local"
+        or type(value.call_id) is not str
+        or not 1 <= len(value.call_id) <= 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in value.call_id)
+        or value.restore_plan_id is not None
+    ):
+        raise ServiceError(
+            "workspace_directory_restore_model_context", "目录恢复需要原模型父调用", 403
+        )
+    return value
 
 
 class DirectoryRestoreTarget(StrictModel):

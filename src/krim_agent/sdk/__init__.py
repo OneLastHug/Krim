@@ -100,6 +100,12 @@ from krim_agent.workspace_directory_restore import (
     DirectoryRestoreTarget,
     DirectoryRestoreView,
 )
+from krim_agent.workspace_directory_restore_model import (
+    DirectoryRestoreLookup,
+    DirectoryRestoreOperationLookup,
+    DirectoryRestoreQuery,
+    DirectoryRestoreQueryResult,
+)
 from krim_agent.workspace_directory_restore_public import DirectoryRestoreDiffPage
 from krim_agent.workspace_list import (
     NativeBatchHistoryPage,
@@ -194,6 +200,10 @@ from .types import (
 )
 
 __all__ = [
+    "DirectoryRestoreLookup",
+    "DirectoryRestoreOperationLookup",
+    "DirectoryRestoreQuery",
+    "DirectoryRestoreQueryResult",
     "DirectoryRestoreDiffEntry",
     "DirectoryRestoreDiffPage",
     "DirectoryRestoreExecute",

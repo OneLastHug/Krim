@@ -1,8 +1,12 @@
-"""先分类目录私有围栏，再决定原Host叶资格；falsey不代表无围栏。"""
+"""先分类目录私有围栏，再核实原Host/Model叶资格；falsey不代表无围栏。"""
 
 import re
 
-from krim_agent.workspace_directory_restore import DirectoryRestoreFence
+from krim_agent.protocol.domain import ServiceError
+from krim_agent.workspace_directory_restore import (
+    DirectoryRestoreFence,
+    directory_restore_model_source,
+)
 from krim_agent.workspace_directory_restore_control import DIRECTORY_RESTORE_STEP_TOOLS
 
 from .core import ToolContext, ToolError
@@ -26,11 +30,6 @@ def validate_directory_restore_parent(name: str, context: ToolContext) -> None:
         or context.workspace_directory_restores is None
         or context.agent_id is None
         or context.session_id is None
-        or context.origin != "host"
-        or context.run_id != "local"
-        or context.source_call_id is not None
-        or context.directory_restore_qualify is not None
-        or fence.model_source is not None
         or any(
             value is not None
             for value in (
@@ -46,5 +45,23 @@ def validate_directory_restore_parent(name: str, context: ToolContext) -> None:
         )
     ):
         raise ToolError(
-            "workspace_directory_restore_context", "目录恢复叶须保留原Host来源、阶段与独立围栏"
+            "workspace_directory_restore_context", "目录恢复叶须保留原来源、阶段与独立围栏"
         )
+    try:
+        source = directory_restore_model_source(fence.model_source)
+    except ServiceError:
+        raise ToolError("workspace_directory_restore_context", "目录恢复原父来源无效") from None
+    valid = (
+        context.origin == "host"
+        and context.run_id == "local"
+        and context.source_call_id is None
+        and context.directory_restore_qualify is None
+        if source is None
+        else context.origin == "model"
+        and context.run_id == source.run_id
+        and context.source_call_id == source.call_id
+        and callable(context.directory_restore_qualify)
+        and context.workspace_checkpoint_controls is not None
+    )
+    if not valid:
+        raise ToolError("workspace_directory_restore_context", "目录恢复须保留原父Run/call与资格")

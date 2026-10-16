@@ -8,6 +8,7 @@ from threading import Event
 from typing import Any, Literal
 
 from pydantic import JsonValue
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.persistence.agent_sessions import assert_session_open, guard_agent_topic
 from krim_agent.persistence.database import RunRow
@@ -127,7 +128,11 @@ class WorkspaceChangeService:
         return qualify
 
     async def _guard(
-        self, context: ToolContext, *, writing: bool = True
+        self,
+        context: ToolContext,
+        *,
+        writing: bool = True,
+        sql_session: AsyncSession | None = None,
     ) -> tuple[str, WorkspaceBinding]:
         if self._closed:
             raise ServiceError("workspace_service_closed", "工作区修改服务已关闭", 503)
@@ -140,7 +145,8 @@ class WorkspaceChangeService:
         if writing and not binding.require().writable:
             raise ServiceError("workspace_read_only", "宿主未授权工作区写能力", 403)
         database = self.store.database
-        async with database.write_lock, database.sessions() as session:
+
+        async def check(session: AsyncSession) -> None:
             row = await guard_agent_topic(
                 session, context.topic_id, context.session_id, context.agent_id, self.store.owner_id
             )
@@ -156,6 +162,12 @@ class WorkspaceChangeService:
                     raise ServiceError("workspace_run_closed", "修改所属Run已关闭", 409)
             elif context.origin != "host":
                 raise ServiceError("workspace_run_mismatch", "模型修改需要原运行上下文", 403)
+
+        if sql_session is None:
+            async with database.write_lock, database.sessions() as session:
+                await check(session)
+        else:
+            await check(sql_session)
         binding.require()
         scope = (
             f"session:{context.session_id}" if context.session_id else f"topic:{context.topic_id}"

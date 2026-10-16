@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from krim_agent.protocol.domain import ServiceError
 from krim_agent.workspace_checkpoint import CheckpointModelSource
+from krim_agent.workspace_directory_restore import directory_restore_model_source
 
 from .database import (
     NativeCheckpointModelSourceRow,
@@ -23,22 +24,7 @@ from .workspace_edits import WorkspaceEditStore
 
 
 def valid_source(source: CheckpointModelSource | None) -> CheckpointModelSource | None:
-    if source is None:
-        return None
-    if (
-        type(source) is not CheckpointModelSource
-        or type(source.run_id) is not str
-        or not 1 <= len(source.run_id) <= 36
-        or source.run_id == "local"
-        or type(source.call_id) is not str
-        or not 1 <= len(source.call_id) <= 128
-        or any(ord(char) < 32 or ord(char) == 127 for char in source.call_id)
-        or source.restore_plan_id is not None
-    ):
-        raise ServiceError(
-            "workspace_directory_restore_model_context", "目录恢复需要原模型父调用", 403
-        )
-    return source
+    return directory_restore_model_source(source)
 
 
 def source_value(source: CheckpointModelSource | None) -> dict[str, str] | None:
