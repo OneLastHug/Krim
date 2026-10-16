@@ -3130,15 +3130,28 @@ class KrimRepository:
         highest = await session.scalar(
             select(func.max(MessageRow.sequence)).where(MessageRow.topic_id == run.topic_id)
         )
-        parent_id = (
-            await session.scalar(
-                select(MessageRow.id)
+        previous_message = (
+            await session.execute(
+                select(
+                    MessageRow.id,
+                    MessageRow.role,
+                    MessageRow.details["kind"].as_string(),
+                    MessageRow.details["origin"].as_string(),
+                )
                 .where(MessageRow.run_id == run.id)
                 .order_by(MessageRow.sequence.desc())
                 .limit(1)
             )
-            or run.input_message_id
-        )
+        ).first()
+        if previous_message is not None and previous_message[1:] == (
+            "system",
+            "conversation_recovery",
+            "host",
+        ):
+            raise ServiceError(
+                "conversation_recovery_fenced", "原运行已建立恢复分支，不能追加迟到消息", 409
+            )
+        parent_id = previous_message[0] if previous_message is not None else run.input_message_id
         message_id = str(uuid4())
         payload = dict(details or {})
         if run.action == "regenerate":
