@@ -390,8 +390,10 @@ export class DirectoryCheckpointUI {
         }
         this.render();
         const controller = new AbortController(), timer = window.setTimeout(() => controller.abort(), 15_000);
+        let postReturned = false;
         try {
             const value = await requestJson(`${this.base(state)}?confirmed=true`, { method: "POST", body: JSON.stringify(request), signal: controller.signal });
+            postReturned = true;
             if (!this.valid(state, generation))
                 return;
             verify(state, value);
@@ -409,7 +411,8 @@ export class DirectoryCheckpointUI {
         catch (error) {
             if (!this.valid(state, generation))
                 return;
-            if (state.pending && error instanceof ApiError && error.status >= 400 && error.status < 500) {
+            // 原键确认GET失败不能把已返回的POST改写成明确拒绝。
+            if (!postReturned && state.pending && error instanceof ApiError && error.status >= 400 && error.status < 500) {
                 state.pending.rejected = true;
                 try {
                     this.save(state);

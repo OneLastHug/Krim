@@ -215,8 +215,10 @@ export class DirectoryCheckpointUI {
     catch (error) { state.sending = false; state.message = errorText(error); this.notice(state.message, true); this.render(); return; }
     this.render();
     const controller = new AbortController(), timer = window.setTimeout(() => controller.abort(), 15_000);
+    let postReturned = false;
     try {
       const value = await requestJson<DirectoryCheckpointView>(`${this.base(state)}?confirmed=true`, { method: "POST", body: JSON.stringify(request), signal: controller.signal });
+      postReturned = true;
       if (!this.valid(state, generation)) return;
       verify(state, value);
       if (value.request_key !== request.request_key || value.root_path !== request.root_path || value.title !== request.title) throw new Error(t("目录检查点回程与原事实不一致"));
@@ -227,7 +229,8 @@ export class DirectoryCheckpointUI {
       this.accept(state, truth, version === state.queryVersion); state.offset = 0;
     } catch (error) {
       if (!this.valid(state, generation)) return;
-      if (state.pending && error instanceof ApiError && error.status >= 400 && error.status < 500) { state.pending.rejected = true; try { this.save(state); } catch { /* 保持原意图及只读恢复。 */ } }
+      // 原键确认GET失败不能把已返回的POST改写成明确拒绝。
+      if (!postReturned && state.pending && error instanceof ApiError && error.status >= 400 && error.status < 500) { state.pending.rejected = true; try { this.save(state); } catch { /* 保持原意图及只读恢复。 */ } }
       state.message = t("原目录捕获请求尚未确认，请按原键继续查询"); this.notice(state.message, true);
     } finally { window.clearTimeout(timer); state.sending = false; if (this.valid(state, generation)) { this.render(); await this.refresh(); } }
   }
