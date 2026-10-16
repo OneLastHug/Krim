@@ -36,6 +36,7 @@ from krim_agent.application.conversation_recovery import ConversationRecoveryCon
 from krim_agent.application.workspace_batches import WorkspaceBatchService
 from krim_agent.application.workspace_changes import _wait
 from krim_agent.application.workspace_checkpoints import WorkspaceCheckpointService
+from krim_agent.application.workspace_container_retentions import WorkspaceContainerRetentionService
 from krim_agent.application.workspace_directory_checkpoints import (
     WorkspaceDirectoryCheckpointService,
 )
@@ -106,6 +107,7 @@ from krim_agent.persistence.completed_tree_origins import (
 )
 from krim_agent.persistence.workspace_batches import NativeBatchStore
 from krim_agent.persistence.workspace_checkpoints import WorkspaceCheckpointStore
+from krim_agent.persistence.workspace_container_retentions import WorkspaceContainerRetentionStore
 from krim_agent.persistence.workspace_directory_captures import WorkspaceDirectoryCaptureStore
 from krim_agent.persistence.workspace_directory_checkpoints import WorkspaceDirectoryCheckpointStore
 from krim_agent.persistence.workspace_directory_restores import WorkspaceDirectoryRestoreStore
@@ -124,6 +126,7 @@ from krim_agent.runtime.chat import RunState
 from krim_agent.task_state import TaskKind, TaskMutation, TaskOperationView, TaskSnapshot
 from krim_agent.tools import ToolContext, ToolError
 from krim_agent.tools.checkpoint_capture import checkpoint_capture_tool
+from krim_agent.tools.container_retention import container_retention_tools
 from krim_agent.tools.core import ToolDefinition, ToolResult
 from krim_agent.tools.directory_changes import directory_change_tools
 from krim_agent.tools.directory_checkpoint_capture import directory_checkpoint_capture_tool
@@ -161,6 +164,19 @@ from krim_agent.workspace_checkpoint import (
     CheckpointCaptureFence,
     WorkspaceCheckpointCreate,
     WorkspaceCheckpointView,
+)
+from krim_agent.workspace_container_retention import (
+    ContainerRetentionFence,
+    ContainerRetentionPreview,
+    ContainerRetentionRequest,
+    ContainerRetentionView,
+)
+from krim_agent.workspace_container_retention_control import (
+    CONTAINER_RETENTION_STEP_TOOLS,
+    ContainerRetentionInspectInput,
+    ContainerRetentionInspection,
+    ContainerRetentionOperationInput,
+    RetentionStepKind,
 )
 from krim_agent.workspace_directory import (
     ArtifactDirectorySpec,
@@ -411,6 +427,16 @@ class AgentService:
             self.manager.workspace_changes,
             self._missing_directory_restore_authorize,
             self._missing_directory_restore_child,
+        )
+        self.container_retention_store = WorkspaceContainerRetentionStore(
+            self.missing_directory_restore_store
+        )
+        self.container_retentions = WorkspaceContainerRetentionService(
+            self.container_retention_store,
+            self.manager.workspace_changes,
+            self._container_retention_authorize,
+            self._container_retention_child,
+            self._container_retention_scope,
         )
         self.workspace_checkpoints = WorkspaceCheckpointService(
             self.workspace_checkpoint_store,
@@ -828,6 +854,16 @@ class AgentService:
             if definition.name not in existing:
                 self.runtime.tools.register(definition)
 
+    def register_container_retentions(self) -> None:
+        """显式登记Host回收私有叶；旧冻结Agent不获得新权限。"""
+        definitions = container_retention_tools()
+        existing = {item.name: item for item in self.runtime.tools.definitions}
+        if any(item.name in existing and existing[item.name] is not item for item in definitions):
+            raise ValueError("空容器回收工具名称已被其他定义占用")
+        for definition in definitions:
+            if definition.name not in existing:
+                self.runtime.tools.register(definition)
+
     def register_directory_checkpoint_restore_controls(self) -> None:
         """显式原模型目录恢复；原私有叶也须在冻结工具集合中获授权。"""
         from krim_agent.tools.workspace_checkpoints import directory_restore_control_tools
@@ -1065,6 +1101,7 @@ class AgentService:
         recovered += await self.directory_checkpoint_store.recover_interrupted()
         recovered += await self.directory_restore_store.recover_interrupted()
         recovered += await self.missing_directory_restore_store.recover_interrupted()
+        recovered += await self.container_retention_store.recover()
         recovered += await self.manager.tree_moves.store.recover_interrupted()
         recovered += await self.manager.tree_exchanges.store.recover_interrupted()
         self._workspace_recovered = True
@@ -1084,6 +1121,7 @@ class AgentService:
         directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None,
         directory_restore: DirectoryRestoreFence | MissingDirectoryRestoreFence | None = None,
         checkpoint_restore: CheckpointRestoreFence | None = None,
+        container_retention: ContainerRetentionInspection | ContainerRetentionFence | None = None,
         command_admitted: Callable[[str], None] | None = None,
     ) -> object:
         if self._closed:
@@ -1189,6 +1227,8 @@ class AgentService:
                         if type(directory_restore) is MissingDirectoryRestoreFence
                         else self.directory_restores
                     ),
+                    container_retention=container_retention,
+                    workspace_container_retentions=self.container_retentions,
                     checkpoint_restore=checkpoint_restore,
                     workspace_checkpoints=self.workspace_checkpoints,
                     call_id=call_id,
@@ -1214,6 +1254,23 @@ class AgentService:
                 "permission_denied": 403,
                 "approval_required": 409,
                 "workspace_unbound": 409,
+                "workspace_container_retention_context": 403,
+                "workspace_container_retention_unavailable": 403,
+                "workspace_container_retention_closed": 503,
+                "workspace_container_retention_busy": 429,
+                "workspace_container_retention_capacity": 429,
+                "workspace_container_retention_timeout": 408,
+                "workspace_container_retention_parameters": 422,
+                "workspace_container_retention_not_found": 404,
+                "workspace_container_retention_source": 403,
+                "workspace_container_retention_fenced": 403,
+                "workspace_container_retention_unverified": 409,
+                "workspace_container_retention_key_conflict": 409,
+                "workspace_container_retention_source_changed": 409,
+                "workspace_container_retention_incomplete": 409,
+                "workspace_container_retention_source_busy": 409,
+                "workspace_container_retention_corrupt": 409,
+                "workspace_container_retention_stopped": 408,
                 "workspace_missing_directory_restore_context": 403,
                 "workspace_missing_directory_restore_unavailable": 403,
                 "workspace_missing_directory_restore_closed": 503,
@@ -2321,6 +2378,116 @@ class AgentService:
     ) -> DirectoryCheckpointView:
         return await self.directory_checkpoints.create(agent_id, request, confirmed=confirmed)
 
+    async def _container_retention_scope(self, agent_id: str) -> str:
+        session = await self.session(agent_id)
+        return "session:" + session.session_id
+
+    async def _container_retention_authorize(
+        self, agent_id: str, kind: RetentionStepKind
+    ) -> tuple[str, WorkspaceBinding]:
+        if self._closed:
+            raise ServiceError("agent_service_closed", "Agent服务已关闭", 503)
+        handle = self._handle(agent_id)
+        if CONTAINER_RETENTION_STEP_TOOLS[kind] not in {
+            item.name for item in handle.runtime.tools.definitions
+        }:
+            raise ServiceError(
+                "workspace_container_retention_unavailable", "原冻结Agent未授此回收阶段", 403
+            )
+        return await self.manager.workspace_changes._guard(
+            ToolContext(
+                handle.runtime.tools,
+                topic_id=handle.topic_id,
+                agent_id=agent_id,
+                session_id=handle.session_id,
+                workspace=handle.definition.workspace,
+                origin="host",
+            ),
+            writing=kind == "remove",
+        )
+
+    async def _container_retention_child(
+        self,
+        agent_id: str,
+        selector: ContainerRetentionInspection | ContainerRetentionFence,
+        confirmed: bool,
+    ) -> object:
+        if type(selector) is ContainerRetentionInspection:
+            arguments = ContainerRetentionInspectInput(
+                source_plan_id=selector.source_plan_id
+            ).model_dump()
+        else:
+            assert type(selector) is ContainerRetentionFence
+            arguments = ContainerRetentionOperationInput(
+                operation_id=selector.operation_id
+            ).model_dump()
+        return await self._workspace_call(
+            agent_id,
+            CONTAINER_RETENTION_STEP_TOOLS[selector.kind],
+            arguments,
+            confirmed=confirmed,
+            container_retention=replace(selector),
+        )
+
+    async def workspace_preview_container_retention(
+        self, agent_id: str, source_plan_id: str, *, confirmed: bool = False
+    ) -> ContainerRetentionPreview:
+        return await self.container_retentions.preview(
+            agent_id, source_plan_id, confirmed=confirmed
+        )
+
+    async def workspace_start_container_retention(
+        self, agent_id: str, request: ContainerRetentionRequest, *, confirmed: bool = False
+    ) -> ContainerRetentionView:
+        return await self.container_retentions.start(agent_id, request, confirmed=confirmed)
+
+    async def workspace_verify_container_retention(
+        self,
+        agent_id: str,
+        operation_id: str,
+        *,
+        expected_revision: int,
+        request_key: str,
+        confirmed: bool = False,
+    ) -> ContainerRetentionView:
+        return await self.container_retentions.verify(
+            agent_id,
+            operation_id,
+            expected_revision=expected_revision,
+            request_key=request_key,
+            confirmed=confirmed,
+        )
+
+    async def workspace_container_retention(
+        self, agent_id: str, operation_id: str
+    ) -> ContainerRetentionView:
+        return await self.container_retention_store.get(
+            await self._container_retention_scope(agent_id), operation_id
+        )
+
+    async def workspace_container_retention_by_key(
+        self, agent_id: str, request_key: str
+    ) -> ContainerRetentionView | None:
+        return await self.container_retention_store.by_key(
+            await self._container_retention_scope(agent_id), request_key
+        )
+
+    async def workspace_container_retention_wait(
+        self, agent_id: str, operation_id: str, *, timeout_seconds: float = 30
+    ) -> ContainerRetentionView:
+        return await self.container_retentions.wait(
+            await self._container_retention_scope(agent_id),
+            operation_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def workspace_container_retention_cancel(
+        self, agent_id: str, operation_id: str, *, expected_revision: int
+    ) -> ContainerRetentionView:
+        return await self.container_retentions.cancel(
+            agent_id, operation_id, expected_revision=expected_revision
+        )
+
     async def _missing_directory_restore_authorize(
         self, agent_id: str, kind: DirectoryRestoreStepKind
     ) -> tuple[str, WorkspaceBinding]:
@@ -3224,6 +3391,7 @@ class AgentService:
         self.conversation_recoveries.assert_external_close()
         self.directory_restores.assert_external_close()
         self.missing_directory_restores.assert_external_close()
+        self.container_retentions.assert_external_close()
         self.directory_checkpoints.assert_external_close()
         self.model_checkpoints.assert_external_close()
         self.manager.tree_exchanges.assert_external_close()
@@ -3251,6 +3419,7 @@ class AgentService:
             await asyncio.gather(*(entry[2] for entry in launches), return_exceptions=True)
             await self.directory_restores.close()
             await self.missing_directory_restores.close()
+            await self.container_retentions.close()
             await self.workspace_restores.close()
             await self.model_checkpoints.close()
             await self.workspace_checkpoints.close()

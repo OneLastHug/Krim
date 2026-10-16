@@ -26,6 +26,8 @@ WORKSPACE_READ_TOOL_NAMES = frozenset(
         "workspace_directory_restore_verify",
         "workspace_list",
         "workspace_search",
+        "workspace_container_retention_inspect",
+        "workspace_container_retention_verify",
         "workspace_mixed_query",
         "workspace_tree_query",
     }
@@ -137,7 +139,7 @@ WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES = frozenset(
 )
 WORKSPACE_WRITE_TOOL_NAMES = (
     WORKSPACE_CHANGE_TOOL_NAMES
-    | {"workspace_directory_restore_apply"}
+    | {"workspace_directory_restore_apply", "workspace_container_retention_remove"}
     | WORKSPACE_TREE_MODEL_TOOL_NAMES
     | WORKSPACE_MIXED_WRITE_TOOL_NAMES
     | (
@@ -178,6 +180,7 @@ WORKSPACE_TOOL_NAMES = (
     | WORKSPACE_TREE_EXCHANGE_TOOL_NAMES
     | WORKSPACE_GENERATED_TREE_UNDO_TOOL_NAMES
     | WORKSPACE_MISSING_DIRECTORY_ROLLBACK_TOOL_NAMES
+    | {"workspace_container_retention_remove"}
 )
 WORKSPACE_POLICY_VERSION = "readonly-v1"
 MAX_RESULT_BYTES = 24000
