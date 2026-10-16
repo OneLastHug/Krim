@@ -119,6 +119,12 @@ export class DirectoryRestoreUI {
         this.render();
         node("directory-restore-panel").scrollIntoView({ block: "nearest" });
     }
+    missingBaseline() {
+        const state = this.current(), plan = state?.selected;
+        if (!state || !plan?.backup || !reviewedBackup(plan))
+            return null;
+        return { ...state.identity, target: { kind: "baseline", identifier: plan.plan_id }, root_path: plan.root_path, target_fingerprint: plan.backup.snapshot_fingerprint };
+    }
     deactivate() { this.stopTimer(); this.generation++; this.activeId = null; }
     refreshLocale() { this.render(); }
     toggled() { if (this.expanded()) {
@@ -518,6 +524,7 @@ export class DirectoryRestoreUI {
         button("directory-restore-preview").disabled = !this.canPreview(state);
         button("directory-restore-start").disabled = !this.canStart(state);
         button("directory-restore-backup").disabled = !reviewedBackup(plan) || state.sending || !!state.recovery.pending;
+        button("directory-restore-missing-backup").disabled = !reviewedBackup(plan) || state.sending || !!state.recovery.pending;
         button("directory-restore-refresh").disabled = state.loading;
         for (const id of ["directory-restore-by-id", "directory-restore-by-key", "directory-restore-by-operation-key"])
             button(id).disabled = state.querying || !state.query;

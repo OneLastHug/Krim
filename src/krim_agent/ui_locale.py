@@ -4,6 +4,59 @@ from .locale import LocaleView, resolve_locale
 
 # 使用固定文案键让首次连接前仍可显示中文；插值只作用于显式模板。
 TRANSLATIONS: dict[str, str] = {
+    "缺失目录恢复": "Missing directory restore",
+    "缺失目录恢复预览中": "Preparing missing directory restore",
+    "缺失目录恢复可审阅": "Missing directory restore ready for review",
+    "缺失目录恢复发布中": "Publishing missing directory restore",
+    "缺失目录恢复已完成": "Missing directory restore completed",
+    "缺失目录恢复失败": "Missing directory restore failed",
+    "缺失目录恢复已取消": "Missing directory restore cancelled",
+    "缺失目录恢复已中断": "Missing directory restore interrupted",
+    "缺失目录恢复已过期": "Missing directory restore expired",
+    "缺失目录恢复结果待核实": "Missing directory restore requires verification",
+    "缺失目录恢复回程与原事实不一致": (
+        "Missing directory restore response does not match original facts"
+    ),
+    "缺失目录恢复记录不可用，新预览和发布已停用": (
+        "Missing directory restore recovery is unavailable; "
+        "new previews and publishing are disabled"
+    ),
+    "原缺失目录恢复请求未被接受": (
+        "The original missing directory restore request was not accepted"
+    ),
+    "原缺失目录恢复请求尚未确认，请按原键继续查询": (
+        "Missing directory restore is not confirmed; keep querying the original key"
+    ),
+    "未找到缺失目录恢复计划或操作": "Missing directory restore plan or operation not found",
+    "缺失目录恢复目标": "Missing directory restore target",
+    "预览缺失目录恢复": "Preview complete missing directory restore",
+    "刷新缺失目录恢复历史": "Refresh missing directory restore history",
+    "缺失目录恢复历史": "Missing directory restore history",
+    "缺失目录恢复历史第{page}页": "Missing directory restore history page {page}",
+    "缺失目录恢复标识或原请求键": "Missing directory restore ID or original request key",
+    "缺失目录恢复差异": "Missing directory restore diff",
+    "缺失目录恢复差异第{page}页": "Missing directory restore diff page {page}",
+    "确认按当前审阅版本发布缺失目录恢复？": (
+        "Publish the complete missing directory restore at the currently reviewed revision?"
+    ),
+    "正在读取缺失目录恢复历史": "Loading missing directory restore history",
+    "当前会话只能查询缺失目录恢复历史": (
+        "This session can only read missing directory restore history"
+    ),
+    "查看缺失目录恢复计划": "View missing directory restore plan",
+    "清理缺失目录恢复材料": "Clean up directory recovery material",
+    "恢复缺失目录": "Restore missing directory",
+    "按原完整备份恢复缺失目录": "Restore missing directory from original complete backup",
+    "批准恢复缺失目录": "Approve missing directory restore",
+    "我已审阅当前版本的缺失目录差异": ("I reviewed the missing directory diff at this revision"),
+    "缺失目录基线": "Missing directory baseline",
+    "目录确实缺失": "Directory is absent",
+    "缺失基线指纹": "Absence fingerprint",
+    "基线核实状态": "Baseline verification status",
+    "已保存观察不表示预览已通过": (
+        "A saved observation does not mean the preview passed verification"
+    ),
+    "原操作私有暂存材料仍被保留": "The original operation still retains staging data",
     "备份核实状态": "Backup verification status",
     "已保存备份不表示预览已通过": "A saved backup does not mean the preview passed verification",
     "恢复完整目录": "Restore complete directory",

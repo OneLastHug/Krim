@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -155,7 +156,8 @@ async def test_workspace_restores_in_real_new_python_process_without_replaying_m
     async def worker(mode, identifier=""):
         process = await asyncio.create_subprocess_exec(
             sys.executable,
-            "tests/fixtures/workspace_agent_worker.py",
+            "-I",
+            str(Path(__file__).parent / "fixtures/workspace_agent_worker.py"),
             str(database),
             str(root),
             mode,

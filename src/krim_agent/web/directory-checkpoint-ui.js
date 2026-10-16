@@ -2,6 +2,7 @@
 import { ApiError, errorText, requestJson, requestJsonNullable } from "./api.js";
 import { localDate, t } from "./i18n.js";
 import { DirectoryRestoreUI } from "./directory-restore-ui.js";
+import { MissingDirectoryRestoreUI } from "./missing-directory-restore-ui.js";
 const node = (id) => document.getElementById(id);
 const input = (id) => node(id);
 const button = (id) => node(id);
@@ -66,9 +67,16 @@ export class DirectoryCheckpointUI {
     generation = 0;
     timer;
     restores;
+    missingRestores;
     constructor(notice) {
         this.notice = notice;
         this.restores = new DirectoryRestoreUI(notice);
+        this.missingRestores = new MissingDirectoryRestoreUI(notice);
+        node("directory-restore-missing-backup").onclick = () => {
+            const state = this.current(), value = this.restores.missingBaseline();
+            if (state && value)
+                void this.missingRestores.useBaseline(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true));
+        };
         for (const [id, field] of [["directory-checkpoint-title", "title"], ["directory-checkpoint-path", "path"], ["directory-checkpoint-query", "query"]]) {
             input(id).oninput = () => { const state = this.current(); if (state)
                 state[field] = input(id).value; this.controls(); };
@@ -89,6 +97,7 @@ export class DirectoryCheckpointUI {
     }
     setSources(agents) {
         this.restores.setSources(agents);
+        this.missingRestores.setSources(agents);
         const ids = new Set(agents.map(agent => agent.agent_id));
         let changed = false;
         for (const agent of agents) {
@@ -122,10 +131,10 @@ export class DirectoryCheckpointUI {
         state.querying = false;
         state.loadVersion++;
         state.queryVersion++;
-    } this.render(); await Promise.all([this.refresh(), this.restores.select(id)]); }
-    deactivate() { this.stopTimer(); this.generation++; this.activeId = null; this.restores.deactivate(); }
-    refreshLocale() { this.render(); this.restores.refreshLocale(); }
-    toggled() { this.restores.toggled(); if (this.expanded()) {
+    } this.render(); await Promise.all([this.refresh(), this.restores.select(id), this.missingRestores.select(id)]); }
+    deactivate() { this.stopTimer(); this.generation++; this.activeId = null; this.restores.deactivate(); this.missingRestores.deactivate(); }
+    refreshLocale() { this.render(); this.restores.refreshLocale(); this.missingRestores.refreshLocale(); }
+    toggled() { this.restores.toggled(); this.missingRestores.toggled(); if (this.expanded()) {
         const state = this.current();
         if (state?.stale)
             void this.refresh();
@@ -549,6 +558,12 @@ export class DirectoryCheckpointUI {
                 restore.onclick = () => { if (this.current() === state)
                     void this.restores.useCheckpoint(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true)); };
                 detail.append(restore);
+                const missing = document.createElement("button");
+                missing.type = "button";
+                missing.textContent = t("恢复缺失目录");
+                missing.onclick = () => { if (this.current() === state)
+                    void this.missingRestores.useCheckpoint(state.agent.agent_id, value).catch(error => this.notice(t(errorText(error)), true)); };
+                detail.append(missing);
             }
         }
         this.controls();

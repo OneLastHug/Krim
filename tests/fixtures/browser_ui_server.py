@@ -5,6 +5,7 @@ import atexit
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -12,7 +13,6 @@ from uuid import uuid4
 
 import httpx
 import uvicorn
-from browser_generated_roots import configure_generated_roots
 from cryptography.fernet import Fernet
 from mcp.types import CallToolResult, ListToolsResult, Tool
 from pydantic import Field, SecretStr
@@ -58,6 +58,9 @@ from krim_agent.usage import TokenUsage
 from krim_agent.workspace import WORKSPACE_TOOL_NAMES
 from krim_agent.workspace_mixed_batch import MixedBatchRequest, MixedBatchView
 from krim_agent.workspace_tree import TreePlanRequest, TreePlanView
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from browser_generated_roots import configure_generated_roots  # noqa: E402
 
 with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directory:
     settings = Settings(
@@ -286,6 +289,10 @@ with TemporaryDirectory(prefix="krim-browser-", dir="/data/tmp/root") as directo
         from browser_directory_checkpoints import configure_directory_checkpoints
 
         configure_directory_checkpoints(app, write_root)
+    if os.environ.get("KRIM_TEST_MISSING_DIRECTORY_RESTORES") == "1":
+        from browser_missing_directory_restores import configure_missing_directory_restores
+
+        configure_missing_directory_restores(app, write_root)
     if os.environ.get("KRIM_TEST_DIRECTORY_RESTORES") == "1":
         from browser_directory_restores import configure_directory_restores
 
