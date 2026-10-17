@@ -1,0 +1,78 @@
+[
+  {
+    "name": "valid",
+    "value": {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "request_key": "vector",
+      "status": "completed",
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "root_span_id": "bbbbbbbbbbbbbbbb",
+      "created_at": 1,
+      "finished_at": 2,
+      "code": null,
+      "stop_requested": false
+    },
+    "valid": true
+  },
+  {
+    "name": "status",
+    "value": {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "request_key": "vector",
+      "status": "success",
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "root_span_id": "bbbbbbbbbbbbbbbb",
+      "created_at": 1,
+      "finished_at": 2,
+      "code": null,
+      "stop_requested": false
+    },
+    "valid": false
+  },
+  {
+    "name": "bool",
+    "value": {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "request_key": "vector",
+      "status": "completed",
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "root_span_id": "bbbbbbbbbbbbbbbb",
+      "created_at": 1,
+      "finished_at": 2,
+      "code": null,
+      "stop_requested": 0
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown",
+    "value": {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "request_key": "vector",
+      "status": "completed",
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "root_span_id": "bbbbbbbbbbbbbbbb",
+      "created_at": 1,
+      "finished_at": 2,
+      "code": null,
+      "stop_requested": false,
+      "extra": 1
+    },
+    "valid": false
+  },
+  {
+    "name": "number",
+    "value": {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "request_key": "vector",
+      "status": "completed",
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "root_span_id": "bbbbbbbbbbbbbbbb",
+      "created_at": "1",
+      "finished_at": 2,
+      "code": null,
+      "stop_requested": false
+    },
+    "valid": false
+  }
+]
