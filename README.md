@@ -1,121 +1,60 @@
 # Krim Agent
 
-Krim Agent 是以 Python 为核心的本地 Agent 项目，提供多轮模型/工具执行、版本化配置、持久会话与任务、审批问答、实时事件、恢复、评估以及浏览器/SDK/CLI 管理。TypeScript只负责浏览器界面，静态产物由Python服务托管。
+Krim Agent 是用于研读和求职讲述的 Python 模块化单体：从一个真实 Run 理解模型/工具循环、审批、取消、持久事实和脱敏 Trace，再用显式人工参考完成小批次版本评测。默认目标是确定性离线脚本，不发送模型网络请求，不代表商业模型质量。
 
-当前在持续完成项目，完整顺序见 [P01–P10接续计划](docs/plan/2026-10-08-project-completion.md)。Workflow放后期；受控工作区读取、条件修改、持久回执、原生修改清单、检查点捕获/恢复及SDK/REST/CLI/浏览器已接通，实际验证范围见[P03证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)。P04命令隔离、持久记录、Agent/SDK、完整输入、文本产物提案/条件发布与REST/client/CLI已接通，浏览器命令面板和Profile执行资源配置已接通，原键恢复/输出与成果分页/取消和提案审阅见[报告](docs/testing/reports/2026-10-10-browser-commands.md)；二进制单文件命令成果已接通，见[报告](docs/testing/reports/2026-10-10-binary-command-artifacts.md)；普通二进制完整命令输入和原快照精确撤销已接通，见[报告](docs/testing/reports/2026-10-11-binary-command-inputs.md)；真实空/嵌套目录来源与可信Python冷读取已接通，见[报告](docs/testing/reports/2026-10-11-command-directory-provenance.md)；目录事务继续；Skills文件包、完整Host/多模态及生产运行能力按后续阶段推进。
+LC-M1 和 React/shadcn UI 已在 `f841567656af8d3d0536c1636fcc6401768d81fb` 基线验收。本分支的 LC-M2 是按独立 评审 批准方案实现的待审候选，实际命令、首轮失败、修复、发行身份和限制见 [M2 实测报告](docs/agent-core/LC-M2-REPORT.md)。方案批准、实现方 自验和最终独立代码/视觉验收是不同结论。
 
-模型原生Checkpoint创建/query/cancel现已沿原Run/call、Scope、权限/预算和私有Fence接通，SDK/REST/Client/CLI/浏览器读取同一原结果，见[模型控制指南](docs/user-guide/model-native-checkpoints.md)与[报告](docs/testing/reports/2026-10-15-model-native-checkpoints.md)。模型原生恢复preview/start/query/cancel、分阶段来源与唯一基线已接通，见[模型恢复指南](docs/user-guide/model-native-checkpoint-restores.md)及[实际验证](docs/testing/reports/2026-10-15-model-native-checkpoint-restores.md)。
-
-## 快速开始
-
-需要Python 3.12–3.14与uv。以下命令在仓库根目录执行：
-
-```bash
-# sync（同步）按锁文件准备项目环境；dev是development（开发依赖）。
-uv sync --locked --group dev
-
-# serve（提供服务）启动Python HTTP/SSE；run（运行）不再次同步环境。
-uv run --no-sync krim serve
+```mermaid
+flowchart LR
+    入口[React / SDK / API / CLI] --> EV[EvaluationService：小批次所有权]
+    入口 --> RS[唯一 RunService：共享准入]
+    EV --> ITEM[execute_item / RunTarget]
+    ITEM --> RS
+    RS --> LOOP[AgentLoop / 真实离线 Provider]
+    LOOP --> TOOL[ToolExecutor / 静态工具]
+    TOOL --> DB[SQLite 五表]
+    RS --> DB
+    EV --> DB
+    DB --> FACTS[同快照事实 / Trace]
+    FACTS --> SCORE[六类有限规则]
+    SCORE --> EV
+    DB --> REPORT[报告与逐样本 Gate]
 ```
 
-浏览器打开 <http://127.0.0.1:8765/ui/>。默认使用离线FakeProvider，可以输入`/add 2 3`或`/echo hello`验证工具执行；普通文本为确定性回显，不代表模型推理能力。现有服务必须单工作进程运行。
+## 运行与阅读
 
-Linux/macOS使用`.venv/bin/python`，Windows使用`.venv\Scripts\python.exe`。当前机器已有环境时可直接执行：
-
-```bash
-.venv/bin/python -m krim_agent serve
-```
-
-访问密钥通过`KRIM_AGENT_API_KEY`设置，模型端点密钥通过`KRIM_AGENT_PROVIDER_API_KEY`设置，两者独立。`.env.example`是模板，不会自动加载；明确加载时用`uv run --env-file .env --no-sync krim serve`。详细说明见 [安装与本地试运行](docs/user-guide/local-agent.md)。
-
-## 可运行的演练
+支持 Linux、Python 3.12、单进程单写端。先安装本轮实际 wheel（Python 分发包），再显式指定合成或自有私有数据库路径；不自动加载 `.env`。`KRIM_AGENT_API_KEY` 设置实例密钥；无密钥时只允许回环客户端/Host，浏览器保持同源。
 
 ```bash
-# 使用临时数据库与真实CLI/TCP，验证两轮执行、任务、服务重启、历史和eval。
-.venv/bin/python examples/local_trial.py
-
-# SDK会话示例：关闭/重开、独立Run与原事件读取。
-.venv/bin/python examples/python_agent_sessions.py
-
-# Linux工作区演练：SDK准备、CLI恢复、服务重启与原操作零重放。
-.venv/bin/python examples/workspace_trial.py
-
-# Linux隔离命令基础：需bubblewrap 0.11.0与系统Python，验证副本、产物和取消。
-.venv/bin/python examples/command_trial.py
-
-# 持久命令演练：实际执行、保存产物、关闭服务、新数据库连接读取原记录。
-.venv/bin/python examples/durable_command_trial.py
-
-# Agent命令演练：Profile资源、SDK审批、完整只读输入、原产物和冷恢复。
-.venv/bin/python examples/agent_command_trial.py
-
-# 命令成果演练：真实差异、生成提案、独立批准发布、撤销恢复原文件。
-.venv/bin/python examples/command_artifact_trial.py
-
-# 命令管理演练：真实CLI服务、同步客户端、重启、原任务与文件回执零重放。
-.venv/bin/python examples/command_management_trial.py
-
-# 显式离线兼容端点模拟：真实Provider适配/工具循环，不发商业请求。
-.venv/bin/python examples/python_openai_provider.py
+# pip：Python 包安装工具；示例路径需替换为实际候选包。
+python -m pip install /path/to/krim_agent-0.2.0a1-py3-none-any.whl
+# -m 是 module（模块入口），serve 提供本机服务。
+python -m krim_agent serve --database .data/agent-demo.db --port 8765
+# CLI（Command-Line Interface，命令行界面）；key 是原请求幂等键。
+krim run --url http://127.0.0.1:8765 --text '/add 2 3' --key demo-add
+# result 只读原 ID（identifier，标识符），不会恢复或重放任务。
+krim result --database .data/agent-demo.db --id <原Run-ID>
 ```
 
-`-m`是module（模块入口），SDK是Software Development Kit（软件开发工具包），CLI是Command-Line Interface（命令行界面），SSE是Server-Sent Events（服务端事件流）。
+浏览器打开 `http://127.0.0.1:8765/ui/`。任务页支持 `/add 2 3`（两个模型步、一次真实 add）、`/echo 你好`、需要审批的 `/note welcome` 和演示停止的 `/slow`。评测页可显式选取已完成任务的输入，人工填写参考与理由、加入样本、冻结修订，再运行 `target-v1/v2/bad` 并比较报告。观测答案不会自动变成参考。
 
-## 已有能力
+SDK（Software Development Kit，软件开发工具包）完整阅读入口是 [agent_demo.py](examples/agent_demo.py) 与 [agent_eval.py](examples/agent_eval.py)。建议沿 `composition → EvaluationService → execute_item → RunService → AgentLoop → ToolExecutor → RunSnapshot → scorers → gate_reports` 阅读。[M2 方案](docs/agent-core/LC-M2-PLAN.md)保存获批契约和取舍；[现状文档](docs/agent-core/ARCHITECTURE_CURRENT.md)区分历史架构与当前实现。
 
-| 模块 | 当前可用行为 |
-|---|---|
-| Agent | Profile历史版本/CAS、可信模型与工具选择、agent/ask/plan/auto边界、父子权限/预算、persistent恢复、后台start/wait/stop与资源清理 |
-| 会话与任务 | 独立session/topic/turn、绝对TTL、关闭/重开/销毁、0023计划/待办、CAS/幂等/历史和会话隔离 |
-| 对话与流 | 消息树/编辑/重生成/分支、持久事件/独立游标、断开重连、后台多话题读取 |
-| SDK/API/CLI/UI | PythonAI/AgentSession、类型化生成/结构化结果、REST/OpenAPI、命令行、Agent任务卡片与任务面板 |
-| 工具与交互 | Pydantic输入、输出Schema、权限/Hook/审计、工具按需发现、真实审批与Question答案 |
-| 工作区 | 宿主根目录授权、Profile/资源冻结、读取/检索；可写授权下的Diff提案、条件应用/撤销/保留、持久回执/核实/清理、原生清单与批次、完整检查点捕获和条件恢复；SDK/REST/CLI/浏览器消费同一事实 |
-| 隔离执行与命令 | 资源/Profile授权、模型与SDK同审批/Hook/审计、完整受控输入、非root/独立网络、输出/资源上限、取消/超时/后代回收；0030原结果、0031文本产物提案、REST/client/CLI管理；浏览器命令管理/原键恢复/输出与成果分页/取消及文件审阅已接通；普通二进制完整输入/发布/撤销及可信目录来源冷读已接通，目录事务继续 |
-| 上下文与预算 | 持久摘要/提案确认、离线BPE/请求窗口、Provider usage、累计预留/结算与未知结果核实 |
-| Eval | 数据集/真实Agent目标、多轮/规则/显式评委、持久进度/暂停/取消/恢复、报告/统计与版本比较 |
-| 资源集成 | MCP stdio/HTTP与显式OAuth、按话题Skills目录、同源Host回程、受限附件/引用/拖放、Change List/Checkpoint |
+## 评测的含义
 
-目录事务/完整树交换、生成根撤销与原生二进制Checkpoint公共捕获/恢复已有后续分组证据，见[最新字节恢复报告](docs/testing/reports/2026-10-15-native-checkpoint-byte-restore.md)。命令资源现可显式配置独立cgroup v2进程树限额，并在模型工具、SDK、REST、CLI和浏览器读取同一原限额/用量，见[配置指南](docs/user-guide/process-tree-quotas.md)与[专项报告](docs/testing/reports/2026-10-15-process-tree-quotas.md)。默认rlimit仍只代表每进程/UID范围；树模式内存/进程线程由内核限制，累计CPU按内核用量采样收束。
+- 最多8个样本、重复1–3次、最多24个 item，串行执行，一个活跃 Eval。交互任务和所有评测版本共用默认4个 Run 名额，不按版本扩容。
+- Candidate 保存来源资格、原 `source_run_id` 与指纹；Reference 必须显式填写 expected（可为 JSON null）及人工理由；DatasetRevision 以 name/version 冻结，同内容幂等、异内容冲突。后续执行生成独立子 Run，不冒用来源 Run。
+- v1 实际将加法参数向零取整，v2 保留小数，bad 对整数加法实际多加1；三者都经过 Provider 往返与真实工具。差异不来自换标签或修改评分。
+- 六类规则为状态/错误码、文本精确匹配、JSON 匹配、JSON Schema、工具序列、轨迹。缺事实、未知用量保持 null/skipped/error，布尔不当数字。执行终态、评分覆盖与质量结果分别呈现。
+- Gate 先核对同数据、规则、重复及执行配置；partial、零覆盖或不兼容为 invalid。候选逐样本退化即 fail，均分提高不能抵消；pass 只说明本次冻结数据与规则下未检测到退化。
+- 本机 `eval start --database` 持同一个 Application 等终态；可捕获中断先等真实 producer/scorer 和资源关闭。需要立即返回 ID、独立 wait/cancel 时使用 `--url` 连接长驻服务；远端客户端退出不取消批次。本机独立 wait/cancel 在开库前拒绝，report/compare/get 为只读。
 
-原负载根因和P04完整审计、商业模型质量/真实账单、生产多worker/租户、PostgreSQL/Redis与部署演练仍未完成。隔离执行仅有Linux本机证据。旧M1/M2工作记录保留历史事实；当前状态以接续计划和最新模块报告为准。
+## 边界与兼容
 
-工作区的目录文件描述符边界与条件发布目前仅Linux实测；Windows不能使用该文件能力，普通Agent/SDK/eval入口仍可用。文件路径约束不等于操作系统进程沙箱。
+工具仍限可信异步 add、echo、lookup_note；没有 Shell、文件写入、插件、任意代码或 OS 沙箱承诺。权限无授权即拒绝；审批绑定 Run/call/参数/工具身份；Hook 不能改写原结果。取消必须等实际任务/流收束，SSE（Server-Sent Events，服务端事件流）断开仅停止读侧。
 
-## 设计、进度与验证
+SQLite 从Krim Agent准确 v1 两表事务升级为 v2 五表，增加 dataset_revisions/evaluations/eval_items；未知或外来库仍拒绝。只读打开不会初始化、迁移、恢复或补写。写端重启将未完成执行记为 interrupted/partial，不续跑、不补评分。intent-only 仍不能证明工具已执行或未执行，也不补成功 Span。
 
-- [Agent架构与审阅顺序](docs/architecture/agent-design.md)
-- [任务状态架构与理由](docs/architecture/task-state-design.md)
-- [工作区架构与设计理由](docs/architecture/workspace-design.md)
-- [工作区API、SDK与CLI使用](docs/api/workspace.md)
-- [工作区浏览器与命令行修改指南](docs/user-guide/workspace-changes.md)
-- [浏览器文件修改架构与理由](docs/architecture/workspace-browser-design.md)
-- [连续修改保留与兼容设计](docs/architecture/workspace-effect-chain-design.md)
-- [原生修改清单与批次设计](docs/architecture/native-workspace-list-design.md)
-- [浏览器统一审阅修改](docs/user-guide/native-change-list.md)
-- [原生检查点浏览器与命令行指南](docs/user-guide/native-checkpoints.md)
-- [原生检查点REST与客户端合约](docs/api/native-checkpoints.md)
-- [检查点条件恢复架构](docs/architecture/workspace-checkpoint-restore-design.md)
-- [工作区整体演练与证据组织](docs/architecture/workspace-trial-design.md)
-- [P03完整证据审计](docs/testing/reports/2026-10-09-workspace-completion.md)
-- [隔离命令架构与设计理由](docs/architecture/isolated-command-design.md)
-- [可信Python执行接口与试运行](docs/api/isolated-execution.md)
-- [持久命令架构与原结果恢复](docs/architecture/durable-command-design.md)
-- [持久命令Python合约](docs/api/durable-commands.md)
-- [Agent命令架构与授权输入](docs/architecture/agent-command-design.md)
-- [Agent命令SDK使用](docs/api/agent-commands.md)
-- [命令产物提案与条件发布架构](docs/architecture/command-artifact-design.md)
-- [命令成果SDK合约](docs/api/command-artifacts.md)
-- [命令管理REST、客户端与CLI](docs/api/command-management.md)
-- [浏览器命令与产物审阅指南](docs/user-guide/commands.md)
-- [本会话接续计划与授权](docs/plan/2026-10-09-project-resumption.md)
-- [命令后台接受与管理架构](docs/architecture/command-management-api-design.md)
-- [SDK与Eval架构](docs/architecture/sdk-evaluation-design.md)
-- [完整项目计划](docs/plan/2026-10-08-project-completion.md)
-- [需求追踪](docs/requirements/requirements-traceability.md)
-- [当前进度](docs/progress/README.md)
-- [Agent已验证基线：Python972/浏览器58](docs/testing/reports/2026-10-07-agent-completion.md)
-- [P01任务模块测试报告](docs/testing/reports/2026-10-08-agent-tasks.md)
-- [文档中心](docs/README.md)
+私有结果包含原文本；脱敏 Trace 只展示允许字段。创建回程未知只按原键核实；首次精确未准入拒绝允许纠正后显式提交，不从一次 GET404 推断未执行。用户数据按文本渲染，无 HTML/Markdown 执行通道。
 
-每个完成并验证的功能独立使用中文“模块：功能”提交并普通推送到既有GitHub仓库；架构、来源、测试和限制随功能同步。未完成阶段不记为项目目标完成，人工验收和生产上线事实单独记录。
+旧 AgentManager、Conversation/lease、兼容 HTTP Provider、模型评委、JSON 导入导出、离线 rescore、多 worker、持续采集/训练与 M3 均未交付。本轮不追旧 P01–P10/62项，不承诺 Windows、其它 Python/浏览器、商业模型或生产部署。M1/UI 历史失败及通过口径分别见原报告，不累计成 M2 通过数。

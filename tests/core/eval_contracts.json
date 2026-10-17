@@ -1,0 +1,863 @@
+[
+  {
+    "name": "reference-null",
+    "kind": "reference",
+    "value": {
+      "expected": null,
+      "expected_status": "completed",
+      "expected_code": null,
+      "expected_tools": null,
+      "trajectory": null,
+      "expected_schema": null
+    },
+    "valid": true
+  },
+  {
+    "name": "reference-missing",
+    "kind": "reference",
+    "value": {
+      "expected_status": "completed",
+      "expected_code": null,
+      "expected_tools": null,
+      "trajectory": null,
+      "expected_schema": null
+    },
+    "valid": false
+  },
+  {
+    "name": "failed-reference-code-required",
+    "kind": "reference",
+    "value": {
+      "expected": "5",
+      "expected_status": "failed",
+      "expected_code": null,
+      "expected_tools": null,
+      "trajectory": null,
+      "expected_schema": null
+    },
+    "valid": false
+  },
+  {
+    "name": "boolean-config-not-one",
+    "kind": "rule",
+    "value": {
+      "name": "status_code",
+      "version": "1",
+      "config": {
+        "match_code": 1
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "eval-view",
+    "kind": "eval",
+    "value": {
+      "id": "978b0b87-462c-4923-890f-3e411b4708eb",
+      "request_key": "vectors",
+      "status": "completed",
+      "code": null,
+      "created_at": 1792246148.5404916,
+      "finished_at": 1792246149.4312224,
+      "stop_requested": false,
+      "revision": 4,
+      "planned_count": 1,
+      "finished_count": 1
+    },
+    "valid": true
+  },
+  {
+    "name": "bool-revision",
+    "kind": "eval",
+    "value": {
+      "id": "978b0b87-462c-4923-890f-3e411b4708eb",
+      "request_key": "vectors",
+      "status": "completed",
+      "code": null,
+      "created_at": 1792246148.5404916,
+      "finished_at": 1792246149.4312224,
+      "stop_requested": false,
+      "revision": true,
+      "planned_count": 1,
+      "finished_count": 1
+    },
+    "valid": false
+  },
+  {
+    "name": "real-report",
+    "kind": "report",
+    "value": {
+      "schema_version": 1,
+      "eval_id": "978b0b87-462c-4923-890f-3e411b4708eb",
+      "revision": 4,
+      "complete": true,
+      "status": "completed",
+      "code": null,
+      "dataset": {
+        "name": "wire",
+        "version": "1",
+        "fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de",
+        "schema_version": 1,
+        "cases": [
+          {
+            "case_id": "one",
+            "input": "/add 2 3",
+            "input_fingerprint": "9813f9c92108183436ccabe75b459a1a7dbb7ffe09d9fb737d7ddd153ab4afc2",
+            "source": {
+              "schema_version": 1,
+              "filter_version": "self-contained/1",
+              "source_kind": "manual",
+              "source_run_id": null,
+              "eligibility": "eligible",
+              "reasons": [
+                "manual_input_only"
+              ],
+              "input_fingerprint": "9813f9c92108183436ccabe75b459a1a7dbb7ffe09d9fb737d7ddd153ab4afc2",
+              "selected_input": null,
+              "source_snapshot_fingerprint": "b48e50e596ba841fb9a7ace2231d25296989e3aa595977fb50c5e7f48ac68210",
+              "source_target_key": null,
+              "source_target_fingerprint": null,
+              "observed": null,
+              "evidence": null,
+              "candidate_fingerprint": "290f9af3e9f22007f501d540ef64e529fc8a37eb03a1ac3d2246aa63b9c200f9"
+            },
+            "reference": {
+              "expected": "5",
+              "expected_status": "completed",
+              "expected_code": null,
+              "expected_tools": null,
+              "trajectory": null,
+              "expected_schema": null
+            },
+            "reference_fingerprint": "397004233992193c022a38b2735215e65b2744e3e961b5ae68e817c29b6c1a80",
+            "reason": "人工核算共享向量"
+          }
+        ],
+        "created_at": 1792246148.4288023
+      },
+      "dataset_ref": {
+        "name": "wire",
+        "version": "1",
+        "fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de"
+      },
+      "dataset_fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de",
+      "target_descriptor": {
+        "key": "target-v2",
+        "limits": {
+          "approval_timeout": 20.0,
+          "max_active_runs": 4,
+          "max_events": 2048,
+          "max_input_bytes": 4096,
+          "max_output_bytes": 8192,
+          "max_request_bytes": 32768,
+          "max_steps": 4,
+          "max_tool_calls": 1,
+          "max_tools_per_step": 1,
+          "run_timeout": 10.0,
+          "tool_timeout": 2.0
+        },
+        "limits_fingerprint": "b71f50a417e5c38f42bcedac8ae1acb530f50b46d4b1bdb57c6208218317f774",
+        "policy": {
+          "allowed_names": [
+            "add",
+            "echo"
+          ],
+          "digest": "9c9a39a56c875144543b7b9d29464b20af04c6f804657eede24d0aa9eb20ee94",
+          "id": "krim_agent.evaluation.targets.controlled_policy",
+          "version": "1"
+        },
+        "post": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "pre": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "prompt_fingerprint": "765c245f704c5ece541e58ad09e1caaf46dfc416ab0a5e508cebc861a6a5c4f8",
+        "provider": {
+          "behavior_version": "decimal-parser/1",
+          "config": {
+            "delay": 0.02,
+            "mode": "decimal"
+          },
+          "digest": "15e6091f92c599f26af826a7a8acb1fdc9980e859859aa93931d83a6172b4011",
+          "id": "krim_agent.providers.eval_script.EvalScriptProvider",
+          "implementation_digest": "15e6091f92c599f26af826a7a8acb1fdc9980e859859aa93931d83a6172b4011",
+          "name": "krim_agent.providers.eval_script.EvalScriptProvider",
+          "version": "1"
+        },
+        "schema_version": 2,
+        "system_prompt": "保留小数精度。",
+        "tools": [
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "left": {
+                  "title": "Left",
+                  "type": "number"
+                },
+                "right": {
+                  "title": "Right",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "left",
+                "right"
+              ],
+              "title": "AddInput",
+              "type": "object"
+            },
+            "name": "add",
+            "output_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "sum": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "sum"
+              ],
+              "type": "object"
+            },
+            "version": "1"
+          },
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "maxLength": 8192,
+                  "title": "Text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "title": "EchoInput",
+              "type": "object"
+            },
+            "name": "echo",
+            "output_schema": {
+              "type": "string"
+            },
+            "version": "1"
+          },
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "pattern": "^[a-z0-9_-]{1,32}$",
+                  "title": "Key",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "title": "NoteInput",
+              "type": "object"
+            },
+            "name": "lookup_note",
+            "output_schema": {
+              "type": "string"
+            },
+            "version": "1"
+          }
+        ],
+        "version": "target-v2/1"
+      },
+      "target_fingerprint": "7db92bc3b692a1a51571a17dd82115b8fefc55f28334faff00b64353d52b098d",
+      "rules": [
+        {
+          "name": "exact_match",
+          "version": "1",
+          "config": {
+            "normalize_whitespace": false
+          }
+        },
+        {
+          "name": "status_code",
+          "version": "1",
+          "config": {
+            "match_code": true
+          }
+        }
+      ],
+      "rules_fingerprint": "d9ba5466cbda33665706639b32de745c8623f70b2c275b3eb2703718a37c8e9c",
+      "execution": {
+        "batch_timeout_seconds": 600,
+        "concurrency": 1,
+        "item_timeout_seconds": 12,
+        "limits": {
+          "approval_timeout": 20.0,
+          "max_active_runs": 4,
+          "max_events": 2048,
+          "max_input_bytes": 4096,
+          "max_output_bytes": 8192,
+          "max_request_bytes": 32768,
+          "max_steps": 4,
+          "max_tool_calls": 1,
+          "max_tools_per_step": 1,
+          "run_timeout": 10.0,
+          "tool_timeout": 2.0
+        },
+        "policy": {
+          "allowed_names": [
+            "add",
+            "echo"
+          ],
+          "digest": "9c9a39a56c875144543b7b9d29464b20af04c6f804657eede24d0aa9eb20ee94",
+          "id": "krim_agent.evaluation.targets.controlled_policy",
+          "version": "1"
+        },
+        "post": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "pre": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "repetitions": 1,
+        "scorer_timeout_seconds": 1
+      },
+      "execution_fingerprint": "b368392e7503cd2694f284d3996f56bbe73be03c2e153504725fa295ccd4e341",
+      "planned_count": 1,
+      "items": [
+        {
+          "case_id": "one",
+          "repetition": 0,
+          "run_id": "fba2246a-24aa-4e18-b390-74cf8412d0a3",
+          "status": "finished",
+          "code": null,
+          "output": {
+            "code": null,
+            "facts_complete": true,
+            "last_seq": 9,
+            "model_steps": 2,
+            "request_key": "lc-eval.978b0b87-462c-4923-890f-3e411b4708eb.0.0",
+            "run_id": "fba2246a-24aa-4e18-b390-74cf8412d0a3",
+            "snapshot_fingerprint": "19e77dc6951deee6876209597d34d40ed186fa8e3daedab1bfac28405d964ef5",
+            "status": "completed",
+            "text": "5",
+            "token_usage": null,
+            "tools": [
+              {
+                "arguments": {
+                  "left": 2.0,
+                  "right": 3.0
+                },
+                "call_id": "cd63752e3ee6d00effc993fed65f9251",
+                "code": null,
+                "executor_started": true,
+                "name": "add",
+                "provider_call_id": "aec98d20942e47b59c8e6aa0355115e6",
+                "result_available": true,
+                "span_id": "538899b3a7da56d3",
+                "status": "ok",
+                "step_index": 0,
+                "value_fingerprint": "52fdc721e2c0a4d4fde50ff2b63155d008dd14fb9aef8dc094df730400f45126"
+              }
+            ],
+            "trace_id": "218e93721732b943c3084cfc85a590d8",
+            "usage_complete": false
+          },
+          "scores": [
+            {
+              "evidence": {},
+              "reason": null,
+              "rule": {
+                "config_fingerprint": "5ff772b266ec248768f563dba369064741b615a2bddbe2d7456b5561e593c8fe",
+                "name": "exact_match",
+                "version": "1"
+              },
+              "status": "scored",
+              "value": 1
+            },
+            {
+              "evidence": {},
+              "reason": null,
+              "rule": {
+                "config_fingerprint": "d2d13df87b67742a9ba937b7f5f3dd2232eb1ba8834606ef9f6a33393de2fcae",
+                "name": "status_code",
+                "version": "1"
+              },
+              "status": "scored",
+              "value": 1
+            }
+          ],
+          "quality": "passed",
+          "source_run_id": null
+        }
+      ],
+      "summary": {
+        "planned": 1,
+        "scored_cells": 2,
+        "planned_cells": 2,
+        "cell_coverage": 1.0,
+        "item_coverage": 1.0,
+        "passed": 1,
+        "pass_rate": 1.0,
+        "mean": 1.0,
+        "metrics": {
+          "exact_match": {
+            "scored": 1,
+            "planned": 1,
+            "coverage": 1.0,
+            "mean": 1.0
+          },
+          "status_code": {
+            "scored": 1,
+            "planned": 1,
+            "coverage": 1.0,
+            "mean": 1.0
+          }
+        },
+        "skipped": 0,
+        "errors": 0,
+        "unexecuted_cells": 0,
+        "usage_complete_count": 0,
+        "token_usage": null
+      },
+      "report_hash": "4185b95e35a607603b0309cdffeaddb1814a2996e48c93ed45b8983d760457f6"
+    },
+    "valid": true
+  },
+  {
+    "name": "tampered-summary",
+    "kind": "report",
+    "value": {
+      "schema_version": 1,
+      "eval_id": "978b0b87-462c-4923-890f-3e411b4708eb",
+      "revision": 4,
+      "complete": true,
+      "status": "completed",
+      "code": null,
+      "dataset": {
+        "name": "wire",
+        "version": "1",
+        "fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de",
+        "schema_version": 1,
+        "cases": [
+          {
+            "case_id": "one",
+            "input": "/add 2 3",
+            "input_fingerprint": "9813f9c92108183436ccabe75b459a1a7dbb7ffe09d9fb737d7ddd153ab4afc2",
+            "source": {
+              "schema_version": 1,
+              "filter_version": "self-contained/1",
+              "source_kind": "manual",
+              "source_run_id": null,
+              "eligibility": "eligible",
+              "reasons": [
+                "manual_input_only"
+              ],
+              "input_fingerprint": "9813f9c92108183436ccabe75b459a1a7dbb7ffe09d9fb737d7ddd153ab4afc2",
+              "selected_input": null,
+              "source_snapshot_fingerprint": "b48e50e596ba841fb9a7ace2231d25296989e3aa595977fb50c5e7f48ac68210",
+              "source_target_key": null,
+              "source_target_fingerprint": null,
+              "observed": null,
+              "evidence": null,
+              "candidate_fingerprint": "290f9af3e9f22007f501d540ef64e529fc8a37eb03a1ac3d2246aa63b9c200f9"
+            },
+            "reference": {
+              "expected": "5",
+              "expected_status": "completed",
+              "expected_code": null,
+              "expected_tools": null,
+              "trajectory": null,
+              "expected_schema": null
+            },
+            "reference_fingerprint": "397004233992193c022a38b2735215e65b2744e3e961b5ae68e817c29b6c1a80",
+            "reason": "人工核算共享向量"
+          }
+        ],
+        "created_at": 1792246148.4288023
+      },
+      "dataset_ref": {
+        "name": "wire",
+        "version": "1",
+        "fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de"
+      },
+      "dataset_fingerprint": "ea0f2cd128a8dbf487449146701228a5c63130a9c8e01602602d33ae381be8de",
+      "target_descriptor": {
+        "key": "target-v2",
+        "limits": {
+          "approval_timeout": 20.0,
+          "max_active_runs": 4,
+          "max_events": 2048,
+          "max_input_bytes": 4096,
+          "max_output_bytes": 8192,
+          "max_request_bytes": 32768,
+          "max_steps": 4,
+          "max_tool_calls": 1,
+          "max_tools_per_step": 1,
+          "run_timeout": 10.0,
+          "tool_timeout": 2.0
+        },
+        "limits_fingerprint": "b71f50a417e5c38f42bcedac8ae1acb530f50b46d4b1bdb57c6208218317f774",
+        "policy": {
+          "allowed_names": [
+            "add",
+            "echo"
+          ],
+          "digest": "9c9a39a56c875144543b7b9d29464b20af04c6f804657eede24d0aa9eb20ee94",
+          "id": "krim_agent.evaluation.targets.controlled_policy",
+          "version": "1"
+        },
+        "post": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "pre": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "prompt_fingerprint": "765c245f704c5ece541e58ad09e1caaf46dfc416ab0a5e508cebc861a6a5c4f8",
+        "provider": {
+          "behavior_version": "decimal-parser/1",
+          "config": {
+            "delay": 0.02,
+            "mode": "decimal"
+          },
+          "digest": "15e6091f92c599f26af826a7a8acb1fdc9980e859859aa93931d83a6172b4011",
+          "id": "krim_agent.providers.eval_script.EvalScriptProvider",
+          "implementation_digest": "15e6091f92c599f26af826a7a8acb1fdc9980e859859aa93931d83a6172b4011",
+          "name": "krim_agent.providers.eval_script.EvalScriptProvider",
+          "version": "1"
+        },
+        "schema_version": 2,
+        "system_prompt": "保留小数精度。",
+        "tools": [
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "left": {
+                  "title": "Left",
+                  "type": "number"
+                },
+                "right": {
+                  "title": "Right",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "left",
+                "right"
+              ],
+              "title": "AddInput",
+              "type": "object"
+            },
+            "name": "add",
+            "output_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "sum": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "sum"
+              ],
+              "type": "object"
+            },
+            "version": "1"
+          },
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "maxLength": 8192,
+                  "title": "Text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "title": "EchoInput",
+              "type": "object"
+            },
+            "name": "echo",
+            "output_schema": {
+              "type": "string"
+            },
+            "version": "1"
+          },
+          {
+            "implementation_digest": "65dde64fc09924bc195b17c26c238d0c19238aad382da4145d3cb893daa810f2",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "pattern": "^[a-z0-9_-]{1,32}$",
+                  "title": "Key",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "title": "NoteInput",
+              "type": "object"
+            },
+            "name": "lookup_note",
+            "output_schema": {
+              "type": "string"
+            },
+            "version": "1"
+          }
+        ],
+        "version": "target-v2/1"
+      },
+      "target_fingerprint": "7db92bc3b692a1a51571a17dd82115b8fefc55f28334faff00b64353d52b098d",
+      "rules": [
+        {
+          "name": "exact_match",
+          "version": "1",
+          "config": {
+            "normalize_whitespace": false
+          }
+        },
+        {
+          "name": "status_code",
+          "version": "1",
+          "config": {
+            "match_code": true
+          }
+        }
+      ],
+      "rules_fingerprint": "d9ba5466cbda33665706639b32de745c8623f70b2c275b3eb2703718a37c8e9c",
+      "execution": {
+        "batch_timeout_seconds": 600,
+        "concurrency": 1,
+        "item_timeout_seconds": 12,
+        "limits": {
+          "approval_timeout": 20.0,
+          "max_active_runs": 4,
+          "max_events": 2048,
+          "max_input_bytes": 4096,
+          "max_output_bytes": 8192,
+          "max_request_bytes": 32768,
+          "max_steps": 4,
+          "max_tool_calls": 1,
+          "max_tools_per_step": 1,
+          "run_timeout": 10.0,
+          "tool_timeout": 2.0
+        },
+        "policy": {
+          "allowed_names": [
+            "add",
+            "echo"
+          ],
+          "digest": "9c9a39a56c875144543b7b9d29464b20af04c6f804657eede24d0aa9eb20ee94",
+          "id": "krim_agent.evaluation.targets.controlled_policy",
+          "version": "1"
+        },
+        "post": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "pre": {
+          "digest": "30a0924a3360be687d1df9fcbbfdff62c01bc0fd14036ab9076cf7f451568666",
+          "id": "none",
+          "version": "1"
+        },
+        "repetitions": 1,
+        "scorer_timeout_seconds": 1
+      },
+      "execution_fingerprint": "b368392e7503cd2694f284d3996f56bbe73be03c2e153504725fa295ccd4e341",
+      "planned_count": 1,
+      "items": [
+        {
+          "case_id": "one",
+          "repetition": 0,
+          "run_id": "fba2246a-24aa-4e18-b390-74cf8412d0a3",
+          "status": "finished",
+          "code": null,
+          "output": {
+            "code": null,
+            "facts_complete": true,
+            "last_seq": 9,
+            "model_steps": 2,
+            "request_key": "lc-eval.978b0b87-462c-4923-890f-3e411b4708eb.0.0",
+            "run_id": "fba2246a-24aa-4e18-b390-74cf8412d0a3",
+            "snapshot_fingerprint": "19e77dc6951deee6876209597d34d40ed186fa8e3daedab1bfac28405d964ef5",
+            "status": "completed",
+            "text": "5",
+            "token_usage": null,
+            "tools": [
+              {
+                "arguments": {
+                  "left": 2.0,
+                  "right": 3.0
+                },
+                "call_id": "cd63752e3ee6d00effc993fed65f9251",
+                "code": null,
+                "executor_started": true,
+                "name": "add",
+                "provider_call_id": "aec98d20942e47b59c8e6aa0355115e6",
+                "result_available": true,
+                "span_id": "538899b3a7da56d3",
+                "status": "ok",
+                "step_index": 0,
+                "value_fingerprint": "52fdc721e2c0a4d4fde50ff2b63155d008dd14fb9aef8dc094df730400f45126"
+              }
+            ],
+            "trace_id": "218e93721732b943c3084cfc85a590d8",
+            "usage_complete": false
+          },
+          "scores": [
+            {
+              "evidence": {},
+              "reason": null,
+              "rule": {
+                "config_fingerprint": "5ff772b266ec248768f563dba369064741b615a2bddbe2d7456b5561e593c8fe",
+                "name": "exact_match",
+                "version": "1"
+              },
+              "status": "scored",
+              "value": 1
+            },
+            {
+              "evidence": {},
+              "reason": null,
+              "rule": {
+                "config_fingerprint": "d2d13df87b67742a9ba937b7f5f3dd2232eb1ba8834606ef9f6a33393de2fcae",
+                "name": "status_code",
+                "version": "1"
+              },
+              "status": "scored",
+              "value": 1
+            }
+          ],
+          "quality": "passed",
+          "source_run_id": null
+        }
+      ],
+      "summary": {
+        "planned": 1,
+        "scored_cells": 2,
+        "planned_cells": 2,
+        "cell_coverage": 1.0,
+        "item_coverage": 1.0,
+        "passed": 999,
+        "pass_rate": 1.0,
+        "mean": 1.0,
+        "metrics": {
+          "exact_match": {
+            "scored": 1,
+            "planned": 1,
+            "coverage": 1.0,
+            "mean": 1.0
+          },
+          "status_code": {
+            "scored": 1,
+            "planned": 1,
+            "coverage": 1.0,
+            "mean": 1.0
+          }
+        },
+        "skipped": 0,
+        "errors": 0,
+        "unexecuted_cells": 0,
+        "usage_complete_count": 0,
+        "token_usage": null
+      },
+      "report_hash": "cc959c680b074ed58a37a9928ac251778af703b2bd3eb9e70bcf8c76f1b2b07e"
+    },
+    "valid": false
+  },
+  {
+    "name": "json-{\"x\":1,\"x\":2}",
+    "kind": "json",
+    "text": "{\"x\":1,\"x\":2}",
+    "valid": false
+  },
+  {
+    "name": "json-1e309",
+    "kind": "json",
+    "text": "1e309",
+    "valid": false
+  },
+  {
+    "name": "json-null",
+    "kind": "json",
+    "text": "null",
+    "valid": true
+  },
+  {
+    "name": "json-true",
+    "kind": "json",
+    "text": "true",
+    "valid": true
+  },
+  {
+    "name": "numeric-revision",
+    "kind": "dataset",
+    "valid": true,
+    "value": {
+      "name": "numeric-reference",
+      "version": "1",
+      "fingerprint": "84afe5fca11a5d290e8975bacb469e01509d9e549b228c3719b57254babbff4c",
+      "schema_version": 1,
+      "cases": [
+        {
+          "case_id": "numeric",
+          "input": "/echo 1e-7",
+          "input_fingerprint": "27c978ca2ea8e84e43d171d39fc08041299d6781e28c33c59298196e70ee8021",
+          "source": {
+            "schema_version": 1,
+            "filter_version": "self-contained/1",
+            "source_kind": "manual",
+            "source_run_id": null,
+            "eligibility": "eligible",
+            "reasons": [
+              "manual_input_only"
+            ],
+            "input_fingerprint": "27c978ca2ea8e84e43d171d39fc08041299d6781e28c33c59298196e70ee8021",
+            "selected_input": null,
+            "source_snapshot_fingerprint": "47d6c193342573c89585b43acbfd737d68644b40b326e03c13fd001ff9587210",
+            "source_target_key": null,
+            "source_target_fingerprint": null,
+            "observed": null,
+            "evidence": null,
+            "candidate_fingerprint": "d08ca38e62936e9d01c903b9cf3e35eed39d17ed3f690556a2c8c25ee18fdcd7"
+          },
+          "reference": {
+            "expected": 1e-07,
+            "expected_status": "completed",
+            "expected_code": null,
+            "expected_tools": null,
+            "trajectory": null,
+            "expected_schema": null
+          },
+          "reference_fingerprint": "7ff5787ef3e4e9dbfb819ede3433cbb338aa852e6cdec050e70087092324b340",
+          "reason": "人工选择明确的JSON小数参考"
+        }
+      ],
+      "created_at": 1792250375.723404
+    }
+  }
+]
