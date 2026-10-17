@@ -1,0 +1,28 @@
+import { useState } from "react";
+import { evalUi as t } from "../lib/copy";
+import { useDataset } from "../hooks/use-dataset";
+import { useEvaluation } from "../hooks/use-evaluation";
+import { CaseEditor } from "./CaseEditor";
+import { EvalReport } from "./EvalReport";
+import { EvalCompare } from "./EvalCompare";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+export function EvaluationWorkbench({ apiKey, active, sourceRun, onRun }: {
+    apiKey: string;
+    active: boolean;
+    sourceRun: string;
+    onRun: (id: string) => void;
+}) {
+    const data = useDataset(apiKey, sourceRun), evaluation = useEvaluation(apiKey, active);
+    const [openId, setOpenId] = useState("");
+    return <section hidden={!active} className="evaluation-workbench"><div className="eval-layout"><CaseEditor data={data}/><div className="evaluation-results"><section className="eval-controls" aria-label="评测操作"><div className="eval-two"><div><Label htmlFor="eval-target">{t.target}</Label><select id="eval-target" value={evaluation.target} disabled={evaluation.pending} onChange={e => evaluation.setTarget(e.target.value)}>{evaluation.targets.map(target => <option key={String(target.key)} value={String(target.key)}>{String(target.key)}</option>)}</select></div><div><Label htmlFor="eval-repetitions">{t.repeat}</Label><Input id="eval-repetitions" type="number" min={1} max={3} value={evaluation.repetitions} disabled={evaluation.pending} onChange={e => {
+            const n = Number(e.target.value);
+            if (Number.isInteger(n) && n >= 1 && n <= 3)
+                evaluation.setRepetitions(n);
+        }}/></div></div>
+   <fieldset className="rule-options"><legend>{t.rules}</legend>{evaluation.rules.map(rule => <label key={rule.name} htmlFor={"rule-" + rule.name}><input type="checkbox" id={"rule-" + rule.name} checked={evaluation.selected.includes(rule.name)} disabled={evaluation.pending || rule.name === "status_code"} onChange={e => evaluation.setSelected(old => e.target.checked ? [...old, rule.name] : old.filter(n => n !== rule.name))}/>{rule.name}</label>)}</fieldset>
+   <Button id="eval-start" disabled={evaluation.busy || !evaluation.pending && (!data.frozen || evaluation.targets.length === 0)} onClick={() => void evaluation.start(data.frozen)}>{evaluation.busy ? "处理中…" : evaluation.pending ? t.findEval : t.start}</Button>
+   <div className="open-evaluation"><Label htmlFor="open-eval-id">{t.id}</Label><div className="eval-inline"><Input id="open-eval-id" value={openId} onChange={e => setOpenId(e.target.value)}/><Button variant="outline" disabled={!openId.trim()} onClick={() => evaluation.select(openId.trim())}>{t.open}</Button></div></div>
+  </section><EvalReport evaluation={evaluation} onRun={onRun}/><EvalCompare evaluation={evaluation}/>{evaluation.notice && <p className="notice" role="status">{evaluation.notice}</p>}</div></div></section>;
+}

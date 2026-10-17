@@ -1,34 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
-import { pythonExecutable, pythonFixtureArgs } from "./e2e/python-client.js";
-
-const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-
-export default defineConfig({
-  testDir: "./e2e",
-  testIgnore: ["generated-root-recovery.spec.ts", "directory-checkpoint-recovery.spec.ts", "directory-restore-recovery.spec.ts", "missing-directory-restore-recovery.spec.ts", "missing-directory-rollback-recovery.spec.ts", "conversation-recovery.spec.ts", "conversation-recovery-boundaries.spec.ts", "conversation-recovery-process.spec.ts"],
-  timeout: 30_000,
-  expect: { timeout: 10_000 },
-  fullyParallel: false,
-  workers: 1,
-  reporter: [["line"]],
-  use: {
-    baseURL: "http://127.0.0.1:8876",
-    trace: "retain-on-failure",
-    ...devices["Desktop Chrome"],
-  },
-  webServer: {
-    env: {
-      KRIM_TEST_EXECUTION_TREE: "1",
-      KRIM_TEST_MODEL_CHECKPOINTS: "1",
-      KRIM_TEST_MODEL_RESTORES: "1",
-      KRIM_TEST_DIRECTORY_CHECKPOINTS: "1",
-      KRIM_TEST_DIRECTORY_RESTORES: "1",
-      KRIM_TEST_MISSING_DIRECTORY_RESTORES: "1",
-      KRIM_TEST_MISSING_DIRECTORY_ROLLBACKS: "1",
-    },
-    command: [pythonExecutable, ...pythonFixtureArgs("browser_ui_server.py")].map(quote).join(" "),
-    url: "http://127.0.0.1:8876/healthz",
-    reuseExistingServer: false,
-    timeout: 30_000,
-  },
-});
+import { resolve } from "node:path";
+const quote = (v: string) => "'" + v.replaceAll("'", "'\"'\"'") + "'";
+const root = resolve(import.meta.dirname, "..");
+const evidence = process.env.KRIM_GUIDE_EVIDENCE ?? resolve(root, ".cache/agent-core/lc-ui1/browser");
+const port = Number(process.env.KRIM_GUIDE_PORT ?? 8876);
+const command = [process.env.KRIM_GUIDE_PYTHON ?? "python3.12", "-I", "-B", resolve(root, "tests/core/fixtures/ui_server.py"), "--database", resolve(evidence, "browser.sqlite"), "--port", String(port), "--evidence", evidence].map(quote).join(" ");
+export default defineConfig({ testDir: "./e2e", testMatch: ["agent-core.spec.ts", "agent-core-ui.spec.ts", "evaluation.spec.ts"], fullyParallel: false, workers: 1, timeout: 30000, reporter: [["line"]], use: { baseURL: process.env.KRIM_GUIDE_BASE_URL ?? `http://127.0.0.1:${port}`, trace: "retain-on-failure", ...devices["Desktop Chrome"] }, webServer: process.env.KRIM_GUIDE_BASE_URL ? undefined : { command, url: `http://127.0.0.1:${port}/healthz`, reuseExistingServer: false, timeout: 15000 } });
