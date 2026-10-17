@@ -1,5 +1,1 @@
-"""M1 主对话运行时。"""
-
-from .chat import ChatRuntime
-
-__all__ = ["ChatRuntime"]
+"""Krim Agent模块；不在包导入时装配依赖。"""

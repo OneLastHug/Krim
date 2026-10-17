@@ -1,64 +1,67 @@
-"""确定性离线演示；明确不是 LLM，也不执行网络请求。"""
+"""确定性离线脚本；不代表商业模型质量，不发送网络请求。"""
 
 import asyncio
-import re
+import uuid
 from collections.abc import AsyncIterator, Sequence
 
-from krim_agent.protocol.domain import MessageView
-from krim_agent.tools.core import ToolDefinition
+from pydantic import JsonValue
 
-from .types import ModelText, ModelToolCall
+from krim_agent.contracts import Message, parse_json
+
+from .types import ModelEvent, ModelText, ModelToolCall
 
 
 class FakeProvider:
-    name = "fake-offline"
-
-    def __init__(self, delay: float = 0.01) -> None:
+    def __init__(self, delay: float = 0.02) -> None:
         self.delay = delay
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.active = 0
+        self.streams_closed = 0
+        self.closed = False
 
     async def stream(
-        self, messages: Sequence[MessageView], tools: Sequence[ToolDefinition]
-    ) -> AsyncIterator[ModelText | ModelToolCall]:
-        last_user = next(
-            (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "user"),
-            None,
-        )
-        if last_user is None:
-            raise ValueError("缺少用户消息")
-        current = messages[last_user]
-        results = [message for message in messages[last_user + 1 :] if message.role == "tool"]
-        if results:
-            reply = "[fake] 工具结果：" + results[-1].content
-        else:
-            original = current.details.get("_prompt_context_raw_text", current.content)
-            text = (original if isinstance(original, str) else current.content).strip()
-            number = r"(-?\d+(?:\.\d+)?)"
-            match = re.fullmatch(rf"/add\s+{number}\s+{number}", text)
-            if match is None:
-                match = re.fullmatch(rf"(?:计算\s*)?{number}\s*\+\s*{number}", text)
-            if match is not None:
-                yield ModelToolCall(
-                    name="add", arguments={"left": float(match[1]), "right": float(match[2])}
-                )
+        self, messages: Sequence[Message], tools: list[dict[str, JsonValue]]
+    ) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        self.active += 1
+        self.entered.set()
+        try:
+            if messages[-1].role == "tool":
+                result = parse_json(messages[-1].content)
+                if isinstance(result, dict) and isinstance(result.get("sum"), (int, float)):
+                    text = format(result["sum"], "g")
+                else:
+                    text = result if isinstance(result, str) else messages[-1].content
+                await asyncio.sleep(self.delay)
+                yield ModelText(text=text)
                 return
-            if text.startswith("/echo "):
-                yield ModelToolCall(name="echo", arguments={"text": text[6:]})
-                return
-            if text.startswith("/question "):
-                yield ModelToolCall(name="question", arguments={"question": text[10:]})
-                return
-            if text.startswith("/skill "):
-                parts = text[7:].split(maxsplit=1)
-                yield ModelToolCall(
-                    name="read_skill",
-                    arguments={"name": parts[0], "resource": parts[1] if len(parts) > 1 else None},
-                )
-                return
-            reply = "[fake] 收到：" + current.content.strip()
-        reply = reply[:8192]
-        for position in range(0, len(reply), 16):
+            text = messages[-1].content
+            if text == "/slow":
+                await asyncio.sleep(60)
             await asyncio.sleep(self.delay)
-            yield ModelText(text=reply[position : position + 16])
+            words = text.split()
+            call_id = uuid.uuid4().hex
+            if len(words) == 3 and words[0] == "/add":
+                try:
+                    left, right = float(words[1]), float(words[2])
+                except ValueError:
+                    yield ModelText(text="参数需要两个有限数字")
+                    return
+                yield ModelToolCall(
+                    id=call_id, name="add", arguments={"left": left, "right": right}
+                )
+            elif words and words[0] == "/note":
+                yield ModelToolCall(
+                    id=call_id, name="lookup_note", arguments={"key": text[6:].strip()}
+                )
+            elif text.startswith("/echo "):
+                yield ModelToolCall(id=call_id, name="echo", arguments={"text": text[6:]})
+            else:
+                yield ModelText(text="离线脚本回显：" + text)
+        finally:
+            self.active -= 1
+            self.streams_closed += 1
 
     async def close(self) -> None:
-        """离线 provider 不持有外部资源。"""
+        self.closed = True

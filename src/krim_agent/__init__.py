@@ -1,7 +1,3 @@
-"""Krim Agent 的 Python 核心包。"""
+"""Krim Agent；导入不装配服务或打开数据库。"""
 
-__version__ = "0.1.0.dev0"
-
-from .protocol.models import ChannelResult, ProtocolEnvelope, StreamFrame
-
-__all__ = ["ChannelResult", "ProtocolEnvelope", "StreamFrame", "__version__"]
+__version__ = "0.2.0a1"

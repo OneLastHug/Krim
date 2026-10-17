@@ -1,98 +1,88 @@
-"""本地 API 边界；EXT 安全补全，不宣称提供租户隔离或沙箱。"""
+"""本机/同源/Key 与有限 JSON 边界；不提供多租户或 OS 沙箱。"""
 
-import re
+import ipaddress
 import secrets
 from urllib.parse import urlsplit
 
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from krim_agent.attachment import MAX_ATTACHMENT_BASE64
 from krim_agent.config import Settings
+from krim_agent.contracts import parse_json
 
 from .web import PUBLIC_UI_PATHS
 
 
-def local_host(host: str | None) -> bool:
-    return host in {"localhost", "127.0.0.1", "::1"}
+def local(value: str | None) -> bool:
+    if value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value or "").is_loopback
+    except ValueError:
+        return False
 
 
 class LocalBoundary:
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
-        self.app = app
-        self.key = settings.api_key.get_secret_value()
+        self.app, self.settings = app, settings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        oauth_callback = scope["method"] == "GET" and scope["path"] == "/v1/mcp/oauth/callback"
-        if scope["path"] == "/v1/mcp/oauth/callback":
-            # 在任何拒绝/回程前去掉URI查询；ASGI访问日志不得输出授权码或state。
-            scope["krim.oauth_query"] = scope.get("query_string", b"")
-            scope["query_string"] = b""
-            original_send = send
 
-            async def callback_send(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    secured = MutableHeaders(scope=message)
-                    secured["Cache-Control"] = "no-store"
-                    secured["Referrer-Policy"] = "no-referrer"
-                    secured["X-Content-Type-Options"] = "nosniff"
-                await original_send(message)
+        async def reject(code: str, status: int) -> None:
+            await JSONResponse(
+                {"error": {"code": code, "message": "请求未完成，请检查操作及运行状态。"}},
+                status_code=status,
+            )(scope, receive, send)
 
-            send = callback_send
         headers = Headers(scope=scope)
-
-        async def reject(code: str, message: str, status: int) -> None:
-            response = JSONResponse({"error": {"code": code, "message": message}}, status)
-            await response(scope, receive, send)
-
         try:
             host = urlsplit("http://" + headers.get("host", "")).hostname
         except ValueError:
             host = None
-        if not self.key and not local_host(host):
-            await reject("local_only", "无密钥模式仅允许本机 Host", 403)
-            return
+        key = self.settings.api_key.get_secret_value()
         client = scope.get("client")
-        if not self.key and client is not None and not local_host(client[0]):
-            await reject("local_only", "无密钥模式仅允许本机客户端", 403)
+        if not key and (not local(host) or client is None or not local(client[0])):
+            await reject("local_only", 403)
             return
         origin = headers.get("origin")
-        expected_origin = f"{scope['scheme']}://{headers.get('host', '')}"
-        if origin and origin != expected_origin:
-            await reject("origin_denied", "不允许跨站请求", 403)
+        if origin is not None and origin != scope["scheme"] + "://" + headers.get("host", ""):
+            await reject("origin_denied", 403)
             return
-        public_ui = scope["method"] in {"GET", "HEAD"} and scope["path"] in PUBLIC_UI_PATHS
-        if self.key and scope["path"] != "/healthz" and not public_ui and not oauth_callback:
-            actual = headers.get("authorization", "")
-            if not secrets.compare_digest(actual.encode(), f"Bearer {self.key}".encode()):
-                await reject("unauthorized", "需要有效的 Bearer API Key", 401)
-                return
+        public = scope["method"] in {"GET", "HEAD"} and (
+            scope["path"] in PUBLIC_UI_PATHS or scope["path"] == "/healthz"
+        )
+        if (
+            key
+            and not public
+            and not secrets.compare_digest(
+                headers.get("authorization", "").encode(), ("Bearer " + key).encode()
+            )
+        ):
+            await reject("unauthorized", 401)
+            return
         body = bytearray()
-        attachment_upload = scope["method"] == "POST" and bool(
-            re.fullmatch(r"/v1/topics/[A-Za-z0-9_-]{1,128}/attachments", scope["path"])
-        )
-        eval_upload = scope["method"] == "POST" and scope["path"] == "/v1/evals"
-        body_limit = (
-            (16 * 1024 * 1024 + 65536)
-            if eval_upload
-            else (MAX_ATTACHMENT_BASE64 + 2048 if attachment_upload else 65536)
-        )
         while True:
-            message = await receive()
-            if message["type"] == "http.disconnect":
+            part = await receive()
+            if part["type"] == "http.disconnect":
                 return
-            chunk = message.get("body", b"")
-            if len(body) + len(chunk) > body_limit:
-                await reject("body_too_large", "请求体超过此接口允许的大小", 413)
+            body.extend(part.get("body", b""))
+            if len(body) > 65536:
+                await reject("body_too_large", 413)
                 return
-            body.extend(chunk)
-            if not message.get("more_body", False):
+            if not part.get("more_body", False):
                 break
+        if body:
+            try:
+                parse_json(body.decode("utf-8"))
+            except (UnicodeError, ValueError, RecursionError):
+                await reject("invalid_json", 422)
+                return
         delivered = False
+        started = False
 
         async def replay() -> Message:
             nonlocal delivered
@@ -101,4 +91,15 @@ class LocalBoundary:
                 return {"type": "http.request", "body": bytes(body), "more_body": False}
             return await receive()
 
-        await self.app(scope, replay, send)
+        async def tracked(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, replay, tracked)
+        except Exception:
+            # 最外层不让原始异常/私有 payload 进入服务器 traceback 日志。
+            if not started:
+                await reject("execution_error", 500)

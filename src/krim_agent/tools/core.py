@@ -1,569 +1,70 @@
-"""工具定义与 Python 适配；参考 SRC-DOC-001、SRC-OSS-003。"""
+"""不可变工具定义与 Hook 快照；没有旧工作区/命令 Backend。"""
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import re
-from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints
-from uuid import uuid4
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Literal
 
-from jsonschema import Draft202012Validator
-from pydantic import BaseModel, ConfigDict, JsonValue, create_model
+from pydantic import BaseModel, JsonValue
 
-from krim_agent.observability import OwnerKind, Tracer
-from krim_agent.protocol.models import StrictModel
+from krim_agent.contracts import ToolObservation, fingerprint
 
-from .output import OutputContract, OutputSchema, WireOutputSchema
+from .output import OutputContract, WireOutputSchema
 
-if TYPE_CHECKING:
-    from krim_agent.execution.binding import CommandCapture, ExecutionBinding
-    from krim_agent.skills import SkillSnapshot
-    from krim_agent.workspace import WorkspaceBinding
-    from krim_agent.workspace_checkpoint import CheckpointCaptureFence
-    from krim_agent.workspace_container_retention import ContainerRetentionFence
-    from krim_agent.workspace_container_retention_control import ContainerRetentionInspection
-    from krim_agent.workspace_directory_checkpoint import DirectoryCheckpointCaptureFence
-    from krim_agent.workspace_directory_restore import DirectoryRestoreFence
-    from krim_agent.workspace_list import NativeBatchFence
-    from krim_agent.workspace_missing_directory_restore import MissingDirectoryRestoreFence
-    from krim_agent.workspace_mixed_batch import MixedBatchFence
-    from krim_agent.workspace_restore import CheckpointRestoreFence
-    from krim_agent.workspace_tree import TreePlanFence, TreePlanRequest, TreePlanView
-
-if TYPE_CHECKING:
-    from .registry import ToolRegistry
-
-Risk = Literal["read", "write"]
-Decision = Literal["allow", "deny", "ask", "audit"]
-Policy = Callable[["ToolDefinition", "ToolContext"], Awaitable[Decision]]
-Executor = Callable[[BaseModel, "ToolContext"], Awaitable[Any]]
-ApprovalHandler = Callable[["ToolDefinition", "ToolContext"], Awaitable[bool]]
-QuestionHandler = Callable[[str, list[str], "ToolContext"], Awaitable[str]]
-InteractionPublisher = Callable[[dict[str, JsonValue]], Awaitable[None]]
-
-
-class TaskBackend(Protocol):
-    async def tool_operation(
-        self, kind: Literal["plan", "todo"], payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-
-
-class WorkspaceChangeBackend(Protocol):
-    async def tool_operation(
-        self, operation: str, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-
-
-class DirectoryChangeBackend(Protocol):
-    async def tool_operation(
-        self, operation: str, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
-
-
-class WorkspaceCheckpointBackend(Protocol):
-    async def capture_read(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, object]: ...
-    async def capture_metadata(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, object]: ...
-    async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None: ...
-
-
-class DirectoryCheckpointBackend(Protocol):
-    async def capture_metadata(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, object]: ...
-    async def validate_capture_metadata(self, value: Any, context: ToolContext) -> None: ...
-
-
-class DirectoryRestoreBackend(Protocol):
-    async def tool_step(
-        self, kind: str, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, object]: ...
-    async def validate_step(self, kind: str, value: Any, context: ToolContext) -> None: ...
-
-
-class MixedBatchQueryBackend(Protocol):
-    async def tool_query(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_query(self, value: Any, context: ToolContext) -> None: ...
-
-
-class MixedBatchWriteBackend(Protocol):
-    async def tool_start(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_start(self, value: Any, context: ToolContext) -> None: ...
-
-
-class WorkspaceTreeBackend(Protocol):
-    async def prepare(self, request: TreePlanRequest, context: ToolContext) -> TreePlanView: ...
-
-
-class TreePlanQueryBackend(Protocol):
-    async def tool_query(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_query(self, value: Any, context: ToolContext) -> None: ...
-
-
-class TreePlanModelBackend(Protocol):
-    async def tool_prepare(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def tool_start(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_result(self, kind: str, value: Any, context: ToolContext) -> None: ...
-
-
-class TreeMoveBackend(Protocol):
-    def call_scope(self) -> AbstractAsyncContextManager[None]: ...
-    async def tool_operation(
-        self, operation: str, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
-    def assert_external_close(self) -> None: ...
-
-
-class TreeExchangeBackend(TreeMoveBackend, Protocol):
-    """双完整树后端独立能力身份；沿同调用/原回程与生命周期协议。"""
-
-
-class CheckpointControlBackend(TreeMoveBackend, Protocol):
-    """检查点模型父调用控制，与内部捕获后端分开装配。"""
-
-
-class CommandBackend(Protocol):
-    async def tool_operation(
-        self, operation: str, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, JsonValue]: ...
-    async def capture_read(
-        self, payload: dict[str, Any], context: ToolContext
-    ) -> dict[str, object]: ...
-    def assert_external_close(self) -> None: ...
-    async def validate_result(self, operation: str, value: Any, context: ToolContext) -> None: ...
-
-
-class ToolError(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
+type Decision = Literal["allow", "deny", "ask"]
 
 
 @dataclass(frozen=True)
-class ShortCircuit:
-    value: Any
-
-
-@dataclass
-class ToolExecutionBudget:
-    deadline: asyncio.Timeout
-    active: bool = True
-    waiters: int = 0
-    remaining: float | None = None
-    pause_extension: float = 0.0
-    _pause_started: float | None = field(default=None, repr=False)
-
-    def pause(self) -> bool:
-        if not self.active or self.deadline.expired():
-            return False
-        if self.waiters == 0:
-            when = self.deadline.when()
-            if when is None:
-                return False
-            self._pause_started = asyncio.get_running_loop().time()
-            self.remaining = max(0.0, when - self._pause_started)
-            self.deadline.reschedule(None)
-        self.waiters += 1
-        return True
-
-    def resume(self) -> None:
-        self.waiters -= 1
-        if self.waiters == 0 and self.active and not self.deadline.expired():
-            assert self.remaining is not None
-            now = asyncio.get_running_loop().time()
-            if self._pause_started is not None:
-                self.pause_extension += now - self._pause_started
-                self._pause_started = None
-            self.deadline.reschedule(now + self.remaining)
-            self.remaining = None
-
-
-ExecutionBudgetBase = tuple[tuple[int, float | None], ...]
-
-
-def execution_budget_snapshot(budgets: tuple[ToolExecutionBudget, ...]) -> tuple[object, ...]:
-    return tuple(
-        (
-            id(item),
-            item.active,
-            item.waiters,
-            item.remaining,
-            item.deadline.when(),
-            item.pause_extension,
-            item._pause_started,
-        )
-        for item in budgets
-    )
-
-
-def execution_budget_base(budgets: tuple[ToolExecutionBudget, ...]) -> ExecutionBudgetBase:
-    values = []
-    for item in budgets:
-        when = item.deadline.when()
-        if when is None and item._pause_started is not None and item.remaining is not None:
-            when = item._pause_started + item.remaining
-        values.append((id(item), None if when is None else when - item.pause_extension))
-    return tuple(values)
-
-
-def same_execution_budget(first: ExecutionBudgetBase, second: ExecutionBudgetBase) -> bool:
-    from math import isclose, isfinite
-
-    if len(first) != len(second):
-        return False
-    for (left_id, left), (right_id, right) in zip(first, second, strict=True):
-        if left_id != right_id:
-            return False
-        if left is None or right is None:
-            if left is not right:
-                return False
-        elif not (
-            isfinite(left) and isfinite(right) and isclose(left, right, rel_tol=0, abs_tol=1e-7)
-        ):
-            return False
-    return True
-
-
-@dataclass
-class ToolContext:
-    registry: ToolRegistry
-    run_id: str = "local"
-    topic_id: str = "local"
-    depth: int = 0
-    timeout: float = 10
-    policy: Policy | None = None
-    call_id: str = field(default_factory=lambda: str(uuid4()))
-    arguments: dict[str, Any] = field(default_factory=dict)
-    agent_id: str | None = None
-    session_id: str | None = None
-    task_store: TaskBackend | None = None
-    approval_handler: ApprovalHandler | None = None
-    question_handler: QuestionHandler | None = None
-    interaction_publisher: InteractionPublisher | None = None
-    execution_timeouts: tuple[ToolExecutionBudget, ...] = ()
-    # 来源由宿主/模型运行时设置，不能从工具参数伪造。
-    origin: Literal["model", "host"] = "model"
-    model_tools: Mapping[str, ToolDefinition] | None = None
-    skill_snapshot: SkillSnapshot | None = None
-    context_config: dict[str, JsonValue] | None = None
-    budget_account_ids: tuple[str, ...] = ()
-    tracer: Tracer | None = None
-    trace_owner_kind: OwnerKind | None = None
-    trace_owner_id: str | None = None
-    # 由可信宿主绑定；模型参数和HTTP请求不能设置此字段。
-    workspace: WorkspaceBinding | None = None
-    workspace_changes: WorkspaceChangeBackend | None = None
-    directory_changes: DirectoryChangeBackend | None = None
-    workspace_mixed_queries: MixedBatchQueryBackend | None = None
-    _mixed_query_response: str | None = field(default=None, repr=False)
-    workspace_mixed_batches: MixedBatchWriteBackend | None = None
-    _mixed_write_response: str | None = field(default=None, repr=False)
-    _directory_response: tuple[str, str] | None = field(default=None, repr=False)
-    workspace_batch: NativeBatchFence | None = None
-    mixed_batch: MixedBatchFence | None = None
-    tree_fence: TreePlanFence | None = None
-    workspace_trees: WorkspaceTreeBackend | None = None
-    _tree_prepare_response: str | None = field(default=None, repr=False)
-    _checkpoint_capture_response: str | None = field(default=None, repr=False)
-    workspace_tree_queries: TreePlanQueryBackend | None = None
-    _tree_query_response: str | None = field(default=None, repr=False)
-    workspace_tree_models: TreePlanModelBackend | None = None
-    _tree_model_response: tuple[str, str] | None = field(default=None, repr=False)
-    tree_moves: TreeMoveBackend | None = None
-    _tree_move_response: tuple[str, str] | None = field(default=None, repr=False)
-    tree_exchanges: TreeExchangeBackend | None = None
-    _tree_exchange_response: tuple[str, str] | None = field(default=None, repr=False)
-    # 仅可信模型混合批次嵌套上下文使用；Registry自身仍为每个嵌套调用生成审计call_id。
-    source_call_id: str | None = field(default=None, repr=False)
-    checkpoint_capture: CheckpointCaptureFence | None = None
-    directory_checkpoint_capture: DirectoryCheckpointCaptureFence | None = None
-    directory_checkpoint_qualify: Callable[[], None] | None = field(default=None, repr=False)
-    workspace_directory_checkpoints: DirectoryCheckpointBackend | None = None
-    _directory_checkpoint_capture_response: str | None = field(default=None, repr=False)
-    directory_restore: DirectoryRestoreFence | MissingDirectoryRestoreFence | None = None
-    directory_restore_qualify: Callable[[], None] | None = field(default=None, repr=False)
-    workspace_directory_restores: DirectoryRestoreBackend | None = None
-    workspace_missing_directory_restores: DirectoryRestoreBackend | None = None
-    _directory_restore_response: str | None = field(default=None, repr=False)
-    container_retention: ContainerRetentionInspection | ContainerRetentionFence | None = None
-    workspace_container_retentions: DirectoryRestoreBackend | None = None
-    _container_retention_response: str | None = field(default=None, repr=False)
-    checkpoint_restore: CheckpointRestoreFence | None = None
-    workspace_checkpoints: WorkspaceCheckpointBackend | None = None
-    workspace_checkpoint_controls: CheckpointControlBackend | None = None
-    _checkpoint_control_response: tuple[str, str] | None = field(default=None, repr=False)
-    execution: ExecutionBinding | None = None
-    commands: CommandBackend | None = None
-    command_capture: CommandCapture | None = None
-    _command_response: tuple[str, str] | None = field(default=None, repr=False)
-    command_admitted: Callable[[str], None] | None = field(default=None, repr=False)
-    _command_expected: str | None = field(default=None, repr=False)
-
-    def child(self, arguments: dict[str, Any]) -> ToolContext:
-        return ToolContext(
-            registry=self.registry,
-            run_id=self.run_id,
-            topic_id=self.topic_id,
-            depth=self.depth + 1,
-            timeout=self.timeout,
-            policy=self.policy,
-            call_id=self.call_id if self.depth == 0 else str(uuid4()),
-            source_call_id=self.source_call_id,
-            agent_id=self.agent_id,
-            session_id=self.session_id,
-            task_store=self.task_store,
-            approval_handler=self.approval_handler,
-            question_handler=self.question_handler,
-            interaction_publisher=self.interaction_publisher,
-            execution_timeouts=self.execution_timeouts,
-            origin=self.origin,
-            model_tools=self.model_tools,
-            skill_snapshot=self.skill_snapshot,
-            context_config=self.context_config,
-            budget_account_ids=self.budget_account_ids,
-            tracer=self.tracer,
-            trace_owner_kind=self.trace_owner_kind,
-            trace_owner_id=self.trace_owner_id,
-            workspace=self.workspace,
-            workspace_changes=self.workspace_changes,
-            directory_changes=self.directory_changes,
-            workspace_mixed_queries=self.workspace_mixed_queries,
-            workspace_mixed_batches=self.workspace_mixed_batches,
-            workspace_batch=self.workspace_batch,
-            mixed_batch=self.mixed_batch,
-            tree_fence=self.tree_fence,
-            workspace_trees=self.workspace_trees,
-            workspace_tree_queries=self.workspace_tree_queries,
-            workspace_tree_models=self.workspace_tree_models,
-            tree_moves=self.tree_moves,
-            tree_exchanges=self.tree_exchanges,
-            checkpoint_capture=self.checkpoint_capture,
-            directory_checkpoint_capture=self.directory_checkpoint_capture,
-            directory_checkpoint_qualify=self.directory_checkpoint_qualify,
-            workspace_directory_checkpoints=self.workspace_directory_checkpoints,
-            directory_restore=self.directory_restore,
-            directory_restore_qualify=self.directory_restore_qualify,
-            workspace_directory_restores=self.workspace_directory_restores,
-            workspace_missing_directory_restores=self.workspace_missing_directory_restores,
-            container_retention=self.container_retention,
-            workspace_container_retentions=self.workspace_container_retentions,
-            checkpoint_restore=self.checkpoint_restore,
-            workspace_checkpoints=self.workspace_checkpoints,
-            workspace_checkpoint_controls=self.workspace_checkpoint_controls,
-            execution=self.execution,
-            commands=self.commands,
-            command_capture=self.command_capture,
-            command_admitted=self.command_admitted,
-            _command_expected=self._command_expected,
-            arguments=arguments,
-        )
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self.registry.call_tool(name, arguments, self)
-
-    @asynccontextmanager
-    async def human_wait(self) -> AsyncIterator[None]:
-        """只暂停借用的工具 deadline；运行/Agent 总预算和交互独立预算仍生效。"""
-        budgets = [budget for budget in self.execution_timeouts if budget.pause()]
-        try:
-            yield
-        finally:
-            for budget in reversed(budgets):
-                budget.resume()
-
-
-PreHook = Callable[[ToolContext], Awaitable[ShortCircuit | None]]
-PostHook = Callable[[Any, ToolContext], Awaitable[Any]]
-OutputGuard = Callable[[Any, ToolContext], Awaitable[None]]
-
-
-@dataclass(frozen=True)
-class ToolDefinition:
+class Invocation:
+    run_id: str
+    call_id: str
+    span_id: str
+    step_index: int
     name: str
-    description: str
+    arguments_json: str
+    tool_hash: str
+    provider_call_id: str | None = None
+
+
+type Policy = Callable[[Invocation], Awaitable[Decision]]
+type PreHook = Callable[[Invocation], Awaitable[str | None]]
+type PostHook = Callable[[Invocation, ToolObservation], Awaitable[None]]
+type Executor = Callable[[BaseModel], Awaitable[JsonValue]]
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
     parameters: type[BaseModel]
     executor: Executor
-    risk: Risk = "write"
-    pre_execute: PreHook | None = None
-    post_execute: PostHook | None = None
-    output_schema: OutputSchema | None = None
-    should_defer: bool = False
-    always_load: bool = False
-    output_guard: OutputGuard | None = None
-    _output_contract: OutputContract | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    output_schema: WireOutputSchema
+    version: str
+    implementation_digest: str
+    risk: str = "read"
 
     def __post_init__(self) -> None:
-        if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name) is None:
-            raise ValueError("工具名称必须是小写字母开头的 snake_case，最多 64 字符")
-        if self.risk not in {"read", "write"}:
-            raise ValueError("不支持的风险等级")
-        if type(self.should_defer) is not bool or type(self.always_load) is not bool:
-            raise ValueError("工具加载配置必须为布尔值")
-        Draft202012Validator.check_schema(self.parameters.model_json_schema())
-        if self.output_schema is not None:
-            object.__setattr__(self, "_output_contract", OutputContract(self.output_schema))
-            if not isinstance(self.output_schema, type):
-                assert self._output_contract is not None
-                object.__setattr__(self, "output_schema", self._output_contract.schema())
+        if (
+            self.risk != "read"
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name) is None
+            or not inspect.iscoroutinefunction(self.executor)
+        ):
+            raise ValueError("仅接受显式可信异步只读工具")
+        if re.fullmatch(r"[0-9a-f]{64}", self.implementation_digest) is None or not self.version:
+            raise ValueError("工具须有宿主确认的实现摘要/版本")
+        OutputContract(self.output_schema)
 
-    def validate_output(self, value: JsonValue) -> None:
-        if self._output_contract is not None:
-            self._output_contract.validate(value)
+    def descriptor(self) -> dict[str, JsonValue]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "implementation_digest": self.implementation_digest,
+            "input_schema": self.parameters.model_json_schema(),
+            "output_schema": OutputContract(self.output_schema).schema(),
+        }
 
-    def schema(self) -> ToolInfo:
-        return ToolInfo(
-            name=self.name,
-            description=self.description,
-            risk=self.risk,
-            input_schema=self.parameters.model_json_schema(),
-            output_schema=self._output_contract.schema() if self._output_contract else None,
-            should_defer=self.should_defer,
-            always_load=self.always_load,
-        )
-
-
-class ToolBase(ABC):
-    name: str
-    description: str
-    parameters: type[BaseModel]
-    risk: Risk = "write"
-    output_schema: OutputSchema | None = None
-    should_defer: bool = False
-    always_load: bool = False
-
-    @abstractmethod
-    async def execute(self, arguments: BaseModel, context: ToolContext) -> Any:
-        raise NotImplementedError
-
-    def definition(self) -> ToolDefinition:
-        return ToolDefinition(
-            self.name,
-            self.description,
-            self.parameters,
-            self.execute,
-            self.risk,
-            output_schema=self.output_schema,
-            should_defer=self.should_defer,
-            always_load=self.always_load,
-        )
-
-
-def tool(
-    *,
-    name: str | None = None,
-    description: str = "",
-    risk: Risk = "write",
-    output_schema: OutputSchema | None = None,
-    should_defer: bool = False,
-    always_load: bool = False,
-) -> Callable[[Callable[..., Awaitable[Any]]], ToolDefinition]:
-    def decorate(function: Callable[..., Awaitable[Any]]) -> ToolDefinition:
-        if not inspect.iscoroutinefunction(function):
-            raise TypeError("M1 工具必须是 async 函数，不能在事件循环中执行同步阻塞代码")
-        hints = get_type_hints(function, include_extras=True)
-        fields: dict[str, Any] = {}
-        needs_context = False
-        for parameter in inspect.signature(function).parameters.values():
-            if parameter.kind in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}:
-                raise TypeError("工具不支持可变参数")
-            if parameter.kind is parameter.POSITIONAL_ONLY:
-                raise TypeError("工具不支持仅位置参数")
-            if parameter.name == "context":
-                if hints.get("context") is not ToolContext:
-                    raise TypeError("context 必须声明为 ToolContext")
-                needs_context = True
-                continue
-            if parameter.name not in hints:
-                raise TypeError(f"缺少参数类型: {parameter.name}")
-            default = ... if parameter.default is parameter.empty else parameter.default
-            fields[parameter.name] = (hints[parameter.name], default)
-        parameters = create_model(
-            f"{function.__name__}Input",
-            __config__=ConfigDict(
-                extra="forbid", strict=True, allow_inf_nan=False, validate_default=True
-            ),
-            **fields,
-        )
-
-        async def executor(arguments: BaseModel, context: ToolContext) -> Any:
-            values = {key: getattr(arguments, key) for key in fields}
-            if needs_context:
-                values["context"] = context
-            return await function(**values)
-
-        return ToolDefinition(
-            name or function.__name__,
-            description or inspect.getdoc(function) or function.__name__,
-            parameters,
-            executor,
-            risk,
-            output_schema=output_schema,
-            should_defer=should_defer,
-            always_load=always_load,
-        )
-
-    return decorate
-
-
-class TextContent(StrictModel):
-    type: Literal["text"] = "text"
-    text: str
-
-
-class ToolInfo(StrictModel):
-    name: str
-    description: str
-    risk: Risk
-    input_schema: dict[str, JsonValue]
-    output_schema: WireOutputSchema | None = None
-    should_defer: bool = False
-    always_load: bool = False
-
-
-class ToolResult(StrictModel):
-    content: list[TextContent]
-    is_error: bool = False
-    data: JsonValue = None
-    code: str | None = None
-
-
-class ToolAudit(StrictModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    call_id: str
-    run_id: str
-    name: str
-    risk: Risk
-    decision: Decision
-    depth: int
-    ok: bool
-    code: str | None = None
-
-
-class ToolObservation(StrictModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    call_id: str
-    run_id: str
-    name: str
-    result: ToolResult
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.descriptor())

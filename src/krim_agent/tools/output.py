@@ -6,11 +6,11 @@ import copy
 from collections.abc import Iterator
 
 from jsonschema import Draft202012Validator, FormatChecker, SchemaError
-from pydantic import BaseModel, JsonValue, TypeAdapter
+from pydantic import BaseModel, JsonValue
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
-from krim_agent.protocol.models import check_json
+from krim_agent.contracts import check_json
 
 OutputSchema = type[BaseModel] | dict[str, JsonValue] | bool
 WireOutputSchema = dict[str, JsonValue] | bool
@@ -55,9 +55,9 @@ class OutputContract:
             if isinstance(declaration, type) and issubclass(declaration, BaseModel)
             else declaration
         )
-        self._schema: WireOutputSchema = copy.deepcopy(
-            TypeAdapter(WireOutputSchema).validate_python(schema, strict=True)
-        )
+        if not isinstance(schema, (dict, bool)):
+            raise ValueError("工具输出 Schema 必须为对象或布尔值")
+        self._schema: WireOutputSchema = copy.deepcopy(schema)
         check_json(self._schema)
         if isinstance(self._schema, dict):
             dialect: JsonValue = self._schema.get("$schema")

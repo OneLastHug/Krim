@@ -1,1997 +1,304 @@
-"""krim 最小客户端与本地服务入口；命令含义见 docs/user-guide/m1-local.md。"""
-
-from __future__ import annotations
+"""Krim Agent CLI：写端显式装配，冷读取只打开只读库。"""
 
 import argparse
-import base64
+import asyncio
 import json
 import os
-from collections.abc import Sequence
+import signal
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
+from urllib.parse import quote
 
-import httpx
-from pydantic import BaseModel, ValidationError
-
-from . import __version__
-from .budgets import BudgetResolveRequest
-from .client import ClientError, KrimClient
-from .context_engine import ContextOptions, ContextProposalDecision
-from .generated_tree_undo import (
-    GeneratedTreeUndoAction,
-    GeneratedTreeUndoAttemptView,
-    GeneratedTreeUndoPreviewRequest,
-)
-from .interactions import InteractionReply
-from .mcp.management import MCPBootstrap, MCPControlRequest, MCPSelectionRequest
-from .protocol.domain import TERMINAL_STATUSES, ServiceError
-from .skill_packages import SkillPackageRequest
-from .streams import MultiplexRequest
-from .task_state import TaskWriteRequest
-from .workflow import WorkflowGraph
-from .workspace_change import WorkspaceAttemptView, WorkspaceChangeAction, WorkspacePreviewRequest
-from .workspace_checkpoint import WorkspaceCheckpointCreate, WorkspaceCheckpointView
-from .workspace_directory import (
-    DirectoryAttemptView,
-    DirectoryChangeAction,
-    DirectoryPreviewRequest,
-    DirectoryQueryKind,
-)
-from .workspace_list import NativeBatchRequest, NativeBatchView
-from .workspace_mixed_batch import MixedBatchRequest, MixedBatchView
-from .workspace_restore import (
-    CheckpointRestoreExecute,
-    CheckpointRestorePreview,
-    CheckpointRestoreView,
-)
-from .workspace_tree import TreePlanRequest, TreePlanView
-from .workspace_tree_exchange_types import (
-    TreeExchangeAction,
-    TreeExchangeAttemptView,
-    TreeExchangePreviewRequest,
-    TreeExchangeQueryKind,
-    TreeExchangeQueryRequest,
-    TreeExchangeSealRequest,
-)
-from .workspace_tree_move import (
-    TreeMoveAction,
-    TreeMoveAttemptView,
-    TreeMovePreviewRequest,
-    TreeMoveQueryKind,
-    TreeMoveQueryRequest,
-)
-
-_CHECKPOINT_ACTIONS = (
-    "create-checkpoint",
-    "checkpoints",
-    "checkpoint",
-    "checkpoint-by-key",
-    "wait-checkpoint",
-    "cancel-checkpoint",
-    "preview-restore",
-    "execute-restore",
-    "restores",
-    "restore",
-    "restore-by-key",
-    "wait-restore",
-    "cancel-restore",
-)
+from krim_agent import __version__
+from krim_agent.client import AsyncRunClient
+from krim_agent.composition import Application, open_application
+from krim_agent.config import Settings
+from krim_agent.contracts import TERMINAL, RunRequest, ServiceError, parse_json
+from krim_agent.evaluation.regression import gate_reports, make_report, validate_report
+from krim_agent.evaluation.service import eval_view
+from krim_agent.evaluation.trace_cases import collect_candidate
+from krim_agent.evaluation.types import EvalRequest, FreezeRequest, RuleName, rule
+from krim_agent.observability import project_trace
+from krim_agent.runtime.facts import project_facts
+from krim_agent.storage.sqlite import SQLiteStore
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="krim", description="Krim Agent 本地对话、分支与持久续传")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    serve = subparsers.add_parser("serve", help="serve（提供服务）：启动 Python HTTP/SSE")
-    serve.add_argument("--host", default="127.0.0.1", help="host（主机）：默认只监听本机")
-    serve.add_argument("--port", default=8765, type=int, help="port（端口）：默认 8765")
-    serve.add_argument("--workspace", help="workspace（工作区）：宿主明确授权的根目录，默认只读")
-    serve.add_argument(
-        "--tree-moves",
-        action="store_true",
-        help="tree moves（树移动）：显式登记非空树工具，写入仍需授权",
-    )
-    serve.add_argument(
-        "--tree-exchanges",
-        action="store_true",
-        help="tree exchanges（双树交换）：显式登记双完整树工具，写入仍需授权",
-    )
-    serve.add_argument(
-        "--generated-tree-undos",
-        action="store_true",
-        help="generated tree undos（生成树根撤销）：显式登记原生成根工具，写入仍需授权",
-    )
-    serve.add_argument(
-        "--checkpoint-bytes",
-        action="store_true",
-        help="checkpoint bytes（检查点字节）：显式启用元数据捕获，仍需原工作区授权",
-    )
-    serve.add_argument(
-        "--directory-checkpoints",
-        action="store_true",
-        help="directory checkpoints（目录检查点）：显式启用完整目录捕获，仍需原工作区授权",
-    )
-    serve.add_argument(
-        "--directory-restores",
-        action="store_true",
-        help="directory restores（目录恢复）：显式登记原受控恢复叶，写入仍需原授权",
-    )
-    serve.add_argument(
-        "--directory-restore-controls",
-        action="store_true",
-        help="directory restore controls（目录恢复控制）：启用原模型恢复五动作",
-    )
-    serve.add_argument(
-        "--missing-directory-restores",
-        action="store_true",
-        help="missing directory restores（缺失目录恢复）：显式登记原受控叶，写入仍需原授权",
-    )
-    serve.add_argument(
-        "--missing-directory-restore-controls",
-        action="store_true",
-        help="missing directory restore controls（缺失目录恢复控制）：登记原模型五动作",
-    )
-    serve.add_argument(
-        "--missing-directory-rollbacks",
-        action="store_true",
-        help="missing directory rollbacks（缺失基线回退）：显式登记原完整保留五动作",
-    )
-    serve.add_argument(
-        "--directory-checkpoint-controls",
-        action="store_true",
-        help=(
-            "directory checkpoint controls（目录检查点控制）：显式登记原模型同调用创建、查询与取消"
-        ),
-    )
-    serve.add_argument(
-        "--checkpoint-controls",
-        action="store_true",
-        help="checkpoint controls（检查点控制）：显式登记模型同调用创建、查询与取消",
-    )
-    serve.add_argument(
-        "--checkpoint-restore-controls",
-        action="store_true",
-        help="checkpoint restore controls（检查点恢复控制）：显式登记模型预览、启动、查询与取消",
-    )
-    serve.add_argument(
-        "--workspace-version", default="local-v1", help="workspace version（工作区版本）：恢复校验"
-    )
-    serve.add_argument(
-        "--workspace-write",
-        action="store_true",
-        help="workspace write（工作区写入）：启用受权限控制的文件修改工具",
-    )
-    serve.add_argument(
-        "--execution",
-        action="store_true",
-        help="execution（命令执行）：登记本机Linux隔离命令资源，默认关闭",
-    )
-    serve.add_argument(
-        "--execution-version",
-        default="local-v1",
-        help="execution version（执行资源版本）：持久Agent恢复校验",
-    )
-    serve.add_argument(
-        "--execution-limits", help="execution limits（执行限额）：本地SandboxLimits JSON文件"
-    )
-    serve.add_argument(
-        "--execution-cgroup-root",
-        help=(
-            "execution cgroup root（执行控制组根）：可信宿主已委派的独立krim-*根，"
-            "与tree限额同时配置"
-        ),
-    )
-    serve.add_argument(
-        "--mcp-config", help="MCP config（MCP启动配置）：可信宿主本地JSON，最多64KiB"
-    )
-    subparsers.add_parser("version", help="version（版本）：显示当前版本")
-    mcp = subparsers.add_parser(
-        "mcp", help="MCP（Model Context Protocol，模型上下文协议）：服务引用管理"
-    )
-    mcp.add_argument(
-        "action", choices=["list", "get", "enable", "disable", "connect", "disconnect", "wait"]
-    )
-    mcp.add_argument("name", nargs="?", help="宿主已登记MCP名称")
-    mcp.add_argument("--revision", type=int, help="revision（修订号）：原引用选择版本")
-    mcp.add_argument("--resource-hash", help="resource hash（资源指纹）：审阅时的公开SHA-256")
-    mcp.add_argument(
-        "--timeout-seconds", type=float, default=30, help="timeout seconds（等待秒数）：0–300"
-    )
-    mcp.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    from .evaluation.cli import add_parser as add_eval_parser
-
-    add_eval_parser(subparsers)
-    from .directory_checkpoint_cli import add_parser as add_directory_checkpoint_parser
-
-    add_directory_checkpoint_parser(subparsers)
-    from .directory_restore_cli import add_parser as add_directory_restore_parser
-
-    add_directory_restore_parser(subparsers)
-    from .missing_directory_restore_cli import add_parser as add_missing_directory_restore_parser
-
-    add_missing_directory_restore_parser(subparsers)
-    from .missing_directory_rollback_cli import add_parser as add_missing_directory_rollback_parser
-
-    add_missing_directory_rollback_parser(subparsers)
-    from .conversation_recovery_cli import add_parser as add_conversation_recovery_parser
-
-    add_conversation_recovery_parser(subparsers)
-    workspace = subparsers.add_parser(
-        "workspace", help="workspace（工作区）：Agent文件、修改提案、操作与异常核实"
-    )
-    workspace.add_argument(
-        "action",
-        choices=[
-            "info",
-            "list",
-            "read",
-            "search",
-            "changes",
-            "proposal",
-            "history",
-            "operation",
-            "proof",
-            "preview",
-            "apply",
-            "undo",
-            "keep",
-            "reconcile",
-            "finalize",
-            "native-changes",
-            "start-batch",
-            "native-batch",
-            "batch-by-key",
-            "batch-history",
-            "wait-batch",
-            "cancel-batch",
-            "start-mixed-batch",
-            "mixed-batch",
-            "mixed-batch-by-key",
-            "mixed-batch-history",
-            "wait-mixed-batch",
-            "cancel-mixed-batch",
-            "prepare-tree",
-            "tree",
-            "tree-by-key",
-            "tree-steps",
-            "start-tree",
-            "wait-tree",
-            "cancel-tree",
-            *_CHECKPOINT_ACTIONS,
-        ],
-    )
-    workspace.add_argument("agent_id", help="Agent实例标识")
-    workspace.add_argument(
-        "value", nargs="?", help="相对路径、搜索文本、proposal/operation/batch/checkpoint/plan标识"
-    )
-    workspace.add_argument("--path", default=".", help="path（路径）：列出/搜索的相对目录")
-    workspace.add_argument("--limit", type=int, help="limit（上限）：目录项或搜索匹配数")
-    workspace.add_argument("--start-line", type=int, default=1, help="start line（起始行）")
-    workspace.add_argument("--max-lines", type=int, default=200, help="max lines（最大行数）")
-    workspace.add_argument(
-        "--request", help="request（请求）：修改/批次/检查点捕获/恢复预览的本地JSON文件"
-    )
-    workspace.add_argument(
-        "--revision", type=int, help="revision（修订号）：文件动作或execute-restore的预期版本"
-    )
-    workspace.add_argument(
-        "--request-key", help="request key（请求键）：文件/恢复执行的幂等键或原请求查询键"
-    )
-    workspace.add_argument(
-        "--filter",
-        choices=["active", "history", "all"],
-        default="active",
-        help="filter（筛选）：原生修改清单筛选范围",
-    )
-    workspace.add_argument("--cursor", help="cursor（游标）：原生清单快照游标")
-    workspace.add_argument("--batch-id", help="batch identifier（批次标识）：查询、等待或取消批次")
-    workspace.add_argument(
-        "--after", type=int, help="after（末位游标）：tree-steps已读的末项position"
-    )
-    workspace.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=30,
-        help="timeout seconds（等待秒数）：批次/检查点/恢复查询最长等待时间",
-    )
-    workspace.add_argument(
-        "--offset", type=int, default=0, help="offset（偏移）：修改/检查点/恢复列表起始项"
-    )
-    workspace.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：本次原参数的Host确认，不覆盖deny"
-    )
-    workspace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    directories = subparsers.add_parser(
-        "directories", help="directories（目录）：受控目录提案、原操作查询与核实"
-    )
-    directories.add_argument(
-        "action",
-        choices=[
-            "inspect",
-            "preview",
-            "apply",
-            "undo",
-            "keep",
-            "reconcile",
-            "finalize",
-            "get",
-            "operation",
-            "list",
-            "history",
-            "proposal-by-key",
-            "operation-by-key",
-        ],
-    )
-    directories.add_argument("agent_id", help="Agent实例标识")
-    directories.add_argument(
-        "value", nargs="?", help="相对目录路径、原proposal/operation标识或请求键"
-    )
-    directories.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
-    directories.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
-    directories.add_argument("--request-key", help="request key（请求键）：明确幂等键")
-    directories.add_argument("--after", help="after（游标）：上一页末项原标识")
-    directories.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
-    directories.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
-    )
-    directories.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    moves = subparsers.add_parser(
-        "tree-moves", help="tree moves（树移动）：完整目录树条件事务及原历史"
-    )
-    moves.add_argument(
-        "action",
-        choices=[
-            "inspect",
-            "preview",
-            "get",
-            "list",
-            "by-key",
-            "operation",
-            "operation-by-key",
-            "history",
-            "apply",
-            "undo",
-            "keep",
-            "reconcile",
-            "cancel",
-        ],
-    )
-    moves.add_argument("agent_id", help="Agent实例标识")
-    moves.add_argument("value", nargs="?", help="相对树路径、原proposal/operation标识或请求键")
-    moves.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
-    moves.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
-    moves.add_argument("--request-key", help="request key（请求键）：明确原幂等键")
-    moves.add_argument("--after", help="after（游标）：上一页末项原标识")
-    moves.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
-    moves.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
-    )
-    moves.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    root_undos = subparsers.add_parser(
-        "generated-tree-undos",
-        help="generated tree undos（生成树根撤销）：审阅保留、条件还原与原历史",
-    )
-    root_undos.add_argument(
-        "action",
-        choices=[
-            "preview",
-            "get",
-            "list",
-            "by-key",
-            "operation",
-            "operation-by-key",
-            "history",
-            "remove-root",
-            "restore-root",
-            "keep",
-            "reconcile",
-            "cancel",
-        ],
-    )
-    root_undos.add_argument("agent_id", help="Agent实例标识")
-    root_undos.add_argument("value", nargs="?", help="原proposal/operation标识或请求键")
-    root_undos.add_argument("--request", help="request（请求）：preview本地严格JSON文件")
-    root_undos.add_argument("--revision", type=int, help="revision（修订号）：原提案版本")
-    root_undos.add_argument("--request-key", help="request key（请求键）：明确原幂等键")
-    root_undos.add_argument("--after", help="after（游标）：上一页末项原标识")
-    root_undos.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
-    root_undos.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
-    )
-    root_undos.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    exchanges = subparsers.add_parser(
-        "tree-exchanges", help="tree exchanges（双树交换）：完整目录树条件事务及原历史"
-    )
-    exchanges.add_argument(
-        "action",
-        choices=[
-            "inspect",
-            "seal",
-            "seal-query",
-            "preview",
-            "get",
-            "list",
-            "by-key",
-            "operation",
-            "operation-by-key",
-            "history",
-            "apply",
-            "undo",
-            "keep",
-            "reconcile",
-            "cancel",
-        ],
-    )
-    exchanges.add_argument("agent_id", help="Agent实例标识")
-    exchanges.add_argument("value", nargs="?", help="相对树路径、原proposal/operation标识或请求键")
-    exchanges.add_argument("--request", help="request（请求）：preview使用的本地严格JSON文件")
-    exchanges.add_argument("--revision", type=int, help="revision（修订号）：当前提案版本")
-    exchanges.add_argument("--request-key", help="request key（请求键）：明确原幂等键")
-    exchanges.add_argument("--after", help="after（游标）：上一页末项原标识")
-    exchanges.add_argument("--limit", type=int, default=32, help="limit（容量）：1–32")
-    exchanges.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：原参数确认，不覆盖deny"
-    )
-    exchanges.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    exchanges.add_argument(
-        "--expected-fingerprint", help="expected fingerprint（原完整指纹）：seal必需"
-    )
-    tasks = subparsers.add_parser("tasks", help="tasks（任务）：读取和修改Agent持久计划/待办")
-    tasks.add_argument("action", choices=["get", "history", "update"])
-    tasks.add_argument("agent_id", help="Agent实例标识")
-    tasks.add_argument(
-        "--kind", choices=["plan", "todo"], default="todo", help="plan（计划）或todo（待办）"
-    )
-    tasks.add_argument("--request", help="update（更新）的本地JSON文件，包含版本和幂等键")
-    tasks.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    commands = subparsers.add_parser(
-        "commands", help="commands（命令）：查询、读取、取消和审阅Agent命令"
-    )
-    commands.add_argument(
-        "action",
-        choices=[
-            "start",
-            "history",
-            "get",
-            "by-key",
-            "inspect",
-            "resources",
-            "read",
-            "wait",
-            "cancel",
-            "changes",
-            "propose",
-            "directory-propose",
-            "directory-changes",
-        ],
-    )
-    commands.add_argument("agent_id")
-    commands.add_argument("value", nargs="?", help="command_id或request_key")
-    commands.add_argument("--request", help="start/propose动作的本地JSON请求文件")
-    commands.add_argument("--source", choices=["stdout", "stderr", "artifact"], default="stdout")
-    commands.add_argument("--path", help="artifact（产物）相对路径")
-    commands.add_argument("--after", help="分页游标或产物路径")
-    commands.add_argument(
-        "--offset", type=int, default=0, help="offset（字节偏移）：读取输出/产物的起点"
-    )
-    commands.add_argument("--limit", type=int, help="limit（上限）：列表默认32项，字节读取默认2048")
-    commands.add_argument(
-        "--timeout-seconds", type=float, default=30, help="timeout seconds（等待秒数）：0–300"
-    )
-    commands.add_argument(
-        "--wait", action="store_true", help="wait（等待）：start后等待原任务，不重新执行"
-    )
-    commands.add_argument(
-        "--include-unchanged", action="store_true", help="include unchanged（包含未修改文件）"
-    )
-    commands.add_argument(
-        "--confirm", action="store_true", help="confirm（确认）：原参数的Host确认，不覆盖deny"
-    )
-    commands.add_argument("--url", default="http://127.0.0.1:8765")
-    trace = subparsers.add_parser("trace", help="trace（追踪）：读取脱敏 span 与观测状态")
-    trace.add_argument("action", choices=["run", "workflow", "get", "status"])
-    trace.add_argument("value", nargs="?")
-    trace.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    budget = subparsers.add_parser("budget", help="budget（预算）：读取累计账本和核实未知请求")
-    budget.add_argument("action", choices=["accounts", "account", "run", "request", "resolve"])
-    budget.add_argument("value", nargs="?", help="account/run/request 标识")
-    budget.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    budget.add_argument("--revision", type=int, help="revision（修订号）：匹配当前未知请求")
-    budget.add_argument("--receipt", help="receipt（回执）：可信宿主核实依据")
-    budget.add_argument("--usage", help="usage（用量）：输入/输出/总量的 JSON 报告")
-    multiplex = subparsers.add_parser(
-        "multiplex", help="multiplex（多路）：一个 SSE 连接读取多个 Run"
-    )
-    multiplex.add_argument("--sources", required=True, help="JSON 数组：run_id/topic_id/next_seq")
-    multiplex.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    interaction = subparsers.add_parser(
-        "interaction", help="interaction（用户交互）：读取审批/问题和提交回应"
-    )
-    interaction.add_argument("action", choices=["list", "approve", "deny", "answer"])
-    interaction.add_argument("run_id")
-    interaction.add_argument("interaction_id", nargs="?")
-    interaction.add_argument("answer", nargs="?")
-    interaction.add_argument(
-        "--pending", action="store_true", help="pending（待处理）：只列出当前待回应请求"
-    )
-    interaction.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    agent = subparsers.add_parser("agent", help="agent（Agent）：目录、执行与持久事件")
-    agent.add_argument(
-        "action",
-        choices=[
-            "catalog",
-            "profiles",
-            "profile",
-            "configure",
-            "enable",
-            "disable",
-            "inventory",
-            "resources",
-            "restore",
-            "session",
-            "turns",
-            "close",
-            "reopen",
-            "list",
-            "get",
-            "spawn",
-            "execute",
-            "start",
-            "wait",
-            "resume",
-            "events",
-            "stop",
-            "destroy",
-        ],
-    )
-    agent.add_argument("value", nargs="?", help="Agent ID 或 spawn 时的目录名称")
-    agent.add_argument("prompt", nargs="?", help="execute/resume 的 prompt（提示）")
-    agent.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    agent.add_argument("--idempotency-key", help="重试去重键")
-    agent.add_argument("--from-seq", type=int, default=0, help="events 起始序号")
-    agent.add_argument("--run-id", help="run ID（运行标识）：固定要续读的 Agent 轮次")
-    agent.add_argument("--revision", type=int, help="revision（配置版本）：新建选择或更新预期版本")
-    agent.add_argument(
-        "--persistent", action="store_true", help="persistent（持久）：spawn 句柄可由后续进程恢复"
-    )
-    compact = subparsers.add_parser("compact", help="compact（压缩）：预览或确认持久历史摘要")
-    compact.add_argument("topic_id")
-    compact.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    compact.add_argument(
-        "--strategy",
-        choices=["summarize_then_truncate", "annotated_compact"],
-        default="annotated_compact",
-    )
-    compact.add_argument("--policy", choices=["never", "always", "auto"], default="auto")
-    compact.add_argument("--max-messages", type=int, help="模型输入消息数量预算，包含摘要")
-    compact.add_argument("--max-chars", type=int, help="JSON 请求文本字符预算")
-    compact.add_argument(
-        "--max-tokens", type=int, help="按服务端 tokenizer（词元编码器）计算的预算"
-    )
-    compact.add_argument(
-        "--reserved-output-tokens",
-        type=int,
-        default=0,
-        help="reserved output tokens（预留输出词元）：不能低于宿主预留",
-    )
-    compact.add_argument("--expected-branch-key", help="确认时匹配预览中的活动路径标识")
-    compact.add_argument("--proposal-id", help="proposal ID（提案标识）：确认已保存的原摘要")
-    compact.add_argument(
-        "--proposal-revision", type=int, help="proposal revision（提案修订号）：匹配预览"
-    )
-    compact_mode = compact.add_mutually_exclusive_group()
-    compact_mode.add_argument(
-        "--preview", action="store_true", help="preview（预览）：保存待确认提案，不改写摘要"
-    )
-    compact_mode.add_argument("--confirm", action="store_true", help="confirm（确认）：保存摘要")
-    proposal = subparsers.add_parser(
-        "proposal", help="proposal（提案）：读取或确认/拒绝持久压缩提案"
-    )
-    proposal.add_argument("action", choices=["list", "get", "confirm", "reject"])
-    proposal.add_argument("topic_id")
-    proposal.add_argument("proposal_id", nargs="?")
-    proposal.add_argument("--revision", type=int, help="revision（修订号）：确认/拒绝的预期版本")
-    proposal.add_argument(
-        "--pending", action="store_true", help="pending（待确认）：只读取有效待办"
-    )
-    proposal.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    workflow = subparsers.add_parser("workflow", help="workflow（工作流）：运行与控制持久图")
-    workflow.add_argument(
-        "action",
-        choices=["run", "list", "get", "events", "pause", "resume", "restore", "stop", "rerun"],
-    )
-    workflow.add_argument("value", nargs="?", help="run 时为 JSON/文件路径，其余动作为 run_id")
-    workflow.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    workflow.add_argument("--input", default="null", help="run 输入 JSON")
-    workflow.add_argument("--idempotency-key", help="Workflow 请求幂等键")
-    workflow.add_argument("--pause-before", action="append", default=[], help="节点前暂停")
-    workflow.add_argument("--pause-after", action="append", default=[], help="节点后暂停")
-    workflow.add_argument("--from-seq", type=int, default=0, help="事件起始序号")
-    workflow.add_argument("--node", help="rerun 节点 ID")
-    workflow.add_argument("--override", help="resume/rerun 输入 JSON")
-    workflow.add_argument("--allow-side-effects", action="store_true")
-    workflow.add_argument("--completed-outputs", help="恢复时已完成 NodeOutput 的 JSON")
-    skill = subparsers.add_parser("skills", help="skills（技能）：读取目录或导入受限ZIP文件包")
-    skill.add_argument("action", choices=["list", "import-archive"])
-    skill.add_argument("topic_id")
-    skill.add_argument("--archive", help="archive（归档）：本地ZIP文件，不作为服务端路径")
-    skill.add_argument("--expected-digest", help="原同名技能digest，明确替换时使用")
-    skill.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-    for command, help_text in (
-        ("chat", "chat（对话）：发送消息并订阅输出"),
-        ("topics", "topics（话题）：列出历史话题"),
-        ("messages", "messages（消息）：重新读取持久化历史"),
-        ("run", "run（运行）：查看运行状态"),
-        ("stop", "stop（停止）：取消并等待持久化"),
-        ("resume", "resume（续传）：从持久事件序号继续输出"),
-        ("usage", "usage（用量）：读取每步供应商报告和完整覆盖状态"),
-        ("tree", "tree（树）：查看全部消息节点与活动路径"),
-        ("branch", "branch（分支）：切换活动消息分支"),
-        ("edit", "edit（编辑）：创建用户消息的新分支并重新回答"),
-        ("regenerate", "regenerate（重新生成）：保留用户消息并生成新回答"),
-    ):
-        child = subparsers.add_parser(command, help=help_text)
-        child.add_argument("--url", default="http://127.0.0.1:8765", help="服务地址")
-        if command == "chat":
-            child.add_argument("text", help="文本；支持 /add 2 3、/echo 内容")
-            child.add_argument("--topic", help="复用话题 ID，不指定则创建新话题")
-            child.add_argument("--idempotency-key", help="idempotency（幂等）键，重试时复用")
-            child.add_argument("--parent", help="在指定完整消息后创建分支")
-        elif command in {"messages", "tree"}:
-            child.add_argument("topic_id")
-        elif command in {"branch", "edit", "regenerate"}:
-            child.add_argument("topic_id")
-            child.add_argument("message_id")
-            if command == "edit":
-                child.add_argument("text")
-            if command != "branch":
-                child.add_argument("--idempotency-key", help="重试时复用的幂等键")
-        elif command in {"run", "stop", "resume", "usage"}:
-            child.add_argument("run_id")
-            if command == "resume":
-                child.add_argument("--from-seq", type=int, default=0, help="起始事件序号")
-    return parser
-
-
-def _workspace_checkpoint_command(
-    client: KrimClient,
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-) -> BaseModel | Sequence[BaseModel] | None:
-    if args.action in {"create-checkpoint", "preview-restore"}:
-        if not args.request:
-            parser.error("检查点捕获/恢复预览需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("检查点请求不能超过64KiB")
-            payload = (
-                WorkspaceCheckpointCreate.model_validate_json(raw)
-                if args.action == "create-checkpoint"
-                else CheckpointRestorePreview.model_validate_json(raw)
-            )
-        except (OSError, ValueError):
-            parser.error("检查点请求无效；请检查捕获paths或恢复checkpoint_id、request_key等字段")
-        if isinstance(payload, WorkspaceCheckpointCreate):
-            return client.agent_workspace_create_checkpoint(
-                args.agent_id, payload, confirmed=args.confirm
-            )
-        return client.agent_workspace_preview_restore(
-            args.agent_id, payload, confirmed=args.confirm
+def freeze_request(args: argparse.Namespace) -> FreezeRequest:
+    case: dict[str, Any] = {
+        "case_id": args.case_id,
+        "reason": args.reason,
+        "reference": {
+            "expected": parse_json(args.expected_json),
+            "expected_status": args.status,
+            "expected_code": args.code,
+            "expected_tools": None,
+            "trajectory": None,
+            "expected_schema": None,
+        },
+    }
+    if args.source_run is not None:
+        if args.candidate_fingerprint is None:
+            raise ServiceError("invalid_input", 422)
+        case.update(
+            source_kind="run",
+            source_run_id=args.source_run,
+            candidate_fingerprint=args.candidate_fingerprint,
+            selected_input=args.input,
         )
-    if args.action in {"checkpoints", "restores"}:
-        limit = args.limit if args.limit is not None else 32
-        if args.action == "checkpoints":
-            return client.agent_workspace_checkpoints(
-                args.agent_id, offset=args.offset, limit=limit
-            )
-        return client.agent_workspace_restores(args.agent_id, offset=args.offset, limit=limit)
-    if args.action in {"checkpoint-by-key", "restore-by-key"}:
-        if not args.request_key:
-            parser.error("按键查询检查点或恢复计划需要--request-key")
-        if args.action == "checkpoint-by-key":
-            return client.agent_workspace_checkpoint_by_key(args.agent_id, args.request_key)
-        return client.agent_workspace_restore_by_key(args.agent_id, args.request_key)
-    if not args.value:
-        parser.error("检查点动作需要checkpoint或plan标识")
-    if args.action == "checkpoint":
-        return client.agent_workspace_checkpoint(args.agent_id, args.value)
-    if args.action == "wait-checkpoint":
-        return client.agent_workspace_wait_checkpoint(
-            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
-        )
-    if args.action == "cancel-checkpoint":
-        return client.agent_workspace_cancel_checkpoint(args.agent_id, args.value)
-    if args.action == "restore":
-        return client.agent_workspace_restore(args.agent_id, args.value)
-    if args.action == "wait-restore":
-        return client.agent_workspace_wait_restore(
-            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
-        )
-    if args.action == "cancel-restore":
-        return client.agent_workspace_cancel_restore(args.agent_id, args.value)
-    if args.revision is None or not args.request_key:
-        parser.error("execute-restore需要--revision和--request-key")
+    else:
+        if args.candidate_fingerprint is not None:
+            raise ServiceError("invalid_input", 422)
+        case.update(source_kind="manual", input=args.input)
+    return FreezeRequest.model_validate(
+        {"name": args.name, "version": args.revision, "cases": [case]}
+    )
+
+
+def eval_request(args: argparse.Namespace) -> EvalRequest:
+    return EvalRequest.model_validate(
+        {
+            "request_key": args.key,
+            "dataset": {
+                "name": args.name,
+                "version": args.revision,
+                "fingerprint": args.fingerprint,
+            },
+            "target_key": args.target,
+            "rules": [
+                rule(cast(RuleName, n)).model_dump(mode="json") for n in args.rules.split(",")
+            ],
+            "execution": {
+                "repetitions": args.repetitions,
+                "concurrency": 1,
+                "item_timeout_seconds": 12,
+                "scorer_timeout_seconds": 1,
+                "batch_timeout_seconds": 600,
+            },
+        }
+    )
+
+
+@asynccontextmanager
+async def owned_eval(path: Path) -> AsyncIterator[Application]:
+    task = asyncio.current_task()
+    assert task is not None
+    loop = asyncio.get_running_loop()
+    previous = {}
+    for signum in [signal.SIGINT, signal.SIGTERM]:
+        previous[signum] = signal.getsignal(signum)
+        loop.add_signal_handler(signum, task.cancel)
     try:
-        request = CheckpointRestoreExecute(
-            plan_id=args.value, expected_revision=args.revision, request_key=args.request_key
-        )
-    except ValueError:
-        parser.error("恢复执行参数无效；请检查计划标识、revision与request-key")
-    return client.agent_workspace_execute_restore(args.agent_id, request, confirmed=args.confirm)
+        async with await open_application(path) as application:
+            yield application
+    finally:
+        for signum, handler in previous.items():
+            loop.remove_signal_handler(signum)
+            signal.signal(signum, handler)
 
 
-def _workspace_tree_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> BaseModel | None:
-    if args.action == "prepare-tree":
-        if not args.request or args.value:
-            parser.error("workspace prepare-tree需要--request本地JSON文件，不接受位置标识")
+async def execute_m2(args: argparse.Namespace) -> Any:
+    operation = getattr(args, "operation", "")
+    if not args.url and args.command == "eval" and operation in {"wait", "cancel"}:
+        raise ServiceError("readonly")
+    frozen = freeze_request(args) if args.command == "dataset" and operation == "freeze" else None
+    requested = eval_request(args) if args.command == "eval" and operation == "start" else None
+    if args.url:
+        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
         try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(16385)
-            if len(raw) > 16384:
-                parser.error("树准备请求不能超过16KiB")
-            request = TreePlanRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("树准备请求无效；请检查原command/source_hash/root_path/request_key")
-        return client.agent_workspace_prepare_tree(args.agent_id, request, confirmed=args.confirm)
-    if args.request is not None:
-        parser.error("树--request仅用于prepare-tree")
-    if args.action != "tree-steps" and args.after is not None:
-        parser.error("树--after仅用于tree-steps")
-    if args.action == "tree-by-key":
-        if not args.request_key or args.value:
-            parser.error("workspace tree-by-key需要--request-key，不接受位置标识")
-        return client.agent_workspace_tree_by_key(args.agent_id, args.request_key)
-    if not args.value or args.request_key is not None:
-        parser.error("树查询/控制需要plan标识，不能附带--request-key")
-    if args.action == "tree":
-        return client.agent_workspace_tree(args.agent_id, args.value)
-    if args.action == "tree-steps":
-        return client.agent_workspace_tree_steps(
-            args.agent_id,
-            args.value,
-            after=args.after,
-            limit=args.limit if args.limit is not None else 32,
-        )
-    if args.action == "start-tree":
-        return client.agent_workspace_start_tree(args.agent_id, args.value, confirmed=args.confirm)
-    if args.action == "wait-tree":
-        return client.agent_workspace_wait_tree(
-            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
-        )
-    return client.agent_workspace_cancel_tree(args.agent_id, args.value)
-
-
-def _workspace_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> None:
-    result: BaseModel | Sequence[BaseModel]
-    if (
-        args.action
-        in {
-            "native-batch",
-            "wait-batch",
-            "cancel-batch",
-            "mixed-batch",
-            "wait-mixed-batch",
-            "cancel-mixed-batch",
-        }
-        and args.batch_id
-    ):
-        if args.value and args.value != args.batch_id:
-            parser.error("位置参数与--batch-id的批次标识不一致")
-        args.value = args.batch_id
-    if args.action in {
-        "prepare-tree",
-        "tree",
-        "tree-by-key",
-        "tree-steps",
-        "start-tree",
-        "wait-tree",
-        "cancel-tree",
-    }:
-        tree = _workspace_tree_command(client, args, parser)
-        if tree is None:
-            print("null")
-            return
-        result = tree
-    elif args.action in _CHECKPOINT_ACTIONS:
-        checkpoint_result = _workspace_checkpoint_command(client, args, parser)
-        if checkpoint_result is None:
-            print("null")
-            return
-        result = checkpoint_result
-    elif args.action == "info":
-        result = client.agent_workspace(args.agent_id)
-    elif args.action == "list":
-        result = client.agent_list_files(
-            args.agent_id, args.path, limit=args.limit if args.limit is not None else 200
-        )
-    elif args.action == "read":
-        if not args.value:
-            parser.error("workspace read需要相对文件路径")
-        result = client.agent_read_file(
-            args.agent_id, args.value, start_line=args.start_line, max_lines=args.max_lines
-        )
-    elif args.action == "search":
-        if not args.value:
-            parser.error("workspace search需要搜索文本")
-        result = client.agent_search_files(
-            args.agent_id,
-            args.value,
-            path=args.path,
-            limit=args.limit if args.limit is not None else 100,
-        )
-    elif args.action == "changes":
-        result = client.agent_workspace_changes(
-            args.agent_id, offset=args.offset, limit=args.limit if args.limit is not None else 50
-        )
-    elif args.action == "native-changes":
-        result = client.agent_workspace_native_changes(
-            args.agent_id,
-            filter=args.filter,
-            cursor=args.cursor,
-            limit=args.limit if args.limit is not None else 32,
-        )
-    elif args.action == "batch-history":
-        result = client.agent_workspace_native_batch_history(
-            args.agent_id, cursor=args.cursor, limit=args.limit if args.limit is not None else 32
-        )
-    elif args.action == "start-batch":
-        if not args.request:
-            parser.error("workspace start-batch需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("原生批次请求不能超过64KiB")
-            batch_request = NativeBatchRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("原生批次请求无效；请检查action、snapshot_revision、targets和request_key")
-        result = client.agent_workspace_start_native_batch(
-            args.agent_id, batch_request, confirmed=args.confirm
-        )
-    elif args.action == "native-batch":
-        if not args.value:
-            parser.error("workspace native-batch需要批次标识")
-        result = client.agent_workspace_native_batch(args.agent_id, args.value)
-    elif args.action == "batch-by-key":
-        if not args.request_key:
-            parser.error("workspace batch-by-key需要--request-key")
-        batch = client.agent_workspace_native_batch_by_key(args.agent_id, args.request_key)
-        if batch is None:
-            print("null")
-            return
-        result = batch
-    elif args.action == "wait-batch":
-        if not args.value:
-            parser.error("workspace wait-batch需要批次标识")
-        result = client.agent_workspace_wait_native_batch(
-            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
-        )
-    elif args.action == "cancel-batch":
-        if not args.value:
-            parser.error("workspace cancel-batch需要批次标识")
-        result = client.agent_workspace_cancel_native_batch(args.agent_id, args.value)
-    elif args.action == "start-mixed-batch":
-        if not args.request:
-            parser.error("workspace start-mixed-batch需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(16385)
-            if len(raw) > 16384:
-                parser.error("混合批次请求不能超过16KiB")
-            mixed_request = MixedBatchRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("混合批次请求无效；请检查action、source、proposal/revision和request_key")
-        result = client.agent_workspace_start_mixed_batch(
-            args.agent_id, mixed_request, confirmed=args.confirm
-        )
-    elif args.action == "mixed-batch":
-        if not args.value:
-            parser.error("workspace mixed-batch需要批次标识")
-        result = client.agent_workspace_mixed_batch(args.agent_id, args.value)
-    elif args.action == "mixed-batch-by-key":
-        if not args.request_key:
-            parser.error("workspace mixed-batch-by-key需要--request-key")
-        mixed = client.agent_workspace_mixed_batch_by_key(args.agent_id, args.request_key)
-        if mixed is None:
-            print("null")
-            return
-        result = mixed
-    elif args.action == "mixed-batch-history":
-        result = client.agent_workspace_mixed_batch_history(
-            args.agent_id, cursor=args.cursor, limit=args.limit if args.limit is not None else 32
-        )
-    elif args.action == "wait-mixed-batch":
-        if not args.value:
-            parser.error("workspace wait-mixed-batch需要批次标识")
-        result = client.agent_workspace_wait_mixed_batch(
-            args.agent_id, args.value, timeout_seconds=args.timeout_seconds
-        )
-    elif args.action == "cancel-mixed-batch":
-        if not args.value:
-            parser.error("workspace cancel-mixed-batch需要批次标识")
-        result = client.agent_workspace_cancel_mixed_batch(args.agent_id, args.value)
-    elif args.action == "preview":
-        if not args.request:
-            parser.error("workspace preview需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("文件修改请求不能超过64KiB")
-            preview = WorkspacePreviewRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("文件修改请求无效；请检查本地JSON文件的spec、request_key和ttl_seconds")
-        result = client.agent_workspace_preview(args.agent_id, preview, confirmed=args.confirm)
-    else:
-        if not args.value:
-            parser.error("workspace动作需要proposal或operation标识")
-        if args.action == "proposal":
-            result = client.agent_workspace_proposal(args.agent_id, args.value)
-        elif args.action == "history":
-            result = client.agent_workspace_history(args.agent_id, args.value)
-        elif args.action == "operation":
-            result = client.agent_workspace_operation(args.agent_id, args.value)
-        elif args.action == "proof":
-            result = client.agent_workspace_operation_proof(args.agent_id, args.value)
-        elif args.action == "reconcile":
-            result = client.agent_workspace_reconcile(
-                args.agent_id, args.value, confirmed=args.confirm
+            if args.command == "candidate":
+                return (await client.candidate(args.id, args.include_input)).model_dump(mode="json")
+            if args.command == "dataset":
+                if frozen is not None:
+                    return (await client.freeze(frozen)).model_dump(mode="json")
+                return await client.request(
+                    "GET",
+                    f"/v1/datasets/{quote(args.name, safe='')}/{quote(args.revision, safe='')}",
+                )
+            if args.command == "report":
+                return await client.report(args.id)
+            if args.command == "compare":
+                return await client.compare(args.baseline, args.candidate)
+            if requested is not None:
+                return (await client.eval_start(requested)).model_dump(mode="json")
+            if operation == "by-key":
+                return (await client.eval_by_key(args.key)).model_dump(mode="json")
+            if operation == "get":
+                return (await client.eval_get(args.id)).model_dump(mode="json")
+            if operation == "wait":
+                return (await client.eval_wait(args.id)).model_dump(mode="json")
+            return (await client.eval_cancel(args.id)).model_dump(mode="json")
+        finally:
+            await client.close()
+    if frozen is not None:
+        async with await open_application(Path(args.database)) as app:
+            assert app.evaluations is not None
+            return (await app.evaluations.freeze(frozen)).model_dump(mode="json")
+    if requested is not None:
+        async with owned_eval(Path(args.database)) as app:
+            service = app.evaluations
+            assert service is not None
+            view = await service.start(requested)
+            await service.wait(view.id)
+            return await service.report(view.id)
+    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    try:
+        if args.command == "candidate":
+            return collect_candidate(await store.snapshot(args.id), args.include_input).model_dump(
+                mode="json"
             )
-        elif args.action == "finalize":
-            result = client.agent_workspace_finalize(
-                args.agent_id, args.value, confirmed=args.confirm
+        if args.command == "dataset":
+            return (await store.dataset(args.name, args.revision)).model_dump(mode="json")
+        if args.command == "compare":
+            before, after = (
+                await store.eval_snapshot(args.baseline),
+                await store.eval_snapshot(args.candidate),
             )
-        else:
-            if args.revision is None or not args.request_key:
-                parser.error("workspace apply/undo/keep需要--revision和--request-key")
-            request = WorkspaceChangeAction(
-                proposal_id=args.value,
-                action=args.action,
-                expected_revision=args.revision,
-                request_key=args.request_key,
+            return gate_reports(
+                validate_report(before["report"] or make_report(before)),
+                validate_report(after["report"] or make_report(after)),
             )
-            result = client.agent_workspace_change(args.agent_id, request, confirmed=args.confirm)
-    if isinstance(result, BaseModel):
-        print(result.model_dump_json(indent=2))
-    else:
-        print(
-            json.dumps(
-                [item.model_dump(mode="json") for item in result], ensure_ascii=False, indent=2
-            )
+        if args.command == "report":
+            snapshot = await store.eval_snapshot(args.id)
+            return validate_report(snapshot["report"] or make_report(snapshot))
+        found_snapshot = (
+            await store.eval_by_key(args.key)
+            if operation == "by-key"
+            else await store.eval_snapshot(args.id)
         )
-    if (
-        args.action in {"apply", "undo", "keep", "reconcile"}
-        and isinstance(result, WorkspaceAttemptView)
-        and result.status != "done"
-    ):
-        parser.exit(1)
-
-    if (
-        isinstance(result, WorkspaceCheckpointView)
-        and args.action in {"create-checkpoint", "wait-checkpoint"}
-        and result.status not in {"capturing", "available"}
-    ):
-        parser.exit(1)
-    if (
-        isinstance(result, CheckpointRestoreView)
-        and args.action in {"preview-restore", "execute-restore", "wait-restore"}
-        and result.status not in {"preparing", "ready", "running", "done"}
-    ):
-        parser.exit(1)
-    if (
-        isinstance(result, NativeBatchView)
-        and args.action in {"start-batch", "wait-batch"}
-        and result.status not in {"running", "done"}
-    ):
-        parser.exit(1)
-    if (
-        isinstance(result, MixedBatchView)
-        and args.action in {"start-mixed-batch", "wait-mixed-batch"}
-        and result.status not in {"running", "done"}
-    ):
-        parser.exit(1)
-    if (
-        isinstance(result, TreePlanView)
-        and args.action in {"start-tree", "wait-tree"}
-        and result.status not in {"running", "done"}
-    ):
-        parser.exit(1)
+        if found_snapshot is None:
+            raise ServiceError("not_found", 404)
+        return eval_view(found_snapshot).model_dump(mode="json")
+    finally:
+        await store.close()
 
 
-def _directory_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> None:
-    result: BaseModel
-    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
-        parser.error("目录分页参数只适用于list/history")
-    if args.action in {"list", "preview"} and args.value is not None:
-        parser.error("目录list/preview不接受位置标识")
-    if args.action != "preview" and args.request is not None:
-        parser.error("--request仅用于目录preview")
-    if args.action not in {"apply", "undo", "keep"} and (
-        args.revision is not None or args.request_key is not None
-    ):
-        parser.error("--revision/--request-key仅用于目录apply/undo/keep")
-    if args.action == "inspect":
-        if not args.value:
-            parser.error("directories inspect需要工作区相对目录路径")
-        result = client.agent_directory_inspect(args.agent_id, args.value, confirmed=args.confirm)
-    elif args.action == "preview":
-        if not args.request:
-            parser.error("directories preview需要--request本地JSON文件")
+async def execute(args: argparse.Namespace) -> Any:
+    if args.command in {"candidate", "dataset", "eval", "report", "compare"}:
+        return await execute_m2(args)
+    if args.url:
+        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
         try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("目录意图不能超过64KiB")
-            request = DirectoryPreviewRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("目录预览请求无效")
-        result = client.agent_directory_preview(args.agent_id, request, confirmed=args.confirm)
-    elif args.action in {"apply", "undo", "keep"}:
-        if not args.value or args.revision is None or not args.request_key:
-            parser.error("目录apply/undo/keep需要原提案ID、--revision和--request-key")
-        result = client.agent_directory_change(
-            args.agent_id,
-            DirectoryChangeAction(
-                proposal_id=args.value,
-                action=args.action,
-                expected_revision=args.revision,
-                request_key=args.request_key,
-            ),
-            confirmed=args.confirm,
+            if args.command == "run":
+                run = await client.start(RunRequest(text=args.text, request_key=args.key))
+                await client.wait(run.id)
+                return (await client.result(run.id)).model_dump(mode="json")
+            if args.command == "cancel":
+                return await client.request("POST", "/v1/runs/" + args.id + "/cancel")
+            suffix = "" if args.command == "get" else "/" + args.command
+            return await client.request("GET", "/v1/runs/" + args.id + suffix)
+        finally:
+            await client.close()
+    if args.command == "run":
+        async with await open_application(Path(args.database)) as app:
+            run = await app.service.start(RunRequest(text=args.text, request_key=args.key))
+            await app.service.wait(run.id)
+            return (await app.service.result(run.id)).model_dump(mode="json")
+    if args.command == "cancel":
+        raise ServiceError("readonly")
+    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    try:
+        snapshot = await store.snapshot(args.id)
+        if args.command == "result" and snapshot.run.status not in TERMINAL:
+            raise ServiceError("not_terminal")
+        if args.command == "trace":
+            return project_trace(snapshot).model_dump(mode="json")
+        if args.command == "events":
+            return [event.model_dump(mode="json") for event in snapshot.events]
+        return (
+            snapshot.run.model_dump(mode="json")
+            if args.command == "get"
+            else project_facts(snapshot).model_dump(mode="json")
         )
-    elif args.action in {"reconcile", "finalize"}:
-        if not args.value:
-            parser.error("目录reconcile/finalize需要原操作ID")
-        method = (
-            client.agent_directory_reconcile
-            if args.action == "reconcile"
-            else client.agent_directory_finalize
-        )
-        result = method(args.agent_id, args.value, confirmed=args.confirm)
-    else:
-        if args.action != "list" and not args.value:
-            parser.error("目录查询需要原标识或请求键")
-        mapping: dict[str, DirectoryQueryKind] = {
-            "get": "proposal",
-            "operation": "operation",
-            "list": "proposals",
-            "history": "history",
-            "proposal-by-key": "proposal_by_key",
-            "operation-by-key": "operation_by_key",
-        }
-        result = client.agent_directory_query(
-            args.agent_id,
-            kind=mapping[args.action],
-            identifier=args.value if args.action in {"get", "operation", "history"} else None,
-            request_key=args.value if args.action.endswith("by-key") else None,
-            after=args.after,
-            limit=args.limit,
-            confirmed=args.confirm,
-        )
-    print(result.model_dump_json(indent=2))
-    if isinstance(result, DirectoryAttemptView) and result.status != "done":
-        parser.exit(1)
-
-
-def _tree_move_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> None:
-    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
-        parser.error("树分页参数只适用于list/history")
-    if args.action in {"list", "preview"} and args.value is not None:
-        parser.error("树list/preview不接受位置标识")
-    if args.action != "preview" and args.request is not None:
-        parser.error("--request仅用于树preview")
-    if args.action not in {"apply", "undo", "keep"} and (
-        args.revision is not None or args.request_key is not None
-    ):
-        parser.error("--revision/--request-key仅用于树apply/undo/keep")
-    if args.action != "list" and args.action != "preview" and not args.value:
-        parser.error("树操作需要原路径、标识或请求键")
-    result: BaseModel
-    if args.action == "inspect":
-        result = client.agent_tree_move_inspect(args.agent_id, args.value, confirmed=args.confirm)
-    elif args.action == "preview":
-        if not args.request:
-            parser.error("tree-moves preview需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("树意图不能超过64KiB")
-            request = TreeMovePreviewRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("树预览请求无效")
-        result = client.agent_tree_move_preview(args.agent_id, request, confirmed=args.confirm)
-    elif args.action in {"apply", "undo", "keep"}:
-        if args.revision is None or not args.request_key:
-            parser.error("树apply/undo/keep需要原提案ID、--revision和--request-key")
-        result = client.agent_tree_move_change(
-            args.agent_id,
-            TreeMoveAction(
-                proposal_id=args.value,
-                action=args.action,
-                expected_revision=args.revision,
-                request_key=args.request_key,
-            ),
-            confirmed=args.confirm,
-        )
-    elif args.action == "reconcile":
-        result = client.agent_tree_move_reconcile(args.agent_id, args.value, confirmed=args.confirm)
-    elif args.action == "cancel":
-        if args.confirm:
-            parser.error("树cancel不需要--confirm")
-        result = client.agent_tree_move_cancel(args.agent_id, args.value)
-    else:
-        kinds: dict[str, TreeMoveQueryKind] = {
-            "get": "proposal",
-            "list": "proposals",
-            "by-key": "by_key",
-            "operation": "operation",
-            "operation-by-key": "operation_by_key",
-            "history": "history",
-        }
-        selection = TreeMoveQueryRequest(
-            kind=kinds[args.action],
-            identifier=args.value if args.action in {"get", "operation", "history"} else None,
-            request_key=args.value if args.action in {"by-key", "operation-by-key"} else None,
-            after=args.after,
-            limit=args.limit,
-        )
-        result = client.agent_tree_move_query(args.agent_id, selection, confirmed=args.confirm)
-    print(result.model_dump_json(indent=2))
-    if isinstance(result, TreeMoveAttemptView) and result.status != "done":
-        parser.exit(1)
-
-
-def _generated_tree_undo_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> None:
-    writes = {"remove-root", "restore-root", "keep"}
-    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
-        parser.error("原生成根分页参数仅用于list/history")
-    if args.action in {"preview", "list"} and args.value is not None:
-        parser.error("原生成根preview/list不接受位置标识")
-    if args.action != "preview" and args.request is not None:
-        parser.error("--request仅用于原生成根preview")
-    if args.action not in writes and (args.revision is not None or args.request_key is not None):
-        parser.error("--revision/--request-key仅用于原生成根remove-root/restore-root/keep")
-    if args.action not in {"preview", "list"} and not args.value:
-        parser.error("原生成根操作需要原标识或请求键")
-    result: BaseModel
-    if args.action == "preview":
-        if not args.request:
-            parser.error("generated-tree-undos preview需要--request本地JSON")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("原生成根请求不能超过64KiB")
-            request = GeneratedTreeUndoPreviewRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("原生成根preview请求无效")
-        result = client.agent_generated_tree_undo_preview(
-            args.agent_id, request, confirmed=args.confirm
-        )
-    elif args.action in writes:
-        if args.revision is None or not args.request_key:
-            parser.error("原生成根动作需要原提案ID、--revision和--request-key")
-        result = client.agent_generated_tree_undo_change(
-            args.agent_id,
-            GeneratedTreeUndoAction(
-                proposal_id=args.value,
-                action=args.action.replace("-", "_"),
-                expected_revision=args.revision,
-                request_key=args.request_key,
-            ),
-            confirmed=args.confirm,
-        )
-    elif args.action == "reconcile":
-        result = client.agent_generated_tree_undo_reconcile(
-            args.agent_id, args.value, confirmed=args.confirm
-        )
-    elif args.action == "cancel":
-        result = client.agent_generated_tree_undo_cancel(
-            args.agent_id, args.value, confirmed=args.confirm
-        )
-    else:
-        kinds: dict[str, TreeMoveQueryKind] = {
-            "get": "proposal",
-            "list": "proposals",
-            "by-key": "by_key",
-            "operation": "operation",
-            "operation-by-key": "operation_by_key",
-            "history": "history",
-        }
-        selection = TreeMoveQueryRequest(
-            kind=kinds[args.action],
-            identifier=args.value if args.action in {"get", "operation", "history"} else None,
-            request_key=args.value if args.action in {"by-key", "operation-by-key"} else None,
-            after=args.after,
-            limit=args.limit,
-        )
-        result = client.agent_generated_tree_undo_query(
-            args.agent_id, selection, confirmed=args.confirm
-        )
-    print(result.model_dump_json(indent=2))
-    if isinstance(result, GeneratedTreeUndoAttemptView) and result.operation.status != "done":
-        parser.exit(1)
-
-
-def _tree_exchange_command(
-    client: KrimClient, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> None:
-    if args.action not in {"list", "history"} and (args.after is not None or args.limit != 32):
-        parser.error("树分页参数只适用于list/history")
-    if args.action in {"list", "preview"} and args.value is not None:
-        parser.error("树list/preview不接受位置标识")
-    if args.action != "preview" and args.request is not None:
-        parser.error("--request仅用于树preview")
-    if args.action not in {"apply", "undo", "keep"} and (
-        args.revision is not None or args.request_key is not None
-    ):
-        parser.error("--revision/--request-key仅用于树apply/undo/keep")
-    if args.action != "list" and args.action != "preview" and not args.value:
-        parser.error("树操作需要原路径、标识或请求键")
-    if args.action != "seal" and args.expected_fingerprint is not None:
-        parser.error("--expected-fingerprint仅用于tree-exchanges seal")
-    result: BaseModel
-    if args.action == "inspect":
-        result = client.agent_tree_exchange_inspect(
-            args.agent_id, args.value, confirmed=args.confirm
-        )
-    elif args.action == "seal-query":
-        result = client.agent_tree_exchange_seal_query(
-            args.agent_id, args.value, confirmed=args.confirm
-        )
-    elif args.action == "seal":
-        if not args.expected_fingerprint:
-            parser.error("tree-exchanges seal需要原plan标识与--expected-fingerprint")
-        result = client.agent_tree_exchange_seal(
-            args.agent_id,
-            TreeExchangeSealRequest(
-                plan_id=args.value, expected_fingerprint=args.expected_fingerprint
-            ),
-            confirmed=args.confirm,
-        )
-    elif args.action == "preview":
-        if not args.request:
-            parser.error("tree-exchanges preview需要--request本地JSON文件")
-        try:
-            with Path(args.request).open("rb") as source:
-                raw = source.read(65537)
-            if len(raw) > 65536:
-                parser.error("树意图不能超过64KiB")
-            request = TreeExchangePreviewRequest.model_validate_json(raw)
-        except (OSError, ValueError):
-            parser.error("树预览请求无效")
-        result = client.agent_tree_exchange_preview(args.agent_id, request, confirmed=args.confirm)
-    elif args.action in {"apply", "undo", "keep"}:
-        if args.revision is None or not args.request_key:
-            parser.error("树apply/undo/keep需要原提案ID、--revision和--request-key")
-        result = client.agent_tree_exchange_change(
-            args.agent_id,
-            TreeExchangeAction(
-                proposal_id=args.value,
-                action=args.action,
-                expected_revision=args.revision,
-                request_key=args.request_key,
-            ),
-            confirmed=args.confirm,
-        )
-    elif args.action == "reconcile":
-        result = client.agent_tree_exchange_reconcile(
-            args.agent_id, args.value, confirmed=args.confirm
-        )
-    elif args.action == "cancel":
-        if args.confirm:
-            parser.error("树cancel不需要--confirm")
-        result = client.agent_tree_exchange_cancel(args.agent_id, args.value)
-    else:
-        kinds: dict[str, TreeExchangeQueryKind] = {
-            "get": "proposal",
-            "list": "proposals",
-            "by-key": "by_key",
-            "operation": "operation",
-            "operation-by-key": "operation_by_key",
-            "history": "history",
-        }
-        selection = TreeExchangeQueryRequest(
-            kind=kinds[args.action],
-            identifier=args.value if args.action in {"get", "operation", "history"} else None,
-            request_key=args.value if args.action in {"by-key", "operation-by-key"} else None,
-            after=args.after,
-            limit=args.limit,
-        )
-        result = client.agent_tree_exchange_query(args.agent_id, selection, confirmed=args.confirm)
-    print(result.model_dump_json(indent=2))
-    if isinstance(result, TreeExchangeAttemptView) and result.status != "done":
-        parser.exit(1)
+    finally:
+        await store.close()
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    if args.command == "eval":
-        from .evaluation.cli import execute as execute_eval
+    parser = argparse.ArgumentParser(description="Krim Agent 离线Agent 核心")
+    parser.add_argument("--version", action="version", version=__version__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    serve = sub.add_parser("serve")
+    serve.add_argument("--database", required=True)
+    serve.add_argument("--port", type=int, default=8765)
+    for command in ("run", "get", "result", "trace", "events", "cancel"):
+        child = sub.add_parser(command)
+        child.add_argument("--database", default=".data/krim-agent.db")
+        child.add_argument("--url")
+        if command == "run":
+            child.add_argument("--text", required=True)
+            child.add_argument("--key", required=True)
+        else:
+            child.add_argument("--id", required=True)
 
-        try:
-            status = execute_eval(args)
-        except KeyboardInterrupt:
-            parser.exit(130, "评估已取消，当前运行已收束。\n")
-        except (OSError, ValueError):
-            parser.exit(2, "评估数据或配置无效；请检查本地文件与参数。\n")
-        parser.exit(status)
-    if args.command == "version":
-        print(f"Krim Agent {__version__}")
-        return
-    if args.command == "workflow" and args.action == "run":
-        if not args.value:
-            parser.error("workflow run 需要 JSON 图或文件路径")
-        try:
-            source = (
-                Path(args.value).read_text("utf-8") if Path(args.value).exists() else args.value
-            )
-            graph = WorkflowGraph.model_validate_json(source)
-            input_value = json.loads(args.input)
-        except (OSError, ValueError) as exc:
-            parser.error(f"Workflow JSON 无效: {exc}")
-        with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
-            print(
-                client.workflow_run(
-                    graph,
-                    input_value,
-                    idempotency_key=args.idempotency_key,
-                    pause_before=args.pause_before,
-                    pause_after=args.pause_after,
-                ).model_dump_json(indent=2)
-            )
-        return
+    def mode(child: argparse.ArgumentParser) -> None:
+        group = child.add_mutually_exclusive_group(required=True)
+        group.add_argument("--url")
+        group.add_argument("--database")
+
+    candidate = sub.add_parser("candidate")
+    mode(candidate)
+    candidate.add_argument("--id", required=True)
+    candidate.add_argument("--include-input", action="store_true")
+    dataset = sub.add_parser("dataset").add_subparsers(dest="operation", required=True)
+    for operation in ["freeze", "get"]:
+        child = dataset.add_parser(operation)
+        mode(child)
+        child.add_argument("--name", required=True)
+        child.add_argument("--revision", required=True)
+        if operation == "freeze":
+            child.add_argument("--case-id", default="case-1")
+            child.add_argument("--input", required=True)
+            child.add_argument("--source-run")
+            child.add_argument("--candidate-fingerprint")
+            child.add_argument("--expected-json", required=True)
+            child.add_argument("--status", required=True, choices=["completed", "failed"])
+            child.add_argument("--code")
+            child.add_argument("--reason", required=True)
+    evaluation = sub.add_parser("eval").add_subparsers(dest="operation", required=True)
+    for operation in ["start", "get", "by-key", "wait", "cancel"]:
+        child = evaluation.add_parser(operation)
+        mode(child)
+        if operation == "start":
+            for field in ["name", "revision", "fingerprint", "target", "key"]:
+                child.add_argument("--" + field, required=True)
+            child.add_argument("--rules", default="status_code,exact_match")
+            child.add_argument("--repetitions", type=int, default=1)
+        elif operation == "by-key":
+            child.add_argument("--key", required=True)
+        else:
+            child.add_argument("--id", required=True)
+    report = sub.add_parser("report")
+    mode(report)
+    report.add_argument("--id", required=True)
+    compare = sub.add_parser("compare")
+    mode(compare)
+    compare.add_argument("--baseline", required=True)
+    compare.add_argument("--candidate", required=True)
+    args = parser.parse_args()
     if args.command == "serve":
         import uvicorn
 
-        from .api.boundary import local_host
-        from .api.server import create_app
-        from .config import Settings
+        from krim_agent.api import create_app
 
-        if not 1 <= args.port <= 65535:
-            parser.error("端口必须在 1–65535 之间")
-        if args.tree_moves and not args.workspace:
-            parser.error("serve --tree-moves需要已授权--workspace")
-        if args.tree_exchanges and not args.workspace:
-            parser.error("serve --tree-exchanges需要已授权--workspace")
-        if args.generated_tree_undos and not args.workspace:
-            parser.error("serve --generated-tree-undos需要已授权--workspace")
-        if args.checkpoint_bytes and not args.workspace:
-            parser.error("serve --checkpoint-bytes需要已授权--workspace")
-        if args.directory_checkpoints and not args.workspace:
-            parser.error("serve --directory-checkpoints需要已授权--workspace")
-        if args.directory_restores and not args.workspace:
-            parser.error("serve --directory-restores需要已授权--workspace")
-        if args.directory_restore_controls and not args.workspace:
-            parser.error("serve --directory-restore-controls需要已授权--workspace")
-        if args.missing_directory_restores and not args.workspace:
-            parser.error("serve --missing-directory-restores需要已授权--workspace")
-        if args.missing_directory_restore_controls and not args.workspace:
-            parser.error("serve --missing-directory-restore-controls需要已授权--workspace")
-        if args.missing_directory_rollbacks and not args.workspace:
-            parser.error("serve --missing-directory-rollbacks需要已授权--workspace")
-        if args.directory_checkpoint_controls and not args.workspace:
-            parser.error("serve --directory-checkpoint-controls需要已授权--workspace")
-        if args.checkpoint_controls and not args.workspace:
-            parser.error("serve --checkpoint-controls需要已授权--workspace")
-        if args.checkpoint_restore_controls and not args.workspace:
-            parser.error("serve --checkpoint-restore-controls需要已授权--workspace")
-        settings = Settings.from_env()
-        if not settings.api_key.get_secret_value() and not local_host(args.host):
-            parser.error("无 API Key 时不能监听非本机地址")
-        try:
-            mcp_servers = None
-            if args.mcp_config:
-                with Path(args.mcp_config).open("rb") as stream:
-                    raw_mcp = stream.read(65537)
-                if len(raw_mcp) > 65536:
-                    raise ValueError("MCP启动配置超过64KiB")
-                try:
-                    mcp_servers = MCPBootstrap.model_validate_json(raw_mcp).registrations()
-                except ValidationError:
-                    raise ValueError("MCP启动配置字段或格式无效") from None
-            execution_runner = None
-            if args.execution:
-                from .execution.linux import LinuxSandboxRunner
-                from .execution.models import SandboxLimits
-
-                limits = None
-                if args.execution_limits:
-                    with Path(args.execution_limits).open("rb") as stream:
-                        raw_limits = stream.read(65537)
-                    if len(raw_limits) > 65536:
-                        raise ValueError("执行限额配置不能超过64KiB")
-                    limits = SandboxLimits.model_validate_json(raw_limits)
-                execution_runner = LinuxSandboxRunner(
-                    limits=limits, cgroup_root=args.execution_cgroup_root
-                )
-            elif args.execution_limits or args.execution_cgroup_root:
-                parser.error("--execution-limits/--execution-cgroup-root须同时启用--execution")
-            app = create_app(
-                settings,
-                workspace_root=args.workspace,
-                workspace_version=args.workspace_version,
-                workspace_writable=args.workspace_write,
-                tree_moves_enabled=args.tree_moves,
-                tree_exchanges_enabled=args.tree_exchanges,
-                generated_tree_undos_enabled=args.generated_tree_undos,
-                checkpoint_bytes_enabled=args.checkpoint_bytes,
-                directory_checkpoints_enabled=args.directory_checkpoints,
-                directory_restores_enabled=args.directory_restores,
-                directory_restore_controls_enabled=args.directory_restore_controls,
-                missing_directory_restores_enabled=args.missing_directory_restores,
-                missing_directory_restore_controls_enabled=args.missing_directory_restore_controls,
-                missing_directory_rollbacks_enabled=args.missing_directory_rollbacks,
-                directory_checkpoint_controls_enabled=args.directory_checkpoint_controls,
-                checkpoint_controls_enabled=args.checkpoint_controls,
-                checkpoint_restore_controls_enabled=args.checkpoint_restore_controls,
-                execution_runner=execution_runner,
-                execution_version=args.execution_version,
-                execution_owned=execution_runner is not None,
-                mcp_servers=mcp_servers,
-            )
-        except (ValueError, OSError, ServiceError) as error:
-            parser.error(f"工作区或执行资源配置无效：{error}")
-        uvicorn.run(app, host=args.host, port=args.port, workers=1)
+        settings = Settings.from_env().model_copy(update={"database": Path(args.database)})
+        uvicorn.run(
+            create_app(settings),
+            host="127.0.0.1",
+            port=args.port,
+            access_log=False,
+            log_level="warning",
+        )
         return
     try:
-        with KrimClient(args.url, os.getenv("KRIM_AGENT_API_KEY", "")) as client:
-            if args.command == "mcp":
-                if args.action == "list":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.mcp_servers()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                    return
-                if not args.name:
-                    parser.error("MCP动作需要已登记名称")
-                if args.action == "get":
-                    mcp_result = client.mcp_server(args.name)
-                elif args.action == "wait":
-                    mcp_result = client.mcp_wait(args.name, args.timeout_seconds)
-                else:
-                    if args.revision is None or not args.resource_hash:
-                        parser.error("MCP控制需要原revision和resource-hash，不自动替换版本")
-                    if args.action in {"enable", "disable"}:
-                        mcp_result = client.mcp_configure(
-                            args.name,
-                            MCPSelectionRequest(
-                                expected_revision=args.revision,
-                                resource_hash=args.resource_hash,
-                                enabled=args.action == "enable",
-                            ),
-                        )
-                    elif args.action == "connect":
-                        mcp_result = client.mcp_connect(
-                            args.name,
-                            MCPControlRequest(
-                                expected_revision=args.revision, resource_hash=args.resource_hash
-                            ),
-                        )
-                    else:
-                        mcp_result = client.mcp_disconnect(
-                            args.name,
-                            MCPControlRequest(
-                                expected_revision=args.revision, resource_hash=args.resource_hash
-                            ),
-                        )
-                print(mcp_result.model_dump_json(indent=2))
-                return
-            if args.command == "workspace":
-                _workspace_command(client, args, parser)
-                return
-            if args.command == "directory-checkpoints":
-                from .directory_checkpoint_cli import run_command as directory_checkpoint_command
-
-                directory_checkpoint_command(client, args, parser)
-                return
-            if args.command == "directory-restores":
-                from .directory_restore_cli import run_command as directory_restore_command
-
-                directory_restore_command(client, args, parser)
-                return
-            if args.command == "missing-directory-restores":
-                from .missing_directory_restore_cli import (
-                    run_command as missing_directory_restore_command,
-                )
-
-                missing_directory_restore_command(client, args, parser)
-                return
-            if args.command == "missing-directory-rollbacks":
-                from .missing_directory_rollback_cli import (
-                    run_command as missing_directory_rollback_command,
-                )
-
-                missing_directory_rollback_command(client, args, parser)
-                return
-            if args.command == "conversation-recoveries":
-                from .conversation_recovery_cli import run_command as conversation_recovery_command
-
-                conversation_recovery_command(client, args, parser)
-                return
-            if args.command == "directories":
-                _directory_command(client, args, parser)
-                return
-            if args.command == "generated-tree-undos":
-                _generated_tree_undo_command(client, args, parser)
-                return
-            if args.command == "tree-exchanges":
-                _tree_exchange_command(client, args, parser)
-                return
-            if args.command == "tree-moves":
-                _tree_move_command(client, args, parser)
-                return
-            if args.command == "tasks":
-                if args.action == "get":
-                    print(client.agent_tasks(args.agent_id, args.kind).model_dump_json(indent=2))
-                elif args.action == "history":
-                    print(
-                        json.dumps(
-                            [
-                                item.model_dump(mode="json")
-                                for item in client.agent_tasks_history(args.agent_id, args.kind)
-                            ],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                else:
-                    if not args.request:
-                        parser.error("tasks update需要--request本地JSON文件")
-                    raw = Path(args.request).read_bytes()
-                    if len(raw) > 65536:
-                        parser.error("任务请求不能超过64KiB")
-                    task_request = TaskWriteRequest.model_validate_json(raw)
-                    print(
-                        client.agent_tasks_write(
-                            args.agent_id, args.kind, task_request
-                        ).model_dump_json(indent=2)
-                    )
-                return
-            if args.command == "commands":
-                from .execution.cli import execute as execute_commands
-
-                try:
-                    status = execute_commands(client, args, parser)
-                except OSError:
-                    parser.exit(1, "本地命令请求或配置无法读取。\n")
-                except (ValidationError, ValueError):
-                    parser.exit(2, "命令参数或JSON结构无效。\n")
-                except ClientError as error:
-                    if error.status == 422:
-                        parser.exit(2, f"命令参数无效：{error}\n")
-                    raise
-                parser.exit(status)
-            if args.command == "budget":
-                if args.action == "accounts":
-                    print(
-                        json.dumps(
-                            [value.model_dump(mode="json") for value in client.budget_accounts()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                else:
-                    if not args.value:
-                        parser.error("budget 动作需要标识")
-                    if args.action == "account":
-                        print(client.budget_account(args.value).model_dump_json(indent=2))
-                    elif args.action == "run":
-                        print(
-                            json.dumps(
-                                [
-                                    value.model_dump(mode="json")
-                                    for value in client.run_budget(args.value)
-                                ],
-                                ensure_ascii=False,
-                                indent=2,
-                            )
-                        )
-                    elif args.action == "request":
-                        print(client.budget_request(args.value).model_dump_json(indent=2))
-                    elif args.action == "resolve":
-                        if args.revision is None or not args.receipt or not args.usage:
-                            parser.error("budget resolve 需要 revision/receipt/usage")
-                        request = BudgetResolveRequest.model_validate(
-                            {
-                                "revision": args.revision,
-                                "receipt": args.receipt,
-                                "usage": json.loads(args.usage),
-                            }
-                        )
-                        print(client.budget_resolve(args.value, request).model_dump_json(indent=2))
-                return
-            if args.command == "multiplex":
-                multiplex_request = MultiplexRequest.model_validate(
-                    {"sources": json.loads(args.sources)}
-                )
-                for item in client.multiplex_events(multiplex_request):
-                    print(
-                        "null" if item is None else item.model_dump_json(exclude_none=True),
-                        flush=True,
-                    )
-                return
-            if args.command == "interaction":
-                if args.action == "list":
-                    print(
-                        json.dumps(
-                            [
-                                item.model_dump(mode="json")
-                                for item in client.interactions(
-                                    args.run_id, pending_only=args.pending
-                                )
-                            ],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                else:
-                    if not args.interaction_id:
-                        parser.error("interaction 回应需要 interaction_id")
-                    if args.action == "answer" and not args.answer:
-                        parser.error("interaction answer 需要真实答案")
-                    print(
-                        client.respond_interaction(
-                            args.run_id,
-                            args.interaction_id,
-                            InteractionReply(
-                                action=args.action,
-                                answer=args.answer if args.action == "answer" else None,
-                            ),
-                        ).model_dump_json(indent=2)
-                    )
-                return
-            if args.command == "agent":
-                if args.action == "profiles":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.agent_profiles()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                elif args.action == "profile":
-                    if not args.value:
-                        parser.error("profile需要Agent配置名")
-                    print(client.agent_profile(args.value, args.revision).model_dump_json(indent=2))
-                elif args.action == "configure":
-                    from krim_agent.agents import AgentProfile, AgentProfileUpdate
-
-                    if not args.value:
-                        parser.error("configure需要本地JSON配置路径")
-                    raw = Path(args.value).read_bytes()
-                    if len(raw) > 65536:
-                        parser.error("Agent配置不能超过64KiB")
-                    agent_config = AgentProfile.model_validate_json(raw)
-                    print(
-                        client.agent_profile_put(
-                            AgentProfileUpdate(
-                                expected_revision=args.revision or 0, config=agent_config
-                            )
-                        ).model_dump_json(indent=2)
-                    )
-                elif args.action in {"enable", "disable"}:
-                    from krim_agent.agents import AgentProfileUpdate
-
-                    if not args.value or args.revision is None or args.revision < 1:
-                        parser.error("enable/disable需要配置名和--revision预期版本")
-                    saved = client.agent_profile(args.value, args.revision)
-                    print(
-                        client.agent_profile_put(
-                            AgentProfileUpdate(
-                                expected_revision=args.revision,
-                                config=saved.config,
-                                enabled=args.action == "enable",
-                            )
-                        ).model_dump_json(indent=2)
-                    )
-                elif args.action == "inventory":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.agent_inventory()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                elif args.action == "resources":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.agent_resources()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                elif args.action == "catalog":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.agents_catalog()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                elif args.action == "list":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.agents()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                else:
-                    if not args.value:
-                        parser.error("agent 操作需要 Agent ID 或目录名称")
-                    if args.action == "spawn":
-                        print(
-                            client.agent_spawn(
-                                args.value,
-                                persistent=args.persistent,
-                                profile_revision=args.revision,
-                            ).model_dump_json(indent=2)
-                        )
-                    elif args.action == "get":
-                        print(client.agent(args.value).model_dump_json(indent=2))
-                    elif args.action == "restore":
-                        print(client.agent_restore(args.value).model_dump_json(indent=2))
-                    elif args.action == "session":
-                        print(client.agent_session(args.value).model_dump_json(indent=2))
-                    elif args.action == "turns":
-                        print(
-                            json.dumps(
-                                [
-                                    item.model_dump(mode="json")
-                                    for item in client.agent_turns(args.value)
-                                ],
-                                ensure_ascii=False,
-                                indent=2,
-                            )
-                        )
-                    elif args.action in {"close", "reopen"}:
-                        if args.revision is None:
-                            parser.error("close/reopen需要--revision会话预期版本")
-                        controlled_session = (
-                            client.agent_session_close(args.value, args.revision)
-                            if args.action == "close"
-                            else client.agent_session_reopen(args.value, args.revision)
-                        )
-                        print(controlled_session.model_dump_json(indent=2))
-                    elif args.action in {"execute", "resume", "start"}:
-                        if not args.prompt:
-                            parser.error("agent execute/resume 需要 prompt")
-                        view = (
-                            client.agent_execute(args.value, args.prompt, args.idempotency_key)
-                            if args.action == "execute"
-                            else client.agent_start(args.value, args.prompt, args.idempotency_key)
-                            if args.action == "start"
-                            else client.agent_resume(args.value, args.prompt, args.idempotency_key)
-                        )
-                        print(view.model_dump_json(indent=2))
-                    elif args.action == "events":
-                        for frame in client.agent_events(
-                            args.value, args.from_seq, run_id=args.run_id
-                        ):
-                            print(frame.model_dump_json(exclude_none=True))
-                    elif args.action == "stop":
-                        print(client.agent_stop(args.value).model_dump_json(indent=2))
-                    elif args.action == "wait":
-                        print(client.agent_wait(args.value).model_dump_json(indent=2))
-                    elif args.action == "destroy":
-                        print(client.agent_destroy(args.value).model_dump_json(indent=2))
-                return
-            if args.command == "trace":
-                if args.action == "status":
-                    print(client.observability_status().model_dump_json(indent=2))
-                elif not args.value:
-                    parser.error("trace run/workflow/get 需要标识")
-                elif args.action == "get":
-                    print(client.trace(args.value).model_dump_json(indent=2))
-                else:
-                    records = (
-                        client.run_trace(args.value)
-                        if args.action == "run"
-                        else client.workflow_trace(args.value)
-                    )
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in records],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                return
-            if args.command == "compact":
-                print(
-                    client.compact(
-                        args.topic_id,
-                        ContextOptions(
-                            strategy=args.strategy,
-                            policy=args.policy,
-                            max_messages=args.max_messages,
-                            max_chars=args.max_chars,
-                            max_tokens=args.max_tokens,
-                            reserved_output_tokens=args.reserved_output_tokens,
-                        ),
-                        confirm=args.confirm,
-                        expected_branch_key=args.expected_branch_key,
-                        proposal_id=args.proposal_id,
-                        proposal_revision=args.proposal_revision,
-                    ).model_dump_json(indent=2)
-                )
-                return
-            if args.command == "proposal":
-                if args.action == "list":
-                    print(
-                        json.dumps(
-                            [
-                                item.model_dump(mode="json")
-                                for item in client.context_proposals(
-                                    args.topic_id, pending_only=args.pending
-                                )
-                            ],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                elif not args.proposal_id:
-                    parser.error("proposal get/confirm/reject 需要 proposal_id")
-                elif args.action == "get":
-                    print(
-                        client.context_proposal(args.topic_id, args.proposal_id).model_dump_json(
-                            indent=2
-                        )
-                    )
-                else:
-                    if args.revision is None:
-                        parser.error("proposal confirm/reject 需要 --revision")
-                    print(
-                        client.decide_context_proposal(
-                            args.topic_id,
-                            args.proposal_id,
-                            ContextProposalDecision(action=args.action, revision=args.revision),
-                        ).model_dump_json(indent=2)
-                    )
-                return
-            if args.command == "workflow":
-                if args.action == "list":
-                    print(
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in client.workflows()],
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                    return
-                if not args.value:
-                    parser.error("workflow 操作需要 run_id")
-                run_id = args.value
-                if args.action == "get":
-                    print(client.workflow(run_id).model_dump_json(indent=2))
-                elif args.action == "events":
-                    for event in client.workflow_events(run_id, args.from_seq):
-                        print(event.model_dump_json(exclude_none=True))
-                elif args.action == "pause":
-                    print(client.workflow_pause(run_id).model_dump_json(indent=2))
-                elif args.action == "stop":
-                    print(client.workflow_stop(run_id).model_dump_json(indent=2))
-                elif args.action == "resume":
-                    value = json.loads(args.override) if args.override is not None else None
-                    print(
-                        client.workflow_resume(
-                            run_id, value, override=args.override is not None
-                        ).model_dump_json(indent=2)
-                    )
-                elif args.action == "restore":
-                    outputs = json.loads(args.completed_outputs) if args.completed_outputs else {}
-                    print(
-                        client.workflow_restore(
-                            run_id,
-                            replay_side_effects=args.allow_side_effects,
-                            completed_outputs=outputs,
-                        ).model_dump_json(indent=2)
-                    )
-                elif args.action == "rerun":
-                    if not args.node:
-                        parser.error("workflow rerun 需要 --node")
-                    value = json.loads(args.override) if args.override is not None else None
-                    print(
-                        client.workflow_rerun(
-                            run_id,
-                            args.node,
-                            value,
-                            override=args.override is not None,
-                            allow_side_effects=args.allow_side_effects,
-                        ).model_dump_json(indent=2)
-                    )
-                return
-            if args.command == "topics":
-                for topic in client.topics():
-                    print(f"{topic.id}\t{topic.title}")
-            elif args.command == "skills":
-                if args.action == "list":
-                    result = client.skills(args.topic_id)
-                else:
-                    if not args.archive:
-                        parser.error("skills import-archive需要--archive本地ZIP")
-                    with Path(args.archive).open("rb") as source:
-                        raw = source.read(45001)
-                    if len(raw) > 45000:
-                        parser.error("技能ZIP不能超过45000字节")
-                    result = client.import_skill_archive(
-                        args.topic_id,
-                        SkillPackageRequest(
-                            archive_base64=base64.b64encode(raw).decode(),
-                            expected_digest=args.expected_digest,
-                        ),
-                    )
-                print(result.model_dump_json(indent=2))
-            elif args.command == "messages":
-                for message in client.messages(args.topic_id):
-                    print(f"[{message.sequence} {message.role}] {message.content}")
-            elif args.command == "tree":
-                print(client.tree(args.topic_id).model_dump_json(indent=2))
-            elif args.command == "branch":
-                print(
-                    client.select_branch(args.topic_id, args.message_id).model_dump_json(indent=2)
-                )
-            elif args.command in {"edit", "regenerate"}:
-                run = (
-                    client.edit(args.topic_id, args.message_id, args.text, args.idempotency_key)
-                    if args.command == "edit"
-                    else client.regenerate(args.topic_id, args.message_id, args.idempotency_key)
-                )
-                print(run.model_dump_json(indent=2))
-            elif args.command in {"run", "stop"}:
-                run = (
-                    client.stop(args.run_id) if args.command == "stop" else client.run(args.run_id)
-                )
-                print(run.model_dump_json(indent=2))
-            elif args.command == "usage":
-                print(client.usage(args.run_id).model_dump_json(indent=2))
-            elif args.command == "resume":
-                if args.from_seq < 0:
-                    parser.error("from-seq 必须是非负整数")
-                for frame in client.events(args.run_id, args.from_seq):
-                    print(frame.model_dump_json(exclude_none=True))
-            elif args.command == "chat":
-                topic_id = args.topic or client.create_topic(args.text[:80]).id
-                run = (
-                    client.send(
-                        topic_id, args.text, args.idempotency_key, parent_message_id=args.parent
-                    )
-                    if args.parent
-                    else client.send(topic_id, args.text, args.idempotency_key)
-                )
-                print(f"话题 ID: {topic_id}\n运行 ID: {run.id}", flush=True)
-                if run.status in TERMINAL_STATUSES:
-                    for message in client.run_messages(run.id):
-                        if (
-                            message.run_id == run.id
-                            and message.role == "assistant"
-                            and message.content
-                        ):
-                            print(message.content)
-                    print(f"终态: {run.status}")
-                    return
-                for frame in client.events(run.id):
-                    if isinstance(frame.data, dict) and frame.data.get("type") == "text_delta":
-                        print(frame.data["text"], end="", flush=True)
-                    elif frame.kind == "end":
-                        print(f"\n终态: {frame.data}")
-    except KeyboardInterrupt:
-        print("\n仅断开客户端订阅；后台可能继续运行。需要停止请使用 stop 命令。")
-    except (ClientError, httpx.HTTPError, ValidationError) as exc:
-        parser.exit(1, f"操作失败: {exc}\n")
+        print(json.dumps(asyncio.run(execute(args)), ensure_ascii=False, allow_nan=False))
+    except ServiceError as error:
+        print(json.dumps({"error": {"code": error.code}}, ensure_ascii=False))
+        raise SystemExit(1) from None
+    except (ValueError, KeyError):
+        print(json.dumps({"error": {"code": "invalid_input"}}))
+        raise SystemExit(1) from None
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print(json.dumps({"error": {"code": "cancelled"}}))
+        raise SystemExit(130) from None

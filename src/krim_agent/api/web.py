@@ -1,4 +1,4 @@
-"""浏览器静态资源白名单；不暴露项目源码、配置或数据库。"""
+"""逐名提供批准的 UI 构建资源；不暴露源码、环境或数据库。"""
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -6,140 +6,37 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 
-PUBLIC_UI_PATHS = frozenset(
-    {
-        "/",
-        "/ui",
-        "/ui/",
-        "/ui/index.html",
-        "/ui/host.html",
-        "/ui/styles.css",
-        "/ui/app.js",
-        "/ui/agents-ui.js",
-        "/ui/conversation-recovery-contract.js",
-        "/ui/conversation-recovery-storage.js",
-        "/ui/conversation-recovery-ui.js",
-        "/ui/tasks-ui.js",
-        "/ui/workspace-ui.js",
-        "/ui/workspace-changes-ui.js",
-        "/ui/directory-changes-ui.js",
-        "/ui/tree-moves-ui.js",
-        "/ui/tree-exchanges-ui.js",
-        "/ui/generated-tree-undos-ui.js",
-        "/ui/missing-directory-rollback-contract.js",
-        "/ui/missing-directory-rollback-recovery.js",
-        "/ui/missing-directory-rollback-ui.js",
-        "/ui/commands-ui.js",
-        "/ui/workspace-trees-ui.js",
-        "/ui/background-streams.js",
-        "/ui/api.js",
-        "/ui/host.js",
-        "/ui/host-shell.js",
-        "/ui/prompt-context.js",
-        "/ui/prompt-context-ui.js",
-        "/ui/i18n.js",
-        "/ui/skills-ui.js",
-        "/ui/links.js",
-        "/ui/drag-drop.js",
-        "/ui/change-list-ui.js",
-        "/ui/checkpoint-ui.js",
-        "/ui/native-checkpoint-ui.js",
-        "/ui/directory-checkpoint-ui.js",
-        "/ui/directory-restore-contract.js",
-        "/ui/directory-restore-recovery.js",
-        "/ui/directory-restore-ui.js",
-        "/ui/missing-directory-restore-contract.js",
-        "/ui/missing-directory-restore-recovery.js",
-        "/ui/missing-directory-restore-ui.js",
-        "/ui/attachments-ui.js",
-        "/ui/mcp-ui.js",
-        "/ui/oauth-ui.js",
-    }
-)
-_CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-    "img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; "
-    "frame-ancestors 'self'"
-)
-_HEADERS = {
-    "Content-Security-Policy": _CSP,
+FILES = ("index.html", "assets/app.js", "assets/styles.css", "THIRD-PARTY-NOTICES.txt")
+PUBLIC_UI_PATHS = frozenset({"/", "/ui/", *("/ui/" + name for name in FILES)})
+HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "frame-ancestors 'none'"
+    ),
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "same-origin",
-    "Cache-Control": "no-cache",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
 }
 
 
 def mount_browser_ui(app: FastAPI) -> None:
-    directory = Path(__file__).resolve().parents[1] / "web"
-    resources = {
-        "index.html": "text/html",
-        "host.html": "text/html",
-        "styles.css": "text/css",
-        "app.js": "text/javascript",
-        "agents-ui.js": "text/javascript",
-        "conversation-recovery-contract.js": "text/javascript",
-        "conversation-recovery-storage.js": "text/javascript",
-        "conversation-recovery-ui.js": "text/javascript",
-        "tasks-ui.js": "text/javascript",
-        "workspace-ui.js": "text/javascript",
-        "workspace-changes-ui.js": "text/javascript",
-        "directory-changes-ui.js": "text/javascript",
-        "tree-moves-ui.js": "text/javascript",
-        "tree-exchanges-ui.js": "text/javascript",
-        "generated-tree-undos-ui.js": "text/javascript",
-        "commands-ui.js": "text/javascript",
-        "workspace-trees-ui.js": "text/javascript",
-        "background-streams.js": "text/javascript",
-        "api.js": "text/javascript",
-        "host.js": "text/javascript",
-        "host-shell.js": "text/javascript",
-        "prompt-context.js": "text/javascript",
-        "prompt-context-ui.js": "text/javascript",
-        "i18n.js": "text/javascript",
-        "skills-ui.js": "text/javascript",
-        "links.js": "text/javascript",
-        "drag-drop.js": "text/javascript",
-        "change-list-ui.js": "text/javascript",
-        "checkpoint-ui.js": "text/javascript",
-        "native-checkpoint-ui.js": "text/javascript",
-        "directory-checkpoint-ui.js": "text/javascript",
-        "directory-restore-contract.js": "text/javascript",
-        "directory-restore-recovery.js": "text/javascript",
-        "directory-restore-ui.js": "text/javascript",
-        "missing-directory-restore-contract.js": "text/javascript",
-        "missing-directory-restore-recovery.js": "text/javascript",
-        "missing-directory-restore-ui.js": "text/javascript",
-        "missing-directory-rollback-contract.js": "text/javascript",
-        "missing-directory-rollback-recovery.js": "text/javascript",
-        "missing-directory-rollback-ui.js": "text/javascript",
-        "attachments-ui.js": "text/javascript",
-        "mcp-ui.js": "text/javascript",
-        "oauth-ui.js": "text/javascript",
-    }
+    root = Path(__file__).resolve().parents[1] / "web"
 
     @app.get("/", include_in_schema=False)
-    async def root() -> RedirectResponse:
-        return RedirectResponse("/ui/", headers=_HEADERS)
+    async def home() -> RedirectResponse:
+        return RedirectResponse("/ui/", headers=HEADERS)
 
-    @app.get("/ui", include_in_schema=False)
-    async def ui_redirect() -> RedirectResponse:
-        return RedirectResponse("/ui/", headers=_HEADERS)
-
-    async def index() -> FileResponse:
-        return FileResponse(directory / "index.html", media_type="text/html", headers=_HEADERS)
-
-    app.add_api_route("/ui/", index, methods=["GET", "HEAD"], include_in_schema=False)
-
-    def resource_route(filename: str, media_type: str) -> Callable[[], Awaitable[FileResponse]]:
+    def endpoint(name: str) -> Callable[[], Awaitable[FileResponse]]:
         async def serve() -> FileResponse:
-            return FileResponse(directory / filename, media_type=media_type, headers=_HEADERS)
+            return FileResponse(root / name, headers=HEADERS)
 
         return serve
 
-    for name, media in resources.items():
+    app.add_api_route(
+        "/ui/", endpoint("index.html"), methods=["GET", "HEAD"], include_in_schema=False
+    )
+    for name in FILES:
         app.add_api_route(
-            f"/ui/{name}",
-            resource_route(name, media),
-            methods=["GET", "HEAD"],
-            include_in_schema=False,
+            "/ui/" + name, endpoint(name), methods=["GET", "HEAD"], include_in_schema=False
         )

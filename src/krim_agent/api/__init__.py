@@ -1,4 +1,4 @@
-"""FastAPI HTTP/SSE 适配层。"""
+"""HTTP 工厂只在 lifespan 显式装配资源。"""
 
 from .server import create_app
 
