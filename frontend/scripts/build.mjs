@@ -1,18 +1,32 @@
-import { mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import ts from "typescript";
-
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const target = resolve(root, "../src/krim_agent/web");
-await mkdir(target, { recursive: true });
-for (const file of ["index.html", "host.html", "styles.css"]) {
-  await copyFile(resolve(root, file), resolve(target, file));
-}
-for (const file of ["api", "app", "agents-ui", "conversation-recovery-contract", "conversation-recovery-storage", "conversation-recovery-ui", "tasks-ui", "workspace-ui", "workspace-changes-ui", "directory-changes-ui", "tree-moves-ui", "tree-exchanges-ui", "generated-tree-undos-ui", "missing-directory-rollback-contract", "missing-directory-rollback-recovery", "missing-directory-rollback-ui", "commands-ui", "workspace-trees-ui", "background-streams", "host", "host-shell", "prompt-context", "prompt-context-ui", "i18n", "skills-ui", "links", "drag-drop", "change-list-ui", "checkpoint-ui", "native-checkpoint-ui", "directory-checkpoint-ui", "directory-restore-contract", "directory-restore-recovery", "directory-restore-ui", "missing-directory-restore-contract", "missing-directory-restore-recovery", "missing-directory-restore-ui", "attachments-ui", "mcp-ui", "oauth-ui"]) {
-  const source = await readFile(resolve(root, `src/${file}.ts`), "utf8");
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-  });
-  await writeFile(resolve(target, `${file}.js`), compiled.outputText, "utf8");
-}
+import {build} from "vite";
+import {mkdir,mkdtemp,readFile,writeFile,copyFile,readdir,stat} from "node:fs/promises";
+import {dirname,resolve,relative} from "node:path";
+import {fileURLToPath} from "node:url";
+import {createHash} from "node:crypto";
+const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
+const cache=resolve(root,"../.cache/agent-core/lc-ui1");await mkdir(cache,{recursive:true});
+const out=await mkdtemp(resolve(cache,"build-"));let modules=[];
+await build({configFile:resolve(root,"vite.config.ts"),root,build:{outDir:out,emptyOutDir:true},plugins:[{name:"agent-ui-provenance",generateBundle(_options,bundle){modules=[...new Set(Object.values(bundle).flatMap(item=>item.type==="chunk"?Object.keys(item.modules):[]))];}}]});
+async function files(path,prefix=""){let found=[];for(const name of await readdir(path)){const full=resolve(path,name);if((await stat(full)).isDirectory())found.push(...await files(full,prefix+name+"/"));else found.push(prefix+name);}return found;}
+const actual=(await files(out)).sort();
+const product=["index.html","assets/app.js","assets/styles.css"];
+const allowed=[...product,".vite/manifest.json",".vite/licenses.json"].sort();
+if(JSON.stringify(actual)!==JSON.stringify(allowed))throw new Error("构建资源集合不符："+JSON.stringify(actual));
+const index=await readFile(resolve(out,"index.html"),"utf8");
+if(!index.includes('/ui/assets/app.js')||!index.includes('/ui/assets/styles.css')||/https?:\/\//.test(index))throw new Error("入口资源引用不符");
+const licenses=JSON.parse(await readFile(resolve(out,".vite/licenses.json"),"utf8"));
+for(const name of ["tw-animate-css","tailwindcss"]){const meta=JSON.parse(await readFile(resolve(root,"node_modules",name,"package.json"),"utf8"));licenses.push({name,version:meta.version,identifier:meta.license,text:await readFile(resolve(root,"node_modules",name,"LICENSE"),"utf8")});}
+const marker="\n\nBundled dependencies\n\n";
+const sourceNotice=await readFile(resolve(root,"THIRD-PARTY-NOTICES.txt"),"utf8");
+const sourcePrefix=sourceNotice.split(marker)[0];
+if(!sourcePrefix.includes("shadcn/ui")||!sourcePrefix.includes("MIT License")||!sourceNotice.includes(marker))throw new Error("缺少受审阅的 shadcn 许可前缀");
+const notices=sourcePrefix+marker+licenses.map(item=>`${item.name}@${item.version}\nLicense: ${item.identifier}\n${item.text}\n`).join("\n--------------------\n\n");
+if(licenses.some(item=>!item.identifier||!item.text))throw new Error("依赖许可缺失，须核实："+JSON.stringify(licenses.filter(item=>!item.identifier||!item.text)));
+await writeFile(resolve(root,"THIRD-PARTY-NOTICES.txt"),notices);
+await mkdir(resolve(root,"../src/krim_agent/web/assets"),{recursive:true});
+for(const name of product)await copyFile(resolve(out,name),resolve(root,"../src/krim_agent/web",name));
+await copyFile(resolve(root,"THIRD-PARTY-NOTICES.txt"),resolve(root,"../src/krim_agent/web/THIRD-PARTY-NOTICES.txt"));
+const hashes={};for(const name of product)hashes[name]=createHash("sha256").update(await readFile(resolve(out,name))).digest("hex");
+await writeFile(resolve(out,".vite/source-modules.json"),JSON.stringify(modules,null,2));
+await writeFile(resolve(out,".vite/proof.json"),JSON.stringify({out,modules,licenses:licenses.map(item=>({name:item.name,version:item.version,license:item.identifier})),hashes,imports:modules.filter(id=>relative(root,id).startsWith("src/"))},null,2));
+console.log(JSON.stringify({out,products:[...product,"THIRD-PARTY-NOTICES.txt"],modules:modules.length}));
