@@ -97,8 +97,12 @@ export async function evalOrFind(store: Storage, body: EvalBody, key: string): P
     const confirmed = parseEval(await request(path, key));
     if (confirmed.id !== view.id || confirmed.request_key !== intent.request_key)
         throw new Error("评测身份不一致");
-    if (loadEval(store)?.request_key === intent.request_key)
-        store.removeItem(EVAL_INTENT);
     return confirmed;
+}
+export function acknowledgeEval(store: Storage, body: EvalBody, view: EvalData): void {
+    // 只有调用方已接收并持久保存原身份，才结束这份完整请求的待确认状态。
+    if (view.request_key !== body.request_key || store.getItem(EVAL_CURRENT) !== view.id || !sameRequest(loadEval(store), body))
+        throw new Error("评测确认身份不一致");
+    store.removeItem(EVAL_INTENT);
 }
 export function sameRequest(a: unknown, b: unknown) { return canonical(a) === canonical(b); }

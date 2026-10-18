@@ -178,6 +178,10 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 .eval-layout { display: grid; grid-template-columns: minmax(280px,360px) minmax(0,1fr); gap: 48px; padding: 32px 0 72px; }
 .evaluation-results { min-width: 0; border-left: 1px solid var(--border); padding-left: 40px; }
 .case-editor { min-width: 0; }
+.eval-editor { min-width: 0; }
+.eval-editor-toggle { display: none; }
+.eval-recovery { margin: 24px 0; }
+.eval-recovery code { display: block; overflow-wrap: anywhere; font-size: 12px; margin: 10px 0; }
 .eval-field,.source-picker,.reference-details { margin: 16px 0; }
 .eval-field label { display: block; margin-bottom: 8px; }
 .eval-input { min-height: 84px; max-height: min(240px,30vh); overflow-y: auto; resize: vertical; padding: 12px; line-height: 1.7; }
@@ -216,6 +220,21 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 .gate-result li { margin-top: 10px; }
 .gate-result code { display: block; overflow-wrap: anywhere; }
 @media(max-width:1023px) { .eval-layout { grid-template-columns: minmax(0,1fr); max-width:720px; margin:auto; gap:28px; } .evaluation-results { border-left:0; padding-left:0; } }
+@media(max-width:1023px) {
+  .eval-focused { display: flex; flex-direction: column; gap: 20px; }
+  .eval-focused .evaluation-results, .eval-focused .eval-report { display: contents; }
+  .eval-focused .eval-report>.workspace-title { order: -7; }
+  .eval-focused .eval-report>.run-identity { order: -6; margin: 0; }
+  .eval-focused .eval-report>.eval-summary { order: -5; margin: 0; }
+  .eval-focused .eval-recovery { order: -4; margin: 0; }
+  .eval-focused .eval-notice { order: -3; margin: 0; }
+  .eval-focused .eval-editor { order: -2; }
+  .eval-focused .eval-editor-toggle { display: inline-flex; margin-bottom: 16px; }
+  .eval-focused:not(.eval-editing) #eval-case-editor { display: none; }
+  .eval-focused .report-table-scroll, .eval-focused .report-identity { order: 0; min-width: 0; }
+  .eval-focused .eval-controls { order: 1; }
+  .eval-focused .eval-compare { order: 2; }
+}
 @media(max-width:480px) { .eval-layout { padding-top:24px; } .eval-two { gap:12px; } .eval-actions>button { flex:1; } .eval-inline button { padding-inline:12px; } .evaluation-workbench .workspace-title { flex-wrap:wrap; } }
 .composer-actions {
   display: flex;

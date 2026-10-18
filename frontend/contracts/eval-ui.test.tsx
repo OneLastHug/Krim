@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { createHash, webcrypto } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import { canonical, revisionSelection, type Dataset, type FreezeBody } from "../src/lib/eval-contracts";
-import { FREEZE_INTENT } from "../src/lib/eval-requests";
+import { FREEZE_INTENT, EVAL_INTENT, EVAL_CURRENT } from "../src/lib/eval-requests";
 (globalThis as typeof globalThis & {
     IS_REACT_ACT_ENVIRONMENT: boolean;
 }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -203,3 +203,72 @@ test("corrected catalogue authentication clears only its own stale notice", asyn
     expect(document.querySelector(".evaluation-results>.notice")).toBeNull();
     expect(calls.filter(c => c.method === "POST")).toEqual([]);
 });
+for (const barrier of ["POST", "confirmation GET"] as const) {
+    for (const steering of ["task", "other", "key", "refresh", "remount"] as const) {
+        test(`successful Eval ${barrier} preserves original intent after ${steering}`, async () => {
+            let entered = false, release!: (value: Response) => void, acceptedKey = "", confirmations = 0;
+            const held = new Promise<Response>(resolve => release = resolve);
+            intercept((path, options) => {
+                if (path === "/v1/datasets" && options.method === "POST")
+                    return json(revision(JSON.parse(String(options.body))));
+                if (path === "/v1/evals" && options.method === "POST") {
+                    acceptedKey = JSON.parse(String(options.body)).request_key;
+                    if (barrier === "POST") {
+                        entered = true;
+                        return held;
+                    }
+                    return json({ ...evalView("accepted"), request_key: acceptedKey });
+                }
+                if (path.startsWith("/v1/evals/by-key/")) {
+                    confirmations++;
+                    if (barrier === "confirmation GET" && confirmations === 1) {
+                        entered = true;
+                        return held;
+                    }
+                    return json({ ...evalView("accepted"), request_key: acceptedKey });
+                }
+                return reads(path);
+            });
+            await mount();
+            await oneCase();
+            await click("冻结修订");
+            await type("open-eval-id", "A");
+            await click("打开评测");
+            await until(() => expect(document.getElementById("eval-status")?.textContent).toBe("已完成"));
+            await click("开始评测");
+            await until(() => expect(entered).toBe(true));
+            const original = JSON.parse(localStorage.getItem(EVAL_INTENT)!);
+            if (steering === "task")
+                await click("任务");
+            if (steering === "other") {
+                await type("open-eval-id", "B");
+                await click("打开评测");
+            }
+            if (steering === "key")
+                await connect("next-key");
+            if (steering === "refresh")
+                await click("刷新");
+            if (steering === "remount") {
+                await act(async () => root.unmount());
+                root = createRoot(host);
+                await mount();
+            }
+            await act(async () => release(json({ ...evalView("accepted"), request_key: acceptedKey })));
+            await until(() => expect(confirmations).toBeGreaterThan(0));
+            await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+            expect(JSON.parse(localStorage.getItem(EVAL_INTENT)!)).toEqual(original);
+            expect(localStorage.getItem(EVAL_CURRENT)).toBe(steering === "other" ? "B" : "A");
+            expect(document.getElementById("eval-id")?.textContent).not.toBe("accepted");
+            if (steering === "task")
+                await click("评测");
+            await click("查找评测");
+            await until(() => expect(document.getElementById("eval-id")?.textContent).toBe("accepted"));
+            expect(localStorage.getItem(EVAL_CURRENT)).toBe("accepted");
+            expect(new URL(location.href).searchParams.get("eval_id")).toBe("accepted");
+            expect(localStorage.getItem(EVAL_INTENT)).toBeNull();
+            expect(calls.filter(c => c.path === "/v1/evals" && c.method === "POST")).toHaveLength(1);
+            expect(calls.filter(c => c.path.endsWith("/cancel"))).toEqual([]);
+            expect(calls.filter(c => c.path.startsWith("/v1/evals/by-key/")).every(c => c.path.endsWith(original.request_key))).toBe(true);
+        });
+    }
+}
