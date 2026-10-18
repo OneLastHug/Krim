@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { object, request, RequestError } from "../api";
 import { reason } from "../lib/copy";
 import { parseEval, parseReport, type Dataset, type EvalBody, type EvalData, type Report, type Rule } from "../lib/eval-contracts";
-import { EVAL_CURRENT, EVAL_INTENT, evalOrFind, loadEval } from "../lib/eval-requests";
+import { EVAL_CURRENT, EVAL_INTENT, acknowledgeEval, evalOrFind, loadEval } from "../lib/eval-requests";
 export function useEvaluation(key: string, active: boolean) {
     const [initial] = useState(() => {
         try {
@@ -17,11 +17,14 @@ export function useEvaluation(key: string, active: boolean) {
     const [pending, setPending] = useState(Boolean(initial.intent) || initial.invalid), [busy, setBusy] = useState(false), [stopping, setStopping] = useState(false), [notice, setNotice] = useState(initial.invalid ? "原评测请求记录无效" : ""), [version, setVersion] = useState(0);
     const [pair, setPair] = useState({ baseline: "", candidate: "" }), [gate, setGate] = useState<Record<string, unknown> | null>(null), [comparing, setComparing] = useState(false);
     const [catalogueNotice, setCatalogueNotice] = useState("");
+    const [pendingKey, setPendingKey] = useState(initial.intent?.request_key ?? "");
+    const activeRef = useRef(active);
+    activeRef.current = active;
     const epoch = useRef(0), compareEpoch = useRef(0), mounted = useRef(false), flight = useRef(false), stopFlight = useRef(false), compareFlight = useRef<number | null>(null), reader = useRef<AbortController | null>(null), compareReader = useRef<AbortController | null>(null), keyRef = useRef(key);
     keyRef.current = key;
     function invalidate() { epoch.current++; reader.current?.abort(); }
     function refresh() { invalidate(); setVersion(v => v + 1); }
-    function select(value: string) { invalidate(); setId(value); setView(null); setReport(null); setNotice(""); localStorage.setItem(EVAL_CURRENT, value); const url = new URL(location.href); url.searchParams.set("eval_id", value); url.searchParams.set("view", "eval"); history.replaceState(null, "", url); setVersion(v => v + 1); }
+    function select(value: string) { localStorage.setItem(EVAL_CURRENT, value); const url = new URL(location.href); url.searchParams.set("eval_id", value); url.searchParams.set("view", "eval"); history.replaceState(null, "", url); invalidate(); setId(value); setView(null); setReport(null); setNotice(""); setVersion(v => v + 1); }
     useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); compareEpoch.current++; compareReader.current?.abort(); }; }, []);
     useEffect(() => { const change = () => select(new URL(location.href).searchParams.get("eval_id") ?? ""); window.addEventListener("popstate", change); return () => window.removeEventListener("popstate", change); }, []);
     useEffect(() => { compareEpoch.current++; compareReader.current?.abort(); setGate(null); }, [key, active]);
@@ -108,12 +111,15 @@ export function useEvaluation(key: string, active: boolean) {
                         throw new Error("规则目录未就绪");
                     return value;
                 }), execution: { repetitions, concurrency: 1, item_timeout_seconds: 12, scorer_timeout_seconds: 1, batch_timeout_seconds: 600 } };
+            setPendingKey(body.request_key);
             const value = await evalOrFind(localStorage, body, key);
-            if (mounted.current && token === epoch.current && keyRef.current === capturedKey)
+            if (mounted.current && activeRef.current && token === epoch.current && keyRef.current === capturedKey) {
                 select(value.id);
+                acknowledgeEval(localStorage, body, value);
+            }
         }
         catch (error) {
-            if (mounted.current && keyRef.current === capturedKey)
+            if (mounted.current && activeRef.current && token === epoch.current && keyRef.current === capturedKey)
                 setNotice(localStorage.getItem(EVAL_INTENT) ? "评测创建结果未确认" : reason(error, error instanceof Error ? error.message : "评测未创建"));
         }
         finally {
@@ -192,6 +198,6 @@ export function useEvaluation(key: string, active: boolean) {
                 setComparing(false);
         }
     }
-    return { id, view, report, targets, rules, target, setTarget, selected, setSelected, repetitions, setRepetitions, pending, busy, stopping, notice: notice || catalogueNotice, select, refresh, start, stop, pair, gate, comparing, changePair, compare };
+    return { id, view, report, targets, rules, target, setTarget, selected, setSelected, repetitions, setRepetitions, pending, pendingKey, busy, stopping, notice: notice || catalogueNotice, select, refresh, start, stop, pair, gate, comparing, changePair, compare };
 }
 export type EvaluationState = ReturnType<typeof useEvaluation>;

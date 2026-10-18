@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseReference, parseEval, parseReport, parseRule, parseDataset, matchesRevision, strictJson, revisionSelection, type Dataset } from "../src/lib/eval-contracts.ts";
-import { freezeOrFind, unadmitted, FREEZE_INTENT } from "../src/lib/eval-requests.ts";
+import { parseReference, parseEval, parseReport, parseRule, parseDataset, matchesRevision, strictJson, revisionSelection, type Dataset, type EvalBody } from "../src/lib/eval-contracts.ts";
+import { freezeOrFind, evalOrFind, acknowledgeEval, unadmitted, FREEZE_INTENT, EVAL_INTENT, EVAL_CURRENT } from "../src/lib/eval-requests.ts";
 import { RequestError } from "../src/api.ts";
 const vectors = JSON.parse(readFileSync(new URL("../../tests/core/eval_contracts.json", import.meta.url), "utf8"));
 for (const vector of vectors) {
@@ -98,3 +98,28 @@ finally {
     globalThis.fetch = savedFetch;
 }
 console.log("numeric references keep original content; confirmed POST conflicts remain conflicts");
+const evalStore = new Memory(), previousFetch = globalThis.fetch;
+try {
+    const view = vectors.find((v: {
+        kind: string;
+        valid: boolean;
+    }) => v.kind === "eval" && v.valid).value;
+    const body: EvalBody = { request_key: view.request_key, dataset: { name: numeric.name, version: numeric.version, fingerprint: numeric.fingerprint }, target_key: "target-v2", rules: [{ name: "status_code", version: "1", config: { match_code: true } }], execution: { repetitions: 1, concurrency: 1, item_timeout_seconds: 12, scorer_timeout_seconds: 1, batch_timeout_seconds: 600 } };
+    let postCount = 0;
+    globalThis.fetch = async (_path, options) => { if (options?.method === "POST")
+        postCount++; return new Response(JSON.stringify(view)); };
+    const confirmed = await evalOrFind(evalStore, body, "key");
+    assert.deepEqual(JSON.parse(evalStore.getItem(EVAL_INTENT)!), body);
+    assert.throws(() => acknowledgeEval(evalStore, body, confirmed), /身份/);
+    evalStore.setItem(EVAL_CURRENT, "other");
+    assert.throws(() => acknowledgeEval(evalStore, body, confirmed), /身份/);
+    evalStore.setItem(EVAL_CURRENT, confirmed.id);
+    assert.throws(() => acknowledgeEval(evalStore, { ...body, target_key: "target-bad" }, confirmed), /身份/);
+    acknowledgeEval(evalStore, body, confirmed);
+    assert.equal(evalStore.getItem(EVAL_INTENT), null);
+    assert.equal(postCount, 1);
+}
+finally {
+    globalThis.fetch = previousFetch;
+}
+console.log("Eval confirmation retains intent until owned identity is durably accepted");
