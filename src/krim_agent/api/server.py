@@ -29,14 +29,20 @@ from krim_agent.evaluation.types import (
     FreezeRequest,
 )
 from krim_agent.observability import TraceView
+from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
 
 
 def create_app(
-    settings: Settings | None = None, *, application: Application | None = None
+    settings: Settings | None = None,
+    *,
+    application: Application | None = None,
+    http_config: OpenAICompatibleConfig | None = None,
 ) -> FastAPI:
+    if application is not None and http_config is not None:
+        raise ServiceError("provider_config", 422)
     config = (
         settings
         if settings is not None
@@ -46,7 +52,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
-        active = await open_application(config.database, settings=config) if owned else application
+        active = (
+            await open_application(config.database, settings=config, http_config=http_config)
+            if owned
+            else application
+        )
         assert active is not None
         app.state.application = active
         try:
@@ -83,10 +93,14 @@ def create_app(
     @app.get("/healthz")
     async def health(request: Request) -> dict[str, JsonValue]:
         current = active(request)
+        enabled = "target-http" in current.service.bindings or isinstance(
+            current.provider, OpenAICompatibleProvider
+        )
         return {
             "status": "healthy" if current.store.healthy else "degraded",
             "edition": "agent-core",
-            "provider": "offline-script",
+            "provider": "script+http" if enabled else "offline-script",
+            "http_enabled": enabled,
             "active": sum(not t.done() for t in current.service.tasks.values()),
         }
 

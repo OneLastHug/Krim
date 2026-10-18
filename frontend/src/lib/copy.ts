@@ -1,12 +1,13 @@
 import { RequestError } from "../api";
 export const labels: Record<string, string> = { queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "运行中断" };
-const reasons: Record<string, string> = { unauthorized: "密钥无效", capacity: "运行名额已满", invalid_input: "任务内容无效", input_limit: "任务内容过长", permission_denied: "没有工具权限", approval_denied: "调用已拒绝", approval_expired: "审批已过期", approval_conflict: "审批决定不一致", approval_unavailable: "审批已结束", tool_timeout: "工具调用超时", run_timeout: "运行超时", storage_unavailable: "暂时无法保存", key_conflict: "请求内容不一致", request_conflict: "原请求内容不一致", invalid_record: "无法读取原请求记录", identity: "响应身份不一致" };
+const reasons: Record<string, string> = { unauthorized: "密钥无效", capacity: "运行名额已满", invalid_input: "任务内容无效", input_limit: "任务内容过长", permission_denied: "没有工具权限", approval_denied: "调用已拒绝", approval_expired: "审批已过期", approval_conflict: "审批决定不一致", approval_unavailable: "审批已结束", tool_timeout: "工具调用超时", run_timeout: "运行超时", storage_unavailable: "暂时无法保存", provider_config: "模型连接配置无效", provider_protocol: "模型响应无效", provider_incomplete_stream: "模型响应未完成", provider_http_error: "模型请求失败", provider_timeout: "模型响应超时", provider_network: "模型连接中断", provider_redirect: "模型地址发生跳转", provider_output_limit: "模型输出达到上限", provider_request_limit: "模型请求过长", provider_response_limit: "模型响应过长", provider_event_limit: "模型响应达到上限", provider_tool_arguments: "工具参数无效", provider_usage_conflict: "模型用量无效", key_conflict: "请求内容不一致", request_conflict: "原请求内容不一致", invalid_record: "无法读取原请求记录", identity: "响应身份不一致" };
 export function reason(error: unknown, fallback = "请求未完成") { const code = codeOf(error); return code ? reasons[code] ?? fallback : fallback; }
 export function codeOf(error: unknown) { return error instanceof RequestError ? error.code : error instanceof Error && ["approval_conflict", "request_conflict", "invalid_record", "identity"].includes(error.message) ? error.message : null; }
 export function runReason(code: unknown) { return typeof code === "string" ? reasons[code] ?? "执行未完成" : "执行未完成"; }
 export const ui = {
     "brand": "Krim Agent",
     "offline": "离线演示",
+    "agent": "Krim Agent",
     "task": "任务",
     "input": "输入任务",
     "create": "创建任务",
@@ -57,3 +58,5 @@ export const ui = {
 } as const;
 export const evalUi = { entry: "评测", data: "数据", caseId: "样本 ID", input: "输入", expected: "预期结果（JSON）", reason: "理由", status: "预期状态", code: "错误码", constraints: "约束", tools: "工具序列（JSON）", trajectory: "轨迹（JSON）", schema: "结果 Schema（JSON）", source: "来源任务 ID", readSource: "读取来源", useInput: "使用输入", manual: "改为手工样本", add: "加入样本", name: "数据集", version: "版本", freeze: "冻结修订", findRevision: "查找修订", openRevision: "打开修订", target: "目标", repeat: "重复次数", rules: "规则", start: "开始评测", findEval: "查找评测", open: "打开评测", id: "评测 ID", current: "当前评测", reading: "读取中…", unread: "读取未完成", report: "报告", compare: "版本比较", baseline: "基线评测 ID", candidate: "候选评测 ID", compareAction: "比较", empty: "暂无评测", coverage: "覆盖", passed: "通过", usage: "用量", unknown: "未知" } as const;
 export const qualityLabels: Record<string, string> = { passed: "通过", failed: "未通过", error: "评分错误", timed_out: "超时", unscored: "未评分" };
+
+export function targetLabel(key: unknown) { return (key === "target-http" ? "HTTP目标" : "脚本") + " · " + String(key); }

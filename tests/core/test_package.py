@@ -9,12 +9,16 @@ def test_cold_imports_are_pure_and_use_no_old_modules(tmp_path):
     root = Path(__file__).resolve().parents[2]
     code = (
         "import sys;sys.path.insert(0," + repr(str(root / "src")) + ");"
+        "import httpx;httpx.AsyncClient.__init__=lambda *a,**k:"
+        "(_ for _ in ()).throw(AssertionError('cold client'));"
+        "import socket;socket.socket.connect=lambda *a,**k:"
+        "(_ for _ in ()).throw(AssertionError('cold network'));"
         "import krim_agent,krim_agent.providers,krim_agent.runtime,krim_agent.tools;"
-        "import krim_agent.sdk,krim_agent.api;"
+        "import krim_agent.sdk,krim_agent.api;import krim_agent.providers.openai_compatible;"
         "assert not any(any(k==p or k.startswith(p+'.') for p in ["
         "'krim_agent.persistence','krim_agent.agents','krim_agent.protocol',"
         "'krim_agent.evaluation.recovery','krim_agent.evaluation.judge',"
-        "'krim_agent.evaluation.conversation','krim_agent.providers.openai_compatible']"
+        "'krim_agent.evaluation.conversation']"
         ") for k in sys.modules)"
     )
     before = list(tmp_path.iterdir())

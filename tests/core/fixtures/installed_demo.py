@@ -23,7 +23,6 @@ for name in [
     "krim_agent.evaluation.recovery",
     "krim_agent.evaluation.judge",
     "krim_agent.evaluation.conversation",
-    "krim_agent.providers.openai_compatible",
     "krim_agent.agents",
     "krim_agent.protocol",
 ]:
