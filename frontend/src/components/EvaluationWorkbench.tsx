@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { evalUi as t } from "../lib/copy";
+import { evalUi as t, targetLabel } from "../lib/copy";
 import { useDataset } from "../hooks/use-dataset";
 import { useEvaluation } from "../hooks/use-evaluation";
 import { CaseEditor } from "./CaseEditor";
@@ -20,7 +20,7 @@ export function EvaluationWorkbench({ apiKey, active, sourceRun, onRun }: {
     useEffect(() => { if (sourceRun)
         setEditorOpen(true); }, [sourceRun]);
     const focused = Boolean(evaluation.id || evaluation.pending || evaluation.busy);
-    return <section hidden={!active} className="evaluation-workbench"><div className={"eval-layout" + (focused ? " eval-focused" : "") + (editorOpen ? " eval-editing" : "")}><div className="eval-editor">{focused && <Button id="eval-editor-toggle" className="eval-editor-toggle" variant="outline" aria-expanded={editorOpen} aria-controls="eval-case-editor" onClick={() => setEditorOpen(open => !open)}>{editorOpen ? "收起编辑" : "编辑数据"}</Button>}<div id="eval-case-editor"><CaseEditor data={data}/></div></div><div className="evaluation-results"><section className="eval-controls" aria-label="评测操作"><div className="eval-two"><div><Label htmlFor="eval-target">{t.target}</Label><select id="eval-target" value={evaluation.target} disabled={evaluation.pending} onChange={e => evaluation.setTarget(e.target.value)}>{evaluation.targets.map(target => <option key={String(target.key)} value={String(target.key)}>{String(target.key)}</option>)}</select></div><div><Label htmlFor="eval-repetitions">{t.repeat}</Label><Input id="eval-repetitions" type="number" min={1} max={3} value={evaluation.repetitions} disabled={evaluation.pending} onChange={e => {
+    return <section hidden={!active} className="evaluation-workbench"><div className={"eval-layout" + (focused ? " eval-focused" : "") + (editorOpen ? " eval-editing" : "")}><div className="eval-editor">{focused && <Button id="eval-editor-toggle" className="eval-editor-toggle" variant="outline" aria-expanded={editorOpen} aria-controls="eval-case-editor" onClick={() => setEditorOpen(open => !open)}>{editorOpen ? "收起编辑" : "编辑数据"}</Button>}<div id="eval-case-editor"><CaseEditor data={data}/></div></div><div className="evaluation-results"><section className="eval-controls" aria-label="评测操作"><div className="eval-two"><div><Label htmlFor="eval-target">{t.target}</Label><select id="eval-target" value={evaluation.target} disabled={evaluation.pending} onChange={e => evaluation.setTarget(e.target.value)}>{evaluation.targets.map(target => <option key={String(target.key)} value={String(target.key)}>{targetLabel(target.key)}</option>)}</select></div><div><Label htmlFor="eval-repetitions">{t.repeat}</Label><Input id="eval-repetitions" type="number" min={1} max={3} value={evaluation.repetitions} disabled={evaluation.pending} onChange={e => {
             const n = Number(e.target.value);
             if (Number.isInteger(n) && n >= 1 && n <= 3)
                 evaluation.setRepetitions(n);

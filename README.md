@@ -1,5 +1,23 @@
 # Krim Agent
 
+当前主线是可拆解的Python Agent研读内核：受控多步Run、权限/审批/Hook、持久事实和脱敏Trace，以及显式来源→人工参考→冻结→真实Eval→规则/Gate。LC-M1/UI/M2已正式验收；LC-M3是有限HTTP适配与最终研读交付候选，仍待原评审对精确revision独立审查，不能把方案批准当产品验收。
+
+从这里开始：
+
+- [阅读指南与源码阅读路线](docs/agent-core/READING-GUIDE.md)
+- [安装、贯通示例和排障](docs/agent-core/RUNBOOK.md)
+- [完整可运行示例](examples/agent_complete.py)
+- [诚实的项目介绍与评审材料](docs/agent-core/RUNBOOK.md)
+- [LC-M3真实命令、失败和限制](docs/agent-core/LC-M3-REPORT.md)
+
+默认离线，HTTP目标仅由可信宿主显式配置；本轮只用真实本机fixture，不调用商业模型。支持Linux/Python3.12/SQLite单进程单写端，不恢复旧62项/P01–P10平台目标。浏览器保留真实shadcn黑白工作台；研读说明留在文档。产品wheel只含46项，示例/fixture另从同候选源码取得。
+
+## 历史阶段说明（原文保留）
+
+以下为此前阶段记录；其“当前/待验收”等文字只表示当时状态，最新能力/支持范围以以上研读材料和正式报告指针为准。
+
+# Krim Agent
+
 Krim Agent 是用于研读和求职讲述的 Python 模块化单体：从一个真实 Run 理解模型/工具循环、审批、取消、持久事实和脱敏 Trace，再用显式人工参考完成小批次版本评测。默认目标是确定性离线脚本，不发送模型网络请求，不代表商业模型质量。
 
 LC-M1 和 React/shadcn UI 已在 `f841567656af8d3d0536c1636fcc6401768d81fb` 基线验收。本分支的 LC-M2 是按独立 评审 批准方案实现的待审候选，实际命令、首轮失败、修复、发行身份和限制见 [M2 实测报告](docs/agent-core/LC-M2-REPORT.md)。方案批准、实现方 自验和最终独立代码/视觉验收是不同结论。

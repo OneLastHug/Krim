@@ -93,7 +93,9 @@ class EvaluationService:
                 return eval_view(old)
             if any(not t.done() for t in self.tasks.values()):
                 raise ServiceError("capacity", 429)
-            binding = self.runs.bindings[request.target_key]
+            binding = self.runs.bindings.get(request.target_key)
+            if binding is None:
+                raise ServiceError("invalid_input", 422)
             binding.assert_current()
             target = cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
             execution = request.execution.model_dump(mode="json") | {

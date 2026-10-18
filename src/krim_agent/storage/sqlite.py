@@ -413,9 +413,14 @@ class SQLiteStore:
     async def snapshot(self, run_id: str) -> RunSnapshot:
         if self.closed:
             raise ServiceError("closed")
-        try:
+
+        async def operation() -> RunSnapshot:
             async with self.lock, self.engine.begin() as conn:
                 return await self._snapshot(conn, run_id)
+
+        try:
+            # 读者取消只终止等待意图；完整读事务归还连接、释放锁后才交付取消。
+            return await settled(operation())
         except ServiceError:
             raise
         except Exception:

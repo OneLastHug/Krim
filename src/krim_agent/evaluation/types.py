@@ -307,7 +307,7 @@ class Execution(StrictModel):
 class EvalRequest(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     dataset: DatasetRef
-    target_key: Literal["target-v1", "target-v2", "target-bad"]
+    target_key: Literal["target-v1", "target-v2", "target-bad", "target-http"]
     rules: list[RuleSpec] = Field(min_length=1, max_length=6)
     execution: Execution
 

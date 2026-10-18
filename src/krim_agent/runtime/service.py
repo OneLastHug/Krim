@@ -8,7 +8,7 @@ import inspect
 import secrets
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
@@ -30,6 +30,7 @@ from krim_agent.contracts import (
     parse_json,
 )
 from krim_agent.observability import TraceView, project_trace
+from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.tools.core import Invocation
 
 from .contracts import RunStore, settled
@@ -63,6 +64,7 @@ class RunBinding:
     descriptor_json: str
     identities: tuple[int, ...]
     tool_identities: tuple[int, ...]
+    _http_token: tuple[object, ...] | None = field(default=None, repr=False)
 
     @staticmethod
     def runtime_identities(loop: AgentLoop) -> tuple[int, ...]:
@@ -114,6 +116,8 @@ class RunBinding:
                 "delay": getattr(loop.provider, "delay", None),
             },
         )
+        if isinstance(loop.provider, OpenAICompatibleProvider):
+            provider.update(behavior_version="http-sse/1", config=loop.provider.identity())
         policy = implementation(loop.executor.policy)
         policy["allowed_names"] = (
             ["add", "echo"]
@@ -128,6 +132,8 @@ class RunBinding:
             mode="json",
             exclude={"database", "api_key", "system_prompt", "target_version", "provider"},
         )
+        if isinstance(loop.provider, OpenAICompatibleProvider):
+            limits["http"] = loop.provider.execution_limits()
         return {
             "schema_version": 2,
             "key": key,
@@ -147,13 +153,25 @@ class RunBinding:
     def freeze(cls, key: str, loop: AgentLoop, settings: Settings) -> RunBinding:
         descriptor = cls.describe(key, loop, settings)
         return cls(
-            loop, settings, encoded(descriptor), cls.runtime_identities(loop), cls.tool_tokens(loop)
+            loop,
+            settings,
+            encoded(descriptor),
+            cls.runtime_identities(loop),
+            cls.tool_tokens(loop),
+            loop.provider.binding_token()
+            if isinstance(loop.provider, OpenAICompatibleProvider)
+            else None,
         )
 
     def assert_current(self) -> None:
         self.loop.executor.registry.assert_current()
         if self.tool_tokens(self.loop) != self.tool_identities:
             raise ServiceError("tool_binding_changed")
+        if self._http_token is not None and (
+            not isinstance(self.loop.provider, OpenAICompatibleProvider)
+            or self.loop.provider.binding_token() != self._http_token
+        ):
+            raise ServiceError("target_binding_changed")
         actual = self.runtime_identities(self.loop)
         descriptor = cast(dict[str, JsonValue], parse_json(self.descriptor_json))
         if (
@@ -240,7 +258,9 @@ class RunService:
             return existing
         if request.request_key.startswith("lc-eval.") and not internal:
             raise ServiceError("invalid_input", 422)
-        binding = self.bindings[request.target]
+        binding = self.bindings.get(request.target)
+        if binding is None:
+            raise ServiceError("invalid_input", 422)
         binding.assert_current()
         if expected is not None and fingerprint(parse_json(binding.descriptor_json)) != expected:
             raise ServiceError("target_binding_changed")

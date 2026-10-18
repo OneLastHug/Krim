@@ -29,6 +29,19 @@ ERROR_CODES = frozenset(
         "tool_timeout",
         "tool_binding_changed",
         "provider_event",
+        "provider_config",
+        "provider_request_limit",
+        "provider_response_limit",
+        "provider_event_limit",
+        "provider_protocol",
+        "provider_tool_arguments",
+        "provider_usage_conflict",
+        "provider_incomplete_stream",
+        "provider_http_error",
+        "provider_redirect",
+        "provider_timeout",
+        "provider_network",
+        "provider_output_limit",
         "duplicate_tool_call",
         "step_limit",
         "tool_limit",
@@ -136,7 +149,7 @@ def fingerprint(value: object) -> str:
 class RunRequest(StrictModel):
     text: str = Field(min_length=1, max_length=32768)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    target: Literal["demo", "target-v1", "target-v2", "target-bad"] = "demo"
+    target: Literal["demo", "target-v1", "target-v2", "target-bad", "target-http"] = "demo"
 
     @field_validator("text")
     @classmethod

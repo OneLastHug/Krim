@@ -272,3 +272,34 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
         });
     }
 }
+
+test("HTTP capability is read only and follows the active key epoch", async () => {
+    let release!: (response: Response) => void;
+    const delayed = new Promise<Response>(resolve => { release = resolve; });
+    intercept((path, options) => {
+        if (path === "/healthz") {
+            return new Headers(options.headers).get("Authorization") === "Bearer new-key" ? json({ http_enabled: false, provider: "offline-script" }) : delayed.then(() => json({ http_enabled: true, provider: "script+http" }));
+        }
+        return reads(path);
+    });
+    await mount();
+    expect(host.querySelector(".brand")?.textContent).toContain("Krim Agent");
+    await connect("new-key");
+    await until(() => expect(host.querySelector(".brand")?.textContent).toContain("离线演示"));
+    await act(async () => release(json({ http_enabled: true })));
+    expect(host.querySelector(".brand")?.textContent).toContain("离线演示");
+    expect(calls.filter(c => c.method === "POST")).toEqual([]);
+    expect(calls.filter(c => c.path === "/healthz").length).toBeGreaterThanOrEqual(2);
+});
+
+test("HTTP target and historical report keep their own identity", async () => {
+    intercept(path => path === "/v1/eval-targets" ? json([{ key: "target-http" }]) : path === "/healthz" ? json({ http_enabled: true }) : reads(path));
+    await mount();
+    await until(() => expect(document.querySelector("#eval-target option")?.textContent).toBe("HTTP目标 · target-http"));
+    expect(host.querySelector(".brand")?.textContent).toContain("Krim Agent");
+    await type("open-eval-id", "historical-script");
+    await click("打开评测");
+    await until(() => expect(host.querySelector(".eval-report small")?.textContent).toBe("脚本 · " + realReport.target_descriptor.key));
+    expect(document.querySelector("#eval-target option")?.textContent).toBe("HTTP目标 · target-http");
+    expect(calls.filter(c => c.method === "POST")).toEqual([]);
+});

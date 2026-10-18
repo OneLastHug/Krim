@@ -68,6 +68,7 @@ class AgentLoop:
             text = ""
             prior_usage: TokenUsage | None = None
             final_usage = False
+            assert_target_current()
             stream = self.provider.stream(messages, schemas)
             try:
                 async for delta in stream:
