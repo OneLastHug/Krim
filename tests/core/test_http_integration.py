@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import socket
+import sqlite3
 import sys
+import time
 from argparse import Namespace
 from contextlib import nullcontext
 from contextvars import ContextVar
@@ -35,6 +37,545 @@ from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+async def test_sol_effort_env_reaches_real_wire(tmp_path, monkeypatch):
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        for key, value in {
+            "BASE_URL": fixture.url,
+            "MODEL": "gpt-6.1-sol",
+            "API_KEY": "SYNTHETIC_SOL",
+            "REASONING_EFFORT": "xhigh",
+            "READ_TIMEOUT_SECONDS": "5",
+        }.items():
+            monkeypatch.setenv("KRIM_AGENT_HTTP_" + key, value)
+        config = OpenAICompatibleConfig.from_env()
+        async with await open_application(tmp_path / "wire.sqlite", http_config=config) as app:
+            view = await app.service.start(
+                RunRequest(text="/add 2 3", request_key="wire", target="target-http")
+            )
+            assert (await app.service.wait(view.id)).status == "completed"
+            assert len(fixture.requests) == 2
+            (tmp_path / "wire.json").write_text(json.dumps(fixture.requests, indent=2))
+            assert all(r["body"].get("reasoning_effort") == "xhigh" for r in fixture.requests)
+            assert all(r["body"]["model"] == "gpt-6.1-sol" for r in fixture.requests)
+            assert all(r["body"]["max_tokens"] == 512 for r in fixture.requests)
+            assert all("max_completion_tokens" not in r["body"] for r in fixture.requests)
+
+
+def live_settings(path, **changes):
+    return Settings.model_validate(
+        {
+            "database": path,
+            "provider": "http",
+            "max_active_runs": 1,
+            "run_timeout": 180,
+            **changes,
+        }
+    )
+
+
+def live_config(fixture, **changes):
+    return OpenAICompatibleConfig.model_validate(
+        {
+            "base_url": fixture.url,
+            "model": "gpt-6.1-sol",
+            "api_key": "SYNTHETIC_SOL",
+            "reasoning_effort": "xhigh",
+            "read_timeout_seconds": 60,
+            **changes,
+        }
+    )
+
+
+@pytest.mark.parametrize("selection", ["htttp", "", None])
+async def test_unknown_host_selection_cannot_fall_back_via_model_copy(tmp_path, selection):
+    path = tmp_path / "unknown-selection.sqlite"
+    settings = Settings(database=path).model_copy(update={"provider": selection})
+    app = None
+    try:
+        try:
+            app = await open_application(path, settings=settings)
+        except ServiceError as error:
+            assert error.code == "provider_config"
+        else:
+            pytest.fail("未知宿主模式已开库并落入脚本，必须fail closed")
+    finally:
+        if app is not None:
+            await app.close()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("REASONING_EFFORT", "high"),
+        ("REASONING_EFFORT", ""),
+        ("READ_TIMEOUT_SECONDS", "NaN"),
+        ("READ_TIMEOUT_SECONDS", "inf"),
+        ("READ_TIMEOUT_SECONDS", "91"),
+        ("READ_TIMEOUT_SECONDS", "0"),
+        ("READ_TIMEOUT_SECONDS", "true"),
+    ],
+)
+def test_sol_config_rejects_invalid_values(monkeypatch, field, value):
+    monkeypatch.setenv("KRIM_AGENT_HTTP_BASE_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setenv("KRIM_AGENT_HTTP_MODEL", "gpt-6.1-sol")
+    monkeypatch.setenv("KRIM_AGENT_HTTP_" + field, value)
+    with pytest.raises(ServiceError, match="provider_config"):
+        OpenAICompatibleConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing",
+        "model",
+        "effort",
+        "key",
+        "read",
+        "run",
+        "capacity",
+        "steps",
+        "prompt",
+        "version",
+        "legacy-wide",
+    ],
+)
+async def test_live_invalid_profile_has_no_database_or_network(tmp_path, change):
+    path = tmp_path / "must-not-open.sqlite"
+    async with HTTPFixture() as fixture:
+        config = live_config(fixture)
+        settings = live_settings(path)
+        if change in {"model", "effort", "key", "read"}:
+            field, value = {
+                "model": ("model", "other"),
+                "effort": ("reasoning_effort", None),
+                "key": ("api_key", ""),
+                "read": ("read_timeout_seconds", 5),
+            }[change]
+            config = live_config(fixture, **{field: value})
+        elif change == "missing":
+            config = None
+        elif change == "legacy-wide":
+            settings = Settings(database=path)
+        else:
+            field, value = {
+                "run": ("run_timeout", 30),
+                "capacity": ("max_active_runs", 4),
+                "steps": ("max_steps", 1),
+                "prompt": ("system_prompt", "wrong"),
+                "version": ("target_version", "wrong"),
+            }[change]
+            values = settings.model_dump(exclude_unset=True) | {field: value}
+            settings = Settings.model_validate(values)
+        with pytest.raises(ServiceError, match="provider_config"):
+            await open_application(path, settings=settings, http_config=config)
+        assert not path.exists() and not fixture.requests
+
+
+async def test_live_borrowed_and_initialization_failure_ownership(tmp_path, monkeypatch):
+    from krim_agent import composition
+
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        provider = OpenAICompatibleProvider(live_config(fixture), max_connections=1)
+        path = tmp_path / "borrowed-live.sqlite"
+        try:
+            async with await open_application(
+                path, settings=live_settings(path), provider=provider
+            ) as app:
+                view = await app.service.start(RunRequest(text="/add 2 3", request_key="borrowed"))
+                assert (await app.service.wait(view.id)).status == "completed"
+                assert app.provider is provider and not app.owns_provider
+                assert provider not in app.owned_providers
+            assert not provider.closed and not provider._owned_client.is_closed
+            with pytest.raises(ServiceError, match="provider_config"):
+                await open_application(
+                    tmp_path / "conflict.sqlite",
+                    settings=live_settings(path),
+                    provider=provider,
+                    http_config=live_config(fixture),
+                )
+            assert not (tmp_path / "conflict.sqlite").exists()
+        finally:
+            await provider.close()
+        assert provider.closed and provider.active == 0 and provider.streams_closed == 2
+        created = []
+        original = OpenAICompatibleProvider
+
+        class Tracked(original):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        def fail(*args, **kwargs):
+            raise ServiceError("execution_error")
+
+        monkeypatch.setattr(composition, "OpenAICompatibleProvider", Tracked)
+        monkeypatch.setattr(composition, "RunService", fail)
+        broken = tmp_path / "live-init.sqlite"
+        with pytest.raises(ServiceError, match="execution_error"):
+            await open_application(
+                broken, settings=live_settings(broken), http_config=live_config(fixture)
+            )
+        assert len(created) == 1 and created[0].closed and created[0]._owned_client.is_closed
+        second = await SQLiteStore.open(broken)
+        await second.close()
+        assert len(fixture.requests) == 2
+
+
+async def test_live_second_step_502_never_falls_back(tmp_path):
+    calls = []
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL", fail_request=2) as fixture:
+        path = tmp_path / "failed.sqlite"
+        async with await open_application(
+            path,
+            settings=live_settings(path),
+            http_config=live_config(fixture),
+            registry=counted_registry(calls),
+        ) as app:
+            view = await app.service.start(RunRequest(text="/add 2 3", request_key="fail-once"))
+            run = await app.service.wait(view.id)
+            assert run.status == "failed" and run.code == "provider_http_error"
+            facts = await app.service.result(view.id)
+            assert len(fixture.requests) == 2 and calls == ["add"]
+            assert app.provider.calls == app.provider.streams_closed == 2
+            assert facts.tools[0].executor_started and facts.tools[0].result_available
+            assert facts.tools[0].value == {"sum": 5.0}
+            assert sum(e.kind == "model_start" for e in facts.events) == 2
+            assert sum(e.kind == "model_end" for e in facts.events) == 1
+            assert not facts.usage_complete and facts.token_usage is not None
+            trace = await app.service.trace(view.id)
+            assert (
+                not trace.complete
+                and "Upstream authentication failed" not in trace.model_dump_json()
+            )
+            assert (
+                await app.service.start(RunRequest(text="/add 2 3", request_key="fail-once"))
+            ).id == view.id
+            assert len(fixture.requests) == 2
+            (tmp_path / "failure.json").write_text(facts.model_dump_json(indent=2))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reasoning_effort", "xhigh"),
+        ("read_timeout_seconds", 4.0),
+        ("max_output_tokens", 256),
+        ("run_timeout", 240),
+    ],
+)
+async def test_live_eval_effective_deadline_and_gate(tmp_path, monkeypatch, field, value):
+    from krim_agent import composition
+    from krim_agent.evaluation.regression import gate_reports
+
+    calls, reports = [], []
+    monkeypatch.setattr(composition, "builtin_registry", lambda: counted_registry(calls))
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        for index in range(3):
+            path = tmp_path / f"gate-{index}.sqlite"
+            live = field == "run_timeout"
+            settings = (
+                live_settings(path, run_timeout=value if index == 2 else 180)
+                if live
+                else Settings(database=path)
+            )
+            parameters = {field: value} if index == 2 and not live else {}
+            config = (
+                live_config(fixture)
+                if live
+                else OpenAICompatibleConfig(
+                    base_url=fixture.url, model="gpt-6.1-sol", api_key="SYNTHETIC_SOL", **parameters
+                )
+            )
+            async with await open_application(path, settings=settings, http_config=config) as app:
+                dataset = await freeze_one(app)
+                request = evaluation_request(dataset, f"gate-{index}")
+                view = await app.evaluations.start(request)
+                assert (await app.evaluations.start(request)).id == view.id
+                await app.evaluations.wait(view.id)
+                report = await app.evaluations.report(view.id)
+                assert report["complete"] and report["items"][0]["quality"] == "passed"
+                reports.append(report)
+                snap = await app.store.eval_snapshot(view.id)
+                assert snap["request_json"] == request.model_dump(mode="json")
+                if live:
+                    assert (
+                        report["execution"]["effective_timeouts"]["item_timeout_seconds"]
+                        == settings.run_timeout + 30
+                    )
+                    assert report["execution"]["item_timeout_seconds"] == 12
+                else:
+                    assert "effective_timeouts" not in report["execution"]
+                if not live and field == "reasoning_effort":
+                    assert ("reasoning_effort" in fixture.requests[-1]["body"]) is (index == 2)
+        assert gate_reports(reports[0], reports[1])["status"] == "pass"
+        assert gate_reports(reports[0], reports[2])["reasons"] == [
+            {"code": "incompatible_execution_fingerprint"}
+        ]
+        assert len(fixture.requests) == 6 and calls == ["add"] * 3
+        (tmp_path / "reports.json").write_text(json.dumps(reports, indent=2))
+
+
+async def test_live_eval_two_item_limit_before_admission(tmp_path):
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        path = tmp_path / "limit.sqlite"
+        async with await open_application(
+            path, settings=live_settings(path), http_config=live_config(fixture)
+        ) as app:
+            dataset = await freeze_one(app)
+            request = evaluation_request(dataset, "two-only")
+            values = request.model_dump(mode="json")
+            values["execution"]["repetitions"] = 3
+            with pytest.raises(ServiceError, match="invalid_input"):
+                await app.evaluations.start(EvalRequest.model_validate(values))
+            with sqlite3.connect(path) as connection:
+                assert connection.execute("SELECT count(*) FROM evaluations").fetchone()[0] == 0
+                assert connection.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+            assert fixture.requests == []
+            values["execution"]["repetitions"] = 2
+            view = await app.evaluations.start(EvalRequest.model_validate(values))
+            assert (await app.evaluations.wait(view.id)).status == "completed"
+            report = await app.evaluations.report(view.id)
+            assert report["summary"]["cell_coverage"] == 1 and len(report["items"]) == 2
+            assert len(fixture.requests) == 4
+
+
+@pytest.mark.parametrize("step", [1, 2])
+@pytest.mark.parametrize("action", ["cancel", "close"])
+async def test_live_binding_and_cancel_windows(tmp_path, step, action):
+    calls = []
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL", pause_requests=(step,)) as fixture:
+        path = tmp_path / "cancel-live.sqlite"
+        app = await open_application(
+            path,
+            settings=live_settings(path),
+            http_config=live_config(fixture),
+            registry=counted_registry(calls),
+        )
+        try:
+            view = await app.service.start(RunRequest(text="/add 2 3", request_key="cancel-live"))
+            await asyncio.wait_for(fixture.step_entered[step - 1].wait(), 3)
+            assert app.provider.active == 1 and len(fixture.requests) == step
+            assert calls == ["add"] * (step - 1)
+            with pytest.raises(ServiceError, match="capacity"):
+                await app.service.start(
+                    RunRequest(text="/add 2 3", request_key="second", target="target-http")
+                )
+            if action == "cancel":
+                assert (await app.service.cancel(view.id)).status == "aborted"
+                assert (await app.service.cancel(view.id)).status == "aborted"
+            else:
+                await asyncio.gather(app.close(), app.close())
+            assert app.service.tasks[view.id].done() and app.provider.active == 0
+            await asyncio.wait_for(fixture.idle.wait(), 2)
+            assert len(fixture.requests) == step and calls == ["add"] * (step - 1)
+        finally:
+            await app.close()
+        assert app.provider._owned_client.is_closed
+        second = await SQLiteStore.open(path)
+        await second.close()
+
+
+@pytest.mark.parametrize("step", [0, 1])
+@pytest.mark.parametrize("changed", ["effort", "client", "stream"])
+async def test_live_binding_after_model_start(tmp_path, step, changed):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls, replaced = [], []
+    replacement_client = None
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        path = tmp_path / "fence-live.sqlite"
+        async with await open_application(
+            path,
+            settings=live_settings(path),
+            http_config=live_config(fixture),
+            registry=counted_registry(calls),
+        ) as app:
+            original = app.store.append
+
+            async def append(run_id, kind, data, **kwargs):
+                result = await original(run_id, kind, data, **kwargs)
+                if kind == "model_start" and data["step_index"] == step:
+                    entered.set()
+                    await release.wait()
+                return result
+
+            app.store.append = append
+            view = await app.service.start(RunRequest(text="/add 2 3", request_key="fence-live"))
+            try:
+                await asyncio.wait_for(entered.wait(), 3)
+                if changed == "effort":
+                    app.provider.config = live_config(fixture, reasoning_effort=None)
+                elif changed == "client":
+                    replacement_client = httpx.AsyncClient(
+                        base_url=fixture.url + "/", timeout=60, trust_env=False
+                    )
+                    app.provider._client = replacement_client
+                else:
+
+                    async def changed_stream(messages, tools):
+                        replaced.append(1)
+                        if False:
+                            yield None
+
+                    app.provider.stream = changed_stream
+                release.set()
+                assert (await app.service.wait(view.id)).code == "target_binding_changed"
+                assert len(fixture.requests) == step and calls == ["add"] * step and replaced == []
+            finally:
+                release.set()
+                if replacement_client is not None:
+                    await replacement_client.aclose()
+
+
+@pytest.mark.parametrize("phase", ["trace", "cli"])
+async def test_live_profile_cli_history_and_trace(tmp_path, monkeypatch, phase):
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        path = tmp_path / "entry.sqlite"
+        if phase == "cli":
+            for key, value in {
+                "PROVIDER": "http",
+                "MAX_ACTIVE_RUNS": "1",
+                "RUN_TIMEOUT": "180",
+                "HTTP_BASE_URL": fixture.url,
+                "HTTP_MODEL": "gpt-6.1-sol",
+                "HTTP_API_KEY": "SYNTHETIC_SOL",
+                "HTTP_REASONING_EFFORT": "xhigh",
+                "HTTP_READ_TIMEOUT_SECONDS": "60",
+            }.items():
+                monkeypatch.setenv("KRIM_AGENT_" + key, value)
+            result = await execute(
+                Namespace(
+                    command="run",
+                    url=None,
+                    database=str(path),
+                    target="demo",
+                    text="/add 2 3",
+                    key="cli-live",
+                )
+            )
+            assert result["text"] == "5"
+            assert len(fixture.requests) == 2, "本机默认CLI不能仍在脚本旁路"
+            monkeypatch.setenv("KRIM_AGENT_HTTP_BASE_URL", "https://private:secret@invalid")
+            before = path.read_bytes()
+            cold = await execute(
+                Namespace(command="trace", url=None, database=str(path), id=result["run"]["id"])
+            )
+            assert cold["spans"][0]["attributes"]["model"] == "gpt-6.1-sol"
+            assert path.read_bytes() == before and len(fixture.requests) == 2
+        else:
+            async with await open_application(path) as old:
+                old_view = await old.service.start(RunRequest(text="/add 2 3", request_key="old"))
+                await old.service.wait(old_view.id)
+                old_trace = await old.service.trace(old_view.id)
+            async with await open_application(
+                path, settings=live_settings(path), http_config=live_config(fixture)
+            ) as app:
+                assert (
+                    await app.service.start(RunRequest(text="/add 2 3", request_key="old"))
+                ).id == old_view.id
+                assert not fixture.requests and await app.service.trace(old_view.id) == old_trace
+                view = await app.service.start(RunRequest(text="/add 2 3", request_key="fresh"))
+                await app.service.wait(view.id)
+                trace = await app.service.trace(view.id)
+                (tmp_path / "trace.json").write_text(trace.model_dump_json(indent=2))
+                assert trace.spans[0].attributes == {
+                    "provider": "http",
+                    "model": "gpt-6.1-sol",
+                    "reasoning_effort": "xhigh",
+                    "target_key": "demo",
+                }
+                app.provider.config = live_config(fixture, model="changed-model")
+                assert await app.service.trace(view.id) == trace
+                public = trace.model_dump_json()
+                assert "SYNTHETIC_SOL" not in public and fixture.url not in public
+
+
+async def test_live_default_demo_uses_one_http_owner(tmp_path):
+    calls, closes = [], []
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL") as fixture:
+        app = await open_application(
+            tmp_path / "default.sqlite",
+            settings=live_settings(tmp_path / "default.sqlite"),
+            http_config=live_config(fixture),
+            registry=counted_registry(calls),
+        )
+        try:
+            view = await app.service.start(RunRequest(text="/add 2 3", request_key="default"))
+            assert (await app.service.wait(view.id)).status == "completed"
+            (tmp_path / "default.json").write_text(
+                json.dumps(
+                    {
+                        "http_requests": len(fixture.requests),
+                        "primary": type(app.provider).__name__,
+                        "facts": (await app.service.result(view.id)).model_dump(mode="json"),
+                    },
+                    indent=2,
+                )
+            )
+            assert len(fixture.requests) == 2, "网页默认demo必须真实进入HTTP，不能以脚本5充数"
+            assert calls == ["add"]
+            assert app.service.bindings["demo"].loop is app.service.bindings["target-http"].loop
+            assert app.service.loop.provider is app.provider
+            assert sum(p is app.provider for p in app.owned_providers) == 1
+            original_close = app.provider.close
+
+            async def observed_close():
+                closes.append(app.provider.active)
+                await original_close()
+
+            app.provider.close = observed_close
+            alias = await app.service.start(
+                RunRequest(text="/add 2 3", request_key="alias", target="target-http")
+            )
+            assert (await app.service.wait(alias.id)).status == "completed"
+            assert len(fixture.requests) == 4 and calls == ["add", "add"]
+        finally:
+            await app.close()
+            await app.close()
+        assert closes == [0] and fixture.active == 0
+        second = await SQLiteStore.open(tmp_path / "default.sqlite")
+        await second.close()
+
+
+@pytest.mark.parametrize("phase", ["read", "run", "eval"])
+async def test_live_delayed_default_run_and_eval(tmp_path, monkeypatch, phase):
+    delays = (6, 8) if phase != "read" else (6, 0)
+    async with HTTPFixture(expected_key="SYNTHETIC_SOL", delays=delays) as fixture:
+        for key, value in {
+            "BASE_URL": fixture.url,
+            "MODEL": "gpt-6.1-sol",
+            "API_KEY": "SYNTHETIC_SOL",
+            "REASONING_EFFORT": "xhigh",
+            "READ_TIMEOUT_SECONDS": "60",
+        }.items():
+            monkeypatch.setenv("KRIM_AGENT_HTTP_" + key, value)
+        path = tmp_path / "delayed.sqlite"
+        async with await open_application(
+            path, settings=live_settings(path), http_config=OpenAICompatibleConfig.from_env()
+        ) as app:
+            start = time.monotonic()
+            if phase == "eval":
+                dataset = await freeze_one(app)
+                view = await app.evaluations.start(evaluation_request(dataset, "delayed-eval"))
+                await app.evaluations.wait(view.id)
+                report = await app.evaluations.report(view.id)
+                (tmp_path / "delayed.json").write_text(json.dumps(report, indent=2))
+                assert report["items"][0]["quality"] == "passed", "真实item不能仍被12秒截断"
+                assert report["execution"]["item_timeout_seconds"] == 12
+                assert report["execution"]["effective_timeouts"]["item_timeout_seconds"] == 210
+            else:
+                view = await app.service.start(
+                    RunRequest(text="/add 2 3", request_key="delayed", target="target-http")
+                )
+                result = await app.service.wait(view.id)
+                facts = await app.service.result(view.id)
+                (tmp_path / "delayed.json").write_text(facts.model_dump_json(indent=2))
+                assert result.status == "completed", (result.status, result.code)
+                assert facts.text == "5"
+            assert time.monotonic() - start >= sum(delays)
+            assert len(fixture.requests) == 2
 
 
 def counted_registry(calls):

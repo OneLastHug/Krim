@@ -102,6 +102,21 @@ class EvaluationService:
                 k: target[k] for k in ["limits", "policy", "pre", "post"]
             }
             try:
+                if request.target_key == "target-http" and binding.settings.provider == "http":
+                    dataset = await self.store.dataset(
+                        request.dataset.name, request.dataset.version
+                    )
+                    if (
+                        dataset.fingerprint != request.dataset.fingerprint
+                        or len(dataset.cases) * request.execution.repetitions > 2
+                    ):
+                        raise ServiceError("invalid_input", 422)
+                    execution["effective_timeouts"] = {
+                        "schema_version": 1,
+                        "source": "trusted-http-host/1",
+                        "item_timeout_seconds": binding.settings.run_timeout + 30,
+                        "batch_timeout_seconds": 600,
+                    }
                 snapshot, created = await self.store.begin_eval(request, target, execution)
             except ServiceError as error:
                 if error.code == "not_found":
@@ -124,6 +139,21 @@ class EvaluationService:
                 await self.store.set_eval_running(eval_id)
                 snapshot = await self.store.eval_snapshot(eval_id)
                 request = EvalRequest.model_validate(snapshot["request_json"])
+                timeouts = snapshot["execution"].get("effective_timeouts")
+                options: dict[str, float] = {}
+                if timeouts is not None:
+                    if (
+                        not isinstance(timeouts, dict)
+                        or timeouts.get("schema_version") != 1
+                        or timeouts.get("source") != "trusted-http-host/1"
+                        or timeouts.get("batch_timeout_seconds") != 600
+                        or type(timeouts.get("item_timeout_seconds")) not in {int, float}
+                        or not 210 <= timeouts["item_timeout_seconds"] <= 270
+                        or timeouts["item_timeout_seconds"]
+                        != snapshot["target"]["limits"]["run_timeout"] + 30
+                    ):
+                        raise ServiceError("facts_corrupt")
+                    options["item_timeout_seconds"] = float(timeouts["item_timeout_seconds"])
                 cases = {
                     c.case_id: c for c in DatasetRevision.model_validate(snapshot["dataset"]).cases
                 }
@@ -138,6 +168,7 @@ class EvaluationService:
                             request.rules,
                             self.store,
                             work,
+                            **options,
                         )
                     finally:
                         self.current.pop(eval_id, None)

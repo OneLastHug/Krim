@@ -10,7 +10,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -39,8 +39,9 @@ class OpenAICompatibleConfig(StrictModel):
     model: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     max_output_tokens: int = Field(default=512, ge=1, le=4096)
+    reasoning_effort: Literal["xhigh"] | None = None
     connect_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
-    read_timeout_seconds: float = Field(default=5.0, gt=0, le=5)
+    read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
     write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     pool_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     max_request_bytes: int = Field(default=32768, ge=256, le=32768)
@@ -109,7 +110,14 @@ class OpenAICompatibleConfig(StrictModel):
 
     @classmethod
     def from_env(cls) -> Self | None:
-        names = ("BASE_URL", "MODEL", "API_KEY", "MAX_OUTPUT_TOKENS")
+        names = (
+            "BASE_URL",
+            "MODEL",
+            "API_KEY",
+            "MAX_OUTPUT_TOKENS",
+            "REASONING_EFFORT",
+            "READ_TIMEOUT_SECONDS",
+        )
         values = {
             name.lower(): os.environ["KRIM_AGENT_HTTP_" + name]
             for name in names
@@ -124,6 +132,10 @@ class OpenAICompatibleConfig(StrictModel):
             arguments: dict[str, Any] = dict(values)
             if "max_output_tokens" in values:
                 arguments["max_output_tokens"] = int(values["max_output_tokens"])
+            if "read_timeout_seconds" in values:
+                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values["read_timeout_seconds"]) is None:
+                    raise ValueError
+                arguments["read_timeout_seconds"] = float(values["read_timeout_seconds"])
             return cls.model_validate(arguments)
         except (ValueError, ValidationError):
             raise ProviderError("provider_config", 422) from None
@@ -363,14 +375,17 @@ class OpenAICompatibleProvider:
         )
 
     def identity(self) -> dict[str, JsonValue]:
-        return {
+        result: dict[str, JsonValue] = {
             "model": self.config.model,
             "endpoint_fingerprint": fingerprint(self.config.base_url),
         }
+        if self.config.reasoning_effort is not None:
+            result["reasoning_effort"] = self.config.reasoning_effort
+        return result
 
     def execution_limits(self) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = self.config.model_dump(
-            mode="json", exclude={"api_key", "base_url", "model"}
+            mode="json", exclude={"api_key", "base_url", "model"}, exclude_none=True
         )
         for key in (
             "connect_timeout_seconds",
@@ -405,6 +420,8 @@ class OpenAICompatibleProvider:
             "max_tokens": self.config.max_output_tokens,
             "stream_options": {"include_usage": True},
         }
+        if self.config.reasoning_effort is not None:
+            body["reasoning_effort"] = self.config.reasoning_effort
         if tools:
             body["tools"] = [
                 {
