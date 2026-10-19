@@ -46,14 +46,20 @@ async def execute_item(
     rules: list[RuleSpec],
     store: SQLiteStore,
     work: ItemWork,
+    *,
+    item_timeout_seconds: float = 12,
 ) -> None:
+    if type(item_timeout_seconds) not in {int, float} or not (
+        item_timeout_seconds == 12 or 210 <= item_timeout_seconds <= 270
+    ):
+        raise ServiceError("invalid_input", 422)
     output: EvalOutput | None = None
     scores: list[Score] = []
     timed_out = False
     success = False
     try:
         try:
-            async with asyncio.timeout(12):
+            async with asyncio.timeout(item_timeout_seconds):
                 work.admission = asyncio.create_task(
                     RunTarget(work.runs).start(eval_id, case.case_id, repetition)
                 )

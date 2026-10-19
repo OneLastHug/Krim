@@ -89,24 +89,92 @@ async def open_application(
     pre: PreHook | None = None,
     post: PostHook | None = None,
 ) -> Application:
-    config = settings if settings is not None else Settings(database=path)
-    if http_config is not None:
-        from krim_agent.providers.openai_compatible import ProviderError
+    from krim_agent.providers.openai_compatible import ProviderError
 
+    config = settings if settings is not None else Settings(database=path)
+    if config.provider not in ("script", "http"):
+        raise ProviderError("provider_config", 422)
+    live = config.provider == "http"
+    primary_settings = config
+    if live:
+        specified = config.model_fields_set
+        try:
+            config = Settings.model_validate(config.model_dump())
+        except ValueError:
+            raise ProviderError("provider_config", 422) from None
+        if provider is not None:
+            if http_config is not None or not isinstance(provider, OpenAICompatibleProvider):
+                raise ProviderError("provider_config", 422)
+            http_config = provider.config
+            if provider.binding_token() != provider._sealed:
+                raise ProviderError("provider_config", 422)
+        if http_config is None:
+            raise ProviderError("provider_config", 422)
+    if http_config is not None:
         try:
             http_config = OpenAICompatibleConfig.model_validate(http_config.model_dump())
         except ValueError:
             raise ProviderError("provider_config", 422) from None
+    if live:
+        assert http_config is not None
+        prompt = "你是 Krim Agent。使用受控工具完成用户任务，保持数值精度。"
+        version = "demo-live-xhigh/1"
+        if (
+            http_config.model != "gpt-6.1-sol"
+            or http_config.reasoning_effort != "xhigh"
+            or not http_config.api_key.get_secret_value()
+            or not 60 <= http_config.read_timeout_seconds <= 90
+            or not 180 <= config.run_timeout <= 240
+            or config.max_active_runs != 1
+            or config.max_steps < 2
+            or "system_prompt" in specified
+            and config.system_prompt != prompt
+            or "target_version" in specified
+            and config.target_version != version
+        ):
+            raise ProviderError("provider_config", 422)
+        try:
+            primary_settings = Settings.model_validate(
+                config.model_dump()
+                | {
+                    "system_prompt": prompt,
+                    "target_version": version,
+                    "max_steps": 2,
+                    "max_tools_per_step": 1,
+                    "max_tool_calls": 1,
+                    "max_input_bytes": min(4096, config.max_input_bytes),
+                    "max_output_bytes": min(8192, config.max_output_bytes),
+                    "max_request_bytes": min(32768, config.max_request_bytes),
+                    "tool_timeout": min(2, config.tool_timeout),
+                }
+            )
+        except ValueError:
+            raise ProviderError("provider_config", 422) from None
+    elif (
+        http_config is not None
+        and http_config.read_timeout_seconds > 5
+        or isinstance(provider, OpenAICompatibleProvider)
+        and provider.config.read_timeout_seconds > 5
+    ):
+        raise ProviderError("provider_config", 422)
     tools = registry if registry is not None else builtin_registry()
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
     try:
         await store.recover()
-        selected = provider if provider is not None else FakeProvider()
+        selected = (
+            provider
+            if provider is not None
+            else (
+                OpenAICompatibleProvider(http_config, max_connections=config.max_active_runs)
+                if live and http_config is not None
+                else FakeProvider()
+            )
+        )
         if provider is None:
             owned.append(selected)
         executor = ToolExecutor(tools, policy, pre, post)
-        loop = AgentLoop(store, selected, executor, config)
+        loop = AgentLoop(store, selected, executor, primary_settings)
         target: dict[str, JsonValue] = {
             "version": config.target_version,
             "system_prompt": config.system_prompt,
@@ -117,8 +185,10 @@ async def open_application(
         }
         bindings = make_eval_bindings(store, config)
         owned.extend(b.loop.provider for b in bindings.values())
-        bindings["demo"] = RunBinding.freeze("demo", loop, config)
-        if http_config is not None:
+        bindings["demo"] = RunBinding.freeze("demo", loop, primary_settings)
+        if live:
+            bindings["target-http"] = RunBinding.freeze("target-http", loop, primary_settings)
+        elif http_config is not None:
             http_provider = OpenAICompatibleProvider(
                 http_config, max_connections=config.max_active_runs
             )

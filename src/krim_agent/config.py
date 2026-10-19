@@ -12,7 +12,7 @@ class Settings(BaseModel):
         extra="forbid", frozen=True, allow_inf_nan=False, hide_input_in_errors=True
     )
     database: Path = Path(".data/krim-agent.db")
-    provider: Literal["script"] = "script"
+    provider: Literal["script", "http"] = "script"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     system_prompt: str = "你是 Krim Agent 离线演示。"
     target_version: str = "demo-v1"

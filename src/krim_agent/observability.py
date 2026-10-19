@@ -41,6 +41,20 @@ def project_trace(snapshot: RunSnapshot) -> TraceView:
             # 工具不作为已经结束的模型网络请求的子区间。
             parent = None if kind == "run" else run.root_span_id
             attributes: dict[str, JsonValue] = {}
+            provider = snapshot.target.get("provider")
+            if (
+                kind == "run"
+                and isinstance(provider, dict)
+                and provider.get("behavior_version") == "http-sse/1"
+            ):
+                identity = provider.get("config")
+                if isinstance(identity, dict) and isinstance(identity.get("model"), str):
+                    attributes["provider"] = "http"
+                    attributes["model"] = identity["model"]
+                    if identity.get("reasoning_effort") == "xhigh":
+                        attributes["reasoning_effort"] = "xhigh"
+                    if snapshot.target.get("key") in {"demo", "target-http"}:
+                        attributes["target_key"] = snapshot.target["key"]
             if type(step) is int:
                 attributes["step_index"] = step
             spans[span_id] = SpanView(

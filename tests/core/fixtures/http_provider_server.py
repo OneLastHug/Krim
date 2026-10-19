@@ -22,10 +22,29 @@ def choice(delta=None, finish=None, usage=None):
 
 
 class HTTPFixture:
-    def __init__(self, mode="normal", *, chunks=None, status=200, headers=None, expected_key=""):
+    def __init__(
+        self,
+        mode="normal",
+        *,
+        chunks=None,
+        status=200,
+        headers=None,
+        expected_key="",
+        delays=(),
+        pause_requests=(),
+        fail_request=None,
+    ):
         self.mode, self.chunks, self.status = mode, chunks, status
         self.headers = headers or {}
         self.expected_key = expected_key
+        assert len(delays) <= 2 and all(0 <= delay <= 8 for delay in delays)
+        assert set(pause_requests) <= {1, 2} and fail_request in {None, 1, 2}
+        self.delays, self.fail_request = delays, fail_request
+        self.step_entered = [asyncio.Event(), asyncio.Event()]
+        self.step_release = [asyncio.Event(), asyncio.Event()]
+        for index, gate_event in enumerate(self.step_release, 1):
+            if index not in pause_requests:
+                gate_event.set()
         self.requests = []
         self.active = 0
         self.closed_connections = 0
@@ -47,6 +66,8 @@ class HTTPFixture:
         self.server.close()
         await self.server.wait_closed()
         self.release.set()
+        for gate_event in self.step_release:
+            gate_event.set()
         for writer in tuple(self.writers):
             writer.close()
         await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
@@ -132,7 +153,8 @@ class HTTPFixture:
                 }
             )
             self.entered.set()
-            status = self.status
+            ordinal = len(self.requests)
+            status = 502 if ordinal == self.fail_request else self.status
             response_headers = {
                 "Content-Type": "text/event-stream",
                 "Connection": "close",
@@ -145,6 +167,27 @@ class HTTPFixture:
                 ).encode()
             )
             await writer.drain()
+            if ordinal <= 2:
+                self.step_entered[ordinal - 1].set()
+                if ordinal <= len(self.delays):
+                    await asyncio.sleep(self.delays[ordinal - 1])
+                waiting = asyncio.create_task(self.step_release[ordinal - 1].wait())
+                disconnected = asyncio.create_task(reader.read(1))
+                try:
+                    await asyncio.wait([waiting, disconnected], return_when=asyncio.FIRST_COMPLETED)
+                    if disconnected.done():
+                        return
+                finally:
+                    for pending in (waiting, disconnected):
+                        pending.cancel()
+                    await asyncio.gather(waiting, disconnected, return_exceptions=True)
+            if status == 502 and ordinal == self.fail_request:
+                writer.write(
+                    b'{"error":{"message":"Upstream authentication failed",'
+                    b'"type":"upstream_error"}}'
+                )
+                await writer.drain()
+                return
             chunks = self.chunks if self.chunks is not None else self.script(body)
             if self.mode == "hold" or "FIXTURE_HOLD" in str(body):
                 writer.write(frame(choice({"content": "等待"})))

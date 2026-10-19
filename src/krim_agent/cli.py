@@ -83,7 +83,10 @@ def eval_request(args: argparse.Namespace) -> EvalRequest:
 
 @asynccontextmanager
 async def owned_eval(
-    path: Path, http_config: OpenAICompatibleConfig | None = None
+    path: Path,
+    http_config: OpenAICompatibleConfig | None = None,
+    *,
+    settings: Settings | None = None,
 ) -> AsyncIterator[Application]:
     task = asyncio.current_task()
     assert task is not None
@@ -94,8 +97,8 @@ async def owned_eval(
         loop.add_signal_handler(signum, task.cancel)
     try:
         opened = (
-            await open_application(path, http_config=http_config)
-            if http_config is not None
+            await open_application(path, settings=settings, http_config=http_config)
+            if http_config is not None or settings is not None
             else await open_application(path)
         )
         async with opened as application:
@@ -147,7 +150,10 @@ async def execute_m2(args: argparse.Namespace) -> Any:
         http_config = (
             OpenAICompatibleConfig.from_env() if requested.target_key == "target-http" else None
         )
-        async with owned_eval(Path(args.database), http_config=http_config) as app:
+        settings = Settings.from_env() if requested.target_key == "target-http" else None
+        async with owned_eval(
+            Path(args.database), http_config=http_config, settings=settings
+        ) as app:
             service = app.evaluations
             assert service is not None
             view = await service.start(requested)
@@ -206,15 +212,16 @@ async def execute(args: argparse.Namespace) -> Any:
         finally:
             await client.close()
     if args.command == "run":
+        settings = Settings.from_env()
         http_config = (
             OpenAICompatibleConfig.from_env()
-            if getattr(args, "target", "demo") == "target-http"
+            if getattr(args, "target", "demo") == "target-http" or settings.provider == "http"
             else None
         )
         owner = (
-            owned_eval(Path(args.database), http_config=http_config)
-            if getattr(args, "target", "demo") == "target-http"
-            else await open_application(Path(args.database))
+            owned_eval(Path(args.database), http_config=http_config, settings=settings)
+            if getattr(args, "target", "demo") == "target-http" or settings.provider == "http"
+            else await open_application(Path(args.database), settings=settings)
         )
         async with owner as app:
             run = await app.service.start(
