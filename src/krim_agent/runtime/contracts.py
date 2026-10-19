@@ -7,6 +7,8 @@ from typing import Protocol
 
 from pydantic import JsonValue
 
+from krim_agent.config import Settings
+from krim_agent.context.types import SessionContext
 from krim_agent.contracts import RunEvent, RunRequest, RunStatus, RunView
 
 
@@ -16,6 +18,7 @@ class RunSnapshot:
     request: RunRequest
     target: dict[str, JsonValue]
     events: tuple[RunEvent, ...]
+    session_context: SessionContext | None = None
 
 
 class RunStore(Protocol):
@@ -23,6 +26,10 @@ class RunStore(Protocol):
 
     async def begin(
         self, request: RunRequest, target: dict[str, JsonValue]
+    ) -> tuple[RunView, bool]: ...
+    async def turn_request(self, turn_id: str) -> tuple[RunRequest, str]: ...
+    async def begin_turn_run(
+        self, turn_id: str, request: RunRequest, target: dict[str, JsonValue], settings: Settings
     ) -> tuple[RunView, bool]: ...
     async def append(
         self, run_id: str, kind: str, data: dict[str, JsonValue], *, event_id: str | None = None

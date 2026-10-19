@@ -35,6 +35,9 @@
     "contracts/run-ui.test.tsx",
     "contracts/evaluation.test.ts",
     "contracts/eval-ui.test.tsx",
-    "e2e/evaluation.spec.ts"
+    "e2e/evaluation.spec.ts",
+    "contracts/agent-core.test.ts",
+    "contracts/session-ui.test.tsx",
+    "e2e/chat.spec.ts"
   ]
 }

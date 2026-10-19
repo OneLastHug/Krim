@@ -60,3 +60,14 @@ export const evalUi = { entry: "评测", data: "数据", caseId: "样本 ID", in
 export const qualityLabels: Record<string, string> = { passed: "通过", failed: "未通过", error: "评分错误", timed_out: "超时", unscored: "未评分" };
 
 export function targetLabel(key: unknown) { return (key === "target-http" ? "HTTP目标" : "脚本") + " · " + String(key); }
+
+
+export const chatCopy = { tab: "对话", create: "新建对话", createSubmit: "创建对话", title: "对话名称", workspace: "工作区", target: "目标", defaultTarget: "默认", message: "消息", send: "发送", enqueue: "加入队列", empty: "暂无对话", close: "关闭对话", resume: "继续队列", unknown: "提交结果未知", find: "查找原请求", details: "工具与 Trace", history: "对话历史" };
+export const turnLabels: Record<string, string> = { queued: "排队中", running: "进行中", completed: "已完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
+export function chatReason(error: unknown): string {
+  const code = codeOf(error) ?? (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : null);
+  const reasons: Record<string, string> = { unauthorized: "密钥无效，请重新连接", capacity: "队列已满，请稍后提交", invalid_input: "请检查输入后提交", input_limit: "输入超出容量，请修改后提交", context_budget: "历史超出上下文容量，请新建对话", provider_http_error: "模型请求失败，可查看详情", provider_timeout: "模型请求超时", queue_timeout: "排队已超时", permission_denied: "当前身份无权执行此操作", not_found: "未找到记录，请检查身份与对话", revision_conflict: "对话已更新，请刷新检查原请求", key_conflict: "原请求内容冲突，请查找原请求", session_closed: "对话已关闭", interrupted: "运行已中断", storage_unavailable: "暂时无法读取记录，请刷新" };
+  if (code && reasons[code]) return reasons[code]!;
+  const allowed = ["无法保存请求", "无法读取未确认请求", "未确认请求过多", "请先连接", "请连接原身份", "没有可用工作区", "响应身份不匹配", "原请求内容不匹配"];
+  return error instanceof Error && allowed.includes(error.message) ? error.message : "读取失败，请刷新";
+}

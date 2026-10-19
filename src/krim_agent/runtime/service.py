@@ -15,7 +15,8 @@ from typing import cast
 
 from pydantic import JsonValue
 
-from krim_agent.config import Settings
+from krim_agent.config import SESSION_FIELDS, Settings
+from krim_agent.context import builder
 from krim_agent.contracts import (
     TERMINAL,
     ApprovalReply,
@@ -130,7 +131,14 @@ class RunBinding:
         )
         limits = settings.model_dump(
             mode="json",
-            exclude={"database", "api_key", "system_prompt", "target_version", "provider"},
+            exclude={
+                "database",
+                "api_key",
+                "system_prompt",
+                "target_version",
+                "provider",
+                *SESSION_FIELDS,
+            },
         )
         if isinstance(loop.provider, OpenAICompatibleProvider):
             limits["http"] = loop.provider.execution_limits()
@@ -182,6 +190,25 @@ class RunBinding:
             raise ServiceError("target_binding_changed")
 
 
+@dataclass(frozen=True)
+class TurnBinding:
+    base: RunBinding
+    context_token: tuple[object, ...]
+
+    @property
+    def loop(self) -> AgentLoop:
+        return self.base.loop
+
+    @property
+    def settings(self) -> Settings:
+        return self.base.settings
+
+    def assert_current(self) -> None:
+        self.base.assert_current()
+        if builder.binding_token() != self.context_token:
+            raise ServiceError("context_binding_changed")
+
+
 class RunService:
     def __init__(
         self,
@@ -206,6 +233,7 @@ class RunService:
         self._finalizing: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
         self.closed = False
+        self.slot_changed = asyncio.Event()
 
     def _external(self) -> None:
         if asyncio.current_task() in self.tasks.values():
@@ -237,8 +265,26 @@ class RunService:
             request, digest = await self.store.child_request(eval_id, case_id, repetition)
             return await self._admit_locked(request, internal=True, expected=digest)
 
+    async def start_turn(self, turn_id: str) -> RunView:
+        async with self._admission:
+            request, digest = await self.store.turn_request(turn_id)
+            prior = await self.store.by_key(request.request_key)
+            if prior is not None:
+                snapshot = await self.store.snapshot(prior.id)
+                if snapshot.session_context is None or snapshot.session_context.turn_id != turn_id:
+                    raise ServiceError("facts_corrupt")
+                return prior
+            return await self._admit_locked(
+                request, internal=True, expected=digest, turn_id=turn_id
+            )
+
     async def _admit_locked(
-        self, request: RunRequest, *, internal: bool = False, expected: str | None = None
+        self,
+        request: RunRequest,
+        *,
+        internal: bool = False,
+        expected: str | None = None,
+        turn_id: str | None = None,
     ) -> RunView:
         if self.closed:
             raise ServiceError("closed", 503)
@@ -256,7 +302,7 @@ class RunService:
             ):
                 raise ServiceError("key_conflict")
             return existing
-        if request.request_key.startswith("lc-eval.") and not internal:
+        if request.request_key.startswith(("lc-eval.", "ac-turn.")) and not internal:
             raise ServiceError("invalid_input", 422)
         binding = self.bindings.get(request.target)
         if binding is None:
@@ -271,14 +317,21 @@ class RunService:
             and sum(not t.done() for t in self.tasks.values()) >= self.settings.max_active_runs
         ):
             raise ServiceError("capacity", 429)
-        run, created = await self.store.begin(
-            request, cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
-        )
+        descriptor = cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
+        executing: RunBinding | TurnBinding = binding
+        if turn_id is None:
+            run, created = await self.store.begin(request, descriptor)
+        else:
+            executing = TurnBinding(binding, builder.binding_token())
+            run, created = await self.store.begin_turn_run(
+                turn_id, request, descriptor, binding.settings
+            )
         if created:
             self.tasks[run.id] = asyncio.create_task(
-                self._drive(run, binding), name="krim-run-" + run.id
+                self._drive(run, executing), name="krim-run-" + run.id
             )
             self.tasks[run.id].add_done_callback(self._task_done)
+            self.tasks[run.id].add_done_callback(lambda _task: self.slot_changed.set())
         if len(self.tasks) > 128:
             for run_id, task in list(self.tasks.items()):
                 if task.done() and run_id != run.id:
@@ -292,7 +345,7 @@ class RunService:
         if not task.cancelled():
             task.exception()  # 读取异常，避免未消费 Task 把私有异常写入事件循环日志。
 
-    async def _drive(self, run: RunView, binding: RunBinding) -> None:
+    async def _drive(self, run: RunView, binding: RunBinding | TurnBinding) -> None:
         status: RunStatus = "completed"
         code: str | None = None
         try:

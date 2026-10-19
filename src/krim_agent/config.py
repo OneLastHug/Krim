@@ -28,6 +28,17 @@ class Settings(BaseModel):
     tool_timeout: float = Field(default=5, gt=0, le=30)
     approval_timeout: float = Field(default=20, gt=0, le=30)
 
+    access_policy_file: Path | None = None
+    session_max_queued: int = Field(default=8, ge=1, le=16)
+    session_max_open: int = Field(default=32, ge=1, le=64)
+    session_max_turns: int = Field(default=256, ge=1, le=1024)
+    session_max_history_bytes: int = Field(default=4194304, ge=32768, le=16777216)
+    session_queue_timeout: float = Field(default=300, gt=0, le=900)
+    context_max_bytes: int = Field(default=131072, ge=256, le=1048576)
+    context_max_messages: int = Field(default=256, ge=2, le=1024)
+    context_reserved_output_tokens: int | None = Field(default=None, ge=1, le=32768)
+    context_counter: Literal["approx-utf8/1"] = "approx-utf8/1"
+
     @field_validator("system_prompt")
     @classmethod
     def prompt_size(cls, value: str) -> str:
@@ -43,3 +54,19 @@ class Settings(BaseModel):
             if "KRIM_AGENT_" + name.upper() in os.environ
         }
         return cls.model_validate(values)
+
+
+SESSION_FIELDS = frozenset(
+    {
+        "access_policy_file",
+        "session_max_queued",
+        "session_max_open",
+        "session_max_turns",
+        "session_max_history_bytes",
+        "session_queue_timeout",
+        "context_max_bytes",
+        "context_max_messages",
+        "context_reserved_output_tokens",
+        "context_counter",
+    }
+)

@@ -9,7 +9,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from krim_agent.config import Settings
-from krim_agent.contracts import parse_json
+from krim_agent.contracts import ServiceError, parse_json
+from krim_agent.security import LOCAL, AccessPolicy
 
 from .web import PUBLIC_UI_PATHS
 
@@ -43,9 +44,15 @@ class LocalBoundary:
             host = urlsplit("http://" + headers.get("host", "")).hostname
         except ValueError:
             host = None
+        application = getattr(getattr(scope.get("app"), "state", None), "application", None)
+        access = getattr(application, "access_policy", None)
         key = self.settings.api_key.get_secret_value()
         client = scope.get("client")
-        if not key and (not local(host) or client is None or not local(client[0])):
+        if (
+            not key
+            and access is None
+            and (not local(host) or client is None or not local(client[0]))
+        ):
             await reject("local_only", 403)
             return
         origin = headers.get("origin")
@@ -64,6 +71,16 @@ class LocalBoundary:
         ):
             await reject("unauthorized", 401)
             return
+        if not public:
+            if isinstance(access, AccessPolicy):
+                try:
+                    principal = access.authenticate(headers.get("authorization", ""))
+                except ServiceError:
+                    await reject("unauthorized", 401)
+                    return
+            else:
+                principal = LOCAL
+            scope.setdefault("state", {})["principal"] = principal
         body = bytearray()
         while True:
             part = await receive()

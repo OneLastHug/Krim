@@ -10,6 +10,7 @@ from typing import cast
 from pydantic import JsonValue, ValidationError
 
 from krim_agent.config import Settings
+from krim_agent.context import builder
 from krim_agent.contracts import Message, RunEvent, ServiceError, encoded
 from krim_agent.providers.types import ModelProvider, ModelText, ModelToolCall, ModelUsage
 from krim_agent.tools.core import Invocation
@@ -41,6 +42,8 @@ class AgentLoop:
             Message(role="system", content=self.settings.system_prompt),
             Message(role="user", content=snapshot.request.text),
         ]
+        if snapshot.session_context is not None:
+            messages = list(snapshot.session_context.context.messages)
         seen: set[str] = set()
         tool_count = 0
         output_bytes = 0
@@ -61,6 +64,13 @@ class AgentLoop:
                 > self.settings.max_request_bytes
             ):
                 raise ServiceError("input_limit")
+            if snapshot.session_context is not None:
+                builder.check_budget(
+                    messages,
+                    schemas,
+                    snapshot.session_context.context.policy,
+                    self.settings.max_request_bytes,
+                )
             span_id = secrets.token_hex(8)
             await emit("model_start", {"span_id": span_id, "step_index": step})
             self.executor.registry.assert_current()
