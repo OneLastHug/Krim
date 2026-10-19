@@ -251,6 +251,20 @@ async def list_turns(
     return await read(store, operation)
 
 
+async def closing(conn: AsyncConnection, session_id: str) -> bool:
+    # 同一写事务读取持久控制事实；resume不能解除这个关闭栅栏。
+    pending = await conn.scalar(
+        select(session_controls.c.id)
+        .where(
+            session_controls.c.session_id == session_id,
+            session_controls.c.kind == "close",
+            session_controls.c.status == "pending",
+        )
+        .limit(1)
+    )
+    return pending is not None
+
+
 async def submit(
     store: SQLiteStore, session_id: str, body: TurnRequest, settings: Settings
 ) -> TurnView:
@@ -273,7 +287,7 @@ async def submit(
             if old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
             return turn_view(old)
-        if session["status"] != "open":
+        if session["status"] != "open" or await closing(conn, session_id):
             raise ServiceError("session_closed")
         if session["revision"] != body.expected_revision:
             raise ServiceError("revision_conflict")
@@ -351,7 +365,11 @@ async def begin_run(
         session = await session_row(conn, turn["session_id"])
         if turn["run_id"] is not None:
             return store._view(await store._row(conn, turn["run_id"])), False
-        if turn["status"] != "queued" or session["status"] != "open":
+        if (
+            turn["status"] != "queued"
+            or session["status"] != "open"
+            or await closing(conn, session["id"])
+        ):
             raise ServiceError("session_closed")
         if session["dispatch_paused"]:
             raise ServiceError("capacity", 429)
@@ -448,13 +466,18 @@ async def begin_run(
 
 
 async def source(
-    conn: AsyncConnection, run_id: str, request_key: str, version: int
+    conn: AsyncConnection,
+    run_id: str,
+    request_key: str,
+    version: int,
+    target: dict[str, JsonValue],
 ) -> SessionContext | None:
     if version != 3:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
-        if request_key.startswith("ac-turn."):
+        # context只由内部Session准入事务写入；旧合法请求前缀不能声明来源。
+        if "context" in target:
             raise ServiceError("facts_corrupt")
         return None
     try:
@@ -468,6 +491,13 @@ async def source(
         ):
             raise ValueError("关联损坏")
         context = ContextSnapshot.model_validate_json(encoded(row["context_snapshot"]))
+        expected = {
+            "schema_version": 1,
+            "policy": context.policy.model_dump(mode="json"),
+            "builder": context.builder_fingerprint,
+        }
+        if fingerprint(target.get("context")) != fingerprint(expected):
+            raise ValueError("内部上下文身份损坏")
         return SessionContext(
             workspace_id=row["workspace_id"],
             session_id=row["session_id"],
@@ -602,6 +632,8 @@ async def begin_control(
             if old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
             return control_view(old)
+        if kind == "resume" and await closing(conn, session_id):
+            raise ServiceError("session_closed")
         if revision != session["revision"]:
             raise ServiceError("revision_conflict")
         if turn_id is not None and (await turn_row(conn, turn_id))["session_id"] != session_id:
@@ -666,6 +698,16 @@ async def complete_control(
     async def operation(conn: AsyncConnection) -> ControlView:
         committed = result
         if control.kind == "close":
+            outstanding = await conn.scalar(
+                select(func.count())
+                .select_from(turns)
+                .where(
+                    turns.c.session_id == control.session_id,
+                    turns.c.status.in_(["queued", "running"]),
+                )
+            )
+            if outstanding:
+                raise ServiceError("not_terminal")
             current = await session_row(conn, control.session_id)
             if current["status"] != "closed":
                 await conn.execute(
