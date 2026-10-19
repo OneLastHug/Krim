@@ -4,11 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import JsonValue
 
+from krim_agent import __version__
 from krim_agent.composition import Application, open_application
 from krim_agent.config import Settings
 from krim_agent.contracts import (
@@ -30,6 +31,7 @@ from krim_agent.evaluation.types import (
 )
 from krim_agent.observability import TraceView
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
+from krim_agent.security import PrincipalContext
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -73,7 +75,63 @@ def create_app(
         assert service is not None
         return service
 
-    app = FastAPI(title="Krim Agent", version="0.2.0a1", lifespan=lifespan)
+    async def authorize_legacy(request: Request) -> None:
+        if not request.url.path.startswith("/v1/"):
+            return
+        principal = cast(PrincipalContext, request.state.principal)
+        if not principal.legacy:
+            raise ServiceError("not_found", 404)
+        if request.method not in {"GET", "HEAD"} and all(
+            m.role == "viewer" for m in principal.memberships
+        ):
+            raise ServiceError("permission_denied", 403)
+
+        async def check_source(run_id: str) -> None:
+            snapshot = await active(request).store.snapshot(run_id)
+            source = snapshot.session_context
+            if source is not None:
+                session = active(request).sessions
+                assert session is not None
+                await session.get(
+                    principal,
+                    source.workspace_id,
+                    source.session_id,
+                    write=request.method not in {"GET", "HEAD"},
+                    approve="/approvals/" in request.url.path,
+                )
+
+        if request.url.path.startswith("/v1/runs"):
+            if request.method == "POST" and request.url.path == "/v1/runs":
+                body = await request.json()
+                if (
+                    isinstance(body, dict)
+                    and isinstance(body.get("request_key"), str)
+                    and body["request_key"].startswith("ac-turn.")
+                ):
+                    raise ServiceError("invalid_input", 422)
+            run_id = request.path_params.get("run_id")
+            if isinstance(run_id, str):
+                await check_source(run_id)
+            if "/by-key/" in request.url.path:
+                found = await active(request).store.by_key(str(request.path_params["key"]))
+                if found is not None:
+                    await check_source(found.id)
+        if request.method == "POST" and request.url.path == "/v1/datasets":
+            body = await request.json()
+            if isinstance(body, dict) and isinstance(body.get("cases"), list):
+                for selection in body["cases"]:
+                    if isinstance(selection, dict) and selection.get("source_kind") == "run":
+                        run_id = selection.get("source_run_id")
+                        if not isinstance(run_id, str):
+                            raise ServiceError("invalid_input", 422)
+                        await check_source(run_id)
+
+    app = FastAPI(
+        title="Krim Agent",
+        version=__version__,
+        lifespan=lifespan,
+        dependencies=[Depends(authorize_legacy)],
+    )
     app.add_middleware(LocalBoundary, settings=config)
 
     @app.exception_handler(ServiceError)
@@ -178,6 +236,9 @@ def create_app(
         return await active(request).service.reply_approval(run_id, request_id, body)
 
     mount_browser_ui(app)
+    from .sessions import mount_sessions
+
+    mount_sessions(app)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:

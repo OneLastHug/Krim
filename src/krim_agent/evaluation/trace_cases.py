@@ -195,6 +195,8 @@ def collect_candidate(snapshot: RunSnapshot, include_input: bool = False) -> Can
         eligibility = "ineligible"
         reasons = ["not_terminal"]
     else:
+        if snapshot.session_context is not None:
+            reasons.append("session_context_required")
         if snapshot.run.status != "completed":
             reasons.append("source_not_completed")
         if not output.facts_complete:

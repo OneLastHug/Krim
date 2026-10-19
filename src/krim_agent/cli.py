@@ -23,6 +23,8 @@ from krim_agent.evaluation.types import EvalRequest, FreezeRequest, RuleName, ru
 from krim_agent.observability import project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.runtime.facts import project_facts
+from krim_agent.sdk.sessions import SessionSDK
+from krim_agent.sessions.types import ControlRequest, SessionCreate, TurnRequest
 from krim_agent.storage.sqlite import SQLiteStore
 
 
@@ -191,7 +193,108 @@ async def execute_m2(args: argparse.Namespace) -> Any:
         await store.close()
 
 
+async def execute_sessions(args: argparse.Namespace) -> Any:
+    operation = args.operation
+    if not args.url and operation in {"close", "resume", "cancel", "wait"}:
+        raise ServiceError("readonly")
+
+    async def perform(sdk: SessionSDK) -> Any:
+        if args.command == "session":
+            if operation == "create":
+                return (
+                    await sdk.create(
+                        SessionCreate(
+                            request_key=args.key, title=args.title, target_key=args.target
+                        )
+                    )
+                ).model_dump(mode="json")
+            if operation == "list":
+                return [v.model_dump(mode="json") for v in await sdk.list()]
+            if operation == "by-key":
+                return (await sdk.by_key(args.key)).model_dump(mode="json")
+            if operation == "get":
+                return (await sdk.get(args.id)).model_dump(mode="json")
+            return (
+                await sdk.control(
+                    args.id,
+                    operation,
+                    ControlRequest(request_key=args.key, expected_revision=args.revision),
+                )
+            ).model_dump(mode="json")
+        if operation == "start":
+            session = await sdk.get(args.session)
+            if not args.url and session.dispatch_paused:
+                raise ServiceError("invalid_input", 422)
+            value = await sdk.submit(
+                args.session,
+                TurnRequest(request_key=args.key, text=args.text, expected_revision=args.revision),
+            )
+            if not args.url:
+                value = await sdk.wait(args.session, value.id)
+            return value.model_dump(mode="json")
+        if operation == "by-key":
+            return (await sdk.turn_by_key(args.session, args.key)).model_dump(mode="json")
+        if operation == "history":
+            return [v.model_dump(mode="json") for v in await sdk.history(args.session)]
+        if operation == "result":
+            return (await sdk.result(args.session, args.id)).model_dump(mode="json")
+        if operation == "trace":
+            return await sdk.trace(args.session, args.id)
+        if operation == "cancel":
+            return (
+                await sdk.control(
+                    args.session,
+                    "cancel_turn",
+                    ControlRequest(request_key=args.key, expected_revision=args.revision),
+                    args.id,
+                )
+            ).model_dump(mode="json")
+        return (
+            await (
+                sdk.wait(args.session, args.id)
+                if operation == "wait"
+                else sdk.turn(args.session, args.id)
+            )
+        ).model_dump(mode="json")
+
+    if args.url:
+        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        try:
+            return await perform(SessionSDK(client, workspace=args.workspace))
+        finally:
+            await client.close()
+    writing = operation in {"create", "start"}
+    if writing:
+        settings = Settings.from_env()
+        target = getattr(args, "target", "demo")
+        if operation == "start" and settings.provider != "http":
+            source = await SQLiteStore.open(Path(args.database), readonly=True)
+            try:
+                target = (
+                    await SessionSDK(source, workspace=args.workspace).get(args.session)
+                ).target_key
+            finally:
+                await source.close()
+        http = (
+            OpenAICompatibleConfig.from_env()
+            if settings.provider == "http" or target == "target-http"
+            else None
+        )
+        if target == "target-http" and http is None:
+            raise ServiceError("provider_config", 422)
+        async with owned_eval(Path(args.database), http_config=http, settings=settings) as app:
+            assert app.sessions is not None
+            return await perform(SessionSDK(app.sessions, workspace=args.workspace))
+    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    try:
+        return await perform(SessionSDK(store, workspace=args.workspace))
+    finally:
+        await store.close()
+
+
 async def execute(args: argparse.Namespace) -> Any:
+    if args.command in {"session", "turn"}:
+        return await execute_sessions(args)
     if args.command in {"candidate", "dataset", "eval", "report", "compare"}:
         return await execute_m2(args)
     if args.url:
@@ -277,6 +380,33 @@ def main() -> None:
         group = child.add_mutually_exclusive_group(required=True)
         group.add_argument("--url")
         group.add_argument("--database")
+
+    for command, operations in (
+        ("session", ["create", "list", "get", "by-key", "close", "resume"]),
+        ("turn", ["start", "get", "by-key", "history", "wait", "cancel", "result", "trace"]),
+    ):
+        commands = sub.add_parser(command).add_subparsers(dest="operation", required=True)
+        for operation in operations:
+            child = commands.add_parser(operation)
+            mode(child)
+            child.add_argument("--workspace", default="local")
+            if command == "turn":
+                child.add_argument("--session", required=True)
+            if operation in {"create", "start", "by-key", "close", "resume", "cancel"}:
+                child.add_argument("--key", required=True)
+            if operation in {"start", "close", "resume", "cancel"}:
+                child.add_argument("--revision", required=True, type=int)
+            if operation in {"get", "wait", "close", "resume", "cancel", "result", "trace"}:
+                child.add_argument("--id", required=True)
+            if operation == "create":
+                child.add_argument("--title", default="新对话")
+                child.add_argument(
+                    "--target",
+                    default="demo",
+                    choices=["demo", "target-v1", "target-v2", "target-bad", "target-http"],
+                )
+            if operation == "start":
+                child.add_argument("--text", required=True)
 
     candidate = sub.add_parser("candidate")
     mode(candidate)

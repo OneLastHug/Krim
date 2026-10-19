@@ -1,3 +1,17 @@
+# Krim Agent 主干：AC-M1 候选
+
+当前独立主线在已验收研读内核上增加持久 Session/Turn、完整多轮 Context、有界队列、主体/工作区授权和真实聊天入口，版本为 **0.3.0a1**。它是待原 评审 独立审查的 AC-M1 候选；不是整体项目验收，也没有部署。
+
+- [逐章指南：架构、完整源码与失败路径](docs/agent-core/GUIDE.md)；[自包含离线 HTML](docs/agent-core/GUIDE.html)
+- [协议与兼容](docs/agent-core/PROTOCOL.md)；[设计决策](docs/agent-core/ADR-0001-session-context.md)；[来源](docs/agent-core/SOURCES.md)
+- [可运行聊天示例](examples/agent_core_chat.py)；[真实命令、失败与发行证据](docs/agent-core/AC-M1-REPORT.md)；[阶段进度](docs/agent-core/PROGRESS.md)
+
+支持 Linux/Python 3.12、SQLite 单写端、小规模有界执行；wheel 精确包含 56 项产品文件。默认离线 demo 保留原脚本能力，不声称能理解任意前史；多轮语义用本机真实 HTTP fixture 验证。HTTP 配置仅由可信宿主提供，浏览器不能注入地址/密钥。未配置策略文件的本机模式不应暴露到公网。
+
+自动压缩、真正 OS 沙盒和完整持续 Eval 分别属于待精确方案/实施/独立批准的 AC-M2/AC-M3。旧上游故障仍未关闭；商业模型与上线未验证。以下旧入口保留历史语境，当前状态以本节和 AC-M1 报告为准。
+
+---
+
 # Krim Agent
 
 当前主线是可拆解的Python Agent研读内核：受控多步Run、权限/审批/Hook、持久事实和脱敏Trace，以及显式来源→人工参考→冻结→真实Eval→规则/Gate。LC-M1/UI/M2已正式验收；LC-M3是有限HTTP适配与最终研读交付候选，仍待原评审对精确revision独立审查，不能把方案批准当产品验收。

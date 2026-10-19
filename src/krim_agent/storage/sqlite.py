@@ -19,6 +19,7 @@ from sqlalchemy import UniqueConstraint, event, func, insert, select, update
 from sqlalchemy.engine import URL, RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from krim_agent.config import Settings
 from krim_agent.contracts import (
     TERMINAL,
     RunEvent,
@@ -33,10 +34,21 @@ from krim_agent.contracts import (
 from krim_agent.evaluation.types import DatasetRevision, EvalRequest, FreezeRequest
 from krim_agent.runtime.contracts import RunSnapshot, settled
 
-from .models import dataset_revisions, eval_items, evaluations, metadata, run_events, runs
+from . import sessions as session_sql
+from .models import (
+    dataset_revisions,
+    eval_items,
+    evaluations,
+    metadata,
+    run_events,
+    runs,
+    session_controls,
+    sessions,
+    turns,
+)
 
 APPLICATION_ID = 0x4B4C4331
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 T = TypeVar("T")
 
 
@@ -91,7 +103,15 @@ class SQLiteStore:
     async def _upgrade(conn: AsyncConnection) -> None:
         await conn.run_sync(
             lambda sync: metadata.create_all(
-                sync, tables=[dataset_revisions, evaluations, eval_items]
+                sync,
+                tables=[
+                    dataset_revisions,
+                    evaluations,
+                    eval_items,
+                    sessions,
+                    turns,
+                    session_controls,
+                ],
             )
         )
         await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -169,19 +189,22 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA application_id={APPLICATION_ID}")
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
-                    expected = {"runs", "run_events"} if version == 1 else set(metadata.tables)
+                    expected = {
+                        1: {"runs", "run_events"},
+                        2: {"runs", "run_events", "dataset_revisions", "evaluations", "eval_items"},
+                        3: set(metadata.tables),
+                    }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, SCHEMA_VERSION}
+                        or version not in {1, 2, 3}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
                     await cls._validate_schema(conn, expected)
-                    if version == 1:
-                        if readonly:
-                            store.schema_version = 1
-                        else:
-                            await cls._upgrade(conn)
+                    store.schema_version = version
+                    if not readonly and version < SCHEMA_VERSION:
+                        await cls._upgrade(conn)
+                        store.schema_version = SCHEMA_VERSION
             return store
         except BaseException:
             await engine.dispose()
@@ -256,6 +279,35 @@ class SQLiteStore:
         await conn.execute(insert(run_events).values(**record.model_dump()))
         return record
 
+    async def _insert_run(
+        self,
+        conn: AsyncConnection,
+        request: RunRequest,
+        target: dict[str, JsonValue],
+        run_id: str,
+        digest: str,
+    ) -> RunView:
+        view = RunView(
+            id=run_id,
+            request_key=request.request_key,
+            status="queued",
+            trace_id=secrets.token_hex(16),
+            root_span_id=secrets.token_hex(8),
+            created_at=time.time(),
+        )
+        await conn.execute(
+            insert(runs).values(
+                **view.model_dump(),
+                request_hash=digest,
+                request=request.model_dump(mode="json"),
+                target=target,
+            )
+        )
+        await self._event(
+            conn, run_id, "run_started", {"span_id": view.root_span_id}, "start:" + run_id
+        )
+        return view
+
     async def begin(
         self, request: RunRequest, target: dict[str, JsonValue]
     ) -> tuple[RunView, bool]:
@@ -274,26 +326,7 @@ class SQLiteStore:
                 if row["request_hash"] != digest:
                     raise ServiceError("key_conflict")
                 return self._view(row), False
-            view = RunView(
-                id=run_id,
-                request_key=request.request_key,
-                status="queued",
-                trace_id=secrets.token_hex(16),
-                root_span_id=secrets.token_hex(8),
-                created_at=time.time(),
-            )
-            await conn.execute(
-                insert(runs).values(
-                    **view.model_dump(),
-                    request_hash=digest,
-                    request=request.model_dump(mode="json"),
-                    target=target,
-                )
-            )
-            await self._event(
-                conn, run_id, "run_started", {"span_id": view.root_span_id}, "start:" + run_id
-            )
-            return view, True
+            return await self._insert_run(conn, request, target, run_id, digest), True
 
         prior_health = self.healthy
         try:
@@ -368,6 +401,8 @@ class SQLiteStore:
                 .where(runs.c.id == run_id)
                 .values(status=status, code=code, finished_at=time.time())
             )
+            if self.schema_version == 3:
+                await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
             return self._view(await self._row(conn, run_id))
 
         prior_health = self.healthy
@@ -444,6 +479,7 @@ class SQLiteStore:
             RunRequest.model_validate(row["request"]),
             cast(dict[str, JsonValue], row["target"]),
             tuple(RunEvent.model_validate(dict(e)) for e in records),
+            await session_sql.source(conn, run_id, row["request_key"], self.schema_version),
         )
 
     async def by_key(self, key: str) -> RunView | None:
@@ -458,7 +494,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version not in {2, 3}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -907,6 +943,14 @@ class SQLiteStore:
 
         await self._eval_write(operation, confirm)
 
+    async def turn_request(self, turn_id: str) -> tuple[RunRequest, str]:
+        return await session_sql.turn_request(self, turn_id)
+
+    async def begin_turn_run(
+        self, turn_id: str, request: RunRequest, target: dict[str, JsonValue], settings: Settings
+    ) -> tuple[RunView, bool]:
+        return await session_sql.begin_run(self, turn_id, request, target, settings)
+
     async def recover(self) -> None:
         async def operation(conn: AsyncConnection) -> None:
             ids = list(
@@ -928,6 +972,8 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status="interrupted", code="interrupted", finished_at=time.time())
                 )
+                if self.schema_version == 3:
+                    await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
             active = (
                 (
                     await conn.execute(
@@ -974,6 +1020,9 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
+            if self.schema_version == 3:
+                await session_sql.pause_queues(conn)
+                await session_sql.recover_controls(conn)
 
         await settled(self._write(operation))
 

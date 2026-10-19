@@ -13,6 +13,11 @@ RunStatus = Literal["queued", "running", "completed", "failed", "aborted", "inte
 TERMINAL = frozenset({"completed", "failed", "aborted", "interrupted"})
 ERROR_CODES = frozenset(
     {
+        "context_budget",
+        "context_binding_changed",
+        "access_policy_invalid",
+        "session_closed",
+        "queue_timeout",
         "invalid_input",
         "invalid_json",
         "invalid_output",

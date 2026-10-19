@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -10,7 +11,8 @@ from typing import cast
 
 from pydantic import JsonValue
 
-from krim_agent.config import Settings
+from krim_agent.config import SESSION_FIELDS, Settings
+from krim_agent.contracts import ServiceError
 from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
 from krim_agent.providers.fake import FakeProvider
@@ -19,6 +21,8 @@ from krim_agent.providers.types import ModelProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
 from krim_agent.runtime.service import RunBinding, RunService
+from krim_agent.security import AccessPolicy
+from krim_agent.sessions.service import SessionService
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Policy, PostHook, PreHook
@@ -35,6 +39,8 @@ class Application:
     owns_provider: bool
     owned_providers: tuple[ModelProvider, ...] = ()
     evaluations: EvaluationService | None = None
+    sessions: SessionService | None = None
+    access_policy: AccessPolicy | None = field(default=None, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     async def __aenter__(self) -> Application:
@@ -62,8 +68,12 @@ class Application:
             async with self.service._admission:
                 self.service.closed = True
             try:
-                if self.evaluations is not None:
-                    await self.evaluations.close()
+                try:
+                    if self.sessions is not None:
+                        await self.sessions.close()
+                finally:
+                    if self.evaluations is not None:
+                        await self.evaluations.close()
             finally:
                 await self.service.close()
         finally:
@@ -88,6 +98,7 @@ async def open_application(
     http_config: OpenAICompatibleConfig | None = None,
     pre: PreHook | None = None,
     post: PostHook | None = None,
+    access_policy: AccessPolicy | None = None,
 ) -> Application:
     from krim_agent.providers.openai_compatible import ProviderError
 
@@ -157,6 +168,20 @@ async def open_application(
         and provider.config.read_timeout_seconds > 5
     ):
         raise ProviderError("provider_config", 422)
+    if access_policy is not None and config.access_policy_file is not None:
+        raise ServiceError("access_policy_invalid", 422)
+    try:
+        active_access = (
+            AccessPolicy.model_validate(deepcopy(access_policy.model_dump()))
+            if access_policy is not None
+            else AccessPolicy.load(config.access_policy_file)
+            if config.access_policy_file is not None
+            else None
+        )
+    except ValueError:
+        raise ServiceError("access_policy_invalid", 422) from None
+    if active_access is not None and config.api_key.get_secret_value():
+        raise ServiceError("access_policy_invalid", 422)
     tools = registry if registry is not None else builtin_registry()
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
@@ -180,7 +205,7 @@ async def open_application(
             "system_prompt": config.system_prompt,
             "tools": cast(JsonValue, tools.schemas()),
             "limits": config.model_dump(
-                mode="json", exclude={"database", "api_key", "system_prompt"}
+                mode="json", exclude={"database", "api_key", "system_prompt", *SESSION_FIELDS}
             ),
         }
         bindings = make_eval_bindings(store, config)
@@ -203,6 +228,8 @@ async def open_application(
             provider is None,
             tuple({id(p): p for p in owned}.values()),
             EvaluationService(store, service),
+            SessionService(store, service, config),
+            active_access,
         )
     except BaseException:
         try:
