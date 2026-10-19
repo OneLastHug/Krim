@@ -479,7 +479,13 @@ class SQLiteStore:
             RunRequest.model_validate(row["request"]),
             cast(dict[str, JsonValue], row["target"]),
             tuple(RunEvent.model_validate(dict(e)) for e in records),
-            await session_sql.source(conn, run_id, row["request_key"], self.schema_version),
+            await session_sql.source(
+                conn,
+                run_id,
+                row["request_key"],
+                self.schema_version,
+                cast(dict[str, JsonValue], row["target"]),
+            ),
         )
 
     async def by_key(self, key: str) -> RunView | None:

@@ -33,7 +33,7 @@ async function startServer(root: string, database: string, generation: number, t
     expect(exit).toEqual({ code: 0, signal: null }); expect(state.unsafe_gc).toBe(0); expect(state.connections_pending).toEqual([]); expect(state.model_active).toBe(0); expect(state.provider_active).toBe(0); expect(state.second_writer).toBe(true); expect(ports).toEqual({ api: true, model: true });
   } };
   try {
-    owner.ready = await waitFile(resolve(root, "ready.json")); expect(owner.ready!.namespace_local_pid).toBe(child.pid); expect(owner.ready!.version).toBe("0.3.0a1"); expect(owner.ready!.module).toContain("/installed-env/"); return owner;
+    owner.ready = await waitFile(resolve(root, "ready.json")); expect(owner.ready!.namespace_local_pid).toBe(child.pid); expect(owner.ready!.version).toBe("0.3.0a1"); expect(owner.ready!.module).toBe(resolve(PYTHON,"../../lib/python3.12/site-packages/krim_agent/__init__.py")); return owner;
   } catch (error) { await owner.close(); throw error; }
 }
 
@@ -111,7 +111,7 @@ for (const viewport of [{ width: 1280, height: 900, name: "desktop" }, { width: 
       const b = await createSession(page, "会话 B"); await page.getByRole("button", { name: "会话 A", exact: true }).click(); await expect(page.locator("#chat-prompt")).toBeEnabled();
       const postGate = barrier(), postDelivered = barrier(); gates.push(postGate.release); let accepted: { id: string; request_key: string } | null = null;
       await page.route(`**/v2/workspaces/local/sessions/${a}/turns`, async route => { if (route.request().method() !== "POST") return route.continue(); const response = await route.fetch(); const body = await response.body(); accepted = JSON.parse(body.toString()) as typeof accepted; await postGate.promise; await route.fulfill({ response, body }); postDelivered.release(); });
-      await send(page, "/add 2 3"); await expect.poll(() => accepted).not.toBeNull(); await page.getByRole("button", { name: "会话 B", exact: true }).click(); await expect(page.locator("#chat-heading")).toHaveText("会话 B"); 
+      await send(page, "/add 2 3"); await expect.poll(() => accepted).not.toBeNull(); await page.getByRole("button", { name: "会话 B", exact: true }).click(); await expect(page.locator("#chat-heading")).toHaveText("会话 B");
       const original = await page.evaluate(key => JSON.parse(localStorage.getItem(key) ?? "[]")[0], INTENTS);
       postGate.release(); await bounded(postDelivered.promise); await page.unroute(`**/v2/workspaces/local/sessions/${a}/turns`); await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key) ?? "[]").length, INTENTS)).toBe(1); expect(new URL(page.url()).searchParams.get("session")).toBe(b); await expect(page.locator(".chat-pending strong")).toHaveText("提交结果未知"); await capture(page, root, "unknown-create");
       const getGate = barrier(), getDelivered = barrier(); gates.push(getGate.release); let getAccepted = false, attempts = 0;
@@ -169,6 +169,37 @@ for (const viewport of [{ width:1280,height:900,name:"desktop" },{ width:390,hei
       expect(await page.locator("#chat-prompt").inputValue()).toBe(""); expect(await last.locator(".chat-user-text").textContent()).toBe(input);
       await writeFile(resolve(root,"tool-scroll.json"),JSON.stringify({before,after,full_input:input,keyboard_focus:true},null,2)); await capture(page,root,"tool-detail");
       const counts=await waitFile(resolve(root,"server/model-counts.json")); expect(counts.requests).toHaveLength(3); expect(counts.executions).toHaveLength(1); expect(counts.executions[0]).toEqual({name:"echo",arguments:{text:long}});
+    } finally {await owner.close();}
+  });
+}
+
+for (const viewport of [{width:1280,height:900,name:"desktop"},{width:390,height:844,name:"mobile"}]) {
+  test(`repair 相邻长短会话标题 ${viewport.name}`,async ({page})=>{
+    await page.setViewportSize(viewport);const root=resolve(EVIDENCE,viewport.name);await mkdir(root,{recursive:true});
+    const owner=await startServer(resolve(root,"server"),resolve(root,"titles.sqlite"),1,"synthetic-repair-title");
+    try {
+      await page.goto(owner.ready!.url+"/ui/?view=chat");await connect(page,"synthetic-repair-title");
+      const entries=[{title:"短标题 A",id:""},{title:"长标题".repeat(35),id:""},{title:"短标题 B",id:""}];
+      for(const value of entries)value.id=await createSession(page,value.title);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await page.evaluate(async()=>{await Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{})));window.scrollTo(0,0);});
+      await page.screenshot({path:resolve(root,"adjacent-titles.png")});
+      const geometry=await page.locator(".chat-session-list > button").evaluateAll(elements=>elements.map(el=>{
+        const b=el.getBoundingClientRect(),span=el.querySelector("span")!;const range=document.createRange();range.selectNodeContents(span);
+        return {title:span.textContent,button:{x:b.x,y:b.y,right:b.right,bottom:b.bottom,width:b.width,height:b.height},text:[...range.getClientRects()].map(r=>({x:r.x,y:r.y,right:r.right,bottom:r.bottom})),focusable:(el as HTMLButtonElement).tabIndex};
+      }));
+      await writeFile(resolve(root,"geometry.json"),JSON.stringify({viewport,geometry},null,2));
+      expect(geometry).toHaveLength(3);
+      for(const item of geometry){expect(item.button.height).toBeGreaterThanOrEqual(44);expect(item.button.width).toBeGreaterThanOrEqual(44);for(const line of item.text){expect(line.y,item.title!).toBeGreaterThanOrEqual(item.button.y-1);expect(line.bottom,item.title!).toBeLessThanOrEqual(item.button.bottom+1);expect(line.x,item.title!).toBeGreaterThanOrEqual(item.button.x-1);expect(line.right,item.title!).toBeLessThanOrEqual(item.button.right+1);}}
+      const selections=[];
+      for(const value of entries){const button=page.getByRole("button",{name:value.title,exact:true});await button.focus();await expect(button).toBeFocused();await page.keyboard.press("Enter");await expect(page.locator("#chat-heading")).toHaveText(value.title);expect(new URL(page.url()).searchParams.get("session")).toBe(value.id);const focus=await button.evaluate(el=>({visible:el.matches(":focus-visible"),width:getComputedStyle(el).outlineWidth,color:getComputedStyle(el).outlineColor}));expect(focus.visible).toBe(true);expect(parseFloat(focus.width)).toBeGreaterThanOrEqual(2);selections.push({...value,method:"keyboard Enter",focus});await button.click();expect(new URL(page.url()).searchParams.get("session")).toBe(value.id);}
+      const long=entries[1]!;await page.getByRole("button",{name:long.title,exact:true}).click();await expect(page.locator("#chat-heading")).toHaveText(long.title);
+      const saved=await page.request.get(owner.ready!.url+`/v2/workspaces/local/sessions/${long.id}`,{headers:{Authorization:"Bearer synthetic-repair-title"}});expect((await saved.json()).title).toBe(long.title);
+      await page.evaluate(async()=>{await Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{})));window.scrollTo(0,0);});await capture(page,root,"long-selected");
+      await writeFile(resolve(root,"selections.json"),JSON.stringify({selections,full_title:long.title},null,2));
+      const book=await page.context().newPage();const external:string[]=[];book.on("request",r=>{if(!r.url().startsWith("file:"))external.push(r.url());});
+      await book.setViewportSize(viewport);await book.goto("file://"+resolve(SOURCE,"docs/agent-core/GUIDE.html"));await expect(book.locator("h2")).toHaveCount(10);expect(await book.locator("svg").count()).toBe(3);expect(external).toEqual([]);
+      await book.screenshot({path:resolve(root,"agent.png")});const bookGeometry=await book.evaluate(()=>({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,chapters:document.querySelectorAll("h2").length}));expect(bookGeometry.scrollWidth).toBeLessThanOrEqual(viewport.width);await writeFile(resolve(root,"agent.json"),JSON.stringify({geometry:bookGeometry,external},null,2));await book.close();
     } finally {await owner.close();}
   });
 }

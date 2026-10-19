@@ -276,14 +276,17 @@ class SessionService:
             if turn_id
             else await sql.list_turns(self.store, session_id, 0, self.settings.session_max_turns)
         )
-        outcomes = await asyncio.gather(
-            *(
-                self.runs.cancel(v.run_id)
-                for v in values
-                if v.run_id is not None and v.status == "running"
-            ),
-            return_exceptions=True,
-        )
+
+        async def join(value: TurnView) -> None:
+            if value.run_id is None:
+                return
+            if value.status == "running":
+                await self.runs.cancel(value.run_id)
+            task = self.runs.tasks.get(value.run_id)
+            if task is not None and not task.done():
+                await settled(task)
+
+        outcomes = await asyncio.gather(*(join(v) for v in values), return_exceptions=True)
         for value in outcomes:
             if isinstance(value, BaseException):
                 raise value

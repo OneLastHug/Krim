@@ -332,3 +332,148 @@ async def test_session_close_returns_committed_state(tmp_path, wire):
         ).status == "cancelled"
         assert (await app.sessions.turn(LOCAL, "local", session.id, queued.id)).run_id is None
         assert app.provider.active == 0 and len(wire.requests) == 1 and wire.executions == []
+
+
+@pytest.mark.parametrize("operation", ["submit", "resume"])
+async def test_pending_close_fences_new_revision_and_joins_cleanup(tmp_path, operation):
+    import json
+
+    from test_session_read_sides import Connections
+
+    from krim_agent.storage import sessions as sql
+
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    executions, ordering = [], []
+
+    async def execute(args):
+        executions.append(args.text)
+        if args.text != "wait":
+            return args.text
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ordering.append("tool_cleanup_enter")
+            cleaning.set()
+            await release.wait()
+            ordering.append("tool_cleanup_exit")
+
+    registry = ToolRegistry(
+        (
+            ToolSpec(
+                "echo",
+                EchoInput,
+                execute,
+                {"type": "string"},
+                "repair/1",
+                hashlib.sha256(b"close-transaction-fence").hexdigest(),
+            ),
+        )
+    )
+    database = tmp_path / "close-fence.sqlite"
+    app = await open_application(database, registry=registry, settings=Settings(max_active_runs=1))
+    probe = Connections(app.store)
+    callers = []
+    record = {"operation": operation, "ordering": ordering}
+    try:
+        session = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="closing"))
+        other = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="other"))
+        original = TurnRequest(text="/echo wait", request_key="accepted", expected_revision=0)
+        active = await app.sessions.submit(LOCAL, "local", session.id, original)
+        await asyncio.wait_for(entered.wait(), 5)
+        queued = await submit(app, session, "/echo never", "accepted-queued")
+        current = await app.sessions.get(LOCAL, "local", session.id)
+        body = ControlRequest(request_key="close-original", expected_revision=current.revision)
+        caller = asyncio.create_task(
+            app.sessions.control(LOCAL, "local", session.id, "close", body)
+        )
+        callers.append(caller)
+        await asyncio.wait_for(cleaning.wait(), 5)
+        durable = await sql.control_by_key(app.store, session.id, body.request_key)
+        assert durable.status == "pending"
+        current = await app.sessions.get(LOCAL, "local", session.id)
+        record.update(close_id=durable.id, observed_revision=current.revision)
+        ordering.append("pending_close_committed")
+        duplicate = asyncio.create_task(
+            app.sessions.control(LOCAL, "local", session.id, "close", body)
+        )
+        callers.append(duplicate)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done() and not duplicate.done()
+        # 原已接受请求先于closing/revision判断，仍返回原身份。
+        assert (await app.sessions.submit(LOCAL, "local", session.id, original)).id == active.id
+        request, _ = await app.store.turn_request(queued.id)
+        with pytest.raises(ServiceError, match="session_closed"):
+            await sql.begin_run(
+                app.store,
+                queued.id,
+                request,
+                json.loads(app.service.bindings["demo"].descriptor_json),
+                app.settings,
+            )
+        received = None
+        try:
+            if operation == "submit":
+                accepted = await app.sessions.submit(
+                    LOCAL,
+                    "local",
+                    session.id,
+                    TurnRequest(
+                        text="/echo forbidden",
+                        request_key="new-key",
+                        expected_revision=current.revision,
+                    ),
+                )
+            else:
+                accepted = await app.sessions.control(
+                    LOCAL,
+                    "local",
+                    session.id,
+                    "resume",
+                    ControlRequest(request_key="new-resume", expected_revision=current.revision),
+                )
+            record["unexpected_acceptance"] = accepted.model_dump(mode="json")
+        except ServiceError as error:
+            received = error.code
+        record["rejection"] = received
+        record["counts_before_release"] = {"model": app.provider.calls, "tools": list(executions)}
+        assert received == "session_closed", record
+        assert app.provider.calls == 1 and executions == ["wait"]
+        assert not caller.done() and not duplicate.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        result = await duplicate
+        ordering.append("close_returned")
+        assert result.status == "completed" and result.result["status"] == "closed"
+        assert (await app.sessions.control(LOCAL, "local", session.id, "close", body)) == result
+        history = await app.sessions.turns(LOCAL, "local", session.id)
+        assert len(history) == 2 and all(v.status not in {"queued", "running"} for v in history)
+        assert all(t.done() for t in app.service.tasks.values())
+        assert app.provider.active == 0 and app.provider.calls == 1 and executions == ["wait"]
+        fresh = await submit(app, other, "/echo other", "other-turn")
+        assert (await app.sessions.wait(LOCAL, "local", other.id, fresh.id)).status == "completed"
+        assert app.provider.calls == 3 and executions == ["wait", "other"]
+        assert ordering.index("tool_cleanup_exit") < ordering.index("close_returned")
+    finally:
+        release.set()
+        await asyncio.gather(*callers, return_exceptions=True)
+        await asyncio.gather(app.close(), app.close())
+        second = await SQLiteStore.open(database)
+        await second.close()
+        record.update(
+            connection_events=probe.events,
+            pending=list(probe.pending),
+            unsafe_gc=probe.unsafe,
+            producer_done=all(t.done() for t in app.service.tasks.values()),
+            controls_done=all(t.done() for t in app.sessions.controls.values()),
+            dispatcher_done=app.sessions._dispatcher.done(),
+            provider_active=app.provider.active,
+            second_writer=True,
+        )
+        (tmp_path / "close-fence.json").write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        assert not probe.pending and probe.unsafe == 0 and record["producer_done"]
+        assert record["controls_done"] and record["dispatcher_done"] and app.provider.active == 0
