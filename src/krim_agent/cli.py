@@ -292,7 +292,71 @@ async def execute_sessions(args: argparse.Namespace) -> Any:
         await store.close()
 
 
+async def execute_workspace(args: argparse.Namespace) -> Any:
+    from krim_agent.sdk.workspace import WorkspaceSDK
+    from krim_agent.workspace.types import InputSnapshotRequest, WorkspaceTurnRequest
+
+    operation = args.operation
+    if not args.url and operation in {"start", "input"}:
+        # 独立本机CLI只有冷读权；开库/读请求/Provider之前拒绝写组合。
+        raise ServiceError("readonly")
+    body = None
+    if operation in {"start", "input"}:
+        import stat
+        path = Path(args.request)
+        info = await asyncio.to_thread(path.lstat)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+            raise ServiceError("invalid_input", 422)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            raw = os.read(fd, 65537)
+        finally:
+            os.close(fd)
+        try:
+            body = (WorkspaceTurnRequest.model_validate_json(raw) if operation == "start"
+                    else InputSnapshotRequest.model_validate_json(raw))
+        except ValueError:
+            raise ServiceError("invalid_input", 422) from None
+
+    async def perform(sdk: WorkspaceSDK) -> Any:
+        value: Any
+        if operation == "start":
+            assert isinstance(body, WorkspaceTurnRequest)
+            return (await sdk.start(args.session, body)).model_dump(mode="json")
+        if operation == "input":
+            assert isinstance(body, InputSnapshotRequest)
+            return (await sdk.input(args.session, body)).model_dump(mode="json")
+        if operation == "artifact":
+            value = (await sdk.chunk(args.session, args.revision, args.path,
+                offset=args.offset, length=args.length) if args.path else
+                await sdk.artifact(args.session, args.revision))
+        elif operation == "verify":
+            value = await sdk.verify(args.session, args.turn)
+        elif args.input_key:
+            value = await sdk.input_by_key(args.session, args.input_key)
+        elif args.key:
+            value = await sdk.by_key(args.session, args.key)
+        else:
+            value = await sdk.get(args.session, args.turn)
+        return value.model_dump(mode="json") if value is not None else None
+
+    if args.url:
+        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        try:
+            return await perform(WorkspaceSDK(client, workspace=args.workspace))
+        finally:
+            await client.close()
+    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    try:
+        return await perform(WorkspaceSDK(store, workspace=args.workspace,
+            artifact_root=Path(args.artifact_root) if args.artifact_root else None))
+    finally:
+        await store.close()
+
+
 async def execute(args: argparse.Namespace) -> Any:
+    if args.command == "workspace":
+        return await execute_workspace(args)
     if args.command in {"session", "turn"}:
         return await execute_sessions(args)
     if args.command in {"candidate", "dataset", "eval", "report", "compare"}:
@@ -447,6 +511,25 @@ def main() -> None:
     mode(compare)
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--candidate", required=True)
+    workspace = sub.add_parser("workspace")
+    workops = workspace.add_subparsers(dest="operation", required=True)
+    for workop in ("start", "input", "get", "artifact", "verify"):
+        child = workops.add_parser(workop)
+        mode(child)
+        child.add_argument("--workspace", default="local")
+        child.add_argument("--session", required=True)
+        child.add_argument("--artifact-root")
+        if workop in {"start", "input"}:
+            child.add_argument("--request", required=True)
+        elif workop == "artifact":
+            child.add_argument("--revision", required=True)
+            child.add_argument("--path")
+            child.add_argument("--offset", type=int, default=0)
+            child.add_argument("--length", type=int, default=16384)
+        else:
+            child.add_argument("--turn")
+            child.add_argument("--key")
+            child.add_argument("--input-key")
     args = parser.parse_args()
     try:
         if args.command == "serve":

@@ -4,3 +4,7 @@ from .sessions import SessionSDK
 from .text import EvaluationSDK, RunSDK
 
 __all__ = ["RunSDK", "EvaluationSDK", "SessionSDK"]
+
+from .workspace import WorkspaceSDK as WorkspaceSDK
+
+__all__.append("WorkspaceSDK")

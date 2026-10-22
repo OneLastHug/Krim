@@ -33,6 +33,7 @@ from krim_agent.contracts import (
 from krim_agent.observability import TraceView, project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.tools.core import Invocation
+from krim_agent.tools.pipeline import _owns, _producing
 
 from .contracts import RunStore, settled
 from .engine import AgentLoop
@@ -72,7 +73,7 @@ class RunBinding:
         def function(value: object) -> object:
             return getattr(value, "__func__", value)
 
-        return tuple(
+        result = tuple(
             map(
                 id,
                 (
@@ -87,10 +88,38 @@ class RunBinding:
                 ),
             )
         )
+        if loop.executor.middleware or loop.executor.wrap is not None or loop.work is not None:
+            result += tuple(map(id, (*loop.executor.middleware, loop.executor.wrap, loop.work)))
+        if loop.work is not None:
+            result += tuple(map(id, (loop.work.profile, loop.work.artifacts, loop.work.runner,
+                loop.work.access_policy)))
+            if loop.work.runner is not None:
+                result += (id(loop.work.runner.profile), id(loop.work.runner.fence),
+                    id(loop.work.runner.hook), hash(repr(loop.work.runner.profile)),
+                    id(function(loop.work.runner.run)))
+            result += (loop.work.artifacts.fd, hash(repr(loop.work.artifacts.root)))
+            result += tuple(id(getattr(getattr(loop.work.artifacts, name), "__func__",
+                getattr(loop.work.artifacts, name))) for name in ["_blob", "_stage", "input",
+                "publish", "_owned"])
+            result += (id(getattr(loop.executor.execute, "__func__", loop.executor.execute)),
+                       id(getattr(loop.work.execute, "__func__", loop.work.execute)))
+            from krim_agent.workspace import verification
+
+            verifier = loop._verifier
+            result += (id(verification), id(verifier), id(type(verifier)))
+            # 在describe/Verifier方法被调用前，直接核对实际函数及其代码对象。
+            result += tuple(
+                token
+                for name in ("verify", "descriptor", "binding_token", "assert_current")
+                for method in (function(getattr(verifier, name)),)
+                for token in (id(method), id(getattr(method, "__code__", None)))
+            )
+            result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        return result
 
     @staticmethod
     def tool_tokens(loop: AgentLoop) -> tuple[int, ...]:
-        return tuple(
+        result = tuple(
             token
             for spec, _ in loop.executor.registry._frozen
             for token in (
@@ -104,6 +133,8 @@ class RunBinding:
                 ),
             )
         )
+        return result + tuple(id(spec.scoped_executor) for spec,
+            _ in loop.executor.registry._frozen if spec.scoped_executor is not None)
 
     @staticmethod
     def describe(key: str, loop: AgentLoop, settings: Settings) -> dict[str, JsonValue]:
@@ -119,7 +150,9 @@ class RunBinding:
         )
         if isinstance(loop.provider, OpenAICompatibleProvider):
             provider.update(behavior_version="http-sse/1", config=loop.provider.identity())
-        policy = implementation(loop.executor.policy)
+        policy = implementation(getattr(loop.executor.policy, "__func__",
+            loop.executor.policy)) if loop.work is not None else implementation(
+            loop.executor.policy)
         policy["allowed_names"] = (
             ["add", "echo"]
             if policy["id"]
@@ -142,7 +175,7 @@ class RunBinding:
         )
         if isinstance(loop.provider, OpenAICompatibleProvider):
             limits["http"] = loop.provider.execution_limits()
-        return {
+        descriptor: dict[str, JsonValue] = {
             "schema_version": 2,
             "key": key,
             "version": settings.target_version,
@@ -156,6 +189,16 @@ class RunBinding:
             "limits": limits,
             "limits_fingerprint": fingerprint(limits),
         }
+        if loop.work is not None:
+            descriptor["workspace_profile"] = loop.work.profile.model_dump(mode="json")
+            descriptor["workspace_implementation"] = {
+                "operations": implementation(loop.work), "executor": implementation(loop.executor),
+                "middleware": [implementation(value) for value in loop.executor.middleware],
+                "wrap": implementation(loop.executor.wrap),
+            }
+            assert loop._verifier is not None
+            descriptor["workspace_verification"] = loop._verifier.descriptor()
+        return descriptor
 
     @classmethod
     def freeze(cls, key: str, loop: AgentLoop, settings: Settings) -> RunBinding:
@@ -238,6 +281,8 @@ class RunService:
     def _external(self) -> None:
         if asyncio.current_task() in self.tasks.values():
             raise ServiceError("self_wait")
+        if _owns(self, self.tasks):
+            raise ServiceError("self_wait")
 
     async def start(self, request: RunRequest) -> RunView:
         job = asyncio.create_task(self._admit(request))
@@ -304,6 +349,8 @@ class RunService:
             return existing
         if request.request_key.startswith(("lc-eval.", "ac-turn.")) and not internal:
             raise ServiceError("invalid_input", 422)
+        if request.target == "target-workspace" and turn_id is None:
+            raise ServiceError("workspace_contract_required")
         binding = self.bindings.get(request.target)
         if binding is None:
             raise ServiceError("invalid_input", 422)
@@ -346,28 +393,36 @@ class RunService:
             task.exception()  # 读取异常，避免未消费 Task 把私有异常写入事件循环日志。
 
     async def _drive(self, run: RunView, binding: RunBinding | TurnBinding) -> None:
-        status: RunStatus = "completed"
-        code: str | None = None
-        try:
-            remaining = max(0, run.created_at + binding.settings.run_timeout - time.time())
-            async with asyncio.timeout(remaining):
-                await self.store.set_running(run.id)
-                await binding.loop.run(run.id, self._approve, binding.assert_current)
-        except asyncio.CancelledError:
-            status, code = "aborted", "cancelled"
-        except TimeoutError:
-            status, code = "failed", "run_timeout"
-        except ServiceError as error:
-            status, code = "failed", error.code
-        except Exception:
-            status, code = "failed", "execution_error"
-        finally:
-            self._finalizing.add(run.id)
+        producer = self.tasks.get(run.id)
+        if producer is None or producer is not asyncio.current_task():
+            raise ServiceError("self_wait")
+        with _producing(self, run.id, cast(asyncio.Task[None], producer)):
+            status: RunStatus = "completed"
+            code: str | None = None
             try:
-                await self.store.finish(run.id, status, code)
+                timeout = (
+                    binding.loop.work.profile.runtime.run_timeout_seconds
+                    if binding.loop.work is not None else binding.settings.run_timeout
+                )
+                remaining = max(0, run.created_at + timeout - time.time())
+                async with asyncio.timeout(remaining):
+                    await self.store.set_running(run.id)
+                    await binding.loop.run(run.id, self._approve, binding.assert_current)
+            except asyncio.CancelledError:
+                status, code = "aborted", "cancelled"
+            except TimeoutError:
+                status, code = "failed", "run_timeout"
+            except ServiceError as error:
+                status, code = "failed", error.code
+            except Exception:
+                status, code = "failed", "execution_error"
             finally:
-                self._finalizing.discard(run.id)
-                self._cancelled.discard(run.id)
+                self._finalizing.add(run.id)
+                try:
+                    await self.store.finish(run.id, status, code)
+                finally:
+                    self._finalizing.discard(run.id)
+                    self._cancelled.discard(run.id)
 
     async def get(self, run_id: str) -> RunView:
         return (await self.store.snapshot(run_id)).run
@@ -442,13 +497,41 @@ class RunService:
         return await self.get(run_id)
 
     async def _approve(self, invocation: Invocation, remaining_seconds: float) -> bool:
+        tool_deadline = time.monotonic() + remaining_seconds
         snapshot = await self.store.snapshot(invocation.run_id)
         request_id = secrets.token_hex(16)
-        expires = min(
-            time.time() + remaining_seconds,
-            time.time() + self.settings.approval_timeout,
-            snapshot.run.created_at + self.settings.run_timeout,
-        )
+        if snapshot.request.target == "target-workspace":
+            binding = self.bindings.get("target-workspace")
+            if snapshot.work is None or binding is None or binding.loop.work is None:
+                raise ServiceError("workspace_contract_required")
+            binding.assert_current()
+            if encoded({key: value for key,
+                value in snapshot.target.items() if key != "context"}) != binding.descriptor_json:
+                raise ServiceError("target_binding_changed")
+            frozen = cast(dict[str, JsonValue], snapshot.work.conditions["runtime"])
+            expected = binding.loop.work.profile.runtime.model_dump(mode="json")
+            from krim_agent.workspace.types import WorkLimits
+            try:
+                selected = WorkLimits.model_validate_json(
+                    encoded({key: frozen.get(key) for key in expected}))
+                reference = WorkLimits.model_validate_json(
+                    binding.loop.work.profile.runtime.model_dump_json())
+            except ValueError:
+                raise ServiceError("target_binding_changed") from None
+            if selected != reference:
+                raise ServiceError("target_binding_changed")
+            now, monotonic = time.time(), time.monotonic()
+            expires = min(snapshot.run.created_at + selected.run_timeout_seconds,
+                          now + selected.approval_timeout_seconds, now + max(0,
+                tool_deadline-monotonic))
+            if expires <= now:
+                raise ServiceError("approval_expired")
+        else:
+            expires = min(
+                time.time() + remaining_seconds,
+                time.time() + self.settings.approval_timeout,
+                snapshot.run.created_at + self.settings.run_timeout,
+            )
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:

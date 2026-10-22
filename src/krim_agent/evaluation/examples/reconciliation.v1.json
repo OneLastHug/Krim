@@ -1,0 +1,61 @@
+{
+  "name": "reconciliation",
+  "version": "1",
+  "cases": [
+    {
+      "case_id": "basic",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,12.50\nt2,b,3.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 1250,
+              "b": 300
+            },
+            "total_cents": 1550,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=1550\ntransactions=2\n"
+        }
+      }
+    },
+    {
+      "case_id": "duplicates_returns",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,10.00\nt1,a,10.00\nt2,a,-2.50\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 750
+            },
+            "total_cents": 750,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=750\ntransactions=2\n"
+        }
+      }
+    },
+    {
+      "case_id": "expected_rejection",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account\nt1,a\n"
+      },
+      "reference": {
+        "exit_code": 2,
+        "files": {}
+      }
+    }
+  ]
+}

@@ -237,8 +237,10 @@ def create_app(
 
     mount_browser_ui(app)
     from .sessions import mount_sessions
+    from .workspace import mount_workspace
 
     mount_sessions(app)
+    mount_workspace(app)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:

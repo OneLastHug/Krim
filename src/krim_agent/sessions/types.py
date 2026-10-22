@@ -7,7 +7,9 @@ from pydantic import Field, JsonValue, field_validator
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import Message, StrictModel
 
-TargetKey = Literal["demo", "target-v1", "target-v2", "target-bad", "target-http"]
+TargetKey = Literal[
+    "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
+]
 Key = str
 
 

@@ -32,6 +32,31 @@ def project_facts(snapshot: RunSnapshot) -> RunFacts:
         elif event.kind in {"tool_start", "tool_end"}:
             item = ToolObservation.model_validate(data)
             observations[item.call_id] = item
+    if snapshot.work is not None:
+        # 只合并同事务持久receipt；没有end仍不补span或假成功。
+        for event in snapshot.events:
+            if event.kind == "workspace_started":
+                call_id = cast(str, event.data["call_id"])
+                old = observations.get(call_id)
+                if old is not None and event.data.get("executor_started") is True:
+                    observations[call_id] = old.model_copy(update={"executor_started": True})
+                continue
+            if event.kind != "workspace_receipt":
+                continue
+            data = event.data
+            receipt = data["receipt"]
+            call_id = cast(str, data["call_id"])
+            old = observations.get(call_id)
+            if old is None or not isinstance(receipt, dict):
+                continue
+            updates: dict[str, JsonValue] = {}
+            if receipt.get("executor_started") is True:
+                updates["executor_started"] = True
+            if receipt.get("output_complete") is True:
+                updates["result_available"] = True
+                if old.value is None:
+                    updates["value"] = receipt
+            observations[call_id] = old.model_copy(update=updates)
     complete = (
         steps > 0
         and len(usages) == steps

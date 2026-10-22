@@ -1,0 +1,27 @@
+{
+  "name": "native-repair",
+  "version": "1",
+  "cases": [
+    {
+      "case_id": "repair",
+      "instruction": "修复ledger/reconcile.py的精确金额、重复记录和退款处理；补充有效unittest并实际运行python -B -m unittest discover -s tests；写outputs/ledger.json与outputs/summary.md。金额为整数分，重复同ID同内容只计算一次，冲突重复/非有限金额/不足分拒绝。不得改CSV或控制目录。",
+      "files": {
+        "ledger/__init__.py": "",
+        "ledger/reconcile.py": "def reconcile(rows):\n    totals = {}\n    for row in rows:\n        totals[row[\"account\"]] = totals.get(row[\"account\"], 0) + float(row[\"amount\"])\n    return totals\n",
+        "tests/test_reconcile.py": "import unittest\nfrom ledger.reconcile import reconcile\n\nclass TestLedger(unittest.TestCase):\n    def test_sum(self):\n        self.assertEqual(reconcile([{\"id\":\"1\",\"account\":\"a\",\"amount\":\"0.10\"}]), {\"a\":10})\n",
+        "transactions.csv": "id,account,amount\n1,a,2.00\n2,a,-0.20\n1,a,2.00\n3,b,2.50\n",
+        "catalog.csv": "account,label\na,Alpha\nb,Beta\n"
+      },
+      "reference": {
+        "files": {
+          "ledger.json": {
+            "a": 180,
+            "b": 250
+          }
+        },
+        "exit_code": 0
+      },
+      "verifier": "repository-repair/1"
+    }
+  ]
+}
