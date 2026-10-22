@@ -416,3 +416,343 @@ async def test_event_limit_is_independent_of_crlf_packet_boundaries():
                 response.aiter_raw = bytes_from_real_socket
                 with pytest.raises(ProviderError, match="provider_event_limit"):
                     _ = [value async for value in _sse_data(response, config)]
+
+
+# D2：真实TCP分组屏障；夹具只发SSE字节，不复制Provider解析或工具执行。
+def d2_call(index, *, arguments='{"text":"合成🙂"}', identity=None, name="echo"):
+    return {"index": index, "id": identity or "d2-call-"+str(index), "type": "function",
+            "function": {"name": name, "arguments": arguments}}
+
+
+class D2Wire(HTTPFixture):
+    def __init__(self, parts):
+        super().__init__()
+        self.parts = parts
+        self.sent = [asyncio.Event() for _ in parts]
+        self.gates = [asyncio.Event() for _ in parts]
+        self.consumed = [asyncio.Event() for _ in parts]
+        self.bodies = []
+
+    async def handle(self, reader, writer):
+        import json
+
+        task = asyncio.current_task()
+        self.tasks.add(task)
+        self.writers.add(writer)
+        self.active += 1
+        self.idle.clear()
+        try:
+            header = await reader.readuntil(b"\r\n\r\n")
+            headers = dict(line.split(":",
+                1) for line in header.decode().split("\r\n")[1:] if ":" in line)
+            length = int(next(v for k, v in headers.items() if k.lower() == "content-length"))
+            body = json.loads(await reader.readexactly(length))
+            self.bodies.append(body)
+            self.requests.append({"body": body})
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            chunks = self.parts if body["messages"][-1]["role"] != "tool" else [
+                frame(choice({"content": "工具组已观察"}))
+                + frame(choice(finish="stop")) + frame("[DONE]")]
+            for index, chunk in enumerate(chunks):
+                writer.write(chunk)
+                await writer.drain()
+                self.sent[index].set()
+                release = asyncio.create_task(self.gates[index].wait())
+                eof = asyncio.create_task(reader.read(1))
+                try:
+                    await asyncio.wait((release, eof), return_when=asyncio.FIRST_COMPLETED)
+                    if eof.done():
+                        return
+                finally:
+                    for child in (release, eof):
+                        if not child.done():
+                            child.cancel()
+                    await asyncio.gather(release, eof, return_exceptions=True)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+            self.writers.discard(writer)
+            self.tasks.discard(task)
+            self.active -= 1
+            self.closed_connections += 1
+            if self.active == 0:
+                self.idle.set()
+
+    async def __aexit__(self, *args):
+        for gate in self.gates:
+            gate.set()
+        await super().__aexit__(*args)
+
+
+@pytest.fixture(autouse=True)
+async def d2_http_resource_record(request, monkeypatch):
+    if request.node.name.split("[")[0] not in {
+        "test_workspace_complete_tool_groups_are_atomic",
+        "test_workspace_bad_tool_groups_zero_release",
+        "test_single_call_default_and_sealed_cap",
+    }:
+        yield
+        return
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+
+    from krim_agent.execution.linux import fds
+    from krim_agent.providers import openai_compatible
+
+    before = fds()
+    existing = asyncio.all_tasks()
+    loop = asyncio.get_running_loop()
+    factory = loop.get_task_factory()
+    owned_tasks = []
+
+    def created(coro, **kwargs):
+        task = factory(loop, coro, **kwargs) if factory is not None else asyncio.Task(coro,
+            loop=loop, **kwargs)
+        owned_tasks.append(task)
+        return task
+
+    loop.set_task_factory(lambda active_loop, coro, **kwargs: created(coro, **kwargs))
+    notes = {"node": request.node.nodeid, "database": None, "providers": [], "wires": []}
+    request.node.d2_notes = notes
+    import httpx
+    actual_send = httpx.AsyncClient.send
+    async def observed_send(client, *args, **kwargs):
+        response = await actual_send(client, *args, **kwargs)
+        wire = next((wire for wire in notes["wires"] if isinstance(wire, D2Wire)), None)
+        if wire is not None:
+            original_raw = response.aiter_raw
+            async def consumed_bytes():
+                size = 0
+                async for chunk in original_raw():
+                    yield chunk
+                    # yield返回说明原_sse_data已处理前一真实TCP块并请求下一块。
+                    size += len(chunk)
+                    total = 0
+                    for i, part in enumerate(wire.parts):
+                        total += len(part)
+                        if size >= total:
+                            wire.consumed[i].set()
+            response.aiter_raw = consumed_bytes
+        return response
+    monkeypatch.setattr(httpx.AsyncClient, "send", observed_send)
+    try:
+        yield
+    finally:
+        loop.set_task_factory(factory)
+        # 精确捕获本scope创建的句柄，包括协议流的async-generator finalizer；不强GC或过滤任务。
+        joining = [task for task in owned_tasks if task is not asyncio.current_task()
+            and not task.done()]
+        notes["joined_task_coroutines"] = [str(task.get_coro()) for task in joining]
+        if joining:
+            async with asyncio.timeout(5):
+                await asyncio.gather(*joining)
+        notes["owned_tasks_created"] = len(owned_tasks)
+        notes["owned_tasks_joined"] = all(task.done()
+            or task is asyncio.current_task() for task in owned_tasks)
+        path = Path(os.environ["KRIM_D2_EVIDENCE"]) / "cases"
+        path.mkdir(exist_ok=True)
+        consumer = Path(openai_compatible.__file__)
+        assert consumer.is_relative_to(Path(os.environ["KRIM_D2_ROOT"]) / "source/src")
+        unexpected = [t.get_name() for t in asyncio.all_tasks()
+                      if t is not asyncio.current_task() and t not in existing and not t.done()]
+        providers = [{"calls": p.calls, "active": p.active, "closed": p.closed,
+                      "streams_closed": p.streams_closed} for p in notes.pop("providers")]
+        wires = [{"requests": len(w.requests), "active": w.active,
+                  "connections_closed": w.closed_connections, "tasks": len(w.tasks),
+                  "server_serving": w.server.is_serving()} for w in notes.pop("wires")]
+        result = notes | {"consumer": {"path": str(consumer),
+            "sha256": hashlib.sha256(await asyncio.to_thread(consumer.read_bytes)).hexdigest()},
+            "providers": providers, "wires": wires, "FD_before": before, "FD_after": fds(),
+            "FD_equal": before == fds(), "unexpected_tasks": unexpected}
+        (
+            path / (
+            hashlib.sha256(
+            request.node.nodeid.encode()).hexdigest()+".json")).write_text(json.dumps(result,
+            indent=2))
+        assert all(p["closed"] and p["active"] == 0
+            and p["calls"] == p["streams_closed"] for p in providers)
+        assert all(w["active"] == 0 and w["tasks"] == 0 and not w["server_serving"] for w in wires)
+        assert before == fds() and not unexpected
+
+
+@pytest.mark.parametrize("cap", [2, 3, 4])
+async def test_workspace_complete_tool_groups_are_atomic(cap, request):
+
+    # 第一call完整/最后call未完/finish后DONE前，均不得释放部分工具。
+    first = frame(choice({"tool_calls": [d2_call(0)]}))
+    partial = [d2_call(i, arguments='{"text":"尾') for i in reversed(range(1, cap))]
+    rest = [{"index": i, "function": {"arguments": '🙂"}'}} for i in range(1, cap)]
+    parts = [first, frame(choice({"tool_calls": partial})),
+             frame(choice({"tool_calls": rest}))+frame(choice(finish="tool_calls")),
+        frame("[DONE]")]
+    async with D2Wire(parts) as fixture:
+        request.node.d2_notes["wires"].append(fixture)
+        provider = OpenAICompatibleProvider(OpenAICompatibleConfig(
+            base_url=fixture.url, model="fixture", max_tool_calls=cap))
+        request.node.d2_notes["providers"].append(provider)
+        events = []
+        async def consume():
+            async for event in provider.stream([Message(role="user", content="组")], []):
+                events.append(event)
+        task = asyncio.create_task(consume())
+        try:
+            for index in range(3):
+                async with asyncio.timeout(5):
+                    await fixture.sent[index].wait()
+                    await fixture.consumed[index].wait()
+                assert not task.done()
+                assert not any(type(e) is ModelToolCall for e in events)
+                fixture.gates[index].set()
+            fixture.gates[3].set()
+            await task
+            calls = [e for e in events if type(e) is ModelToolCall]
+            assert [e.id for e in calls] == ["d2-call-"+str(i) for i in range(cap)]
+            assert all(e.arguments == {"text": "合成🙂" if i == 0 else "尾🙂"} for i,
+                e in enumerate(calls))
+            assert len(fixture.requests) == provider.calls == 1
+            request.node.d2_notes["calls_released"] = [e.model_dump(mode="json") for e in calls]
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await provider.close()
+
+
+@pytest.mark.parametrize("case", [
+    "missing-index", "bool", "float", "string", "negative", "over-cap", "sparse",
+    "duplicate-id", "last-json", "duplicate-json-key", "argument-limit", "no-finish",
+    "no-done", "length", "cancel-first", "cancel-last", "cancel-finish",
+])
+async def test_workspace_bad_tool_groups_zero_release(case, request):
+    raw = [d2_call(0), d2_call(1)]
+    invalid = {"missing-index": None, "bool": True, "float": 1.0,
+               "string": "1", "negative": -1, "over-cap": 4, "sparse": 2}
+    if case in invalid:
+        if case == "missing-index":
+            raw[1].pop("index")
+        else:
+            raw[1]["index"] = invalid[case]
+    if case == "duplicate-id":
+        raw[1]["id"] = raw[0]["id"]
+    if case in {"last-json", "duplicate-json-key", "argument-limit"}:
+        raw[1]["function"]["arguments"] = {"last-json": "{bad",
+            "duplicate-json-key": '{"x":1,"x":2}',
+            "argument-limit": '{"text":"'+"x"*4096+'"}'}[case]
+    parts = [frame(choice({"tool_calls": raw[:1]})), frame(choice({"tool_calls": raw[1:]})),
+             b"" if case == "no-finish" else frame(
+        choice(finish="length" if case == "length" else "tool_calls")),
+             b"" if case == "no-done" else frame("[DONE]")]
+    async with D2Wire(parts) as fixture:
+        request.node.d2_notes["wires"].append(fixture)
+        provider = OpenAICompatibleProvider(OpenAICompatibleConfig(
+            base_url=fixture.url, model="fixture", max_tool_calls=4))
+        request.node.d2_notes["providers"].append(provider)
+        events, errors = [], []
+        async def consume():
+            try:
+                async for event in provider.stream([Message(role="user", content="拒绝")], []):
+                    events.append(event)
+            except ProviderError as error:
+                errors.append(error.code)
+        task = asyncio.create_task(consume())
+        try:
+            if case.startswith("cancel-"):
+                stop = {"cancel-first": 0, "cancel-last": 1, "cancel-finish": 2}[case]
+                for index in range(stop+1):
+                    async with asyncio.timeout(5):
+                        await fixture.sent[index].wait()
+                        await fixture.consumed[index].wait()
+                    if index != stop:
+                        fixture.gates[index].set()
+                task.cancel()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                for gate in fixture.gates:
+                    gate.set()
+                await task
+                assert errors, "完整组任一无效时必须实际拒绝，不能释放前面的合法call"
+            assert not any(type(e) is ModelToolCall for e in events)
+            assert len(fixture.requests) == provider.calls == 1
+            request.node.d2_notes["protocol_errors"] = errors
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await provider.close()
+
+
+@pytest.mark.parametrize("case", ["default-one", "default-two", "explicit-four", "invalid-cap",
+     "constructed", "seal-config", "seal-client"])
+async def test_single_call_default_and_sealed_cap(case, request):
+    from pydantic import ValidationError
+
+    from krim_agent.contracts import ServiceError
+
+    chunks = [
+     frame(
+     choice(
+     {
+     "tool_calls": [
+     d2_call(
+     i) for i in range(4 if case == "explicit-four" else 2 if case == "default-two" else 1)]})),
+              frame(choice(finish="tool_calls")), frame("[DONE]")]
+    async with HTTPFixture(chunks=chunks) as fixture:
+        request.node.d2_notes["wires"].append(fixture)
+        if case == "invalid-cap":
+            for value in [0, 5, True, False, 1.0, "2", None]:
+                with pytest.raises(ValidationError):
+                    OpenAICompatibleConfig(base_url=fixture.url, model="fixture",
+                        max_tool_calls=value)
+            assert not fixture.requests
+            return
+        config = OpenAICompatibleConfig(base_url=fixture.url, model="fixture",
+                                       **({"max_tool_calls": 4} if case == "explicit-four" else {}))
+        if case == "constructed":
+            config = OpenAICompatibleConfig.model_construct(
+                **(config.model_dump() | {"max_tool_calls": 5}))
+            with pytest.raises((ValidationError, ServiceError)):
+                OpenAICompatibleProvider(config)
+            assert not fixture.requests
+            return
+        provider = OpenAICompatibleProvider(config)
+        request.node.d2_notes["providers"].append(provider)
+        replacement = None
+        try:
+            if case == "seal-config":
+                object.__setattr__(provider.config, "max_tool_calls", 4)
+            if case == "seal-client":
+                import httpx
+
+                replacement = httpx.AsyncClient(base_url=fixture.url+"/", trust_env=False)
+                provider._client = replacement
+            if case.startswith("seal-"):
+                with pytest.raises(ServiceError, match="target_binding_changed"):
+                    _ = [e async for e in provider.stream([Message(role="user", content="x")], [])]
+                assert not fixture.requests
+            elif case == "default-two":
+                with pytest.raises(ProviderError):
+                    _ = [e async for e in provider.stream([Message(role="user", content="x")], [])]
+            else:
+                events = [e async for e in provider.stream([Message(role="user", content="x")], [])]
+                assert len(
+                    [
+                    e for e in events if type(
+                    e) is ModelToolCall]) == (4 if case == "explicit-four" else 1)
+            assert provider.execution_limits(
+                )["max_tool_calls"] == (4 if case in {"explicit-four", "seal-config"} else 1)
+        finally:
+            await provider.close()
+            if replacement is not None:
+                await replacement.aclose()
+                assert replacement.is_closed
