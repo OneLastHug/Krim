@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_release_versions_and_root_lock_metadata():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
-    assert project["project"]["version"] == __version__ == "0.3.0a1"
-    assert create_app().version == "0.3.0a1"
+    assert project["project"]["version"] == __version__ == "0.4.0a1"
+    assert create_app().version == "0.4.0a1"
     roots = [p for p in lock["package"] if p["name"] == "krim-agent"]
-    assert len(roots) == 1 and roots[0]["version"] == "0.3.0a1"
+    assert len(roots) == 1 and roots[0]["version"] == "0.4.0a1"
     assert roots[0]["source"] == {"editable": "."}
     before_raw = subprocess.check_output(
         ["git", "--no-optional-locks", "show", "43952e1129fbf9357a550507936827900b6d836c:uv.lock"],
@@ -27,14 +27,14 @@ def test_release_versions_and_root_lock_metadata():
     )
     before = tomllib.loads(before_raw)
     expected = before_raw.replace(
-        'name = "krim-agent"\nversion = "0.2.0a1"', 'name = "krim-agent"\nversion = "0.3.0a1"', 1
+        'name = "krim-agent"\nversion = "0.2.0a1"', 'name = "krim-agent"\nversion = "0.4.0a1"', 1
     )
     assert (ROOT / "uv.lock").read_text() == expected
     third_party = [p for p in lock["package"] if p["name"] != "krim-agent"]
     assert len(third_party) == 38
     assert third_party == [p for p in before["package"] if p["name"] != "krim-agent"]
     expected_root = next(p for p in before["package"] if p["name"] == "krim-agent") | {
-        "version": "0.3.0a1"
+        "version": "0.4.0a1"
     }
     assert roots[0] == expected_root
 
@@ -42,10 +42,10 @@ def test_release_versions_and_root_lock_metadata():
 def test_exact_package_and_import_purity(tmp_path):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     scope = json.loads(
-        re.search(r"```json\n(.*?)\n```", (ROOT / "docs/agent-core/SCOPE.md").read_text(), re.S)[1]
+        re.search(r"```json\n(.*?)\n```", (ROOT / "docs/agent-core/AC-M2-SCOPE.md").read_text(), re.S)[1]
     )
     declared = project["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"]
-    assert len(declared) == 56 and set(declared) == set(scope["package_files"])
+    assert len(declared) == 75 and set(declared) == set(scope["package_files"])
     assert all((ROOT / p).is_file() for p in declared)
     code = (
         "import sys;sys.path.insert(0," + repr(str(ROOT / "src")) + ");"

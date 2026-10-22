@@ -43,7 +43,7 @@ async def test_v1_upgrade_atomic_and_readonly_pure(tmp_path):
     try:
         async with store.engine.begin() as conn:
             version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar_one()
-        assert version == 3
+        assert version == 4
         async with store.engine.begin() as conn:
             tables = (
                 (await conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'"))
@@ -59,6 +59,11 @@ async def test_v1_upgrade_atomic_and_readonly_pure(tmp_path):
             "sessions",
             "turns",
             "session_controls",
+            "work_sessions",
+            "work_turns",
+            "compactions",
+            "tool_effects",
+            "artifact_revisions",
         }
     finally:
         await store.close()
