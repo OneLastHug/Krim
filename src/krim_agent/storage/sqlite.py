@@ -35,6 +35,7 @@ from krim_agent.evaluation.types import DatasetRevision, EvalRequest, FreezeRequ
 from krim_agent.runtime.contracts import RunSnapshot, settled
 
 from . import sessions as session_sql
+from . import work as work_sql
 from .models import (
     dataset_revisions,
     eval_items,
@@ -48,7 +49,7 @@ from .models import (
 )
 
 APPLICATION_ID = 0x4B4C4331
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 T = TypeVar("T")
 
 
@@ -111,6 +112,16 @@ class SQLiteStore:
                     sessions,
                     turns,
                     session_controls,
+                    *[
+                        metadata.tables[name]
+                        for name in (
+                            "work_sessions",
+                            "work_turns",
+                            "compactions",
+                            "tool_effects",
+                            "artifact_revisions",
+                        )
+                    ],
                 ],
             )
         )
@@ -192,11 +203,21 @@ class SQLiteStore:
                     expected = {
                         1: {"runs", "run_events"},
                         2: {"runs", "run_events", "dataset_revisions", "evaluations", "eval_items"},
-                        3: set(metadata.tables),
+                        3: {
+                            "runs",
+                            "run_events",
+                            "dataset_revisions",
+                            "evaluations",
+                            "eval_items",
+                            "sessions",
+                            "turns",
+                            "session_controls",
+                        },
+                        4: set(metadata.tables),
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3}
+                        or version not in {1, 2, 3, 4}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
@@ -384,26 +405,57 @@ class SQLiteStore:
             raise ServiceError("storage_unavailable", 503) from None
 
     async def finish(self, run_id: str, status: RunStatus, code: str | None = None) -> RunView:
+        handles = []
+
         async def operation(conn: AsyncConnection) -> RunView:
+            nonlocal status, code
             row = await self._row(conn, run_id)
             if row["status"] in TERMINAL:
+                status, code = row["status"], row["code"]
                 return self._view(row)
-            await self._event(
-                conn,
-                run_id,
-                "terminal",
-                {"status": status, "code": code},
-                "terminal:" + run_id,
-                terminal=True,
-            )
-            await conn.execute(
-                update(runs)
-                .where(runs.c.id == run_id)
-                .values(status=status, code=code, finished_at=time.time())
-            )
-            if self.schema_version == 3:
-                await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
-            return self._view(await self._row(conn, run_id))
+            from krim_agent.workspace import verification
+
+            helpers = verification._TERMINAL_HELPERS
+
+            async def attempt_body() -> RunView:
+                await self._event(
+                    conn,
+                    run_id,
+                    "terminal",
+                    {"status": status, "code": code},
+                    "terminal:" + run_id,
+                    terminal=True,
+                )
+                await conn.execute(
+                    update(runs)
+                    .where(runs.c.id == run_id)
+                    .values(status=status, code=code, finished_at=time.time())
+                )
+                if self.schema_version in {3, 4}:
+                    await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
+                return self._view(await self._row(conn, run_id))
+
+            handoff = verification.private_handoff_for_same_owner_and_run(run_id)
+            attempt = await helpers[0](conn, self, run_id, handoff)
+            if attempt is None:
+                return await attempt_body()
+            handles.append((attempt, helpers[4]))
+            await conn.exec_driver_sql("SAVEPOINT krim_d4_terminal")
+            try:
+                value = await attempt_body()
+                if status == "completed":
+                    helpers[1](attempt, selected_status=status, selected_code=code)
+                else:
+                    helpers[3](attempt, selected_status=status, selected_code=code)
+            except verification.VerificationCommitRejected as rejected:
+                if status != "completed" or not rejected.issued_for(attempt):
+                    raise
+                await conn.exec_driver_sql("ROLLBACK TO krim_d4_terminal")
+                status, code = rejected.negative_pair()
+                helpers[2](attempt, rejected)
+                value = await attempt_body()
+                helpers[3](attempt, selected_status=status, selected_code=code)
+            return value
 
         prior_health = self.healthy
         try:
@@ -424,6 +476,9 @@ class SQLiteStore:
                 return snap.run
             self.healthy = False
             raise ServiceError("storage_unavailable", 503) from None
+        finally:
+            for attempt, clear in handles:
+                clear(attempt)
 
     async def set_running(self, run_id: str) -> None:
         async def operation(conn: AsyncConnection) -> None:
@@ -486,6 +541,7 @@ class SQLiteStore:
                 self.schema_version,
                 cast(dict[str, JsonValue], row["target"]),
             ),
+            await work_sql.load(conn, run_id) if self.schema_version == 4 else None,
         )
 
     async def by_key(self, key: str) -> RunView | None:
@@ -500,7 +556,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3}:
+        if self.schema_version not in {2, 3, 4}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -978,7 +1034,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status="interrupted", code="interrupted", finished_at=time.time())
                 )
-                if self.schema_version == 3:
+                if self.schema_version in {3, 4}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
             active = (
                 (
@@ -1026,7 +1082,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version == 3:
+            if self.schema_version in {3, 4}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 
@@ -1040,3 +1096,15 @@ class SQLiteStore:
             await self.engine.dispose()
         finally:
             os.close(self.fd)
+
+    async def work_read(self, operation: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        work_sql.require(self)
+        return await session_sql.read(self, operation)
+
+    async def work_write(
+        self,
+        operation: Callable[[AsyncConnection], Awaitable[T]],
+        confirm: Callable[[], Awaitable[T | None]],
+    ) -> T:
+        work_sql.require(self)
+        return await self._eval_write(operation, confirm)

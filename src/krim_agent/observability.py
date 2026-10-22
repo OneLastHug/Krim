@@ -55,6 +55,10 @@ def project_trace(snapshot: RunSnapshot) -> TraceView:
                         attributes["reasoning_effort"] = "xhigh"
                     if snapshot.target.get("key") in {"demo", "target-http"}:
                         attributes["target_key"] = snapshot.target["key"]
+            if snapshot.work is not None:
+                attributes["target_key"] = "target-workspace"
+                if kind == "model" and data.get("purpose") in {"task", "summary"}:
+                    attributes["purpose"] = data["purpose"]
             if type(step) is int:
                 attributes["step_index"] = step
             spans[span_id] = SpanView(

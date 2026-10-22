@@ -38,3 +38,37 @@ class SessionContext(StrictModel):
     session_id: str
     turn_id: str
     context: ContextSnapshot
+
+
+class WorkspaceSessionContext(StrictModel):
+    """schema2准备引用；不把完整历史复制进旧ContextSnapshot。"""
+
+    schema_version: Literal[2] = 2
+    workspace_id: str
+    session_id: str
+    turn_id: str
+    effective_fingerprint: str
+    source_fingerprint: str
+
+
+class CompactionPolicy(StrictModel):
+    """D3消费的冻结类型；D1只定义数据，不发摘要请求。"""
+
+    version: Literal["compaction/1"] = "compaction/1"
+    trigger_ratio: float = Field(default=0.8, gt=0, le=0.8)
+    keep_turns: int = Field(default=2, ge=2, le=8)
+    summary_bytes: int = Field(default=2048, ge=1, le=2048)
+    max_passes: int = Field(default=2, ge=1, le=2)
+    counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"
+
+
+class PreparedContext(StrictModel):
+    schema_version: Literal[2] = 2
+    messages: tuple[Message, ...]
+    sources: tuple[HistorySource, ...]
+    policy: CompactionPolicy
+    source_fingerprint: str
+    summary_hash: str | None
+    input_bytes: int = Field(ge=0, le=1048576)
+    estimated_tokens: int = Field(ge=0)
+    counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"

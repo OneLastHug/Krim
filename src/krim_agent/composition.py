@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,7 @@ from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
 from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
+from krim_agent.execution.linux import SandboxRunner
 from krim_agent.providers.fake import FakeProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.providers.types import ModelProvider
@@ -27,7 +29,12 @@ from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Policy, PostHook, PreHook
 from krim_agent.tools.executor import ToolExecutor
+from krim_agent.tools.pipeline import Middleware, Wrap
 from krim_agent.tools.registry import ToolRegistry
+from krim_agent.tools.workspace import registry as workspace_registry
+from krim_agent.workspace.artifacts import ArtifactStore
+from krim_agent.workspace.operations import WorkspaceOperations
+from krim_agent.workspace.targets import WorkspaceConfiguration
 
 
 @dataclass
@@ -42,6 +49,9 @@ class Application:
     sessions: SessionService | None = None
     access_policy: AccessPolicy | None = field(default=None, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
+    work: WorkspaceOperations | None = None
+    artifacts: ArtifactStore | None = None
+    runner: SandboxRunner | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -78,14 +88,25 @@ class Application:
                 await self.service.close()
         finally:
             try:
-                outcomes = await asyncio.gather(
-                    *(p.close() for p in self.owned_providers), return_exceptions=True
-                )
-                for outcome in outcomes:
-                    if isinstance(outcome, BaseException):
-                        raise outcome
+                try:
+                    if self.work is not None:
+                        await self.work.close()
+                finally:
+                    try:
+                        if self.runner is not None:
+                            await cast(Callable[[], Awaitable[None]], self.runner.close)()
+                    finally:
+                        if self.artifacts is not None:
+                            await self.artifacts.close()
             finally:
-                await self.store.close()
+                try:
+                    outcomes = await asyncio.gather(*(p.close() for p in self.owned_providers),
+                        return_exceptions=True)
+                    for outcome in outcomes:
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                finally:
+                    await self.store.close()
 
 
 async def open_application(
@@ -99,14 +120,47 @@ async def open_application(
     pre: PreHook | None = None,
     post: PostHook | None = None,
     access_policy: AccessPolicy | None = None,
+    workspace_profile: WorkspaceConfiguration | None = None,
+    workspace_middleware: tuple[Middleware, ...] = (),
+    workspace_wrap: Wrap | None = None,
 ) -> Application:
+    from sqlalchemy import select
+
+    from krim_agent.contracts import TERMINAL
     from krim_agent.providers.openai_compatible import ProviderError
+    from krim_agent.storage.models import runs, session_controls, sessions, tool_effects, turns
 
     config = settings if settings is not None else Settings(database=path)
     if config.provider not in ("script", "http"):
         raise ProviderError("provider_config", 422)
     live = config.provider == "http"
+    if workspace_profile is not None and config.workspace_profile_file is not None:
+        raise ServiceError("workspace_unavailable")
+    workspace = workspace_profile or (
+        WorkspaceConfiguration.load(
+        config.workspace_profile_file) if config.workspace_profile_file is not None else None)
+    if workspace is not None:
+        workspace.__post_init__()
+    raw_http_fields = set(http_config.model_fields_set) if http_config is not None else set()
+    if isinstance(provider, OpenAICompatibleProvider):
+        cap = workspace.profile.max_tools_per_step if workspace is not None else 1
+        if provider.binding_token() != provider._sealed or provider.config.max_tool_calls != cap:
+            raise ProviderError("provider_config", 422)
+        if workspace is not None and http_config is not None:
+            raise ProviderError("provider_config", 422)
+    if http_config is not None:
+        cap = workspace.profile.max_tools_per_step if workspace is not None else 1
+        if "max_tool_calls" in raw_http_fields and http_config.max_tool_calls != cap:
+            raise ProviderError("provider_config", 422)
+        if workspace is not None:
+            http_config = OpenAICompatibleConfig.model_validate(
+                http_config.model_dump() | {"max_tool_calls": cap})
+    if workspace is not None and http_config is None and not isinstance(provider,
+        OpenAICompatibleProvider):
+        raise ServiceError("workspace_unavailable")
     primary_settings = config
+    if workspace is not None and isinstance(provider, OpenAICompatibleProvider) and not live:
+        primary_settings = config.model_copy(update={"max_tools_per_step": 1, "max_tool_calls": 1})
     if live:
         specified = config.model_fields_set
         try:
@@ -185,7 +239,49 @@ async def open_application(
     tools = registry if registry is not None else builtin_registry()
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
+    artifacts = None
+    runner = None
+    operations = None
     try:
+        if workspace is None:
+            # 只读判定恢复需求；缺可信工作区资源时不先写 interrupted/paused。
+            async with store.engine.connect() as conn:
+                pending = (await conn.execute(
+                    select(runs.c.request).where(runs.c.status.not_in(TERMINAL))
+                )).scalars()
+                needs_workspace = any(
+                    isinstance(body, dict) and body.get("target") == "target-workspace"
+                    for body in pending
+                )
+                if store.schema_version in {3, 4}:
+                    queued = await conn.scalar(
+                        select(turns.c.id).join(sessions, turns.c.session_id == sessions.c.id)
+                        .where(sessions.c.target_key == "target-workspace",
+                               turns.c.status.in_(["queued", "running"])).limit(1)
+                    )
+                    control = await conn.scalar(
+                        select(session_controls.c.request_key)
+                        .join(sessions, session_controls.c.session_id == sessions.c.id)
+                        .where(sessions.c.target_key == "target-workspace",
+                               session_controls.c.status == "pending").limit(1)
+                    )
+                    needs_workspace = needs_workspace or queued is not None or control is not None
+                if store.schema_version == 4:
+                    active_effect = await conn.scalar(
+                        select(tool_effects.c.call_id)
+                        .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"])).limit(1)
+                    )
+                    needs_workspace = needs_workspace or active_effect is not None
+            if needs_workspace:
+                raise ServiceError("workspace_unavailable")
+        else:
+            artifacts = ArtifactStore(store, workspace.artifact_root)
+            operations = WorkspaceOperations(store, artifacts, workspace.profile,
+                access_policy=active_access)
+            # 构造器用原票据/inode/UID完成真实资源恢复；失败则仅 finally 收已拥有资源。
+            runner = SandboxRunner(workspace.execution, hook=operations.runner_hook,
+                fence=operations.runner_fence)
+            operations.runner = runner
         await store.recover()
         selected = (
             provider
@@ -219,6 +315,28 @@ async def open_application(
             )
             owned.append(http_provider)
             bindings["target-http"] = _make_http_binding(store, config, http_provider)
+        if workspace is not None:
+            if "target-http" not in bindings and isinstance(provider, OpenAICompatibleProvider):
+                bindings["target-http"] = _make_http_binding(store, config, provider)
+            http_binding = bindings.get("target-http")
+            if http_binding is None or not isinstance(http_binding.loop.provider,
+                OpenAICompatibleProvider):
+                raise ServiceError("workspace_unavailable")
+            assert artifacts is not None and operations is not None and runner is not None
+            work_settings = config.model_copy(
+                update={"system_prompt": (
+                    "你是 Krim Agent。使用获授权工作区工具完成任务；"
+                    "模型陈述不等于完成核验。"
+                ),
+                "target_version": "workspace/1",
+                "max_request_bytes": min(config.max_request_bytes,
+                http_binding.loop.provider.config.max_request_bytes)})
+            work_loop = AgentLoop(store, http_binding.loop.provider,
+                ToolExecutor(workspace_registry(operations), operations.policy, pre, post,
+                             middleware=workspace_middleware, wrap=workspace_wrap),
+                work_settings, work=operations)
+            bindings["target-workspace"] = RunBinding.freeze("target-workspace", work_loop,
+                work_settings)
         service = RunService(store, loop, config, target, bindings)
         return Application(
             store,
@@ -230,14 +348,28 @@ async def open_application(
             EvaluationService(store, service),
             SessionService(store, service, config),
             active_access,
+            work=operations,
+            artifacts=artifacts,
+            runner=runner,
         )
     except BaseException:
         try:
-            outcomes = await settled(
-                asyncio.gather(*(p.close() for p in owned), return_exceptions=True)
-            )
+            try:
+                if operations is not None:
+                    await settled(operations.close())
+            finally:
+                try:
+                    if runner is not None:
+                        await settled(cast(Callable[[], Awaitable[None]], runner.close)())
+                finally:
+                    if artifacts is not None:
+                        await settled(artifacts.close())
         finally:
-            await settled(store.close())
+            try:
+                outcomes = await settled(asyncio.gather(*(p.close() for p in owned),
+                    return_exceptions=True))
+            finally:
+                await settled(store.close())
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 raise outcome from None

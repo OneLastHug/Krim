@@ -17,6 +17,7 @@ from krim_agent.runtime.service import RunService
 from krim_agent.security import PrincipalContext
 from krim_agent.storage import sessions as sql
 from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
 from .types import ControlRequest, ControlView, SessionCreate, SessionView, TurnRequest, TurnView
 
@@ -126,14 +127,22 @@ class SessionService:
         )
 
     async def submit(
-        self, principal: PrincipalContext, workspace: str, session_id: str, request: TurnRequest
+        self, principal: PrincipalContext, workspace: str, session_id: str,
+     request: TurnRequest | WorkspaceTurnRequest
     ) -> TurnView:
         self._admitting()
+        if isinstance(request, WorkspaceTurnRequest):
+            # 工作请求的嵌套expected必须在首await前脱离调用者；legacy顺序不变。
+            request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
         await self.get(principal, workspace, session_id, write=True)
-        body = TurnRequest.model_validate_json(request.model_dump_json())
+        body = WorkspaceTurnRequest.model_validate_json(
+            request.model_dump_json()) if isinstance(request,
+            WorkspaceTurnRequest) else TurnRequest.model_validate_json(request.model_dump_json())
         if len(body.text.encode()) > self.settings.max_input_bytes:
             raise ServiceError("input_limit", 422)
-        result = await sql.submit(self.store, session_id, body, self.settings)
+        result = await sql.submit(self.store, session_id, body, self.settings,
+                                  access=ExecutionAccess(principal, workspace,
+            session_id) if isinstance(body, WorkspaceTurnRequest) else None)
         self.runs.slot_changed.set()
         return result
 

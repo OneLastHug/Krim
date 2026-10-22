@@ -13,6 +13,25 @@ RunStatus = Literal["queued", "running", "completed", "failed", "aborted", "inte
 TERMINAL = frozenset({"completed", "failed", "aborted", "interrupted"})
 ERROR_CODES = frozenset(
     {
+        "summary_protocol",
+        "summary_failed",
+        "compaction_budget",
+        "workspace_contract_required",
+        "workspace_unavailable",
+        "workspace_busy",
+        "artifact_conflict",
+        "wrap_reentry",
+        "middleware_error",
+        "completion_unverified",
+        "input_revision_conflict",
+        "sandbox_unavailable",
+        "sandbox_setup",
+        "sandbox_limit",
+        "sandbox_cleanup_required",
+        "sandbox_cleanup_failed",
+        "artifact_invalid",
+        "artifact_limit",
+        "execution_unknown",
         "context_budget",
         "context_binding_changed",
         "access_policy_invalid",
@@ -154,7 +173,9 @@ def fingerprint(value: object) -> str:
 class RunRequest(StrictModel):
     text: str = Field(min_length=1, max_length=32768)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    target: Literal["demo", "target-v1", "target-v2", "target-bad", "target-http"] = "demo"
+    target: Literal[
+        "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
+    ] = "demo"
 
     @field_validator("text")
     @classmethod

@@ -13,12 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.config import Settings
 from krim_agent.context import builder
-from krim_agent.context.types import ContextPolicy, ContextSnapshot, HistorySource, SessionContext
+from krim_agent.context.types import (
+    ContextPolicy,
+    ContextSnapshot,
+    HistorySource,
+    SessionContext,
+    WorkspaceSessionContext,
+)
 from krim_agent.contracts import Message, RunRequest, RunView, ServiceError, encoded, fingerprint
 from krim_agent.runtime.contracts import RunSnapshot, settled
 from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, TurnRequest, TurnView
+from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
-from .models import session_controls, sessions, turns
+from . import work as work_sql
+from .models import session_controls, sessions, turns, work_turns
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
@@ -41,7 +49,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version != 3:
+    if store.schema_version not in {3, 4}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -183,6 +191,9 @@ async def create_session(
             closed_at=None,
         )
         await conn.execute(insert(sessions).values(**row))
+        if body.target_key == "target-workspace":
+            work_sql.require(store)
+            await work_sql.initialize(conn, row, target)
         return session_view(row)
 
     async def confirm() -> SessionView | None:
@@ -266,13 +277,25 @@ async def closing(conn: AsyncConnection, session_id: str) -> bool:
 
 
 async def submit(
-    store: SQLiteStore, session_id: str, body: TurnRequest, settings: Settings
+    store: SQLiteStore,
+    session_id: str,
+    body: TurnRequest | WorkspaceTurnRequest,
+    settings: Settings,
+    *,
+    access: ExecutionAccess | None = None,
 ) -> TurnView:
     require(store)
+    if isinstance(body, WorkspaceTurnRequest):
+        # frozen字段仍可包含可变JSON；首个await前验证并脱离调用者的完整嵌套对象。
+        body = WorkspaceTurnRequest.model_validate_json(body.model_dump_json())
     digest = fingerprint(body.model_dump(mode="json"))
 
     async def operation(conn: AsyncConnection) -> TurnView:
         session = await session_row(conn, session_id)
+        if session["target_key"] == "target-workspace":
+            if access is None or not isinstance(body, WorkspaceTurnRequest):
+                raise ServiceError("workspace_contract_required")
+            await work_sql.row(conn, session_id, access, write=True)
         rows = (
             (
                 await conn.execute(
@@ -287,6 +310,13 @@ async def submit(
             if old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
             return turn_view(old)
+        if session["target_key"] == "target-workspace":
+            work_sql.require(store)
+            if not isinstance(body, WorkspaceTurnRequest) or access is None:
+                raise ServiceError("workspace_contract_required")
+            await work_sql.row(conn, session_id, access, write=True)
+        elif isinstance(body, WorkspaceTurnRequest):
+            raise ServiceError("workspace_contract_required")
         if session["status"] != "open" or await closing(conn, session_id):
             raise ServiceError("session_closed")
         if session["revision"] != body.expected_revision:
@@ -321,6 +351,9 @@ async def submit(
             finished_at=None,
         )
         await conn.execute(insert(turns).values(**row))
+        if session["target_key"] == "target-workspace":
+            assert isinstance(body, WorkspaceTurnRequest) and access is not None
+            await work_sql.enqueue(conn, row, body, access)
         await conn.execute(
             update(sessions)
             .where(sessions.c.id == session_id)
@@ -330,6 +363,19 @@ async def submit(
 
     async def confirm() -> TurnView | None:
         found = await turn_by_key(store, session_id, body.request_key)
+        if isinstance(body, WorkspaceTurnRequest):
+
+            async def full_match(conn: AsyncConnection) -> bool:
+                assert access is not None
+                await work_sql.row(conn, session_id, access, write=True)
+                stored = (
+                    await conn.execute(
+                        select(work_turns.c.request_hash).where(work_turns.c.turn_id == found.id)
+                    )
+                ).scalar_one_or_none()
+                return stored == digest
+
+            return found if await read(store, full_match) else None
         return (
             found
             if found.text == body.text and found.accepted_revision == body.expected_revision
@@ -390,6 +436,36 @@ async def begin_run(
             raise ServiceError("capacity", 429)
         if time.time() - turn["created_at"] >= settings.session_queue_timeout:
             raise ServiceError("queue_timeout")
+        if session["target_key"] == "target-workspace":
+            work_sql.require(store)
+            from .models import run_events
+            frozen = []
+            for row in previous:
+                last = await conn.scalar(select(func.max(run_events.c.seq)).where(
+                    run_events.c.run_id == row["run_id"])) if row["run_id"] else None
+                frozen.append(dict(row) | {"terminal_seq": last if last is not None else -1})
+            frame = await work_sql.bind(
+                conn,
+                turn,
+                run_id,
+                target,
+                [
+                    dict(row) | {"terminal_seq": row["terminal_seq"]}
+                    for row in frozen
+                ],
+            )
+            effective = target | {"context": frame}
+            digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
+            run = await store._insert_run(conn, request, effective, run_id, digest)
+            await conn.execute(
+                update(work_turns).where(work_turns.c.turn_id == turn_id).values(run_id=run.id)
+            )
+            await conn.execute(
+                update(turns)
+                .where(turns.c.id == turn_id)
+                .values(run_id=run.id, status="running", started_at=time.time())
+            )
+            return run, True
         history: list[Message] = []
         sources = []
         for row in previous:
@@ -471,8 +547,8 @@ async def source(
     request_key: str,
     version: int,
     target: dict[str, JsonValue],
-) -> SessionContext | None:
-    if version != 3:
+) -> SessionContext | WorkspaceSessionContext | None:
+    if version not in {3, 4}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
@@ -482,6 +558,33 @@ async def source(
         return None
     try:
         session = await session_row(conn, row["session_id"])
+        if session["target_key"] == "target-workspace":
+            frame = await work_sql.load(conn, run_id)
+            if (
+                frame is None
+                or request_key != "ac-turn." + row["id"]
+                or target.get("context")
+                != {
+                    "schema_version": 2,
+                    "effective_fingerprint": frame.effective_fingerprint,
+                    "source_fingerprint": fingerprint(list(frame.source_refs)),
+                }
+            ):
+                raise ServiceError("facts_corrupt")
+            prepared = await conn.scalar(select(work_turns.c.prepared_context).where(
+                work_turns.c.run_id == run_id))
+            if prepared is not None:
+                from krim_agent.context.types import PreparedContext
+                context2 = PreparedContext.model_validate_json(encoded(prepared))
+                if context2.source_fingerprint != fingerprint(list(frame.source_refs)):
+                    raise ServiceError("facts_corrupt")
+            return WorkspaceSessionContext(
+                workspace_id=row["workspace_id"],
+                session_id=row["session_id"],
+                turn_id=row["id"],
+                effective_fingerprint=frame.effective_fingerprint,
+                source_fingerprint=fingerprint(list(frame.source_refs)),
+            )
         if (
             row["context_snapshot"] is None
             or fingerprint(row["context_snapshot"]) != row["context_fingerprint"]
@@ -510,6 +613,34 @@ async def source(
 
 async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
     if snapshot.session_context is None:
+        return
+    if isinstance(snapshot.session_context, WorkspaceSessionContext):
+        await work_sql.finish(
+            conn, snapshot.run.id, interrupted=snapshot.run.status == "interrupted"
+        )
+        def task_transcript() -> list[Message]:
+            from dataclasses import replace
+            summary = {e.data.get("step_index") for e in snapshot.events
+                       if e.kind == "model_start" and e.data.get("purpose") == "summary"}
+            events = tuple(e for e in snapshot.events if e.kind != "summary_text"
+                           and not (e.kind in {"model_start", "model_end", "usage"}
+                                    and e.data.get("step_index") in summary))
+            return builder.transcript(replace(snapshot, events=events))
+        from .models import compactions
+        await conn.execute(update(compactions).where(
+            compactions.c.run_id == snapshot.run.id, compactions.c.status == "reserved"
+        ).values(status="interrupted" if snapshot.run.status in {"aborted", "interrupted"}
+                 else "failed", finished_at=time.time()))
+        await conn.execute(
+            update(turns)
+            .where(turns.c.id == snapshot.session_context.turn_id)
+            .values(
+                status="cancelled" if snapshot.run.status == "aborted" else snapshot.run.status,
+                code=snapshot.run.code,
+                finished_at=snapshot.run.finished_at,
+                transcript=[m.model_dump(mode="json") for m in task_transcript()],
+            )
+        )
         return
     status = "cancelled" if snapshot.run.status == "aborted" else snapshot.run.status
     await conn.execute(
@@ -769,3 +900,34 @@ async def recover_controls(conn: AsyncConnection) -> None:
                 finished_at=time.time(),
             )
         )
+
+
+async def workspace_history(conn: AsyncConnection, run_id: str, offset: int,
+                            limit: int, access: ExecutionAccess, *,
+                            source_anchor: str) -> list[dict[str, Any]]:
+    """同连接分页，核实完整冻结引用；不持锁请求模型。"""
+    frame = await work_sql.load(conn, run_id)
+    if frame is None or access.session_id != frame.session_id or not 1 <= limit <= 16:
+        raise ServiceError("facts_corrupt")
+    if fingerprint(list(frame.source_refs)) != source_anchor:
+        raise ServiceError("facts_corrupt")
+    from .models import runs
+    target = await conn.scalar(select(runs.c.target).where(runs.c.id == run_id))
+    if (not isinstance(target, dict) or not isinstance(target.get("context"), dict)
+            or target["context"].get("source_fingerprint") != source_anchor):
+        raise ServiceError("facts_corrupt")
+    await work_sql.row(conn, frame.session_id, access)
+    selected = frame.source_refs[offset:offset+limit]
+    result = []
+    for ref in selected:
+        row = await turn_row(conn, cast(str, ref["turn_id"]))
+        if row["status"] in {"queued", "running"}:
+            raise ServiceError("facts_corrupt")
+        messages = ([Message.model_validate_json(encoded(m)) for m in row["transcript"]]
+                    if row["transcript"] is not None else [Message(role="user",
+                        content=row["text"]),
+                    Message(role="user", content="[不可信历史状态数据] " + row["status"]
+                            + ": " + (row["code"] or "unknown"))])
+        builder.validate_groups(messages)
+        result.append({"ref": dict(ref), "messages": messages})
+    return result

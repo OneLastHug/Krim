@@ -49,7 +49,7 @@ class OpenAICompatibleConfig(StrictModel):
     max_event_bytes: int = Field(default=16384, ge=128, le=16384)
     max_events: int = Field(default=1024, ge=1, le=1024)
     max_arguments_bytes: int = Field(default=4096, ge=2, le=4096)
-    max_tool_calls: int = Field(default=1, ge=1, le=1)
+    max_tool_calls: int = Field(default=1, ge=1, le=4, strict=True)
 
     @field_validator("base_url")
     @classmethod
@@ -536,6 +536,8 @@ class OpenAICompatibleProvider:
             if not done or finish is None:
                 raise ProviderError("provider_incomplete_stream")
             if bool(calls) != (finish == "tool_calls"):
+                raise ProviderError("provider_protocol")
+            if sorted(calls) != list(range(len(calls))):
                 raise ProviderError("provider_protocol")
             complete = [calls[index].collect() for index in sorted(calls)]
             if len({call.id for call in complete}) != len(complete):
