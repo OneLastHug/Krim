@@ -38,6 +38,9 @@
     "e2e/evaluation.spec.ts",
     "contracts/agent-core.test.ts",
     "contracts/session-ui.test.tsx",
-    "e2e/chat.spec.ts"
+    "e2e/chat.spec.ts",
+    "contracts/agent-workspace.test.ts",
+    "contracts/agent-workspace-ui.test.tsx",
+    "e2e/agent-workspace.spec.ts"
   ]
 }

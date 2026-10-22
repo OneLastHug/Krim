@@ -71,3 +71,5 @@ export function chatReason(error: unknown): string {
   const allowed = ["无法保存请求", "无法读取未确认请求", "未确认请求过多", "请先连接", "请连接原身份", "没有可用工作区", "响应身份不匹配", "原请求内容不匹配"];
   return error instanceof Error && allowed.includes(error.message) ? error.message : "读取失败，请刷新";
 }
+
+export const workspaceCopy = { title: "工作区任务", unavailable: "工作区未配置", send: "发送工作请求", find: "查找原工作请求" } as const;

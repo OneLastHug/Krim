@@ -5,6 +5,7 @@ import { SessionList } from "./SessionList";
 import { ChatHistory } from "./ChatHistory";
 import { ChatComposer } from "./ChatComposer";
 import { chatCopy as c, turnLabels } from "../lib/copy";
+import { WorkspacePanel } from "./WorkspacePanel";
 
 export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, onConnect }: { apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; httpEnabled: boolean; onConnect: () => void }) {
   const chat = useSession(apiKey, active, fence, onLegacy);
@@ -18,7 +19,9 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, on
       {chat.pending.length > 0 && <div className="chat-pending" role="status"><strong>{chat.pending.every(chat.posting) ? "提交中" : c.unknown}</strong>{chat.pending.map(intent => <div key={intent.id}><span data-ui-data>{intent.kind === "session" ? intent.body.title : (intent.session_id ?? "").slice(0, 8)}</span><Button variant="outline" onClick={() => void chat.recover(intent)}>{c.find}</Button></div>)}</div>}
       {chat.pendingControls.map(value => <div className="chat-pending" key={String(value.body.request_key)}><span>操作结果未确认</span><Button variant="outline" onClick={() => void chat.recoverControl(value)}>{value.rejected ? "重试原操作" : "查找操作结果"}</Button></div>)}
       <ChatHistory chat={chat} />
-      <ChatComposer chat={chat} />
+      {chat.session?.target_key === "target-workspace" ? <WorkspacePanel
+        key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])}
+        chat={chat} apiKey={apiKey} active={active} fence={fence} /> : <ChatComposer chat={chat} />}
     </section>
   </section>;
 }

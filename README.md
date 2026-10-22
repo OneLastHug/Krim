@@ -90,3 +90,8 @@ SQLite 从Krim Agent准确 v1 两表事务升级为 v2 五表，增加 dataset_r
 私有结果包含原文本；脱敏 Trace 只展示允许字段。创建回程未知只按原键核实；首次精确未准入拒绝允许纠正后显式提交，不从一次 GET404 推断未执行。用户数据按文本渲染，无 HTML/Markdown 执行通道。
 
 旧 AgentManager、Conversation/lease、兼容 HTTP Provider、模型评委、JSON 导入导出、离线 rescore、多 worker、持续采集/训练与 M3 均未交付。本轮不追旧 P01–P10/62项，不承诺 Windows、其它 Python/浏览器、商业模型或生产部署。M1/UI 历史失败及通过口径分别见原报告，不累计成 M2 通过数。
+
+
+## AC-M2 FINAL 0.4.0a1 候选范围（2026-10-20 UTC）
+
+本轮冻结发行集合为75项（71 Python＋4 web），通过同一Application/Run工具、摘要、隔离命令与Artifact核验链；D4已接受，FINAL正在真实新包/项目外安装/同包双视口验证，尚未M2/整体接受。以AC-M2-REPORT的本轮追加与独立FINAL-ENTRY01报告为实际执行记录，未运行的门禁不能当成通过。旧0.3/56发行历史保持；新候选revision待发布协调机械冻结，无新生产或商业应用调用声明。

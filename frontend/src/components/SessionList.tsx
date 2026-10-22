@@ -16,7 +16,7 @@ export function SessionList({ chat, httpEnabled }: { chat: SessionState; httpEna
       <DialogContent aria-describedby={undefined}><DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
         <form onSubmit={e => { e.preventDefault(); void chat.create(title, target).then(() => setOpen(false)); }}>
           <Label htmlFor="session-title">{c.title}</Label><Input id="session-title" value={title} onChange={e => setTitle(e.target.value)} maxLength={128} required autoComplete="off" />
-          {httpEnabled && chat.actor?.target_keys?.includes("target-http") && <div className="chat-target"><Label htmlFor="chat-target">{c.target}</Label><select id="chat-target" value={target} onChange={e => setTarget(e.target.value)}><option value="demo">{c.defaultTarget}</option><option value="target-http">HTTP</option></select></div>}
+          <div className="chat-target"><Label htmlFor="chat-target">{c.target}</Label><select id="chat-target" value={target} onChange={e => setTarget(e.target.value)}><option value="demo">{c.defaultTarget}</option>{httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}<option value="target-workspace" disabled={!chat.actor?.target_keys?.includes("target-workspace")}>工作区</option></select>{!chat.actor?.target_keys?.includes("target-workspace") && <span role="status">工作区未配置</span>}</div>
           <div className="dialog-actions"><Button type="submit" disabled={chat.creating || !!chat.newPending || !title.trim()}>{chat.creating ? "提交中" : c.createSubmit}</Button></div>
         </form>
       </DialogContent>

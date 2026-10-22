@@ -4,7 +4,7 @@ import {dirname,resolve,relative} from "node:path";
 import {fileURLToPath} from "node:url";
 import {createHash} from "node:crypto";
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
-const cache=process.env.KRIM_AGENT_CORE_BUILD ?? resolve(root,"../.cache/agent-core/ac-m1");await mkdir(cache,{recursive:true});
+const cache=process.env.KRIM_AGENT_CORE_BUILD ?? resolve(root,"../.cache/agent-core/ac-m2-final");await mkdir(cache,{recursive:true});
 const out=await mkdtemp(resolve(cache,"build-"));let modules=[];
 await build({configFile:resolve(root,"vite.config.ts"),root,build:{outDir:out,emptyOutDir:true},plugins:[{name:"agent-ui-provenance",generateBundle(_options,bundle){modules=[...new Set(Object.values(bundle).flatMap(item=>item.type==="chunk"?Object.keys(item.modules):[]))];}}]});
 async function files(path,prefix=""){let found=[];for(const name of await readdir(path)){const full=resolve(path,name);if((await stat(full)).isDirectory())found.push(...await files(full,prefix+name+"/"));else found.push(prefix+name);}return found;}

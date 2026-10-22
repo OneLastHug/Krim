@@ -630,3 +630,15 @@ summary {
 }
 
 .chat-heading h2 { max-height:80px; overflow:auto; }
+
+/* D4工作区局部布局；既有组件与M1样式前缀保持。 */
+.workspace-panel { display: grid; gap: .8rem; min-width: 0; }
+.workspace-panel form { display: grid; gap: .5rem; min-width: 0; }
+.workspace-panel textarea { width: 100%; min-height: 6rem; max-height: 24rem; overflow: auto; border: 1px solid var(--border); border-radius: .5rem; padding: .6rem; }
+.workspace-panel pre, .workspace-artifact pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-panel code, .workspace-artifact code { overflow-wrap: anywhere; }
+.workspace-pending { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.workspace-artifact { border: 1px solid var(--border); padding: .8rem; border-radius: .5rem; min-width: 0; }
+.workspace-artifact ul { padding-left: 1rem; }
+.workspace-panel :focus-visible, .workspace-artifact :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+@media (max-width: 640px) { .workspace-panel textarea { min-height: 5rem; } .workspace-artifact { padding: .5rem; } }
