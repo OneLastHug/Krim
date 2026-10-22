@@ -33,7 +33,7 @@ async function startServer(root: string, database: string, generation: number, t
     expect(exit).toEqual({ code: 0, signal: null }); expect(state.unsafe_gc).toBe(0); expect(state.connections_pending).toEqual([]); expect(state.model_active).toBe(0); expect(state.provider_active).toBe(0); expect(state.second_writer).toBe(true); expect(ports).toEqual({ api: true, model: true });
   } };
   try {
-    owner.ready = await waitFile(resolve(root, "ready.json")); expect(owner.ready!.namespace_local_pid).toBe(child.pid); expect(owner.ready!.version).toBe("0.3.0a1"); expect(owner.ready!.module).toBe(resolve(PYTHON,"../../lib/python3.12/site-packages/krim_agent/__init__.py")); return owner;
+    owner.ready = await waitFile(resolve(root, "ready.json")); expect(owner.ready!.namespace_local_pid).toBe(child.pid); expect(owner.ready!.version).toBe("0.4.0a1"); expect(owner.ready!.module).toBe(resolve(PYTHON,"../../lib/python3.12/site-packages/krim_agent/__init__.py")); return owner;
   } catch (error) { await owner.close(); throw error; }
 }
 

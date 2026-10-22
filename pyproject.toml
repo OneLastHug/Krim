@@ -3,13 +3,14 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 [project]
 name = "krim-agent"
-version = "0.3.0a1"
+version = "0.4.0a1"
 description = "Krim Agent: persistent sessions, controlled runs and rule evaluations"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = ["fastapi>=0.115,<1", "pydantic>=2.10,<3", "sqlalchemy>=2.0,<2.1", "aiosqlite>=0.20,<1", "uvicorn>=0.30,<1", "jsonschema>=4.23,<5", "referencing>=0.37,<0.38", "httpx>=0.27,<1"]
 [project.scripts]
 krim = "krim_agent.cli:main"
+krim-eval = "krim_agent.evaluation.cli:main"
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "ruff>=0.9,<1", "mypy>=1.15,<2", "types-jsonschema>=4.23"]
 [tool.hatch.build.targets.wheel]
@@ -21,12 +22,14 @@ only-include = [
   "src/krim_agent/api/server.py",
   "src/krim_agent/api/sessions.py",
   "src/krim_agent/api/web.py",
+  "src/krim_agent/api/workspace.py",
   "src/krim_agent/cli.py",
   "src/krim_agent/client.py",
   "src/krim_agent/composition.py",
   "src/krim_agent/config.py",
   "src/krim_agent/context/__init__.py",
   "src/krim_agent/context/builder.py",
+  "src/krim_agent/context/compaction.py",
   "src/krim_agent/context/types.py",
   "src/krim_agent/contracts.py",
   "src/krim_agent/evaluation/__init__.py",
@@ -37,6 +40,12 @@ only-include = [
   "src/krim_agent/evaluation/targets.py",
   "src/krim_agent/evaluation/trace_cases.py",
   "src/krim_agent/evaluation/types.py",
+  "src/krim_agent/execution/__init__.py",
+  "src/krim_agent/execution/_broker.py",
+  "src/krim_agent/execution/cgroups.py",
+  "src/krim_agent/execution/linux.py",
+  "src/krim_agent/execution/seccomp.py",
+  "src/krim_agent/execution/types.py",
   "src/krim_agent/observability.py",
   "src/krim_agent/providers/__init__.py",
   "src/krim_agent/providers/eval_script.py",
@@ -47,10 +56,12 @@ only-include = [
   "src/krim_agent/runtime/contracts.py",
   "src/krim_agent/runtime/engine.py",
   "src/krim_agent/runtime/facts.py",
+  "src/krim_agent/runtime/model_step.py",
   "src/krim_agent/runtime/service.py",
   "src/krim_agent/sdk/__init__.py",
   "src/krim_agent/sdk/sessions.py",
   "src/krim_agent/sdk/text.py",
+  "src/krim_agent/sdk/workspace.py",
   "src/krim_agent/security.py",
   "src/krim_agent/sessions/__init__.py",
   "src/krim_agent/sessions/service.py",
@@ -59,22 +70,55 @@ only-include = [
   "src/krim_agent/storage/models.py",
   "src/krim_agent/storage/sessions.py",
   "src/krim_agent/storage/sqlite.py",
+  "src/krim_agent/storage/work.py",
   "src/krim_agent/tools/__init__.py",
   "src/krim_agent/tools/builtins.py",
   "src/krim_agent/tools/core.py",
   "src/krim_agent/tools/executor.py",
   "src/krim_agent/tools/output.py",
+  "src/krim_agent/tools/pipeline.py",
   "src/krim_agent/tools/registry.py",
+  "src/krim_agent/tools/workspace.py",
   "src/krim_agent/usage.py",
   "src/krim_agent/web/THIRD-PARTY-NOTICES.txt",
   "src/krim_agent/web/assets/app.js",
   "src/krim_agent/web/assets/styles.css",
   "src/krim_agent/web/index.html",
+  "src/krim_agent/workspace/__init__.py",
+  "src/krim_agent/workspace/artifacts.py",
+  "src/krim_agent/workspace/operations.py",
+  "src/krim_agent/workspace/targets.py",
+  "src/krim_agent/workspace/types.py",
+  "src/krim_agent/workspace/verification.py",
+  "src/krim_agent/evaluation/domain.py",
+  "src/krim_agent/evaluation/ports.py",
+  "src/krim_agent/evaluation/kernel.py",
+  "src/krim_agent/evaluation/repository.py",
+  "src/krim_agent/evaluation/evidence.py",
+  "src/krim_agent/evaluation/metrics.py",
+  "src/krim_agent/evaluation/reports.py",
+  "src/krim_agent/evaluation/app.py",
+  "src/krim_agent/evaluation/cli.py",
+  "src/krim_agent/evaluation/lifecycle.py",
+  "src/krim_agent/evaluation/adapters/__init__.py",
+  "src/krim_agent/evaluation/adapters/krim.py",
+  "src/krim_agent/evaluation/adapters/local_process.py",
+  "src/krim_agent/evaluation/examples/__init__.py",
+  "src/krim_agent/evaluation/examples/reconcile.py",
+  "src/krim_agent/evaluation/examples/reconciliation.v1.json",
+  "src/krim_agent/evaluation/adapters/process.py",
+  "src/krim_agent/evaluation/adapters/profiles.py",
+  "src/krim_agent/evaluation/adapters/codex_cli.py",
+  "src/krim_agent/evaluation/adapters/claude_code.py",
+  "src/krim_agent/evaluation/adapters/codex_events.py",
+  "src/krim_agent/evaluation/adapters/claude_events.py",
+  "src/krim_agent/evaluation/verifiers.py",
+  "src/krim_agent/evaluation/examples/native_repair.v1.json",
 ]
 sources = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests/core", "tests/agent_core"]
-python_files = ["test_contracts.py", "test_runtime.py", "test_tool_boundaries.py", "test_run_facts.py", "test_storage.py", "test_read_sides.py", "test_package.py", "test_trace_cases.py", "test_evaluation.py", "test_eval_storage.py", "test_regression.py", "test_eval_read_sides.py", "test_http_provider.py", "test_http_integration.py", "test_context.py", "test_session_api.py", "test_session_package.py", "test_session_read_sides.py", "test_session_storage.py", "test_sessions.py"]
+python_files = ["test_contracts.py", "test_runtime.py", "test_tool_boundaries.py", "test_run_facts.py", "test_storage.py", "test_read_sides.py", "test_package.py", "test_trace_cases.py", "test_evaluation.py", "test_eval_storage.py", "test_regression.py", "test_eval_read_sides.py", "test_http_provider.py", "test_http_integration.py", "test_context.py", "test_session_api.py", "test_session_package.py", "test_session_read_sides.py", "test_session_storage.py", "test_sessions.py", "test_sandbox.py", "test_workspace_storage.py", "test_artifacts.py", "test_tool_pipeline.py", "test_compaction.py", "test_agent_tasks.py", "test_workspace_api.py", "test_workspace_package.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra -p no:cacheprovider"

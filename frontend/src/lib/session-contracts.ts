@@ -11,7 +11,7 @@ function exact(v: Record<string, unknown>, fields: string[]) { if (Object.keys(v
 export function parseActor(raw: unknown): Actor {
   const value = object(raw);
   if (Object.keys(value).some(k => !["principal_id", "generation", "legacy", "workspaces", "target_keys"].includes(k)) || ["principal_id", "generation", "legacy", "workspaces"].some(k => !(k in value))) throw new Error("身份响应无效");
-  if (value.target_keys !== undefined && (!Array.isArray(value.target_keys) || value.target_keys.length > 5 || value.target_keys.some(k => !["demo", "target-v1", "target-v2", "target-bad", "target-http"].includes(String(k))))) throw new Error("目标响应无效");
+  if (value.target_keys !== undefined && (!Array.isArray(value.target_keys) || value.target_keys.length > 6 || value.target_keys.some(k => !["demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"].includes(String(k))))) throw new Error("目标响应无效");
   if (!text(value.principal_id) || !integer(value.generation) || typeof value.legacy !== "boolean" || !Array.isArray(value.workspaces) || value.workspaces.length > 64) throw new Error("身份响应无效");
   for (const item of value.workspaces) { const w = object(item); exact(w, ["workspace_id", "role", "approve"]); if (!text(w.workspace_id) || !["member", "viewer", "admin"].includes(String(w.role)) || typeof w.approve !== "boolean") throw new Error("工作区响应无效"); }
   return value as unknown as Actor;
