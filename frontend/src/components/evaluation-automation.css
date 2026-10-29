@@ -1,0 +1,133 @@
+.evaluation-automation-panel {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+  color: var(--foreground);
+}
+.evaluation-automation-panel[hidden] { display: none; }
+.automation-heading, .automation-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.automation-heading h1 { margin: 0; }
+.automation-heading p, .automation-section-heading p {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.automation-columns {
+  display: grid;
+  grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+  gap: 32px;
+  min-width: 0;
+}
+.automation-column { display: grid; align-content: start; gap: 28px; min-width: 0; }
+.automation-section {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.automation-section-heading h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.automation-table-scroll { max-width: 100%; overflow-x: auto; }
+.automation-status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.automation-status-table th, .automation-status-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.automation-status-table th { width: 118px; font-weight: 550; white-space: nowrap; }
+.automation-status-table td { overflow-wrap: anywhere; }
+.automation-inline-code { display: block; margin-top: 3px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.automation-muted { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.6; }
+.automation-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.automation-field { display: grid; gap: 7px; min-width: 0; }
+.automation-field select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--input);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+}
+.automation-field input[data-slot="input"] { margin-top: 0; }
+.automation-field select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.automation-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.automation-form-grid .automation-field { align-content: start; }
+.automation-metrics { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.automation-metrics legend { margin-bottom: 4px; font-size: 14px; font-weight: 550; }
+.automation-metric-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.automation-metric-choice input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--foreground); }
+.automation-metric-choice span { display: grid; gap: 2px; }
+.automation-metric-choice small { color: var(--muted-foreground); font-size: 12px; }
+.automation-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.automation-pagination span { color: var(--muted-foreground); font-size: 12px; }
+.automation-pagination button[data-slot="button"] { min-height: 38px; }
+.automation-schedule-list, .automation-recovery-list { margin: 0; padding: 0; list-style: none; }
+.automation-schedule-list > li, .automation-recovery-list > li {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+.automation-schedule-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.automation-schedule-title strong { overflow-wrap: anywhere; font-size: 14px; }
+.automation-schedule-title span { color: var(--muted-foreground); font-size: 13px; }
+.automation-facts { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; }
+.automation-facts dt { color: var(--muted-foreground); }
+.automation-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.automation-alert, .automation-inline-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 5%, var(--background));
+  color: var(--foreground);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.automation-inline-warning { padding: 8px 10px; }
+.automation-notice { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.automation-detail { display: grid; gap: 5px; padding-top: 12px; border-top: 1px solid var(--border); }
+.automation-detail h3 { margin: 0; font-size: 13px; }
+.automation-detail p { margin: 0; color: var(--muted-foreground); font-size: 12px; overflow-wrap: anywhere; }
+.automation-recovery { margin-top: 2px; }
+.automation-recovery-list > li { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.automation-recovery-list > li > div { display: grid; gap: 4px; min-width: 0; }
+.automation-recovery-list strong { font-size: 13px; }
+.automation-recovery-list small { color: var(--muted-foreground); font-size: 12px; overflow-wrap: anywhere; }
+.automation-recovery-list code { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.automation-recovery-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.automation-feedback-candidates { display: grid; gap: 7px; margin-top: 8px; }
+.automation-candidate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.automation-candidate-row code { min-width: 0; }
+
+@media (max-width: 980px) {
+  .automation-columns { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .automation-column { gap: 24px; }
+}
+@media (max-width: 520px) {
+  .automation-heading { align-items: stretch; }
+  .automation-heading > button { flex: 0 0 auto; }
+  .automation-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .automation-status-table th { width: 94px; }
+  .automation-recovery-list > li { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .automation-recovery-actions { justify-content: flex-start; }
+  .automation-actions > button { flex: 1 1 auto; }
+}

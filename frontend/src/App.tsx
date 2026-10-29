@@ -7,6 +7,8 @@ import { RunWorkspace } from "./components/RunWorkspace";
 import { useRun } from "./hooks/use-run";
 import { EvaluationWorkbench } from "./components/EvaluationWorkbench";
 import { EvaluationProductWorkbench } from "./components/EvaluationProductWorkbench";
+import { EvaluationAutomationPanel } from "./components/EvaluationAutomationPanel";
+import { Button } from "./components/ui/button";
 import { WorkbenchLayout } from "./components/WorkbenchLayout";
 import { WorkbenchInspector } from "./components/WorkbenchInspector";
 import { parseActor, type Actor } from "./lib/session-contracts";
@@ -36,18 +38,21 @@ export function App() {
   const [identityLoading, setIdentityLoading] = useState(() => readWorkbenchView(new URL(location.href)) !== "chat"), [identityError, setIdentityError] = useState("");
   const [httpEnabled, setHttpEnabled] = useState<boolean | null>(null);
   const [productEnabled, setProductEnabled] = useState<boolean | null>(null);
+  const [automationEnabled, setAutomationEnabled] = useState(false);
+  const [automationOpen, setAutomationOpen] = useState(false);
   const [chatMount, setChatMount] = useState(0);
   const { theme, toggleTheme } = useDisplayTheme();
 
   useEffect(() => {
     let current = true;
     const controller = new AbortController();
-    setHttpEnabled(null); setProductEnabled(null);
+    setHttpEnabled(null); setProductEnabled(null); setAutomationEnabled(false);
     void request("/healthz", key, undefined, controller.signal).then(raw => {
       if (current) {
         const health = object(raw), value = health.http_enabled;
         setHttpEnabled(typeof value === "boolean" ? value : null);
         setProductEnabled(health.product_eval_enabled === true);
+        setAutomationEnabled(health.evaluation_automation_enabled === true);
       }
     }).catch(() => { if (current) { setHttpEnabled(null); setProductEnabled(false); } });
     return () => { current = false; controller.abort(); };
@@ -132,6 +137,17 @@ export function App() {
     setSourceRun(id); setSelectedProductTaskId(""); setMode("datasets");
   }
 
+  function openFeedbackCandidate(runId: string, candidateId: string) {
+    const membership = identity?.workspaces.find(value => value.workspace_id === productWorkspace);
+    if (!membership || !productEnabled || !candidateId || !runId) return;
+    const url = new URL(location.href);
+    url.searchParams.set("view", "datasets"); url.searchParams.set("workspace", productWorkspace);
+    url.searchParams.set("source_run", runId); url.searchParams.set("product_candidate_id", candidateId);
+    for (const field of ["eval_id", "legacy_eval", "product_eval_id"]) url.searchParams.delete(field);
+    chatFence.current++; window.history.pushState(null, "", url);
+    setSourceRun(runId); setSelectedProductTaskId(""); setMode("datasets"); setAutomationOpen(false);
+  }
+
   const selectProductCandidate = useCallback((id: string, runId?: string) => {
     const url = new URL(location.href);
     if (url.searchParams.get("view") !== "datasets" || url.searchParams.get("product_candidate_id") === id) return;
@@ -195,7 +211,9 @@ export function App() {
             : <div className="workbench"><RunComposer run={run} onConnect={() => setKeyOpen(true)}/><RunWorkspace key={run.id} run={run} onCandidate={id => { if (productEnabled) evaluateRun(productWorkspace, id); else { setSourceRun(id); choose("eval"); } }}/></div>}
       </section>
       {productEnabled && (mode === "datasets" || mode === "eval" && !legacyEvaluation) && (identityLoading || !identity) && <UnavailablePage title={identityLoading ? "正在读取工作区" : "请连接工作区"}>{identityError || "正在确认当前身份与工作区能力。"}</UnavailablePage>}
-      {productEnabled && identity && <EvaluationProductWorkbench key={`product-${chatMount}`} apiKey={key} workspace={productWorkspace} identity={identity} canWrite={productCanWrite} canApprove={productCanWrite && productMembership?.approve === true} active={(mode === "datasets" || mode === "eval" && !legacyEvaluation) && !identityLoading} view={mode === "datasets" ? "datasets" : "eval"} sourceRun={sourceRun} candidateId={currentUrl.searchParams.get("product_candidate_id") ?? undefined} onCandidateSelection={selectProductCandidate} taskId={currentUrl.searchParams.get("product_eval_id") ?? undefined} onTaskSelection={selectProductTask} onRun={legacy ? id => { choose("run"); run.select(id); } : undefined}/>}
+      {productEnabled && automationEnabled && mode === "eval" && !legacyEvaluation && <nav className="product-eval-actions" aria-label="评测功能"><Button variant={automationOpen ? "ghost" : "secondary"} aria-pressed={!automationOpen} onClick={() => setAutomationOpen(false)}>评测任务</Button><Button variant={automationOpen ? "secondary" : "ghost"} aria-pressed={automationOpen} onClick={() => setAutomationOpen(true)}>持续回归</Button></nav>}
+      {productEnabled && identity && <EvaluationProductWorkbench key={`product-${chatMount}`} apiKey={key} workspace={productWorkspace} identity={identity} canWrite={productCanWrite} canApprove={productCanWrite && productMembership?.approve === true} active={(mode === "datasets" || mode === "eval" && !legacyEvaluation && !(automationEnabled && automationOpen)) && !identityLoading} view={mode === "datasets" ? "datasets" : "eval"} sourceRun={sourceRun} candidateId={currentUrl.searchParams.get("product_candidate_id") ?? undefined} onCandidateSelection={selectProductCandidate} taskId={currentUrl.searchParams.get("product_eval_id") ?? undefined} onTaskSelection={selectProductTask} onRun={legacy ? id => { choose("run"); run.select(id); } : undefined}/>}
+      {automationEnabled && identity && <EvaluationAutomationPanel key={`automation-${chatMount}`} apiKey={key} workspace={productWorkspace} identity={identity} active={mode === "eval" && !legacyEvaluation && automationOpen && !identityLoading} canWrite={productCanWrite} canApprove={productCanWrite && productMembership?.approve === true} isAdmin={productMembership?.role === "admin"} sourceRun={sourceRun} onCandidate={openFeedbackCandidate} onTask={id => { setAutomationOpen(false); selectProductTask(id); }}/> }
       <section className="page-view" hidden={mode !== "datasets" || productEnabled === true} aria-label="数据集页面">
         <UnavailablePage title="数据集工作流尚未独立接入">候选审核、样本编辑与冻结目前仍位于旧版评测流程中。{identityLoading ? "正在读取当前身份的能力。" : legacy === false ? "当前身份没有旧版评测能力。" : " 可前往评测查看现有能力。"}</UnavailablePage>
         {isLegacyRouteAvailable && <button className="inline-navigation" type="button" onClick={() => choose("eval")}>打开旧版评测</button>}

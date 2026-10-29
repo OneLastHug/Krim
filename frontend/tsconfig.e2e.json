@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "e2e/step-screenshot.ts",
+    "e2e/product-evaluation.spec.ts",
+    "e2e/prepared-workspace.spec.ts",
+    "e2e/evaluation-automation.spec.ts"
+  ]
+}
