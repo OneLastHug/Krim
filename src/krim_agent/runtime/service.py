@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import secrets
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
@@ -32,6 +30,7 @@ from krim_agent.contracts import (
 )
 from krim_agent.observability import TraceView, project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
+from krim_agent.source_fingerprints import source_digest
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.pipeline import _owns, _producing
 
@@ -46,7 +45,7 @@ def implementation(value: object | None) -> dict[str, JsonValue]:
     selected = value if inspect.isfunction(value) else type(value)
     path = inspect.getsourcefile(selected)
     digest = (
-        hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        source_digest(path)
         if path
         else fingerprint(getattr(selected, "__qualname__", "host"))
     )
@@ -450,22 +449,19 @@ class RunService:
         return project_trace(await self.store.snapshot(run_id))
 
     async def events(self, run_id: str, from_seq: int = 0, limit: int = 64) -> list[RunEvent]:
-        snapshot = await self.store.snapshot(run_id)
-        if from_seq < 0 or from_seq > len(snapshot.events) or not 1 <= limit <= 64:
-            raise ServiceError("invalid_cursor", 416)
-        return list(snapshot.events[from_seq : from_seq + limit])
+        page = await self.store.event_page(run_id, from_seq, limit)
+        return list(page.events)
 
     async def stream(self, run_id: str, from_seq: int = 0) -> AsyncIterator[RunEvent | None]:
         cursor = from_seq
         heartbeat = time.monotonic()
         while True:
-            records = await self.events(run_id, cursor)
-            for record in records:
+            page = await self.store.event_page(run_id, cursor, 64)
+            for record in page.events:
                 cursor = record.seq + 1
                 heartbeat = time.monotonic()
                 yield record
-            snapshot = await self.store.snapshot(run_id)
-            if cursor >= len(snapshot.events) and snapshot.run.status in TERMINAL:
+            if cursor >= page.event_count and page.status in TERMINAL:
                 return
             if time.monotonic() - heartbeat >= 10:
                 heartbeat = time.monotonic()

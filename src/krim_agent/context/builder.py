@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from pydantic import JsonValue
 
 from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
+from krim_agent.source_fingerprints import source_digest
 
 from .types import ContextPolicy, ContextSnapshot, HistorySource
 
@@ -19,7 +18,7 @@ VERSION = "complete-turns/1"
 
 
 def identity() -> str:
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return source_digest(__file__)
 
 
 def binding_token() -> tuple[object, ...]:

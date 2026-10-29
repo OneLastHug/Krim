@@ -13,7 +13,6 @@ import weakref
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal, cast
 
 from pydantic import JsonValue
@@ -22,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import RunStatus, ServiceError, encoded, fingerprint, parse_json
 from krim_agent.runtime.contracts import settled
+from krim_agent.source_fingerprints import source_digest
 from krim_agent.storage.models import run_events, runs, tool_effects, work_turns
 from krim_agent.tools.pipeline import _PRODUCER
 from krim_agent.workspace.types import ExecutionAccess, Verification, WorkFrame
@@ -137,7 +137,7 @@ def descriptor() -> dict[str, JsonValue]:
     return {
         "schema": SCHEMA,
         "rules": "python-unittest/1+strict-json/1+bounded-ast/1",
-        "implementation_digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "implementation_digest": source_digest(__file__),
         "command_profile_digest": fingerprint({"argv": list(COMMAND), "cwd": "."}),
         "limits_digest": fingerprint(LIMITS),
     }
@@ -155,7 +155,7 @@ def _module_current() -> None:
 def binding_token() -> tuple[object, ...]:
     return tuple(
         (globals().get(name), getattr(globals().get(name), "__code__", None)) for name in _NAMES
-    ) + (hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),)
+    ) + (source_digest(__file__),)
 
 
 def _condition(

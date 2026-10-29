@@ -32,7 +32,7 @@ from krim_agent.contracts import (
     fingerprint,
 )
 from krim_agent.evaluation.types import DatasetRevision, EvalRequest, FreezeRequest
-from krim_agent.runtime.contracts import RunSnapshot, settled
+from krim_agent.runtime.contracts import RunEventPage, RunSnapshot, settled
 
 from . import sessions as session_sql
 from . import work as work_sql
@@ -539,6 +539,68 @@ class SQLiteStore:
             )
 
         await settled(self._write(operation))
+
+    async def _event_page(
+        self, conn: AsyncConnection, run_id: str, from_seq: int, limit: int
+    ) -> RunEventPage:
+        row = (
+            (
+                await conn.execute(
+                    select(*(runs.c[name] for name in RunView.model_fields)).where(
+                        runs.c.id == run_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ServiceError("not_found", 404)
+        run = self._view(row)
+        if from_seq < 0 or not 1 <= limit <= 64:
+            raise ServiceError("invalid_cursor", 416)
+        event_count = (
+            await conn.execute(
+                select(func.count())
+                .select_from(run_events)
+                .where(run_events.c.run_id == run_id)
+            )
+        ).scalar_one()
+        if from_seq > event_count:
+            raise ServiceError("invalid_cursor", 416)
+        records = (
+            (
+                await conn.execute(
+                    select(run_events)
+                    .where(run_events.c.run_id == run_id, run_events.c.seq >= from_seq)
+                    .order_by(run_events.c.seq)
+                    .limit(limit)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        return RunEventPage(
+            events=tuple(RunEvent.model_validate(dict(record)) for record in records),
+            event_count=event_count,
+            status=run.status,
+        )
+
+    async def event_page(self, run_id: str, from_seq: int, limit: int) -> RunEventPage:
+        if self.closed:
+            raise ServiceError("closed")
+
+        async def operation() -> RunEventPage:
+            async with self.lock, self.engine.begin() as conn:
+                return await self._event_page(conn, run_id, from_seq, limit)
+
+        try:
+            # 读者取消只终止等待意图；原只读事务归还连接并释放锁后才传播取消。
+            return await settled(operation())
+        except ServiceError:
+            raise
+        except Exception:
+            raise ServiceError("storage_unavailable", 503) from None
 
     async def snapshot(self, run_id: str) -> RunSnapshot:
         if self.closed:

@@ -18,6 +18,7 @@ from krim_agent.context.types import CompactionPolicy, ContextPolicy, HistorySou
 from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.model_step import ModelStep
+from krim_agent.source_fingerprints import source_digest
 from krim_agent.storage.models import compactions, runs, work_turns
 from krim_agent.storage.sessions import workspace_history
 from krim_agent.storage.sqlite import SQLiteStore
@@ -49,9 +50,9 @@ class Compactor:
         self.record_policy = {"context": self.policy.model_dump(mode="json"),
             "compaction": self.compaction.model_dump(mode="json"),
             "implementation": binding_token()[-1],
-            "model_step_implementation": hashlib.sha256(
-                Path(__file__).parents[1].joinpath("runtime/model_step.py").read_bytes()
-            ).hexdigest(),
+            "model_step_implementation": source_digest(
+                Path(__file__).parents[1].joinpath("runtime/model_step.py")
+            ),
             "counter_version": "approx-utf8/1",
             "grant": self.frame.grant.model_dump(mode="json")}
 
@@ -358,4 +359,4 @@ def binding_token() -> tuple[object, ...]:
             id(Compactor.summarize), id(Compactor.complete), id(Compactor.guard),
             id(Compactor.measure), id(Compactor.row), id(Compactor.verify), id(Compactor.snapshot),
             id(workspace_history),
-            fingerprint(PROMPT), hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+            fingerprint(PROMPT), source_digest(__file__))

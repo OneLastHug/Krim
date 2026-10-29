@@ -25,6 +25,7 @@ from krim_agent.runtime.engine import AgentLoop
 from krim_agent.runtime.service import RunBinding, RunService
 from krim_agent.security import AccessPolicy
 from krim_agent.sessions.service import SessionService
+from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Policy, PostHook, PreHook
@@ -134,6 +135,7 @@ async def open_application(
     if config.provider not in ("script", "http"):
         raise ProviderError("provider_config", 422)
     live = config.provider == "http"
+    reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
     workspace = workspace_profile or (

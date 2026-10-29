@@ -23,6 +23,13 @@ class RunSnapshot:
     work: WorkFrame | None = None
 
 
+@dataclass(frozen=True)
+class RunEventPage:
+    events: tuple[RunEvent, ...]
+    event_count: int
+    status: RunStatus
+
+
 class RunStore(Protocol):
     healthy: bool
 
@@ -40,6 +47,9 @@ class RunStore(Protocol):
     async def set_running(self, run_id: str) -> None: ...
     async def request_stop(self, run_id: str) -> None: ...
     async def snapshot(self, run_id: str) -> RunSnapshot: ...
+    async def event_page(
+        self, run_id: str, from_seq: int, limit: int
+    ) -> RunEventPage: ...
     async def by_key(self, key: str) -> RunView | None: ...
     async def child_request(
         self, eval_id: str, case_id: str, repetition: int
