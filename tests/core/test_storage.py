@@ -3,7 +3,6 @@ import os
 import sqlite3
 
 import pytest
-from conftest import registry_for
 
 from krim_agent.composition import open_application
 from krim_agent.contracts import RunEvent, RunRequest, ServiceError
@@ -65,7 +64,7 @@ async def test_second_writer_refused_before_recovery_and_readonly_never_writes(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("point", ["tool_intent", "tool_end", "terminal"])
-async def test_transaction_failure_rolls_back_and_disables_admission(tmp_path, point):
+async def test_transaction_failure_rolls_back_and_disables_admission(tmp_path, point, registry_for):
     calls = []
 
     async def execute(args):
@@ -101,7 +100,9 @@ async def test_transaction_failure_rolls_back_and_disables_admission(tmp_path, p
 
 
 @pytest.mark.asyncio
-async def test_lost_tool_result_commit_return_reads_original_event_without_reexecution(tmp_path):
+async def test_lost_tool_result_commit_return_reads_original_event_without_reexecution(
+    tmp_path, registry_for
+):
     calls = []
 
     async def execute(args):
