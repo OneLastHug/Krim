@@ -14,6 +14,10 @@ from pydantic import JsonValue
 
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
+from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
+from krim_agent.evaluation.app import EvalApplication, open_eval
+from krim_agent.evaluation.ports import AdapterLease
+from krim_agent.evaluation.product import EvaluationProduct
 from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
 from krim_agent.execution.linux import SandboxRunner
@@ -53,6 +57,8 @@ class Application:
     work: WorkspaceOperations | None = None
     artifacts: ArtifactStore | None = None
     runner: SandboxRunner | None = None
+    product_evaluations: EvalApplication | None = None
+    evaluation_product: EvaluationProduct | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -69,6 +75,8 @@ class Application:
         self.service._external()
         if self.evaluations is not None:
             self.evaluations._external()
+        if self.product_evaluations is not None:
+            self.product_evaluations.kernel._external()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         await settled(self._close_task)
@@ -80,11 +88,15 @@ class Application:
                 self.service.closed = True
             try:
                 try:
-                    if self.sessions is not None:
-                        await self.sessions.close()
+                    if self.product_evaluations is not None:
+                        await self.product_evaluations.close()
                 finally:
-                    if self.evaluations is not None:
-                        await self.evaluations.close()
+                    try:
+                        if self.sessions is not None:
+                            await self.sessions.close()
+                    finally:
+                        if self.evaluations is not None:
+                            await self.evaluations.close()
             finally:
                 await self.service.close()
         finally:
@@ -108,6 +120,14 @@ class Application:
                             raise outcome
                 finally:
                     await self.store.close()
+
+
+def _evaluation_database_path(database: Path, configured: Path | None) -> Path:
+    # 在写端准入前固定可信启动路径，不把相对路径解析留到运行中。
+    selected = (configured or database.with_name(database.stem + ".eval.sqlite")).absolute()
+    if selected == database.absolute():
+        raise ServiceError("invalid_input", 422)
+    return selected
 
 
 async def open_application(
@@ -268,11 +288,16 @@ async def open_application(
     if active_access is not None and config.api_key.get_secret_value():
         raise ServiceError("access_policy_invalid", 422)
     tools = registry if registry is not None else builtin_registry()
+    evaluation_path = (
+        _evaluation_database_path(path, config.product_eval_database)
+        if config.product_eval_enabled else None
+    )
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
     artifacts = None
     runner = None
     operations = None
+    application: Application | None = None
     try:
         if workspace is None:
             # 只读判定恢复需求；缺可信工作区资源时不先写 interrupted/paused。
@@ -369,7 +394,7 @@ async def open_application(
             bindings["target-workspace"] = RunBinding.freeze("target-workspace", work_loop,
                 work_settings)
         service = RunService(store, loop, config, target, bindings)
-        return Application(
+        application = Application(
             store,
             service,
             selected,
@@ -383,7 +408,27 @@ async def open_application(
             artifacts=artifacts,
             runner=runner,
         )
+        if evaluation_path is not None:
+            adapters = {
+                "krim-script-" + key.removeprefix("target-"): AdapterLease(
+                    NeutralKrimAdapter(store, service, key,
+                        neutral_key="krim-script-" + key.removeprefix("target-")),
+                    owned=True,
+                )
+                for key in ("target-v1", "target-v2", "target-bad")
+                if key in service.bindings
+            }
+            neutral = await open_eval(evaluation_path, adapters=adapters)
+            application.product_evaluations = neutral
+            assert application.sessions is not None
+            application.evaluation_product = EvaluationProduct(
+                neutral, service, application.sessions
+            )
+        return application
     except BaseException:
+        if application is not None:
+            await settled(application.close())
+            raise
         try:
             try:
                 if operations is not None:
