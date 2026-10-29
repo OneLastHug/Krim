@@ -1,4 +1,4 @@
-"""只装配本机Krim Agent的离线配置；不支持旧供应商模式。"""
+"""可信宿主的有界运行配置；不从浏览器接收供应商凭据。"""
 
 import os
 from pathlib import Path
@@ -13,6 +13,7 @@ class Settings(BaseModel):
     )
     database: Path = Path(".data/krim-agent.db")
     provider: Literal["script", "http"] = "script"
+    http_mode: Literal["bounded-demo", "agent"] = "bounded-demo"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     system_prompt: str = "你是 Krim Agent 离线演示。"
     target_version: str = "demo-v1"
