@@ -157,7 +157,9 @@ async def test_confirmed_dataset_metadata_survives_new_client(tmp_path):
         finished = await fresh.task(task["id"])
         assert finished["finished_count"] == finished["planned_count"] == 1
         assert finished["report_hash"]
-        assert (await fresh.task_by_key("execute-confirmed"))["report_hash"] == finished["report_hash"]
+        assert (await fresh.task_by_key("execute-confirmed"))["report_hash"] == finished[
+            "report_hash"
+        ]
         listed = next(item for item in await fresh.list_tasks() if item["id"] == task["id"])
         assert listed["finished_count"] == 1 and listed["report_hash"] == finished["report_hash"]
         report = await fresh.report_page(task["id"])
@@ -173,9 +175,7 @@ async def test_import_receipt_and_same_key_replay_reauthorize_source_owner(tmp_p
         assert product is not None and app.sessions is not None
         alice = PrincipalContext("alice", 1, (Membership(workspace_id="team"),))
         bob = PrincipalContext("bob", 1, (Membership(workspace_id="team"),))
-        admin = PrincipalContext(
-            "admin", 1, (Membership(workspace_id="team", role="admin"),)
-        )
+        admin = PrincipalContext("admin", 1, (Membership(workspace_id="team", role="admin"),))
         session = await app.sessions.create(
             alice, "team", SessionCreate(request_key="alice-session")
         )
@@ -236,9 +236,7 @@ async def test_import_receipt_and_same_key_replay_reauthorize_source_owner(tmp_p
                 event.remove(engine, "before_cursor_execute", capture)
 
         non_reads = [
-            sql
-            for sql in statements
-            if not sql.lstrip().upper().startswith(("SELECT", "BEGIN"))
+            sql for sql in statements if not sql.lstrip().upper().startswith(("SELECT", "BEGIN"))
         ]
         assert statements and not non_reads, non_reads
         assert app.provider.calls == calls_before

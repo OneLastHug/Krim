@@ -296,7 +296,7 @@ class EvaluationProduct:
         scope: str,
         imported: list[dict[str, Any]],
     ) -> None:
-        # Receipt属于workspace共享数据，但读取其中的Run来源仍需当前principal通过原Session owner检查。
+        # 回执可在工作区共享；其中的Run来源仍按原会话所有者权限读取。
         for row in imported:
             source = row.get("source")
             if (
