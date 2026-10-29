@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -17,17 +19,18 @@ from krim_agent.runtime.service import RunService
 from krim_agent.security import PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.storage import observation_outbox as outbox_sql
+from krim_agent.storage.models import runs, turns
 from krim_agent.storage.sqlite import SQLiteStore
 
 from .adapters.krim_outbox import ActorViews, KrimOutboxPort
 from .app import EvalApplication
 from .continuous import ContinuousEvaluation
-from .continuous_types import ScheduleSpec
-from .domain import DatasetRef
+from .continuous_types import ScheduleSpec, window_request
+from .domain import DatasetRef, neutral_fingerprint
 from .hot_observations import HotObservationFlow
 from .hot_types import CapturePolicy, CaptureRecord, FeedbackSignal
 from .product import EvaluationProduct
-from .repository import eval_schedules, meta
+from .repository import eval_schedule_windows, eval_schedules, meta, tasks
 
 
 class EvaluationAutomation:
@@ -73,7 +76,12 @@ class EvaluationAutomation:
         self.store: SQLiteStore = product.sessions.store
         self._actors = MappingProxyType(actors)
         self._scope_workspaces = MappingProxyType(scope_workspaces)
-        self.clock = clock
+        self._clock_source = clock
+        self._clock_override: ContextVar[float | None] = ContextVar(
+            "krim_evaluation_automation_clock", default=None
+        )
+        # 保持稳定 callable 身份；tick 请求通过 ContextVar 冻结该调用链的时钟。
+        self.clock: Callable[[], float] = self._read_clock
         self.poll_interval = poll_interval
         self._task: asyncio.Task[None] | None = None
         self._start_lock = asyncio.Lock()
@@ -114,6 +122,19 @@ class EvaluationAutomation:
             raise ServiceError("closed", 503)
         if self.evaluation.repository.closed or self.store.closed:
             raise ServiceError("closed", 503)
+
+    def _read_clock(self) -> float:
+        frozen = self._clock_override.get()
+        return self._clock_source() if frozen is None else frozen
+
+    @contextmanager
+    def _frozen_clock(self) -> Generator[float, None, None]:
+        now = self.clock()
+        token = self._clock_override.set(now)
+        try:
+            yield now
+        finally:
+            self._clock_override.reset(token)
 
     def _trusted(
         self,
@@ -217,6 +238,207 @@ class EvaluationAutomation:
         event = await port.feedback(actor, run_id, signal)
         self._wake.set()
         return {"revision": event.revision, "key": event.key}
+
+    async def feedback_receipt(
+        self,
+        principal: PrincipalContext,
+        workspace_id: str,
+        run_id: str,
+        key: str,
+    ) -> dict[str, Any]:
+        """只读恢复本人原反馈回执，不写入、不派发观测。"""
+        try:
+            key = FeedbackSignal(key=key, reason="other").key
+        except (TypeError, ValueError):
+            raise ServiceError("invalid_input", 422) from None
+        actor = self._trusted(principal, workspace_id, write=True)
+        scope = EvaluationProduct._scope(workspace_id)
+
+        async def operation(conn: AsyncConnection) -> dict[str, Any]:
+            linked = (
+                await conn.execute(
+                    select(turns.c.owner_id, turns.c.workspace_id).where(
+                        turns.c.run_id == run_id
+                    )
+                )
+            ).first()
+            if linked is None or linked.workspace_id != workspace_id:
+                raise ServiceError("not_found", 404)
+            actor.owns(workspace_id, linked.owner_id, write=True)
+            terminal = (
+                await conn.execute(
+                    select(runs.c.status).where(runs.c.id == run_id)
+                )
+            ).scalar_one_or_none()
+            actor.owns(workspace_id, linked.owner_id, write=True)
+            if terminal is None:
+                raise ServiceError("not_found", 404)
+            if terminal in {"queued", "running"}:
+                raise ServiceError("invalid_input", 422)
+            saved_rows = (
+                await conn.execute(
+                    select(outbox_sql.observation_outbox).where(
+                        outbox_sql.observation_outbox.c.run_id == run_id,
+                        outbox_sql.observation_outbox.c.workspace_id == workspace_id,
+                    )
+                )
+            ).mappings().all()
+            actor.owns(workspace_id, linked.owner_id, write=True)
+
+            matches: list[dict[str, Any]] = []
+            stale_generation = False
+            for saved in saved_rows:
+                record = CaptureRecord.model_validate(saved["body"])
+                if (
+                    saved["capture_id"] != record.capture_id
+                    or saved["source_id"] != record.source_id
+                    or saved["workspace_id"] != record.workspace_id
+                    or saved["run_id"] != record.run_id
+                    or saved["terminal_event_id"] != record.terminal_event_id
+                    or saved["policy_fingerprint"] != record.policy_fingerprint
+                    or record.workspace_id != workspace_id
+                    or record.scope != scope
+                    or record.run_id != run_id
+                    or record.policy.workspace_id != workspace_id
+                    or record.policy.scope != scope
+                    or record.policy.fingerprint() != record.policy_fingerprint
+                    or saved["feedback_revision"] != len(record.feedback)
+                ):
+                    raise ServiceError("facts_corrupt")
+                events = [
+                    event
+                    for event in record.feedback
+                    if event.actor == actor.principal_id and event.key == key
+                ]
+                if len(events) > 1:
+                    raise ServiceError("facts_corrupt")
+                if not events:
+                    continue
+                event = events[0]
+                if event.generation != actor.generation:
+                    stale_generation = True
+                    continue
+                matches.append(
+                    {
+                        "revision": event.revision,
+                        "key": event.key,
+                        "event": event.model_dump(mode="json"),
+                        "record": record.model_dump(mode="json"),
+                        "delivery": saved["delivery"],
+                        "phase": saved["phase"],
+                    }
+                )
+
+            if len(matches) > 1:
+                raise ServiceError("facts_corrupt")
+            if matches:
+                return matches[0]
+            if stale_generation:
+                raise ServiceError("key_conflict")
+            raise ServiceError("not_found", 404)
+
+        fact = await self.store.work_read(operation)
+        event = fact["event"]
+        record = CaptureRecord.model_validate(fact["record"])
+        delivery = fact["delivery"]
+        phase = fact["phase"]
+        if not isinstance(delivery, dict) or delivery.get("schema_version") != "hot-delivery/1":
+            raise ServiceError("facts_corrupt")
+        base = {
+            "revision": fact["revision"],
+            "key": fact["key"],
+            "reason": event["reason"],
+            "candidate_ids": [],
+        }
+        manifest = delivery.get("manifest")
+        if manifest is None:
+            if phase == "acked":
+                raise ServiceError("facts_corrupt")
+            return base | {
+                "delivery_status": "pending"
+                if phase in {"pending", "claimed"}
+                else "not_enqueued"
+            }
+        try:
+            units = outbox_sql.expanded_units(delivery)
+        except (TypeError, ValueError):
+            raise ServiceError("facts_corrupt") from None
+        common = delivery.get("common")
+        destination = common.get("destination_id") if isinstance(common, dict) else None
+        if not isinstance(destination, str) or not destination:
+            raise ServiceError("facts_corrupt")
+        request_key = outbox_sql.delivery_key(
+            record.source_id,
+            record.capture_id,
+            destination,
+            record.scope,
+            "feedback",
+            actor.principal_id,
+            key,
+        )
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("revision") != len(record.feedback)
+            or not isinstance(manifest.get("keys"), list)
+            or request_key not in manifest["keys"]
+        ):
+            raise ServiceError("facts_corrupt")
+        unit = units.get(request_key)
+        if (
+            unit is None
+            or unit.get("actor") != actor.principal_id
+            or unit.get("generation") != actor.generation
+            or unit.get("feedback") != {"key": key, "reason": event["reason"]}
+        ):
+            raise ServiceError("facts_corrupt")
+        request = unit.get("request")
+        if (
+            not isinstance(request, dict)
+            or request.get("request_key") != request_key
+            or request.get("scope") != scope
+            or request.get("sources")
+            != [
+                {
+                    "task_id": None,
+                    "case_id": None,
+                    "run_id": run_id,
+                    "repetition": 0,
+                    "revision": None,
+                    "evidence_hash": None,
+                    "feedback": {"key": key, "reason": event["reason"]},
+                }
+            ]
+        ):
+            raise ServiceError("facts_corrupt")
+        if unit["state"] == "not_started":
+            return base | {"delivery_status": "pending"}
+        imported = await self.evaluation.repository.import_observations(
+            scope, request_key, unit["request_hash"], rows=None
+        )
+        if imported is None:
+            if unit["state"] == "complete":
+                raise ServiceError("facts_corrupt")
+            return base | {"delivery_status": "pending"}
+        if len(imported) != 1:
+            raise ServiceError("facts_corrupt")
+        imported_row = imported[0]
+        candidate_id = imported_row.get("candidate_id", imported_row.get("id"))
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise ServiceError("facts_corrupt")
+        try:
+            candidate = await self.evaluation.repository.candidate(scope, candidate_id)
+        except ServiceError as error:
+            if error.code == "not_found":
+                raise ServiceError("facts_corrupt") from None
+            raise
+        if (
+            candidate.get("observation_id") != imported_row.get("id")
+            or candidate.get("observation_hash") != imported_row.get("content_hash")
+            or candidate.get("signals")
+            != [{"key": key, "reason": event["reason"], "actor": actor.principal_id}]
+        ):
+            raise ServiceError("facts_corrupt")
+        return base | {"candidate_ids": [candidate_id], "delivery_status": "linked"}
 
     async def status(
         self, principal: PrincipalContext, workspace_id: str
@@ -326,6 +548,133 @@ class EvaluationAutomation:
         row = await self.evaluation.repository.schedule(scope, schedule_id)
         return self._schedule_public_view(workspace_id, row)
 
+    async def current_schedule_window(
+        self,
+        principal: PrincipalContext,
+        workspace_id: str,
+        schedule_id: str,
+    ) -> dict[str, Any]:
+        """纯读计算当前窗口索引；不观察、预留或派发Task。"""
+        self._trusted(principal, workspace_id)
+        scope = EvaluationProduct._scope(workspace_id)
+        row = await self.evaluation.repository.schedule(scope, schedule_id)
+        try:
+            spec = ScheduleSpec.model_validate(row["spec"])
+            index = int((self.clock() - spec.epoch) // spec.interval_seconds)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            raise ServiceError("facts_corrupt") from None
+        return {
+            "schedule_id": spec.schedule_id,
+            "version": spec.version,
+            "window_index": index,
+            "enabled": row["enabled"] is True,
+            "eligible": row["enabled"] is True and 0 <= index < spec.max_windows,
+        }
+
+    async def schedule_window(
+        self,
+        principal: PrincipalContext,
+        workspace_id: str,
+        schedule_id: str,
+        window_index: int,
+    ) -> dict[str, Any]:
+        """按原 index 只读恢复持久窗口记录及其绑定 Task。"""
+        self._trusted(principal, workspace_id)
+        if type(window_index) is not int or not 0 <= window_index <= 2:
+            raise ServiceError("invalid_input", 422)
+        scope = EvaluationProduct._scope(workspace_id)
+        repository = self.evaluation.repository
+        schedule = await repository.schedule(scope, schedule_id)
+        try:
+            spec = ScheduleSpec.model_validate(schedule["spec"])
+        except (KeyError, TypeError, ValueError):
+            raise ServiceError("facts_corrupt") from None
+        if window_index >= spec.max_windows:
+            raise ServiceError("not_found", 404)
+        async with repository.lock, repository.engine.begin() as conn:
+            if repository.closed:
+                raise ServiceError("closed", 503)
+            body = (
+                await conn.execute(
+                    select(eval_schedule_windows.c.body).where(
+                        eval_schedule_windows.c.scope == scope,
+                        eval_schedule_windows.c.schedule_id_version
+                        == spec.schedule_id + "/" + spec.version,
+                        eval_schedule_windows.c.dataset_envelope_fp
+                        == spec.template.dataset_envelope_fp,
+                        eval_schedule_windows.c.target_fp == schedule["target_fp"],
+                        eval_schedule_windows.c.window_index == window_index,
+                    )
+                )
+            ).scalar_one_or_none()
+        result = {
+            "schedule_id": spec.schedule_id,
+            "version": spec.version,
+            "window_index": window_index,
+            "status": "unknown",
+            "task": None,
+        }
+        if body is None:
+            return result
+        if not isinstance(body, dict) or type(body.get("window_index")) is not int:
+            raise ServiceError("facts_corrupt")
+        if body.get("status") == "missed":
+            if set(body) != {"status", "task_id", "window_index"} or (
+                body.get("task_id") is not None or body["window_index"] != window_index
+            ):
+                raise ServiceError("facts_corrupt")
+            return result | {"status": "missed"}
+        if body.get("status") != "reserved" or set(body) != {
+            "status",
+            "task_id",
+            "window_index",
+            "spec_hash",
+            "request_hash",
+        }:
+            raise ServiceError("facts_corrupt")
+        if (
+            body["window_index"] != window_index
+            or body["spec_hash"] != schedule["spec_hash"]
+            or not isinstance(body["task_id"], str)
+            or not isinstance(body["request_hash"], str)
+        ):
+            raise ServiceError("facts_corrupt")
+        request = window_request(schedule, window_index)
+        request_json = request.model_dump(mode="json")
+        request_hash = neutral_fingerprint(request_json)
+        if body["request_hash"] != request_hash:
+            raise ServiceError("facts_corrupt")
+        async with repository.lock, repository.engine.begin() as conn:
+            if repository.closed:
+                raise ServiceError("closed", 503)
+            task_binding = (
+                await conn.execute(
+                    select(tasks.c.scope, tasks.c.request_key).where(
+                        tasks.c.id == body["task_id"]
+                    )
+                )
+            ).first()
+        if (
+            task_binding is None
+            or task_binding.scope != scope
+            or task_binding.request_key != request.request_key
+        ):
+            raise ServiceError("facts_corrupt")
+        try:
+            task = await repository.snapshot(body["task_id"])
+        except ServiceError as error:
+            if error.code == "not_found":
+                raise ServiceError("facts_corrupt") from None
+            raise
+        if (
+            task.get("id") != body["task_id"]
+            or task.get("request_json") != request_json
+            or task.get("request_hash") != request_hash
+        ):
+            raise ServiceError("facts_corrupt")
+        public_task = await self.product.task(principal, workspace_id, body["task_id"])
+        return result | {"status": "reserved", "task": _task_receipt(public_task)}
+
     def _schedule_public_view(
         self, workspace_id: str, row: dict[str, Any]
     ) -> dict[str, Any]:
@@ -336,12 +685,18 @@ class EvaluationAutomation:
         dataset = self.product._public_ref(
             workspace_id, spec.template.dataset.model_dump(mode="json")
         )
+        public_spec = spec.model_dump(mode="json")
+        public_spec.pop("scope", None)
+        public_spec["template"].pop("scope", None)
+        public_spec["template"]["dataset"] = dataset
         return _schedule_view(row) | {
             "dataset": dataset,
             "target_key": spec.template.target_key,
             "epoch": spec.epoch,
             "interval_seconds": spec.interval_seconds,
             "max_windows": spec.max_windows,
+            "spec": public_spec,
+            "spec_fingerprint": neutral_fingerprint(public_spec),
         }
 
     async def create_schedule(
@@ -367,21 +722,35 @@ class EvaluationAutomation:
         )
         result = await self._continuous(actor, workspace_id).create_schedule(frozen)
         self._wake.set()
-        return _schedule_view(result)
+        return self._schedule_public_view(workspace_id, result)
 
     async def tick_schedule(
         self,
         principal: PrincipalContext,
         workspace_id: str,
         schedule_id: str,
+        expected_window_index: int | None = None,
     ) -> dict[str, Any]:
         self._trusted(principal, workspace_id, write=True)
+        if expected_window_index is not None and (
+            type(expected_window_index) is not int or not 0 <= expected_window_index <= 2
+        ):
+            raise ServiceError("invalid_input", 422)
         scope = EvaluationProduct._scope(workspace_id)
-        row = await self.evaluation.repository.schedule(scope, schedule_id)
-        actor = self._schedule_actor(row, workspace_id)
-        result = await self._continuous(actor, workspace_id).tick(schedule_id)
+        with self._frozen_clock() as now:
+            row = await self.evaluation.repository.schedule(scope, schedule_id)
+            try:
+                spec = ScheduleSpec.model_validate(row["spec"])
+                current_index = int((now - spec.epoch) // spec.interval_seconds)
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                raise ServiceError("facts_corrupt") from None
+            if expected_window_index is not None and expected_window_index != current_index:
+                raise ServiceError("snapshot_changed", 409)
+            actor = self._schedule_actor(row, workspace_id)
+            result = await self._continuous(actor, workspace_id).tick(schedule_id)
         self._wake.set()
-        return _task_view(result)
+        public_task = await self.product.task(principal, workspace_id, str(result["id"]))
+        return _task_receipt(public_task)
 
     async def disable_schedule(
         self,
@@ -546,9 +915,10 @@ class EvaluationAutomation:
                 ):
                     raise ServiceError("facts_corrupt")
                 actor = self._schedule_actor(body, workspace_id)
-                if (self.clock() - spec.epoch) // spec.interval_seconds < 0:
-                    continue
-                await self._continuous(actor, workspace_id).tick(row.schedule_id)
+                with self._frozen_clock() as now:
+                    if (now - spec.epoch) // spec.interval_seconds < 0:
+                        continue
+                    await self._continuous(actor, workspace_id).tick(row.schedule_id)
             except ServiceError as error:
                 self._last_error = error.code
             except Exception:
@@ -603,31 +973,65 @@ def _observer_generation_salt(principal: PrincipalContext) -> str:
     return "observer-" + digest
 
 
+def _task_receipt(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: task[key]
+        for key in (
+            "id", "request_key", "status", "code", "revision", "planned_count", "finished_count"
+        )
+    }
+
+
 def _schedule_view(row: dict[str, Any]) -> dict[str, Any]:
     spec = row.get("spec")
     if not isinstance(spec, dict):
         raise ServiceError("facts_corrupt")
+    control_revision = row.get("control_revision")
+    enabled = row.get("enabled")
+    disable_receipt = row.get("disable_receipt")
+    if type(control_revision) is not int or control_revision not in {0, 1}:
+        raise ServiceError("facts_corrupt")
+    if control_revision == 0:
+        if enabled is not True or disable_receipt is not None:
+            raise ServiceError("facts_corrupt")
+        receipt = None
+    else:
+        if (
+            enabled is not False
+            or not isinstance(disable_receipt, dict)
+            or set(disable_receipt) != {"key", "request_hash"}
+            or not isinstance(spec.get("scope"), str)
+            or not isinstance(spec.get("schedule_id"), str)
+        ):
+            raise ServiceError("facts_corrupt")
+        key = disable_receipt["key"]
+        if (
+            not isinstance(key, str)
+            or not 1 <= len(key) <= 64
+            or any(not char.isascii() or not (char.isalnum() or char in "_.-") for char in key)
+            or disable_receipt["request_hash"]
+            != neutral_fingerprint(
+                {
+                    "scope": spec["scope"],
+                    "id": spec["schedule_id"],
+                    "revision": 0,
+                    "key": key,
+                }
+            )
+        ):
+            raise ServiceError("facts_corrupt")
+        receipt = {
+            "key": key,
+            "decision": "disabled",
+            "expected_revision": 0,
+            "revision": 1,
+        }
     return {
         "schedule_id": spec.get("schedule_id"),
         "version": spec.get("version"),
-        "enabled": row.get("enabled") is True,
-        "revision": row.get("control_revision"),
+        "enabled": enabled,
+        "revision": control_revision,
         "observed_through": row.get("observed_through"),
         "missed_windows": len(row.get("missed", [])) if isinstance(row.get("missed"), list) else 0,
-    }
-
-
-def _task_view(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: row[key]
-        for key in (
-            "id",
-            "request_key",
-            "status",
-            "code",
-            "revision",
-            "planned_count",
-            "finished_count",
-        )
-        if key in row
+        "control_receipt": receipt,
     }
