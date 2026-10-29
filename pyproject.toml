@@ -99,6 +99,7 @@ only-include = [
   "src/krim_agent/evaluation/repository.py",
   "src/krim_agent/evaluation/evidence.py",
   "src/krim_agent/evaluation/metrics.py",
+  "src/krim_agent/evaluation/semantic_judge.py",
   "src/krim_agent/evaluation/reports.py",
   "src/krim_agent/evaluation/app.py",
   "src/krim_agent/evaluation/cli.py",
