@@ -63,6 +63,7 @@ only-include = [
   "src/krim_agent/sdk/text.py",
   "src/krim_agent/sdk/workspace.py",
   "src/krim_agent/security.py",
+  "src/krim_agent/source_fingerprints.py",
   "src/krim_agent/sessions/__init__.py",
   "src/krim_agent/sessions/service.py",
   "src/krim_agent/sessions/types.py",

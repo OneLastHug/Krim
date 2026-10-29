@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from pydantic import JsonValue, ValidationError
 
 from krim_agent.contracts import Message, RunEvent, ServiceError
 from krim_agent.providers.types import ModelProvider, ModelText, ModelToolCall, ModelUsage
 from krim_agent.runtime.contracts import settled
+from krim_agent.source_fingerprints import source_digest
 from krim_agent.usage import TokenUsage
 
 
@@ -108,4 +107,4 @@ class ModelStep:
 
 def binding_token() -> tuple[object, ...]:
     return (id(ModelStep), id(ModelStep.call), id(ModelStep.__init__),
-            hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+            source_digest(__file__))
