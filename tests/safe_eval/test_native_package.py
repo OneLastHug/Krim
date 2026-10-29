@@ -232,3 +232,57 @@ def test_installed_native_entry_uses_same_kernel(tmp_path):
         source.close()
         destination.close()
     (tmp_path / "installed-result.json").write_text(json.dumps(value, indent=2))
+
+
+def test_pn2_repair_installed_cleanup_receipts(tmp_path):
+    root = Path(os.environ["KRIM_PN2_ROOT"])
+    insertion = """
+        receipts=[]
+        for job in app.owner.jobs.values():
+            snapshot=json.loads(json.dumps(job.collector.result()))
+            digest=hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()
+            first=await app.owner.cancel(job,job.lease)
+            second=await app.owner.cancel(job,job.lease)
+            assert first.closed and second.closed
+            assert first.observation==second.observation==snapshot
+            current=json.dumps(job.collector.result(),sort_keys=True).encode()
+            assert hashlib.sha256(current).hexdigest()==digest
+            assert job.cleanup_receipts and job.cleanup_receipts[-1]['closed']
+            keys=['collector_joined','stdout_eof','stderr_eof','pidfd_closed','group_empty']
+            assert all(job.cleanup_receipts[-1][k] for k in keys)
+            receipts.append({'ref':job.ref.id,'pid':job.process.pid,'snapshot_hash':digest,'cleanup_receipts':job.cleanup_receipts})
+        payload['cleanup_receipts']=receipts
+"""
+    anchor = "    finally:\n        await app.close()"
+    assert INSTALLED_FIXTURE.count(anchor) == 1
+    code = INSTALLED_FIXTURE.replace(anchor, insertion + anchor, 1)
+    compile(code, "pn2-reentry02-installed-cleanup.py", "exec")
+    worker = Path(__file__).parent / "fixtures/native_cli_worker.py"
+    argv = [
+        str(root / "installed/bin/python"),
+        "-I",
+        "-B",
+        "-c",
+        code,
+        str(tmp_path / "installed-repair-campaign"),
+        str(worker),
+    ]
+    process = subprocess.run(argv, cwd=root / "outside", capture_output=True, text=True, timeout=30)
+    (tmp_path / "installed-repair-command.json").write_text(
+        json.dumps(
+            {
+                "argv": argv,
+                "cwd": str(root / "outside"),
+                "rc": process.returncode,
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+            },
+            indent=2,
+        )
+    )
+    assert process.returncode == 0, process.stderr
+    value = json.loads(process.stdout)
+    assert value["resources"]["closed"] and len(value["cleanup_receipts"]) == 4
+    assert value["real_cli_launches"] == value["model_requests"] == 0
+    assert Path(value["module"]).is_relative_to(root / "installed/lib/python3.12/site-packages")
+    (tmp_path / "installed-repair-result.json").write_text(json.dumps(value, indent=2))

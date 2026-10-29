@@ -166,7 +166,9 @@ def main():
                     "id": "cmd-1",
                     "type": "command_execution",
                     "status": "in_progress",
-                    "command": "python -B -m unittest",
+                    "command": "/usr/bin/echo unrelated"
+                    if args.mode == "command-unrelated"
+                    else "python -B -m unittest discover -s tests",
                 },
             },
         )
@@ -195,17 +197,29 @@ def main():
                             "type": "tool_use",
                             "id": "cmd-1",
                             "name": "Bash",
-                            "input": {"command": "python -B -m unittest"},
+                            "input": {
+                                "command": "/usr/bin/echo unrelated"
+                                if args.mode == "command-unrelated"
+                                else "python -B -m unittest discover -s tests"
+                            },
                         }
                     ]
                 },
             }
         )
+    command = (
+        ["/usr/bin/echo", "unrelated"]
+        if args.mode == "command-unrelated"
+        else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
+    )
     process = subprocess.run(
-        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"],
+        command,
         capture_output=True,
         text=True,
         timeout=5,
+    )
+    Path(".fixture-command.json").write_text(
+        json.dumps({"argv": command, "returncode": process.returncode})
     )
     if process.returncode:
         sys.stderr.write(process.stderr)
@@ -220,6 +234,34 @@ def main():
     Path("outputs/summary.md").write_text(
         f"accounts={len(result)}; total_cents={sum(result.values())}\n"
     )
+    if args.mode == "artifact-oversize":
+        Path("outputs/extra.txt").write_text("x" * 1048577)
+    elif args.mode == "artifact-fifo":
+        import os
+
+        os.mkfifo("outputs/extra.fifo")
+    elif args.mode == "tests-undiscoverable":
+        Path("tests/test_reconcile.py").write_text(
+            "def test_one():\n    assert True\ndef test_two():\n    assert True\n"
+        )
+    elif args.mode == "tests-empty":
+        Path("tests/test_reconcile.py").write_text(
+            "import unittest\nclass TestEmpty(unittest.TestCase):\n"
+            "    def test_one(self):\n        pass\n"
+            "    def test_two(self):\n        pass\n"
+        )
+    elif args.mode == "tests-fail":
+        Path("tests/test_reconcile.py").write_text(
+            "import unittest\nclass TestFail(unittest.TestCase):\n"
+            "    def test_one(self):\n        self.assertTrue(False)\n"
+            "    def test_two(self):\n        self.assertTrue(False)\n"
+        )
+    elif args.mode == "tests-vacuous":
+        Path("tests/test_reconcile.py").write_text(
+            "import unittest\nclass TestVacuous(unittest.TestCase):\n"
+            "    def test_one(self):\n        self.assertTrue(True)\n"
+            "    def test_two(self):\n        self.assertTrue(True)\n"
+        )
     if codex:
         emit(
             {

@@ -242,3 +242,70 @@ def test_old_observation_dump_keeps_exact_keys():
     assert actual == expected
     assert neutral_encoded(actual) == encoded(expected)
     assert neutral_fingerprint(actual) == fingerprint(expected)
+
+
+@pytest.mark.parametrize("phase", ["initial", "final"])
+@pytest.mark.parametrize("change", ["missing", "exit", "inconsistent", "eof"])
+def test_pn2_repair_verifier_schema_is_stage_bound(phase, change):
+    from krim_agent.evaluation.verifiers import NativeVerifier
+
+    checks = {
+        k: True
+        for k in [
+            "inputs_unchanged",
+            "gold_0",
+            "gold_1",
+            "gold_2",
+            "reject_0",
+            "reject_1",
+            "reject_2",
+        ]
+    }
+    if phase == "final":
+        checks.update(
+            {
+                k: True
+                for k in ["source_changed", "tests_changed", "effective_tests", "ledger", "summary"]
+            }
+        )
+    else:
+        checks["gold_0"] = False
+    result = {
+        "schema_version": "native-verifier/1",
+        "phase": phase,
+        "checks": checks,
+        "passed": phase == "final",
+        "environment_error": False,
+        "baseline_checks_complete": True,
+        "test_run": {
+            "discovered": 2,
+            "executed": 2,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "asserting_tests": 2,
+        }
+        if phase == "final"
+        else None,
+    }
+    facts = {
+        "argv": ["verifier", "--phase", phase],
+        "stdout": json.dumps(result),
+        "output_complete": True,
+        "stdout_eof": True,
+        "stderr_eof": True,
+        "wait_returncode": 0 if phase == "final" else 1,
+    }
+    verifier = NativeVerifier()
+    assert verifier.result(facts) == result
+    if change == "missing":
+        del result["checks"]["inputs_unchanged"]
+    elif change == "exit":
+        facts["wait_returncode"] = 7
+    elif change == "inconsistent":
+        result["passed"] = not result["passed"]
+    else:
+        facts["stderr_eof"] = False
+    facts["stdout"] = json.dumps(result)
+    refused = verifier.result(facts)
+    assert refused["passed"] is False and refused["environment_error"] is True

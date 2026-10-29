@@ -165,6 +165,10 @@ async def record_node(request, tmp_path, recwarn):
                             "returncode": j.process.returncode,
                             "pidfd_closed": j.pidfd == -1,
                             "collector_joined": j.collector.done() if j.collector else False,
+                            "stdout_eof": j.stdout_eof,
+                            "stderr_eof": j.stderr_eof,
+                            "stream_tasks_joined": all(t.done() for t in j.stream_tasks),
+                            "cleanup_receipts": j.cleanup_receipts,
                         }
                         for j in app.owner.jobs.values()
                     ],
@@ -1459,3 +1463,587 @@ async def test_real_native_cancel_after_completed_tool(tmp_path, target):
     assert value["output"]["cleanup"] == "closed"
     assert value["output"]["native"]["tools"]
     assert value["output"]["process"]["fixture_only"] is False
+
+
+async def test_pn2_repair_snapshot_receipt(tmp_path):
+    dataset = DatasetSpec.model_validate_json(
+        files("krim_agent.evaluation.examples").joinpath("reconciliation.v1.json").read_bytes()
+    )
+    database = tmp_path / "snapshot.sqlite"
+    DATABASES.append(database)
+    app = await open_eval(database)
+    APPLICATIONS.append(app)
+    try:
+        await app.repository.freeze(dataset)
+        request = TaskSpec(
+            dataset=dataset.ref(),
+            request_key="snapshot-receipt",
+            metrics=app.repository.metric_registry.specs(),
+        )
+        view = await app.run(request)
+        await app.kernel.wait(view["id"])
+        job = next(iter(app.adapter.jobs.values()))
+        original = copy.deepcopy(job.collector.result())
+        digest = fingerprint(original)
+        first = await app.adapter.cancel(job.ref)
+        second = await app.adapter.cancel(job.ref)
+        assert first.observation == second.observation == original
+        assert fingerprint(job.collector.result()) == digest
+        receipts = job.cleanup_receipts
+        assert receipts and all(r["closed"] for r in receipts)
+        assert all(r["wait_returncode"] is not None and r["collector_joined"] for r in receipts)
+        assert all(
+            r["stdout_eof"] and r["stderr_eof"] and r["pidfd_closed"] and r["group_empty"]
+            for r in receipts
+        )
+        await app.close()
+        await app.close()
+        assert fingerprint(job.collector.result()) == digest
+        (tmp_path / "cleanup-receipts.json").write_text(json.dumps(receipts, indent=2))
+    finally:
+        await app.close()
+
+
+async def test_pn2_repair_cleanup_budget(tmp_path, monkeypatch):
+    import time
+
+    dataset = DatasetSpec.model_validate_json(
+        files("krim_agent.evaluation.examples").joinpath("reconciliation.v1.json").read_bytes()
+    )
+    database = tmp_path / "budget.sqlite"
+    DATABASES.append(database)
+    app = await open_eval(database)
+    APPLICATIONS.append(app)
+    release = asyncio.Event()
+    original = app.adapter._collect
+
+    async def held(work):
+        await release.wait()
+        return await original(work)
+
+    monkeypatch.setattr(app.adapter, "_collect", held)
+    pending = None
+    timely = False
+    try:
+        await app.repository.freeze(dataset)
+        request = TaskSpec(
+            dataset=dataset.ref(),
+            request_key="cleanup-budget",
+            metrics=app.repository.metric_registry.specs(),
+        )
+        view, created = await app.repository.begin(request.model_dump(mode="json"))
+        assert created
+        trial = app.repository.plan(view).trials[0]
+        prepared = await app.adapter.prepare(trial)
+        await app.repository.intent(trial)
+        ref = await app.adapter.execute(prepared)
+        await app.repository.attach(trial, ref)
+        job = app.adapter.jobs[ref.id]
+        started = time.monotonic()
+        pending = asyncio.create_task(app.adapter.cancel(ref))
+        done, _ = await asyncio.wait({pending}, timeout=30.3)
+        elapsed = time.monotonic() - started
+        timely = pending in done
+        if timely:
+            result = pending.result()
+            assert not result.closed and result.reason == "cleanup_unknown"
+            assert job.collector is not None and not job.collector.done()
+            assert job.pidfd >= 0 and app.owner.jobs[job.ref.id] is job
+            assert job.cleanup_receipts[-1]["collector_joined"] is False
+        (tmp_path / "cleanup-budget.json").write_text(
+            json.dumps(
+                {
+                    "seconds": elapsed,
+                    "bounded_before_release": timely,
+                    "pid": job.process.pid,
+                    "collector_done": job.collector.done(),
+                }
+            )
+        )
+    finally:
+        release.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        await app.close()
+    assert timely, "30-second cleanup budget was bypassed by collector wait"
+    assert job.collector.done() and job.process.returncode is not None and job.pidfd == -1
+    assert app.owner.closed and app.adapter.closed
+    assert job.cleanup_receipts[-1]["closed"]
+    (tmp_path / "cleanup-budget-receipts.json").write_text(
+        json.dumps(job.cleanup_receipts, indent=2)
+    )
+
+
+async def test_pn2_repair_collect_unknown_blocks(tmp_path, monkeypatch):
+    app, adapter, request, profile = await native_app(
+        tmp_path, extra_keys=("blocked-after-unknown",)
+    )
+    release = asyncio.Event()
+    original = adapter._settle
+
+    async def conservative(job):
+        closed = await original(job)
+        return closed and release.is_set()
+
+    monkeypatch.setattr(adapter, "_settle", conservative)
+    try:
+        view = await app.run(request)
+        result = await app.kernel.wait(view["id"])
+        assert result["status"] == "failed" and result["code"] == "execution_unknown"
+        assert app.kernel.cleanup_unknown
+        assert adapter.execute_calls == 1
+        with pytest.raises(ServiceError, match="storage_unavailable"):
+            await app.run(request.model_copy(update={"request_key": "blocked-after-unknown"}))
+        assert adapter.execute_calls == 1
+        assert all(j.resources for j in adapter.jobs.values())
+        assert result["items"][0]["output"]["cleanup"] == "unknown"
+    finally:
+        release.set()
+        await app.close()
+    assert adapter.closed and app.owner.closed
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "verifier-nonzero",
+        "verifier-missing",
+        "artifact-oversize",
+        "artifact-fifo",
+        "tests-undiscoverable",
+        "tests-empty",
+        "tests-fail",
+        "command-unrelated",
+        "normal",
+    ],
+)
+async def test_pn2_repair_verifier_hard_gates(tmp_path, monkeypatch, case):
+    app, adapter, request, profile = await native_app(
+        tmp_path, mode=case if not case.startswith("verifier-") else "normal"
+    )
+    if case.startswith("verifier-"):
+        script = tmp_path / "controlled-verifier.py"
+        checks = {
+            k: True
+            for k in [
+                "inputs_unchanged",
+                "gold_0",
+                "gold_1",
+                "gold_2",
+                "reject_0",
+                "reject_1",
+                "reject_2",
+                "source_changed",
+                "tests_changed",
+                "effective_tests",
+                "ledger",
+                "summary",
+            ]
+        }
+        value = {
+            "schema_version": "native-verifier/1",
+            "phase": "final",
+            "passed": True,
+            "checks": checks,
+            "environment_error": False,
+            "baseline_checks_complete": True,
+            "test_run": {
+                "discovered": 2,
+                "executed": 2,
+                "failures": 0,
+                "errors": 0,
+                "skipped": 0,
+                "asserting_tests": 2,
+            },
+        }
+        if case == "verifier-missing":
+            value = {"passed": True}
+        script.write_text(
+            "import json\nprint("
+            + repr(json.dumps(value))
+            + ")\nraise SystemExit("
+            + str(7 if case == "verifier-nonzero" else 0)
+            + ")\n"
+        )
+        original = adapter.verifier.argv
+
+        def controlled(profile, directory, initial_file, *, final):
+            if final:
+                return [sys.executable, "-I", "-B", str(script), "--phase", "final"]
+            return original(profile, directory, initial_file, final=final)
+
+        monkeypatch.setattr(adapter.verifier, "argv", controlled)
+        adapter._verifier_methods = (
+            controlled,
+            getattr(adapter.verifier.result, "__func__", adapter.verifier.result),
+        )
+    try:
+        view = await app.run(request)
+        result = await app.kernel.wait(view["id"])
+        item = result["items"][0]
+        assert adapter.execute_calls == 1
+        if case == "normal":
+            assert item["quality"] == "passed", item
+            assert item["output"]["verification"]["test_run"]["executed"] >= 2
+            assert item["output"]["verification"]["test_run"]["asserting_tests"] >= 2
+        else:
+            assert item["quality"] != "passed", item
+            assert any(s["value"] != 1 for s in item["scores"])
+        if case == "verifier-nonzero":
+            stages = item["output"]["process"]["stages"]
+            assert (
+                next(s for s in stages if s["phase"] == "verifier")["facts"]["wait_returncode"] == 7
+            )
+        if case.startswith("artifact-"):
+            assert item["output"]["process"]["artifact_error"]
+            assert item["output"]["native"]["tools"]
+        if case == "command-unrelated":
+            job = next(iter(adapter.jobs.values()))
+            actual = json.loads(
+                (Path(job.prepared.directory) / ".fixture-command.json").read_text()
+            )
+            assert actual["argv"] == ["/usr/bin/echo", "unrelated"]
+            assert actual["returncode"] == 0
+            assert item["output"]["verification"]["test_run"]["executed"] == 2
+        assert (await app.run(request))["id"] == view["id"] and adapter.execute_calls == 1
+    finally:
+        await app.close()
+
+
+async def test_pn2_repair_krim_snapshot_failure(tmp_path, monkeypatch):
+    from krim_agent.config import Settings
+    from krim_agent.contracts import RunRequest, parse_json
+    from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
+    from krim_agent.evaluation.ports import AdapterLease
+    from krim_agent.evaluation.targets import make_eval_bindings
+    from krim_agent.runtime.service import RunBinding, RunService
+    from krim_agent.storage.sqlite import SQLiteStore
+
+    database = tmp_path / "runs.sqlite"
+    DATABASES.append(database)
+    settings = Settings(database=database, max_active_runs=1)
+    store = await SQLiteStore.open(database)
+    await store.recover()
+    bindings = make_eval_bindings(store, settings)
+    provider = bindings["target-v2"].loop.provider
+    stream = provider.stream
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held(messages, tools):
+        entered.set()
+        await release.wait()
+        async for event in stream(messages, tools):
+            yield event
+
+    monkeypatch.setattr(provider, "stream", held)
+    base = bindings["target-v2"]
+    bindings["target-v2"] = RunBinding.freeze("target-v2", base.loop, base.settings)
+    base = bindings["target-v2"]
+    runs = RunService(store, base.loop, settings, parse_json(base.descriptor_json), bindings)
+    neutral = NeutralKrimAdapter(store, runs, root=tmp_path / "inputs")
+    app = await open_eval(
+        tmp_path / "eval.sqlite", adapters={"krim-script-v2": AdapterLease(neutral, owned=False)}
+    )
+    APPLICATIONS.append(app)
+    DATABASES.append(tmp_path / "eval.sqlite")
+    original_snapshot = store.snapshot
+    failed = False
+
+    async def snapshot_failure(ident):
+        nonlocal failed
+        if not failed and ident in runs.tasks:
+            await asyncio.wait_for(entered.wait(), 2)
+            failed = True
+            raise OSError("CONTROLLED_POST_START_SNAPSHOT_FAILURE")
+        return await original_snapshot(ident)
+
+    original_start = runs.start
+
+    async def start_then_fault(value):
+        run = await original_start(value)
+        await asyncio.wait_for(entered.wait(), 2)
+        monkeypatch.setattr(store, "snapshot", snapshot_failure)
+        return run
+
+    monkeypatch.setattr(runs, "start", start_then_fault)
+    try:
+        dataset = DatasetSpec.model_validate(
+            {
+                "name": "repair-krim",
+                "version": "1",
+                "cases": [
+                    {
+                        "case_id": "sum",
+                        "instruction": "/add 2 3",
+                        "files": {"INPUT.txt": "/add 2 3"},
+                        "reference": {"expected": "5"},
+                        "verifier": "krim-script/1",
+                    }
+                ],
+            }
+        )
+        await app.repository.freeze(dataset)
+        request = TaskSpec(
+            dataset=dataset.ref(),
+            request_key="snapshot-failure",
+            target_key="krim-script-v2",
+            metrics=app.repository.metric_registry.specs("krim"),
+        )
+        view = await app.run(request)
+        result = await app.kernel.wait(view["id"])
+        assert failed and result["status"] == "failed"
+        owned = await store.by_key(f"pn2.krim.{view['id']}.sum.0")
+        assert runs.tasks[owned.id].done(), "owned Run must join before borrowed service close"
+        assert not runs.closed and not store.closed
+        assert not any(not t.done() for t in runs.tasks.values())
+        monkeypatch.setattr(runs, "start", original_start)
+        other = await runs.start(
+            RunRequest(text="/add 1 1", request_key="other-run", target="target-v1")
+        )
+        await runs.wait(other.id)
+        assert (await store.snapshot(other.id)).run.status == "completed"
+        assert (await app.run(request))["id"] == view["id"] and neutral.execute_calls == 1
+        (tmp_path / "pre-borrowed-close.json").write_text(
+            json.dumps(
+                {
+                    "owned": owned.id,
+                    "joined": runs.tasks[owned.id].done(),
+                    "other": other.id,
+                    "other_status": (await store.snapshot(other.id)).run.status,
+                    "runs_closed": runs.closed,
+                    "provider_calls": provider.calls,
+                }
+            )
+        )
+    finally:
+        release.set()
+        await app.close()
+        await neutral.close()
+        await runs.close()
+        for item in {id(b.loop.provider): b.loop.provider for b in bindings.values()}.values():
+            await item.close()
+        await store.close()
+
+
+async def test_pn2_repair_vacuous_tests_are_rejected(tmp_path):
+    app, adapter, request, profile = await native_app(tmp_path, mode="tests-vacuous")
+    try:
+        view = await app.run(request)
+        result = await app.kernel.wait(view["id"])
+        item = result["items"][0]
+        assert adapter.execute_calls == 1
+        assert item["quality"] != "passed", item
+        assert item["output"]["verification"]["checks"]["effective_tests"] is False
+        assert (await app.run(request))["id"] == view["id"] and adapter.execute_calls == 1
+    finally:
+        await app.close()
+
+
+@pytest.mark.parametrize("backend", ["reference", "native"])
+async def test_pn2_reentry_runner_cleanup_budget(tmp_path, monkeypatch, backend):
+    from krim_agent.evaluation.adapters.process import ProcessOwner
+    from krim_agent.evaluation.repository import Repository
+    from krim_agent.evaluation.runner import ItemWork
+
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    held = []
+    attempts = []
+    runner_calls = []
+    observed_reads = set()
+    original_observe = ProcessOwner.observe
+    original_cancel = ProcessOwner._cancel
+    original_cleanup = ItemWork.cleanup
+    app = adapter = waiting = None
+    bounded = False
+    before_close = None
+    close_evidence = {}
+
+    async def observe(owner, work, **kwargs):
+        is_target = backend == "reference" or "--family" in work.argv
+        if is_target and not held:
+            held.append(work)
+            for name in ["stdout", "stderr"]:
+                stream = getattr(work.process, name)
+                read = stream.read
+
+                async def gated(size=-1, *, name=name, read=read):
+                    observed_reads.add(name)
+                    if observed_reads == {"stdout", "stderr"}:
+                        entered.set()
+                    await release.wait()
+                    return await read(size)
+
+                monkeypatch.setattr(stream, "read", gated)
+        return await original_observe(owner, work, **kwargs)
+
+    async def measured_cancel(owner, work):
+        if held and work is held[0]:
+            attempts.append(
+                {
+                    "time": loop.time(),
+                    "task_identity": id(asyncio.current_task()),
+                    "pid": work.process.pid,
+                }
+            )
+            cleanup_started.set()
+        return await original_cancel(owner, work)
+
+    async def measured_cleanup(work):
+        if work.adapter is adapter:
+            runner_calls.append(
+                {
+                    "time": loop.time(),
+                    "admission_done": work.admission is not None and work.admission.done(),
+                    "scorer": None if work.scorer is None else work.scorer.done(),
+                    "ref": None if work.ref is None else work.ref.id,
+                }
+            )
+        return await original_cleanup(work)
+
+    monkeypatch.setattr(ProcessOwner, "observe", observe)
+    monkeypatch.setattr(ProcessOwner, "_cancel", measured_cancel)
+    monkeypatch.setattr(ItemWork, "cleanup", measured_cleanup)
+    try:
+        if backend == "native":
+            app, adapter, request, profile = await native_app(
+                tmp_path, extra_keys=("must-not-dispatch",)
+            )
+            database = profile.binding.database
+        else:
+            database = tmp_path / "runner-reference.sqlite"
+            DATABASES.append(database)
+            app = await open_eval(database)
+            APPLICATIONS.append(app)
+            adapter = app.adapter
+            dataset = DatasetSpec.model_validate_json(
+                files("krim_agent.evaluation.examples")
+                .joinpath("reconciliation.v1.json")
+                .read_bytes()
+            )
+            await app.repository.freeze(dataset)
+            request = TaskSpec(
+                dataset=dataset.ref(),
+                request_key="full-runner",
+                metrics=app.repository.metric_registry.specs(),
+            )
+        assert request.execution.item_timeout_seconds == 20
+        view = await app.run(request)
+        waiting = asyncio.create_task(app.kernel.wait(view["id"]))
+        await asyncio.wait_for(entered.wait(), 5)
+        work = held[0]
+        assert work.pidfd >= 0 and work.collector is not None
+        assert len(work.stream_tasks) == 3
+        assert observed_reads == {"stdout", "stderr"}
+        await asyncio.wait_for(cleanup_started.wait(), 25)
+        done, _ = await asyncio.wait({waiting}, timeout=31)
+        bounded = waiting in done
+        result = waiting.result() if bounded else await app.repository.snapshot(view["id"])
+        before_close = {
+            "backend": backend,
+            "task_id": view["id"],
+            "database": str(database),
+            "bounded_before_release": bounded,
+            "seconds_from_first_cleanup": loop.time() - attempts[0]["time"],
+            "result": result,
+            "runner_calls": copy.deepcopy(runner_calls),
+            "attempts": copy.deepcopy(attempts),
+            "cleanup_receipts": copy.deepcopy(work.cleanup_receipts),
+            "collector_done": work.collector.done(),
+            "stream_tasks_done": [t.done() for t in work.stream_tasks],
+            "pidfd_retained": work.pidfd >= 0,
+            "same_owned_object": app.owner.jobs.get(work.ref.id) is work,
+            "execute_calls": adapter.execute_calls,
+        }
+        (tmp_path / "runner-before-release.json").write_text(json.dumps(before_close, indent=2))
+        if bounded:
+            assert result["status"] == "failed" and result["code"] == "execution_unknown"
+            assert app.kernel.cleanup_unknown
+            assert len(attempts) == 1 and len(runner_calls) == 2
+            assert not work.collector.done() and work.pidfd >= 0
+            assert not work.stdout_eof and not work.stderr_eof
+            assert not all(t.done() for t in work.stream_tasks)
+            assert app.owner.jobs[work.ref.id] is work
+            assert work.cleanup_receipts[-1]["reason"] == "cleanup_unknown"
+            first_task = work.cancel_task
+            unknown = await app.owner.cancel(work, work.lease)
+            assert not unknown.closed and work.cancel_task is first_task
+            assert len(attempts) == 1
+            with pytest.raises(ServiceError, match="permission_denied"):
+                await app.owner.cancel(work, object())
+            assert len(attempts) == 1
+            with pytest.raises(ServiceError, match="storage_unavailable"):
+                await app.run(request)
+            with pytest.raises(ServiceError, match="storage_unavailable"):
+                await app.run(request.model_copy(update={"request_key": "must-not-dispatch"}))
+            found = await app.repository.by_key(request.model_dump(mode="json"))
+            assert found["id"] == view["id"]
+            with pytest.raises(ServiceError, match="database_busy"):
+                await Repository.open(database)
+    finally:
+        release.set()
+        if waiting is not None:
+            await asyncio.gather(waiting, return_exceptions=True)
+        if held:
+            work = held[0]
+            await asyncio.wait_for(asyncio.shield(work.collector), 5)
+            original = copy.deepcopy(work.collector.result())
+            original_hash = fingerprint(original)
+            published = None
+            if backend == "native":
+                published = copy.deepcopy(next(iter(adapter.jobs.values())).observation)
+            published_hash = fingerprint(published)
+            calls = adapter.execute_calls
+            task_before = await app.repository.snapshot(view["id"])
+            await app.close()
+            await app.close()
+            assert work.process.returncode is not None and work.pidfd == -1
+            assert work.collector.done() and all(t.done() for t in work.stream_tasks)
+            assert work.stdout_eof and work.stderr_eof
+            assert work.cleanup_receipts[-1]["closed"]
+            assert work.cleanup_receipts[-1]["group_empty"]
+            assert fingerprint(work.collector.result()) == original_hash
+            if backend == "native":
+                assert fingerprint(next(iter(adapter.jobs.values())).observation) == published_hash
+            assert adapter.execute_calls == calls
+            repeated = await app.owner.cancel(work, work.lease)
+            assert repeated.closed and repeated.observation == original
+            reader = await open_eval(database, readonly=True)
+            APPLICATIONS.append(reader)
+            try:
+                cold = await reader.repository.by_key(request.model_dump(mode="json"))
+                assert cold["id"] == view["id"] and cold == task_before
+            finally:
+                await reader.close()
+            writer = await Repository.open(database)
+            await writer.close()
+            close_evidence = {
+                "backend": backend,
+                "task_id": view["id"],
+                "same_pid": work.process.pid,
+                "wait": work.process.returncode,
+                "collector_done": work.collector.done(),
+                "stream_tasks_done": [t.done() for t in work.stream_tasks],
+                "stdout_eof": work.stdout_eof,
+                "stderr_eof": work.stderr_eof,
+                "pidfd_closed": work.pidfd == -1,
+                "cleanup_receipts": work.cleanup_receipts,
+                "original_observation_hash": original_hash,
+                "published_observation_hash": published_hash,
+                "execute_calls_before_close": calls,
+                "execute_calls_after_close": adapter.execute_calls,
+                "second_writer_closed": writer.closed,
+                "second_writer_connections": writer.resources,
+                "runner_calls": runner_calls,
+                "attempts": attempts,
+            }
+            (tmp_path / "runner-explicit-close.json").write_text(
+                json.dumps(close_evidence, indent=2)
+            )
+        elif app is not None:
+            await app.close()
+    assert bounded, "runner automatically renewed cleanup after the first 30-second budget"
+    assert before_close["seconds_from_first_cleanup"] < 31
+    assert before_close["execute_calls"] == close_evidence["execute_calls_after_close"] == 1
