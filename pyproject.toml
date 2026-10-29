@@ -114,6 +114,22 @@ only-include = [
   "src/krim_agent/evaluation/adapters/claude_events.py",
   "src/krim_agent/evaluation/verifiers.py",
   "src/krim_agent/evaluation/examples/native_repair.v1.json",
+  "src/krim_agent/evaluation/continuous_types.py",
+  "src/krim_agent/evaluation/continuous.py",
+  "src/krim_agent/evaluation/sources.py",
+  "src/krim_agent/evaluation/continuous_store.py",
+  "src/krim_agent/evaluation/continuous_reports.py",
+  "src/krim_agent/evaluation/continuous_metrics.py",
+  "src/krim_agent/evaluation/adapters/krim_source.py",
+  "src/krim_agent/evaluation/examples/continuous.v1.json",
+  "src/krim_agent/evaluation/paging.py",
+  "src/krim_agent/evaluation/scale_store.py",
+  "src/krim_agent/evaluation/scale_reports.py",
+  "src/krim_agent/evaluation/examples/scale_reconciliation.v1.json",
+  "src/krim_agent/storage/observation_outbox.py",
+  "src/krim_agent/evaluation/hot_types.py",
+  "src/krim_agent/evaluation/hot_observations.py",
+  "src/krim_agent/evaluation/adapters/krim_outbox.py",
 ]
 sources = ["src"]
 [tool.pytest.ini_options]

@@ -58,8 +58,14 @@ def _read_regular(root: int, name: str) -> bytes:
 
 
 def verify_repository(directory: Path, initial: dict[str, Any], *, final: bool) -> dict[str, Any]:
+    import io
+    import types
+    import unittest
+
     checks: dict[str, bool] = {}
     previous_path = list(sys.path)
+    test_run = None
+    phase = "final" if final else "initial"
     try:
         root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -103,16 +109,15 @@ def verify_repository(directory: Path, initial: dict[str, Any], *, final: bool) 
         ]
         for index, (rows, expected) in enumerate(vectors):
             checks[f"gold_{index}"] = function(rows) == expected
-        for index, bad in enumerate(
+        bads = [
+            [{"id": "1", "account": "a", "amount": "NaN"}],
+            [{"id": "1", "account": "a", "amount": "0.001"}],
             [
-                [{"id": "1", "account": "a", "amount": "NaN"}],
-                [{"id": "1", "account": "a", "amount": "0.001"}],
-                [
-                    {"id": "1", "account": "a", "amount": "1"},
-                    {"id": "1", "account": "b", "amount": "2"},
-                ],
+                {"id": "1", "account": "a", "amount": "1"},
+                {"id": "1", "account": "b", "amount": "2"},
             ],
-        ):
+        ]
+        for index, bad in enumerate(bads):
             try:
                 function(bad)
             except (ValueError, ArithmeticError):
@@ -126,14 +131,91 @@ def verify_repository(directory: Path, initial: dict[str, Any], *, final: bool) 
             checks["tests_changed"] = (
                 hashlib.sha256(tests).hexdigest() != initial["tests/test_reconcile.py"]["sha256"]
             )
-            checks["effective_tests"] = (
-                sum(
-                    isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name.startswith("test_")
-                    for n in ast.walk(ast.parse(tests))
+            # 有限unittest判据：固定文件内可发现的TestCase、至少两个有断言的方法，且真实执行成功。
+            tree = ast.parse(tests)
+
+            def calls_reconcile(node: ast.AST) -> bool:
+                return any(
+                    isinstance(x, ast.Call)
+                    and isinstance(x.func, ast.Name)
+                    and x.func.id == "reconcile"
+                    for x in ast.walk(node)
                 )
-                >= 2
+
+            asserting = set()
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for method in node.body:
+                    if not isinstance(method, ast.FunctionDef) or not method.name.startswith(
+                        "test_"
+                    ):
+                        continue
+                    values = {
+                        target.id
+                        for x in ast.walk(method)
+                        if isinstance(x, ast.Assign) and calls_reconcile(x.value)
+                        for target in x.targets
+                        if isinstance(target, ast.Name)
+                    }
+                    for check in ast.walk(method):
+                        is_assert = isinstance(check, ast.Assert) or (
+                            isinstance(check, ast.Call)
+                            and isinstance(check.func, ast.Attribute)
+                            and check.func.attr.startswith("assert")
+                            and isinstance(check.func.value, ast.Name)
+                            and check.func.value.id == "self"
+                        )
+                        # 拒绝assertTrue(True)等空断言；只支持直接调用或简单局部赋值关联。
+                        if is_assert and (
+                            calls_reconcile(check)
+                            or any(
+                                isinstance(x, ast.Name) and x.id in values for x in ast.walk(check)
+                            )
+                        ):
+                            asserting.add((node.name, method.name))
+            module = types.ModuleType("_pn2_regression")
+            module.__file__ = str(directory / "tests/test_reconcile.py")
+            exec(compile(tests, module.__file__, "exec"), module.__dict__)
+            suite = unittest.TestLoader().loadTestsFromModule(module)
+
+            def cases(group: Any) -> list[Any]:
+                return [
+                    test
+                    for item in group
+                    for test in (cases(item) if isinstance(item, unittest.TestSuite) else [item])
+                ]
+
+            discovered = cases(suite)
+            assertion_count = sum(
+                (type(t).__name__, t._testMethodName) in asserting for t in discovered
             )
+            if not 2 <= len(discovered) <= 32:
+                checks["effective_tests"] = False
+                test_run = {
+                    "discovered": len(discovered),
+                    "executed": 0,
+                    "failures": 0,
+                    "errors": 0,
+                    "skipped": 0,
+                    "asserting_tests": assertion_count,
+                }
+            else:
+                result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+                test_run = {
+                    "discovered": len(discovered),
+                    "executed": result.testsRun,
+                    "failures": len(result.failures),
+                    "errors": len(result.errors),
+                    "skipped": len(result.skipped),
+                    "asserting_tests": assertion_count,
+                }
+                checks["effective_tests"] = (
+                    result.wasSuccessful()
+                    and result.testsRun == len(discovered)
+                    and not result.skipped
+                    and assertion_count >= 2
+                )
             root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 checks["ledger"] = json.loads(_read_regular(root, "outputs/ledger.json")) == {
@@ -147,20 +229,16 @@ def verify_repository(directory: Path, initial: dict[str, Any], *, final: bool) 
             finally:
                 os.close(root)
         return {
+            "schema_version": "native-verifier/1",
+            "phase": phase,
             "passed": all(checks.values()),
             "checks": checks,
             "environment_error": False,
             "baseline_checks_complete": all(
-                name in checks
-                for name in [
-                    "gold_0",
-                    "gold_1",
-                    "gold_2",
-                    "reject_0",
-                    "reject_1",
-                    "reject_2",
-                ]
+                k in checks
+                for k in ["gold_0", "gold_1", "gold_2", "reject_0", "reject_1", "reject_2"]
             ),
+            "test_run": test_run,
         }
     except (
         KeyError,
@@ -173,9 +251,13 @@ def verify_repository(directory: Path, initial: dict[str, Any], *, final: bool) 
         SystemExit,
     ) as error:
         return {
+            "schema_version": "native-verifier/1",
+            "phase": phase,
             "passed": False,
             "checks": checks,
             "environment_error": False,
+            "baseline_checks_complete": False,
+            "test_run": test_run,
             "reason": type(error).__name__,
         }
     finally:
@@ -216,14 +298,83 @@ class NativeVerifier:
         return args
 
     def result(self, facts: dict[str, Any]) -> dict[str, Any]:
-        if not facts["output_complete"]:
-            return {"passed": False, "environment_error": True, "reason": "verifier_output_limit"}
+        from typing import cast
+
+        from krim_agent.contracts import parse_json
+
         try:
-            result = json.loads(facts["stdout"])
-            if not isinstance(result, dict) or type(result.get("passed")) is not bool:
+            if (
+                facts.get("output_complete") is not True
+                or facts.get("stdout_eof") is not True
+                or facts.get("stderr_eof") is not True
+            ):
+                raise ValueError("verifier_output_limit")
+            argv = facts["argv"]
+            phase = argv[argv.index("--phase") + 1]
+            result = parse_json(facts["stdout"])
+            if not isinstance(result, dict):
                 raise ValueError("verifier_schema")
+            checks = result.get("checks")
+            expected = {
+                "inputs_unchanged",
+                "gold_0",
+                "gold_1",
+                "gold_2",
+                "reject_0",
+                "reject_1",
+                "reject_2",
+            }
+            if phase == "final":
+                expected |= {
+                    "source_changed",
+                    "tests_changed",
+                    "effective_tests",
+                    "ledger",
+                    "summary",
+                }
+            if (
+                phase not in {"initial", "final"}
+                or result.get("schema_version") != "native-verifier/1"
+                or result.get("phase") != phase
+                or not isinstance(checks, dict)
+                or set(checks) != expected
+                or not all(type(v) is bool for v in checks.values())
+                or type(result.get("passed")) is not bool
+                or result["passed"] != all(checks.values())
+                or result.get("environment_error") is not False
+                or result.get("baseline_checks_complete") is not True
+                or type(facts.get("wait_returncode")) is not int
+                or facts["wait_returncode"] != (0 if result["passed"] else 1)
+            ):
+                raise ValueError("verifier_schema")
+            if phase == "final":
+                run = result.get("test_run")
+                keys = {
+                    "discovered",
+                    "executed",
+                    "failures",
+                    "errors",
+                    "skipped",
+                    "asserting_tests",
+                }
+                if (
+                    not isinstance(run, dict)
+                    or set(run) != keys
+                    or any(type(v) is not int or v < 0 for v in run.values())
+                ):
+                    raise ValueError("verifier_tests")
+                counts = cast(dict[str, int], run)
+                effective = (
+                    2 <= counts["executed"] == counts["discovered"] <= 32
+                    and counts["asserting_tests"] >= 2
+                    and counts["failures"] == counts["errors"] == counts["skipped"] == 0
+                )
+                if checks["effective_tests"] != effective:
+                    raise ValueError("verifier_tests")
+            elif result.get("test_run") is not None:
+                raise ValueError("verifier_tests")
             return result
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError, IndexError):
             return {"passed": False, "environment_error": True, "reason": "verifier_protocol"}
 
 

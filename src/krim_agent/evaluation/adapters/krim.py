@@ -222,6 +222,9 @@ class LegacyRepository:
     async def finish(self, task_id: str, status: str, code: str) -> None:
         await self.store.finish_eval(task_id, status, code)
 
+    def mode(self, request: dict[str, Any]) -> str:
+        return "execute"
+
 
 class EvaluationService:
     """保持旧构造/DTO和只读接口；不持有第二份_drive或执行循环。"""
@@ -383,18 +386,48 @@ class NeutralKrimAdapter:
         )
         old = await self.store.by_key(key)
         self.assert_current(trial.target)
+        admitted = False
         if old is None:
             self.execute_calls += 1
             try:
                 old = await self.runs.start(request)
-            except Exception:
-                old = await self.store.by_key(key)
+                # 真实start已校验完整request；在任何后续await之前接管其返回的身份。
+                admitted = old.request_key == key
+            except Exception as error:
+                try:
+                    old = await self.store.by_key(key)
+                except Exception as lookup_error:
+                    self.closed = True
+                    vars(self).setdefault("_unresolved_starts", {})[key] = request
+                    raise ServiceError("execution_unknown") from lookup_error
                 if old is None:
-                    raise
-        snapshot = await self.store.snapshot(old.id)
-        if snapshot.request != request:
-            raise ServiceError("key_conflict")
+                    if isinstance(error, ServiceError):
+                        raise error
+                    self.closed = True
+                    vars(self).setdefault("_unresolved_starts", {})[key] = request
+                    raise ServiceError("execution_unknown") from error
         ref = ExecutionRef(old.id)
+        if admitted:
+            self.jobs[ref.id] = ref
+        try:
+            snapshot = await self.store.snapshot(old.id)
+            if snapshot.request != request:
+                raise ServiceError("key_conflict")
+            self.assert_current(trial.target)
+        except BaseException:
+            if admitted:
+                # 借用服务保持开放；只取消本次可信start交回的Run，join在异常回程之前完成。
+                from ..lifecycle import settled
+
+                try:
+                    await settled(self.runs.cancel(ref.id))
+                except Exception as error:
+                    self.closed = True
+                    raise ServiceError("execution_unknown") from error
+            else:
+                self.closed = True
+                vars(self).setdefault("_unresolved_starts", {})[key] = request
+            raise
         self.jobs[ref.id] = ref
         return ref
 

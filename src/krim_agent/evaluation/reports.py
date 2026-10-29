@@ -155,6 +155,8 @@ def make_report(snapshot: dict[str, Any]) -> dict[str, JsonValue]:
 
 
 def validate_report(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") in {"safe-eval/scale/1", "safe-eval/scale/2"}:
+        raise ServiceError("report_pages_required")
     if value.get("schema_version") == "safe-eval/1":
         return validate_neutral_report(value)
     if (
@@ -350,6 +352,20 @@ def gate_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[st
 
 
 def make_neutral_report(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if snapshot.get("layout") == 3:
+        root = snapshot.get("report")
+        if not isinstance(root, dict):
+            raise ServiceError("report_pages_required")
+        from .scale_reports import validate_manifest
+
+        checked = validate_manifest(root)
+        if checked["eval_id"] != snapshot["id"] or checked["revision"] != snapshot["revision"]:
+            raise ServiceError("facts_corrupt")
+        return checked
+    if snapshot.get("continuous") is not None:
+        from .continuous_reports import make_report as continuous_report
+
+        return continuous_report(snapshot)
     report = {
         "schema_version": "safe-eval/1",
         "eval_id": snapshot["id"],
@@ -384,6 +400,14 @@ def make_neutral_report(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_neutral_report(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") in {"safe-eval/scale/1", "safe-eval/scale/2"}:
+        from .scale_reports import validate_manifest
+
+        return validate_manifest(value)
+    if value.get("schema_version") == "safe-eval/continuous/1":
+        from .continuous_reports import validate_report as continuous_report
+
+        return continuous_report(value)
     from .domain import Budget, DatasetSpec, MetricSpec
 
     if value.get("report_hash") != neutral_fingerprint(

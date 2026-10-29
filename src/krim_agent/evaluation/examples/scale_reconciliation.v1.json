@@ -1,0 +1,2306 @@
+{
+  "name": "pn3-scale-reconciliation",
+  "version": "1",
+  "cases": [
+    {
+      "case_id": "scale-000",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.00\nt1,a,1.00\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 100,
+              "b": -100
+            },
+            "total_cents": 0,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=0\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-001",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.01\nt1,a,1.01\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 101,
+              "b": -100
+            },
+            "total_cents": 1,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=1\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-002",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.02\nt1,a,1.02\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 102,
+              "b": -100
+            },
+            "total_cents": 2,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=2\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-003",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.03\nt1,a,1.03\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 103,
+              "b": -100
+            },
+            "total_cents": 3,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=3\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-004",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.04\nt1,a,1.04\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 104,
+              "b": -100
+            },
+            "total_cents": 4,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=4\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-005",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.05\nt1,a,1.05\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 105,
+              "b": -100
+            },
+            "total_cents": 5,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=5\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-006",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.06\nt1,a,1.06\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 106,
+              "b": -100
+            },
+            "total_cents": 6,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=6\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-007",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.07\nt1,a,1.07\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 107,
+              "b": -100
+            },
+            "total_cents": 7,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=7\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-008",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.08\nt1,a,1.08\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 108,
+              "b": -100
+            },
+            "total_cents": 8,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=8\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-009",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.09\nt1,a,1.09\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 109,
+              "b": -100
+            },
+            "total_cents": 9,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=9\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-010",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.10\nt1,a,1.10\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 110,
+              "b": -100
+            },
+            "total_cents": 10,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=10\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-011",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.11\nt1,a,1.11\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 111,
+              "b": -100
+            },
+            "total_cents": 11,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=11\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-012",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.12\nt1,a,1.12\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 112,
+              "b": -100
+            },
+            "total_cents": 12,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=12\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-013",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.13\nt1,a,1.13\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 113,
+              "b": -100
+            },
+            "total_cents": 13,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=13\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-014",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.14\nt1,a,1.14\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 114,
+              "b": -100
+            },
+            "total_cents": 14,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=14\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-015",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.15\nt1,a,1.15\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 115,
+              "b": -100
+            },
+            "total_cents": 15,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=15\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-016",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.16\nt1,a,1.16\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 116,
+              "b": -100
+            },
+            "total_cents": 16,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=16\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-017",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.17\nt1,a,1.17\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 117,
+              "b": -100
+            },
+            "total_cents": 17,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=17\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-018",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.18\nt1,a,1.18\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 118,
+              "b": -100
+            },
+            "total_cents": 18,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=18\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-019",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.19\nt1,a,1.19\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 119,
+              "b": -100
+            },
+            "total_cents": 19,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=19\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-020",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.20\nt1,a,1.20\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 120,
+              "b": -100
+            },
+            "total_cents": 20,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=20\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-021",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.21\nt1,a,1.21\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 121,
+              "b": -100
+            },
+            "total_cents": 21,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=21\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-022",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.22\nt1,a,1.22\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 122,
+              "b": -100
+            },
+            "total_cents": 22,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=22\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-023",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.23\nt1,a,1.23\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 123,
+              "b": -100
+            },
+            "total_cents": 23,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=23\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-024",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.24\nt1,a,1.24\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 124,
+              "b": -100
+            },
+            "total_cents": 24,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=24\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-025",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.25\nt1,a,1.25\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 125,
+              "b": -100
+            },
+            "total_cents": 25,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=25\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-026",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.26\nt1,a,1.26\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 126,
+              "b": -100
+            },
+            "total_cents": 26,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=26\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-027",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.27\nt1,a,1.27\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 127,
+              "b": -100
+            },
+            "total_cents": 27,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=27\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-028",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.28\nt1,a,1.28\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 128,
+              "b": -100
+            },
+            "total_cents": 28,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=28\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-029",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.29\nt1,a,1.29\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 129,
+              "b": -100
+            },
+            "total_cents": 29,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=29\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-030",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.30\nt1,a,1.30\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 130,
+              "b": -100
+            },
+            "total_cents": 30,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=30\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-031",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.31\nt1,a,1.31\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 131,
+              "b": -100
+            },
+            "total_cents": 31,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=31\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-032",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.32\nt1,a,1.32\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 132,
+              "b": -100
+            },
+            "total_cents": 32,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=32\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-033",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.33\nt1,a,1.33\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 133,
+              "b": -100
+            },
+            "total_cents": 33,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=33\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-034",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.34\nt1,a,1.34\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 134,
+              "b": -100
+            },
+            "total_cents": 34,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=34\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-035",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.35\nt1,a,1.35\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 135,
+              "b": -100
+            },
+            "total_cents": 35,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=35\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-036",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.36\nt1,a,1.36\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 136,
+              "b": -100
+            },
+            "total_cents": 36,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=36\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-037",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.37\nt1,a,1.37\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 137,
+              "b": -100
+            },
+            "total_cents": 37,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=37\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-038",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.38\nt1,a,1.38\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 138,
+              "b": -100
+            },
+            "total_cents": 38,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=38\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-039",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.39\nt1,a,1.39\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 139,
+              "b": -100
+            },
+            "total_cents": 39,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=39\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-040",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.40\nt1,a,1.40\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 140,
+              "b": -100
+            },
+            "total_cents": 40,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=40\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-041",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.41\nt1,a,1.41\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 141,
+              "b": -100
+            },
+            "total_cents": 41,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=41\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-042",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.42\nt1,a,1.42\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 142,
+              "b": -100
+            },
+            "total_cents": 42,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=42\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-043",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.43\nt1,a,1.43\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 143,
+              "b": -100
+            },
+            "total_cents": 43,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=43\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-044",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.44\nt1,a,1.44\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 144,
+              "b": -100
+            },
+            "total_cents": 44,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=44\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-045",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.45\nt1,a,1.45\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 145,
+              "b": -100
+            },
+            "total_cents": 45,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=45\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-046",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.46\nt1,a,1.46\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 146,
+              "b": -100
+            },
+            "total_cents": 46,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=46\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-047",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.47\nt1,a,1.47\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 147,
+              "b": -100
+            },
+            "total_cents": 47,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=47\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-048",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.48\nt1,a,1.48\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 148,
+              "b": -100
+            },
+            "total_cents": 48,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=48\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-049",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.49\nt1,a,1.49\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 149,
+              "b": -100
+            },
+            "total_cents": 49,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=49\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-050",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.50\nt1,a,1.50\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 150,
+              "b": -100
+            },
+            "total_cents": 50,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=50\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-051",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.51\nt1,a,1.51\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 151,
+              "b": -100
+            },
+            "total_cents": 51,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=51\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-052",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.52\nt1,a,1.52\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 152,
+              "b": -100
+            },
+            "total_cents": 52,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=52\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-053",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.53\nt1,a,1.53\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 153,
+              "b": -100
+            },
+            "total_cents": 53,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=53\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-054",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.54\nt1,a,1.54\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 154,
+              "b": -100
+            },
+            "total_cents": 54,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=54\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-055",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.55\nt1,a,1.55\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 155,
+              "b": -100
+            },
+            "total_cents": 55,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=55\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-056",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.56\nt1,a,1.56\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 156,
+              "b": -100
+            },
+            "total_cents": 56,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=56\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-057",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.57\nt1,a,1.57\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 157,
+              "b": -100
+            },
+            "total_cents": 57,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=57\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-058",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.58\nt1,a,1.58\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 158,
+              "b": -100
+            },
+            "total_cents": 58,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=58\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-059",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.59\nt1,a,1.59\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 159,
+              "b": -100
+            },
+            "total_cents": 59,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=59\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-060",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.60\nt1,a,1.60\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 160,
+              "b": -100
+            },
+            "total_cents": 60,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=60\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-061",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.61\nt1,a,1.61\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 161,
+              "b": -100
+            },
+            "total_cents": 61,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=61\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-062",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.62\nt1,a,1.62\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 162,
+              "b": -100
+            },
+            "total_cents": 62,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=62\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-063",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.63\nt1,a,1.63\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 163,
+              "b": -100
+            },
+            "total_cents": 63,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=63\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-064",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.64\nt1,a,1.64\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 164,
+              "b": -100
+            },
+            "total_cents": 64,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=64\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-065",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.65\nt1,a,1.65\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 165,
+              "b": -100
+            },
+            "total_cents": 65,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=65\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-066",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.66\nt1,a,1.66\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 166,
+              "b": -100
+            },
+            "total_cents": 66,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=66\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-067",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.67\nt1,a,1.67\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 167,
+              "b": -100
+            },
+            "total_cents": 67,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=67\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-068",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.68\nt1,a,1.68\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 168,
+              "b": -100
+            },
+            "total_cents": 68,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=68\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-069",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.69\nt1,a,1.69\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 169,
+              "b": -100
+            },
+            "total_cents": 69,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=69\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-070",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.70\nt1,a,1.70\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 170,
+              "b": -100
+            },
+            "total_cents": 70,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=70\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-071",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.71\nt1,a,1.71\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 171,
+              "b": -100
+            },
+            "total_cents": 71,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=71\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-072",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.72\nt1,a,1.72\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 172,
+              "b": -100
+            },
+            "total_cents": 72,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=72\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-073",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.73\nt1,a,1.73\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 173,
+              "b": -100
+            },
+            "total_cents": 73,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=73\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-074",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.74\nt1,a,1.74\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 174,
+              "b": -100
+            },
+            "total_cents": 74,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=74\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-075",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.75\nt1,a,1.75\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 175,
+              "b": -100
+            },
+            "total_cents": 75,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=75\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-076",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.76\nt1,a,1.76\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 176,
+              "b": -100
+            },
+            "total_cents": 76,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=76\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-077",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.77\nt1,a,1.77\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 177,
+              "b": -100
+            },
+            "total_cents": 77,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=77\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-078",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.78\nt1,a,1.78\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 178,
+              "b": -100
+            },
+            "total_cents": 78,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=78\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-079",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.79\nt1,a,1.79\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 179,
+              "b": -100
+            },
+            "total_cents": 79,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=79\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-080",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.80\nt1,a,1.80\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 180,
+              "b": -100
+            },
+            "total_cents": 80,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=80\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-081",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.81\nt1,a,1.81\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 181,
+              "b": -100
+            },
+            "total_cents": 81,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=81\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-082",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.82\nt1,a,1.82\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 182,
+              "b": -100
+            },
+            "total_cents": 82,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=82\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-083",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.83\nt1,a,1.83\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 183,
+              "b": -100
+            },
+            "total_cents": 83,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=83\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-084",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.84\nt1,a,1.84\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 184,
+              "b": -100
+            },
+            "total_cents": 84,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=84\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-085",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.85\nt1,a,1.85\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 185,
+              "b": -100
+            },
+            "total_cents": 85,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=85\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-086",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.86\nt1,a,1.86\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 186,
+              "b": -100
+            },
+            "total_cents": 86,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=86\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-087",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.87\nt1,a,1.87\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 187,
+              "b": -100
+            },
+            "total_cents": 87,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=87\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-088",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.88\nt1,a,1.88\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 188,
+              "b": -100
+            },
+            "total_cents": 88,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=88\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-089",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.89\nt1,a,1.89\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 189,
+              "b": -100
+            },
+            "total_cents": 89,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=89\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-090",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.90\nt1,a,1.90\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 190,
+              "b": -100
+            },
+            "total_cents": 90,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=90\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-091",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.91\nt1,a,1.91\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 191,
+              "b": -100
+            },
+            "total_cents": 91,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=91\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-092",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.92\nt1,a,1.92\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 192,
+              "b": -100
+            },
+            "total_cents": 92,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=92\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-093",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.93\nt1,a,1.93\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 193,
+              "b": -100
+            },
+            "total_cents": 93,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=93\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-094",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.94\nt1,a,1.94\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 194,
+              "b": -100
+            },
+            "total_cents": 94,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=94\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-095",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.95\nt1,a,1.95\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 195,
+              "b": -100
+            },
+            "total_cents": 95,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=95\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-096",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.96\nt1,a,1.96\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 196,
+              "b": -100
+            },
+            "total_cents": 96,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=96\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-097",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.97\nt1,a,1.97\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 197,
+              "b": -100
+            },
+            "total_cents": 97,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=97\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-098",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.98\nt1,a,1.98\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 198,
+              "b": -100
+            },
+            "total_cents": 98,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=98\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    },
+    {
+      "case_id": "scale-099",
+      "instruction": "Read catalog.csv and transactions.csv. Deduplicate transaction IDs, sum exact cents including refunds, reject missing columns. Write outputs/ledger.json and outputs/summary.md.",
+      "files": {
+        "catalog.csv": "account,name\na,Alpha\nb,Beta\n",
+        "transactions.csv": "id,account,amount\nt1,a,1.99\nt1,a,1.99\nt2,b,-1.00\n"
+      },
+      "reference": {
+        "exit_code": 0,
+        "files": {
+          "ledger.json": {
+            "accounts": {
+              "a": 199,
+              "b": -100
+            },
+            "total_cents": 99,
+            "transaction_count": 2
+          },
+          "summary.md": "total_cents=99\ntransactions=2\n"
+        }
+      },
+      "verifier": "reconciliation/1"
+    }
+  ]
+}

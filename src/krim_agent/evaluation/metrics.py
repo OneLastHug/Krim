@@ -347,35 +347,67 @@ class MetricRegistry:
 
 
 async def native_proof(
-    case: dict[str, Any],
-    output: dict[str, Any],
-    config: dict[str, Any],
+    case: dict[str, Any], output: dict[str, Any], config: dict[str, Any]
 ) -> tuple[str, int | None, str | None]:
+    import shlex
+    from pathlib import Path
+
     await asyncio.sleep(0)
     native, process = output["native"], output["process"]
     ok = (
-        native.get(
-            "complete",
-        )
-        is True
+        native.get("complete") is True
         and output["cleanup"] == "closed"
         and output["exit_code"] == 0
+        and process.get("output_complete") is True
+        and not process.get("artifact_error")
+        and all(
+            output["artifacts"].get(k, {}).get("sha256")
+            for k in ["outputs/ledger.json", "outputs/summary.md"]
+        )
     )
-    kinds = {t["kind"] for t in native.get("tools", []) if t.get("status") == "completed"}
-    ok = ok and {"command", "edit"} <= kinds and process.get("output_complete") is True
+    tools = [
+        t
+        for t in native.get("tools", [])
+        if t.get("status") == "completed" and not t.get("is_error")
+    ]
+    ran_tests = False
+    for tool in tools:
+        if tool.get("kind") != "command" or tool.get("exit_code") not in (0, None):
+            continue
+        try:
+            argv = shlex.split(tool.get("arguments", {}).get("command", ""))
+        except (TypeError, ValueError):
+            continue
+        ran_tests = ran_tests or (
+            len(argv) == 7
+            and Path(argv[0]).name.startswith("python")
+            and argv[1:] == ["-B", "-m", "unittest", "discover", "-s", "tests"]
+        )
+    ok = ok and ran_tests and any(t.get("kind") == "edit" for t in tools)
     return "scored", int(ok), None if ok else "native_proof_missing"
 
 
 async def repository_checks(
-    case: dict[str, Any],
-    output: dict[str, Any],
-    config: dict[str, Any],
+    case: dict[str, Any], output: dict[str, Any], config: dict[str, Any]
 ) -> tuple[str, int | None, str | None]:
     await asyncio.sleep(0)
     proof = output["verification"]
     if proof.get("environment_error"):
         return "error", None, "environment_error"
-    ok = proof.get("passed") is True
+    checks = proof.get("checks", {})
+    ok = (
+        proof.get("passed") is True
+        and proof.get("schema_version") == "native-verifier/1"
+        and proof.get("phase") == "final"
+        and bool(checks)
+        and all(v is True for v in checks.values())
+        and output["cleanup"] == "closed"
+        and not output["process"].get("artifact_error")
+        and all(
+            output["artifacts"].get(k, {}).get("sha256")
+            for k in ["outputs/ledger.json", "outputs/summary.md"]
+        )
+    )
     return "scored", int(ok), None if ok else "repository_check_failed"
 
 

@@ -49,7 +49,7 @@ from .models import (
 )
 
 APPLICATION_ID = 0x4B4C4331
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 T = TypeVar("T")
 
 
@@ -64,8 +64,10 @@ class SQLiteStore:
 
     @staticmethod
     async def _validate_schema(conn: AsyncConnection, names: set[str]) -> None:
+        from .observation_outbox import TABLES
+
         for name in names:
-            table = metadata.tables[name]
+            table = metadata.tables[name] if name in metadata.tables else TABLES[name]
             info = (await conn.exec_driver_sql(f'PRAGMA table_info("{name}")')).all()
             expected = [
                 (c.name, str(c.type).upper(), not c.nullable, c.primary_key) for c in table.columns
@@ -125,6 +127,9 @@ class SQLiteStore:
                 ],
             )
         )
+        from .observation_outbox import create_schema
+
+        await create_schema(conn)
         await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod
@@ -164,6 +169,8 @@ class SQLiteStore:
     async def open(
         cls, path: Path, *, readonly: bool = False, max_events: int = 2048
     ) -> SQLiteStore:
+        from .observation_outbox import TABLES, create_schema
+
         path, fd, fresh = cls._open_file(path, readonly)
         url = URL.create(
             "sqlite+aiosqlite",
@@ -197,6 +204,7 @@ class SQLiteStore:
                 )
                 if fresh and not readonly and application == 0 and version == 0 and not tables:
                     await conn.run_sync(metadata.create_all)
+                    await create_schema(conn)
                     await conn.exec_driver_sql(f"PRAGMA application_id={APPLICATION_ID}")
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
@@ -214,10 +222,11 @@ class SQLiteStore:
                             "session_controls",
                         },
                         4: set(metadata.tables),
+                        5: set(metadata.tables) | set(TABLES),
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4}
+                        or version not in {1, 2, 3, 4, 5}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
@@ -418,11 +427,27 @@ class SQLiteStore:
             helpers = verification._TERMINAL_HELPERS
 
             async def attempt_body() -> RunView:
+                from . import observation_outbox as hot_sql
+
+                capture = (
+                    await hot_sql.prepare_terminal(conn, run_id, status, code)
+                    if self.schema_version == 5
+                    else None
+                )
+                terminal_data: dict[str, JsonValue] = {
+                    "status": status,
+                    "code": code,
+                    **(
+                        {"observation_capture": capture["disposition"]}
+                        if capture is not None
+                        else {}
+                    ),
+                }
                 await self._event(
                     conn,
                     run_id,
                     "terminal",
-                    {"status": status, "code": code},
+                    terminal_data,
                     "terminal:" + run_id,
                     terminal=True,
                 )
@@ -431,8 +456,12 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4}:
+                if self.schema_version in {3, 4, 5}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
+                if capture is not None:
+                    await hot_sql.finalize_terminal(
+                        conn, capture, await self._snapshot(conn, run_id)
+                    )
                 return self._view(await self._row(conn, run_id))
 
             handoff = verification.private_handoff_for_same_owner_and_run(run_id)
@@ -471,6 +500,17 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
+            if self.schema_version == 5:
+                from . import observation_outbox as hot_sql
+
+                try:
+                    confirmed = await self.work_read(
+                        lambda conn: hot_sql.confirm_terminal(conn, snap, status, code)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    confirmed = False
             if confirmed and snap.run.status == status and snap.run.code == code:
                 self.healthy = prior_health
                 return snap.run
@@ -541,7 +581,7 @@ class SQLiteStore:
                 self.schema_version,
                 cast(dict[str, JsonValue], row["target"]),
             ),
-            await work_sql.load(conn, run_id) if self.schema_version == 4 else None,
+            await work_sql.load(conn, run_id) if self.schema_version in {4, 5} else None,
         )
 
     async def by_key(self, key: str) -> RunView | None:
@@ -556,7 +596,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4}:
+        if self.schema_version not in {2, 3, 4, 5}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1021,11 +1061,27 @@ class SQLiteStore:
                 ).scalars()
             )
             for run_id in ids:
+                from . import observation_outbox as hot_sql
+
+                capture = (
+                    await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
+                    if self.schema_version == 5
+                    else None
+                )
+                terminal_data: dict[str, JsonValue] = {
+                    "status": "interrupted",
+                    "code": "interrupted",
+                    **(
+                        {"observation_capture": capture["disposition"]}
+                        if capture is not None
+                        else {}
+                    ),
+                }
                 await self._event(
                     conn,
                     run_id,
                     "terminal",
-                    {"status": "interrupted", "code": "interrupted"},
+                    terminal_data,
                     "terminal:" + run_id,
                     terminal=True,
                 )
@@ -1034,8 +1090,12 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status="interrupted", code="interrupted", finished_at=time.time())
                 )
-                if self.schema_version in {3, 4}:
+                if self.schema_version in {3, 4, 5}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
+                if capture is not None:
+                    await hot_sql.finalize_terminal(
+                        conn, capture, await self._snapshot(conn, run_id)
+                    )
             active = (
                 (
                     await conn.execute(
@@ -1082,7 +1142,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4}:
+            if self.schema_version in {3, 4, 5}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 

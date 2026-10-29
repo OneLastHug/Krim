@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import builtins
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from krim_agent.client import AsyncRunClient
 from krim_agent.contracts import RunFacts, ServiceError
 from krim_agent.runtime.facts import project_facts
 from krim_agent.security import LOCAL, PrincipalContext
-from krim_agent.sessions.service import SessionService
+from krim_agent.sessions.service import SessionService, _validate_control_arguments
 from krim_agent.sessions.types import (
     ControlRequest,
     ControlView,
@@ -173,14 +173,14 @@ class SessionSDK:
     async def control(
         self, session_id: str, operation: str, request: ControlRequest, turn_id: str | None = None
     ) -> ControlView:
-        if operation not in {"rename", "resume", "close", "cancel_turn"}:
-            raise ServiceError("invalid_input", 422)
+        _validate_control_arguments(operation, turn_id)
         if isinstance(self.backend, AsyncRunClient):
-            suffix = (
-                "/turns/" + self.ident(turn_id) + "/cancel"
-                if turn_id is not None
-                else "/" + operation
-            )
+            if operation == "cancel_turn":
+                # 组合校验保证此分支具有非空 turn_id；断言同时收窄 Optional 类型。
+                assert turn_id is not None
+                suffix = "/turns/" + self.ident(turn_id) + "/cancel"
+            else:
+                suffix = "/" + operation
             return ControlView.model_validate(
                 await self.backend.request(
                     "POST",
@@ -188,8 +188,6 @@ class SessionSDK:
                     request.model_dump(mode="json"),
                 )
             )
-        from typing import Literal, cast
-
         return await self.writer().control(
             self.principal,
             self.workspace,

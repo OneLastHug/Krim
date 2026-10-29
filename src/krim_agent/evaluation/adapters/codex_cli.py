@@ -38,6 +38,8 @@ class NativeWork:
     observation: dict[str, Any] | None = None
     cancel_task: asyncio.Task[CleanupResult] | None = None
     verification: dict[str, Any] | None = None
+    close_task: asyncio.Task[CleanupResult] | None = None
+    _close_reobserve: bool = field(default=False, repr=False)
     finish_codec: Callable[[], dict[str, Any]] | None = field(default=None, repr=False)
 
 
@@ -264,11 +266,15 @@ class NativeCLIAdapter:
                 await self._adopt(job)
             finally:
                 job.pending = None
+        cancel = self.owner._close_work if job._close_reobserve else self._cancel_process
+        results = await asyncio.gather(
+            *(cancel(work, self._lease) for _, work in job.resources),
+            return_exceptions=True,
+        )
         closed = True
-        for phase, work in job.resources:
-            result = await self._cancel_process(work, self._lease)
-            closed = closed and result.closed
-            if result.observation is not None:
+        for (phase, _), result in zip(job.resources, results, strict=True):
+            closed = closed and isinstance(result, CleanupResult) and result.closed
+            if isinstance(result, CleanupResult) and result.observation is not None:
                 job.facts[phase] = result.observation
         return closed
 
@@ -296,7 +302,14 @@ class NativeCLIAdapter:
                     if isinstance(text, str)
                     else None
                 )
-            stages.append({"phase": phase, "process_ref": work.ref.id, "facts": record})
+            stages.append(
+                {
+                    "phase": phase,
+                    "process_ref": work.ref.id,
+                    "facts": record,
+                    "cleanup_receipts": clone(work.cleanup_receipts),
+                }
+            )
         process = {
             "stages": stages,
             "uid": os.getuid(),
@@ -365,6 +378,8 @@ class NativeCLIAdapter:
         finally:
             closed = await settled(self._settle(job))
             job.observation = self._observation(job, closed)
+        if not closed:
+            raise ServiceError("execution_unknown")
         return cast(dict[str, Any], clone(job.observation))
 
     async def collect(self, ref: ExecutionRef) -> dict[str, Any]:
@@ -387,26 +402,73 @@ class NativeCLIAdapter:
         job.active = False
         if job.cancel_task is None:
             job.cancel_task = asyncio.create_task(self._cancel(job))
+        observed = job.close_task
+        if observed is not None and observed.done() and not observed.cancelled():
+            if observed.exception() is None and observed.result().closed:
+                return await settled(observed)
         return await settled(job.cancel_task)
 
     async def _cancel(self, job: NativeWork) -> CleanupResult:
+        pending = job.collector is not None and not job.collector.done()
         if job.collector is not None:
-            if not job.collector.done():
+            if pending:
                 job.collector.cancel()
             await asyncio.gather(job.collector, return_exceptions=True)
-        closed = await self._settle(job)
+        if pending:
+            # _run.finally已经等待此次清理；同一次关闭也不立刻再开第二轮。
+            job._close_reobserve = False
+        if job.observation is None or job._close_reobserve:
+            try:
+                closed = await self._settle(job)
+            finally:
+                job._close_reobserve = False
+        else:
+            closed = job.observation["cleanup"] == "closed"
         if job.observation is None:
             job.observation = self._observation(job, closed)
         return CleanupResult(closed, None if closed else "cleanup_unknown", clone(job.observation))
 
     async def close(self) -> CleanupResult:
-        if self._close_task is None:
+        previous = self._close_task
+        if (
+            previous is None
+            or previous.done()
+            and (
+                previous.cancelled()
+                or previous.exception() is not None
+                or not previous.result().closed
+            )
+        ):
             self._close_task = asyncio.create_task(self._close())
+        assert self._close_task is not None
         return await settled(self._close_task)
+
+    async def _close_work(self, job: NativeWork) -> CleanupResult:
+        if self.jobs.get(job.ref.id) is not job:
+            raise ServiceError("permission_denied")
+        first = job.cancel_task
+        if first is None or not first.done():
+            return await self.cancel(job.ref)
+        if not first.cancelled() and first.exception() is None and first.result().closed:
+            return await settled(first)
+        previous = job.close_task
+        if (
+            previous is None
+            or previous.done()
+            and (
+                previous.cancelled()
+                or previous.exception() is not None
+                or not previous.result().closed
+            )
+        ):
+            job._close_reobserve = True
+            job.close_task = asyncio.create_task(self._cancel(job))
+        assert job.close_task is not None
+        return await settled(job.close_task)
 
     async def _close(self) -> CleanupResult:
         results = await asyncio.gather(
-            *(self.cancel(j.ref) for j in self.jobs.values()),
+            *(self._close_work(j) for j in self.jobs.values()),
             return_exceptions=True,
         )
         self.closed = all(isinstance(r, CleanupResult) and r.closed for r in results)
