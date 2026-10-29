@@ -169,6 +169,7 @@ def target_for():
 
     from krim_agent.execution import linux, seccomp
     from krim_agent.workspace.types import WorkspaceProfile
+    from krim_agent.workspace.verification import descriptor
 
     p = profile_for("identity")
     base = json.loads(p.base.read_text())
@@ -191,6 +192,7 @@ def target_for():
     return {
         "key": "target-workspace",
         "tools": [],
+        "workspace_verification": descriptor(),
         "workspace_profile": WorkspaceProfile(
             max_tools_per_step=4, environment=projection
         ).model_dump(mode="json"),

@@ -23,7 +23,7 @@ from krim_agent.storage.sqlite import SQLiteStore
         "ddl-tool_effects",
         "ddl-artifact_revisions",
         "commit",
-        "unknown5",
+        "unknown6",
     ],
 )
 async def test_schema4_upgrade_atomic_and_legacy_rows_readonly(tmp_path, case, legacy_schema3):
@@ -59,9 +59,9 @@ async def test_schema4_upgrade_atomic_and_legacy_rows_readonly(tmp_path, case, l
             return {n: conn.execute('SELECT * FROM "' + n + '"').fetchall() for n in names}
 
     original = rows() if case != "new" else {}
-    if case == "unknown5":
+    if case == "unknown6":
         with closing(sqlite3.connect(database)) as conn, conn:
-            conn.execute("PRAGMA user_version=5")
+            conn.execute("PRAGMA user_version=6")
         before = database.read_bytes()
         with pytest.raises(ServiceError, match="database_invalid"):
             await SQLiteStore.open(database)
@@ -77,8 +77,7 @@ async def test_schema4_upgrade_atomic_and_legacy_rows_readonly(tmp_path, case, l
                     conn.execute('DROP TABLE "' + table + '"')
                 conn.execute(f"PRAGMA user_version={version}")
         if version == 4:
-            writer = await SQLiteStore.open(database)
-            await writer.close()
+            await _h1_schema4_upgrade(database)
         before = database.read_bytes()
         reader = await SQLiteStore.open(database, readonly=True)
         try:
@@ -122,7 +121,7 @@ async def test_schema4_upgrade_atomic_and_legacy_rows_readonly(tmp_path, case, l
     events = watch_store(store)
     fd = store.fd
     try:
-        assert store.schema_version == 4
+        assert store.schema_version == 5
         if original:
             assert {k: v for k, v in rows().items() if k in original} == original
             assert (
@@ -486,3 +485,16 @@ async def test_workspace_request_snapshot_before_wait(tmp_path, monkeypatch, req
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             await store.close()
+
+
+async def _h1_schema4_upgrade(database):
+    import sys
+
+    directory = (
+        Path(__file__).resolve()  # noqa: ASYNC240  # 固定本地身份检查
+    ).parents[1] / "safe_eval"
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    from test_hot_observation_storage import upgrade_v4_from_fixed_source
+
+    return await upgrade_v4_from_fixed_source(database)
