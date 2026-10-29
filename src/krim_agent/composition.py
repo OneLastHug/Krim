@@ -135,6 +135,11 @@ async def open_application(
     if config.provider not in ("script", "http"):
         raise ProviderError("provider_config", 422)
     live = config.provider == "http"
+    if config.http_mode not in ("bounded-demo", "agent") or (
+        config.http_mode == "agent" and not live
+    ):
+        raise ProviderError("provider_config", 422)
+    agent_http = live and config.http_mode == "agent"
     reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
@@ -145,16 +150,25 @@ async def open_application(
         workspace.__post_init__()
     raw_http_fields = set(http_config.model_fields_set) if http_config is not None else set()
     if isinstance(provider, OpenAICompatibleProvider):
-        cap = workspace.profile.max_tools_per_step if workspace is not None else 1
+        cap = workspace.profile.max_tools_per_step if workspace is not None else (
+            min(config.max_tools_per_step, provider.config.max_tool_calls) if agent_http else 1
+        )
         if provider.binding_token() != provider._sealed or provider.config.max_tool_calls != cap:
             raise ProviderError("provider_config", 422)
         if workspace is not None and http_config is not None:
             raise ProviderError("provider_config", 422)
     if http_config is not None:
-        cap = workspace.profile.max_tools_per_step if workspace is not None else 1
-        if "max_tool_calls" in raw_http_fields and http_config.max_tool_calls != cap:
-            raise ProviderError("provider_config", 422)
-        if workspace is not None:
+        cap = workspace.profile.max_tools_per_step if workspace is not None else (
+            min(config.max_tools_per_step, 4) if agent_http else 1
+        )
+        if "max_tool_calls" in raw_http_fields:
+            if agent_http and workspace is None:
+                if http_config.max_tool_calls > cap:
+                    raise ProviderError("provider_config", 422)
+                cap = http_config.max_tool_calls
+            elif http_config.max_tool_calls != cap:
+                raise ProviderError("provider_config", 422)
+        if workspace is not None or agent_http:
             http_config = OpenAICompatibleConfig.model_validate(
                 http_config.model_dump() | {"max_tool_calls": cap})
     if workspace is not None and http_config is None and not isinstance(provider,
@@ -182,7 +196,22 @@ async def open_application(
             http_config = OpenAICompatibleConfig.model_validate(http_config.model_dump())
         except ValueError:
             raise ProviderError("provider_config", 422) from None
-    if live:
+    if agent_http:
+        assert http_config is not None
+        primary_settings = Settings.model_validate(
+            config.model_dump()
+            | {
+                "system_prompt": config.system_prompt if "system_prompt" in specified else (
+                    "你是 Krim Agent。使用获授权工具完成用户任务；依据实际结果回答。"
+                ),
+                "target_version": config.target_version if "target_version" in specified else (
+                    "agent-http/1"
+                ),
+                "max_tools_per_step": min(config.max_tools_per_step, http_config.max_tool_calls),
+                "max_request_bytes": min(config.max_request_bytes, http_config.max_request_bytes),
+            }
+        )
+    elif live:
         assert http_config is not None
         prompt = "你是 Krim Agent。使用受控工具完成用户任务，保持数值精度。"
         version = "demo-live-xhigh/1"
