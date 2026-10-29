@@ -176,7 +176,17 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       first = first || saved.rejected;
       let raw: unknown;
       try { raw = await request(first ? saved.target : sessionPath(saved.workspace_id) + "/" + encodeURIComponent(saved.session_id!) + "/controls/by-key/" + encodeURIComponent(String(saved.body.request_key)), apiKey, first ? saved.body : undefined); }
-      catch (error) { if (first && error instanceof RequestError && error.status === 401 && error.code === "unauthorized") { saved.rejected = true; values[cacheKey] = saved; saveControls(values); } throw error; }
+      catch (error) {
+        if (first && error instanceof RequestError && error.status === 401 && error.code === "unauthorized") { saved.rejected = true; values[cacheKey] = saved; saveControls(values); }
+        if (first && error instanceof RequestError && error.status === 409 && error.code === "revision_conflict") {
+          const latest = controls();
+          if (latest[cacheKey]?.body.request_key === saved.body.request_key) delete latest[cacheKey];
+          saveControls(latest); refreshPending();
+          if (current()) setNotice("对话已更新；本次操作未执行。请刷新检查状态后重新操作。");
+          return;
+        }
+        throw error;
+      }
       const value = object(raw); if (value.session_id !== saved.session_id || value.request_key !== saved.body.request_key) throw new Error("控制身份不匹配");
       if (current() && value.status === "completed") { const latest = controls(); delete latest[cacheKey]; saveControls(latest); setVersion(v => v + 1); setNotice(null); }
     } catch (error) { if (current()) setNotice(chatReason(error)); }
