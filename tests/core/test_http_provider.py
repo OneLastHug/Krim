@@ -114,6 +114,78 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             await provider.close()
 
 
+async def test_deepseek_disabled_thinking_preserves_real_tcp_tool_history():
+    async with HTTPFixture() as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                base_url=fixture.url,
+                model="deepseek-flash",
+                thinking="disabled",
+            )
+        )
+        messages = [Message(role="user", content="/add 2 3")]
+        tools = builtin_registry().schemas()
+        try:
+            first = [event async for event in provider.stream(messages, tools)]
+            call = next(event for event in first if isinstance(event, ModelToolCall))
+            messages.extend(
+                [
+                    Message(
+                        role="assistant",
+                        content="",
+                        tool_calls=[call.model_dump(mode="json")],
+                    ),
+                    Message(role="tool", content='{"sum":5}', call_id=call.id),
+                ]
+            )
+            second = [event async for event in provider.stream(messages, tools)]
+            assert "".join(event.text for event in second if isinstance(event, ModelText)) == "5"
+
+            first_request, second_request = [item["body"] for item in fixture.requests]
+            assert first_request["thinking"] == second_request["thinking"] == {
+                "type": "disabled"
+            }
+            assert first_request["tools"][0]["type"] == "function"
+            assert first_request["tools"][0]["function"]["name"] == "add"
+            assert second_request["messages"][-1]["tool_call_id"] == call.id
+            assert second_request["messages"][-1]["role"] == "tool"
+            assert second_request["messages"][-2]["tool_calls"][0]["id"] == call.id
+        finally:
+            await provider.close()
+    assert fixture.active == 0
+
+
+async def test_deepseek_disabled_thinking_cancellation_closes_real_tcp_stream():
+    async with HTTPFixture(mode="hold") as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                base_url=fixture.url,
+                model="deepseek-flash",
+                thinking="disabled",
+            )
+        )
+        received = asyncio.Event()
+
+        async def consume():
+            async for _event in provider.stream([Message(role="user", content="hold")], []):
+                received.set()
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(received.wait(), 3)
+            assert fixture.requests[0]["body"]["thinking"] == {"type": "disabled"}
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(fixture.idle.wait(), 3)
+            assert fixture.closed_connections == 1 and provider.streams_closed == 1
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await provider.close()
+
+
 async def test_text_stream_arrives_before_done_and_closes_early():
     async with HTTPFixture(mode="hold") as fixture:
         provider = OpenAICompatibleProvider(
