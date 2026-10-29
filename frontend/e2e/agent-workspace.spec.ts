@@ -76,12 +76,27 @@ async function open(page: Page, owner: State) {
   await expect(page.locator("#workspace-text")).toBeEnabled();
   await expect(page.locator("#chat-heading")).toHaveText("FINAL工作A");
 }
+async function resetTurnChecks(page: Page) {
+  while(await page.locator(".workspace-check-list li").count())
+    await page.locator(".workspace-check-list li button").first().click();
+  while(await page.locator(".workspace-condition-list > li").count())
+    await page.locator(".workspace-condition-title button").first().click();
+}
 async function send(page: Page, text = "D4_TASK 浏览器真实项目") {
   await page.locator("#workspace-text").fill(text);
-  await page.locator("#workspace-completion").fill(JSON.stringify({ profile: "python-unittest/1",
-    required_paths: text.startsWith("D4_NEXT") ? [] : ["calc.py", "answer.json"],
-    conditions: text.startsWith("D4_NEXT") ? [] : [{ id: "answer", kind: "json_equal",
-      path: "answer.json", pointer: "/answer", expected: 42, symbols: [] }] }));
+  await resetTurnChecks(page);
+  if(!text.startsWith("D4_NEXT")) {
+    await page.locator("#workspace-required-path").fill("calc.py");
+    await page.getByRole("button",{name:"添加路径",exact:true}).click();
+    await page.locator("#workspace-required-path").fill("answer.json");
+    await page.getByRole("button",{name:"添加路径",exact:true}).click();
+    await page.getByRole("button",{name:"添加完成条件",exact:true}).click();
+    const condition=page.locator(".workspace-condition");
+    await condition.getByLabel("条件名称").fill("answer");
+    await condition.getByLabel("检查文件").fill("answer.json");
+    await condition.getByLabel("JSON Pointer").fill("/answer");
+    await condition.getByLabel("预期 JSON 值").fill("42");
+  }
   await page.getByRole("button", { name: "发送工作请求", exact: true }).click();
 }
 async function approve(page: Page, command = true) {
@@ -363,10 +378,11 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
             {headers:AUTH})).json().then(value=>value.status)).toBe("failed");
         }
         await open(page,owner);
-        await page.locator(".workspace-panel > details > summary").click();
-        await page.locator("#workspace-input").fill(JSON.stringify({schema_version:1,request_key:"input-confirmed",
-          expected_head_revision:0,files:[{path:"hello.txt",encoding:"base64",data:"aGVsbG8=",
-            sha256:"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]}));
+        await page.locator("#workspace-input-revision").fill("0");
+        await page.getByRole("button",{name:"添加空文件",exact:true}).click();
+        const inputEditor=page.locator(".workspace-file-editor");
+        await inputEditor.locator("input").fill("hello.txt");
+        await inputEditor.locator("textarea").fill("hello");
         await page.getByRole("button",{name:"提交输入快照",exact:true}).click();
         await expect(page.locator(".workspace-artifact")).toContainText("hello.txt");
         const ledger=await page.evaluate(key=>localStorage.getItem(key),KNOWN);expect(ledger).not.toBeNull();
@@ -390,7 +406,6 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
       const base=owner.url+"/v3/workspaces/local/sessions/"+owner.session_id;
       try {
         await open(page,owner);
-        await page.locator(".workspace-panel > details > summary").click();
         await page.route(base+"/inputs",async route=>{
           const response=await route.fetch();accepted=await response.json();original=route.request().postDataJSON();
           if(boundary==="post"){entered.release();await hold.promise;await route.fulfill({response});}
@@ -400,8 +415,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
           const response=await route.fetch();if(armed){armed=false;entered.release();await hold.promise;}
           await route.fulfill({response});
         });
-        await page.locator("#workspace-input").fill(JSON.stringify({schema_version:1,request_key:"late-input",
-          expected_head_revision:0,files:[]}));
+        await page.locator("#workspace-input-revision").fill("0");
         await page.getByRole("button",{name:"提交输入快照",exact:true}).click();
         if(boundary==="get") {await expect(page.getByRole("button",{name:"查找原工作请求",exact:true})).toBeVisible();
           await page.getByRole("button",{name:"查找原工作请求",exact:true}).click();}

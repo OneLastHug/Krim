@@ -1,6 +1,14 @@
 import { readFile, stat } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { screenshotStep } from "./step-screenshot.js";
+import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
+
+test("API evidence is persisted independently of the reporter without overwriting prior results", async ({}, info) => {
+  const value = { status: 409, body: { error: { code: "artifact_invalid" } } };
+  const path = await attachJsonEvidence(info, "拒绝回执.json", value);
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual(value);
+  await expect(attachJsonEvidence(info, "拒绝回执.json", { status: 200 })).rejects.toMatchObject({ code: "EEXIST" });
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual(value);
+});
 
 test("indexes ordered Chinese steps, duplicate titles, action failures and screenshot failures", async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: "dark" });

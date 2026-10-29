@@ -109,14 +109,53 @@ function workspaceServer(kind: "turn" | "input", barrier: "post" | "get" | "none
   };
   return { hold, get accepted() { return accepted; }, get finds() { return finds; } };
 }
-async function type(id: string, value: string) {
+async function typeElement(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   await act(async () => {
-    const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement;
-    expect(input).toBeTruthy();
-    Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype :
-      HTMLInputElement.prototype, "value")!.set!.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
   });
+}
+async function type(id: string, value: string) {
+  const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+  expect(element).toBeTruthy();
+  await typeElement(element!, value);
+}
+async function fillLabel(scope: ParentNode, labelText: string, value: string) {
+  const label = [...scope.querySelectorAll("label")].find(item => item.textContent?.trim() === labelText);
+  expect(label).toBeTruthy();
+  const element = document.getElementById(label!.htmlFor) as HTMLInputElement | HTMLTextAreaElement | null;
+  expect(element).toBeTruthy();
+  await typeElement(element!, value);
+}
+async function addRequiredPath(path: string) {
+  await type("workspace-required-path", path);
+  await act(async () => button("添加路径").click());
+}
+async function setTurnChecks(text: string) {
+  while (document.querySelector(".workspace-check-list li")) {
+    const remove = document.querySelector(".workspace-check-list li button") as HTMLButtonElement;
+    await act(async () => remove.click());
+  }
+  while (document.querySelector(".workspace-condition-list li")) {
+    const remove = document.querySelector(".workspace-condition-list li .workspace-condition-title button") as HTMLButtonElement;
+    await act(async () => remove.click());
+  }
+  if (text.startsWith("D4_NEXT")) return;
+  await addRequiredPath("data.json");
+  await act(async () => button("添加完成条件").click());
+  const condition = document.querySelector(".workspace-condition")!;
+  await fillLabel(condition, "条件名称", "nested");
+  await fillLabel(condition, "检查文件", "data.json");
+  await fillLabel(condition, "JSON Pointer", "/value");
+  await fillLabel(condition, "预期 JSON 值", JSON.stringify({ list: [false, null, { nested: [1, 2] }] }));
+}
+async function setInputFile(path: string, content: string) {
+  await type("workspace-input-revision", "0");
+  await act(async () => button("添加空文件").click());
+  const editor = document.querySelector(".workspace-file-editor")!;
+  await typeElement(editor.querySelector("input") as HTMLInputElement, path);
+  await typeElement(editor.querySelector("textarea") as HTMLTextAreaElement, content);
 }
 async function mountWorkspace() {
   history.replaceState({}, "", "/ui/?view=chat&workspace=local&session="+A);
@@ -126,12 +165,9 @@ async function mountWorkspace() {
 async function send(kind: "turn" | "input", twice = false) {
   if (kind === "turn") {
     await type("workspace-text", "完整工作请求");
-    await type("workspace-completion", JSON.stringify({ profile: "python-unittest/1", required_paths: ["data.json"],
-      conditions: [{ id: "nested", kind: "json_equal", path: "data.json", pointer: "/value",
-        expected: { list: [false, null, { nested: [1, 2] }] }, symbols: [] }] }));
+    await setTurnChecks("完整工作请求");
   } else {
-    await type("workspace-input", JSON.stringify({ schema_version: 1, request_key: "", expected_head_revision: 0,
-      files: [{ path: "hello.txt", encoding: "base64", data: "aGVsbG8=", sha256: hash }] }));
+    await setInputFile("hello.txt", "hello");
   }
   await act(async () => { button(kind === "turn" ? "发送工作请求" : "提交输入快照").click();
     if (twice) button(kind === "turn" ? "发送工作请求" : "提交输入快照").click(); });

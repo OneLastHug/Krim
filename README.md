@@ -1,97 +1,63 @@
-# Krim Agent 主干：AC-M1 候选
-
-当前独立主线在已验收研读内核上增加持久 Session/Turn、完整多轮 Context、有界队列、主体/工作区授权和真实聊天入口，版本为 **0.3.0a1**。它是待原 评审 独立审查的 AC-M1 候选；不是整体项目验收，也没有部署。
-
-- [逐章指南：架构、完整源码与失败路径](docs/agent-core/GUIDE.md)；[自包含离线 HTML](docs/agent-core/GUIDE.html)
-- [协议与兼容](docs/agent-core/PROTOCOL.md)；[设计决策](docs/agent-core/ADR-0001-session-context.md)；[来源](docs/agent-core/SOURCES.md)
-- [可运行聊天示例](examples/agent_core_chat.py)；[真实命令、失败与发行证据](docs/agent-core/AC-M1-REPORT.md)；[阶段进度](docs/agent-core/PROGRESS.md)
-
-支持 Linux/Python 3.12、SQLite 单写端、小规模有界执行；wheel 精确包含 56 项产品文件。默认离线 demo 保留原脚本能力，不声称能理解任意前史；多轮语义用本机真实 HTTP fixture 验证。HTTP 配置仅由可信宿主提供，浏览器不能注入地址/密钥。未配置策略文件的本机模式不应暴露到公网。
-
-自动压缩、真正 OS 沙盒和完整持续 Eval 分别属于待精确方案/实施/独立批准的 AC-M2/AC-M3。旧上游故障仍未关闭；商业模型与上线未验证。以下旧入口保留历史语境，当前状态以本节和 AC-M1 报告为准。
-
----
-
 # Krim Agent
 
-当前主线是可拆解的Python Agent研读内核：受控多步Run、权限/审批/Hook、持久事实和脱敏Trace，以及显式来源→人工参考→冻结→真实Eval→规则/Gate。LC-M1/UI/M2已正式验收；LC-M3是有限HTTP适配与最终研读交付候选，仍待原评审对精确revision独立审查，不能把方案批准当产品验收。
+Krim Agent 是 Python Agent 工作台：在持久对话中运行任务、审批工具、查看执行事实与文件产物，再用人工参考构建数据集、执行评测并比较版本。
 
-从这里开始：
+后端使用 Python 3.12、SQLite 和单个运行服务；前端使用 React、TypeScript、Tailwind 与 shadcn/Base UI。当前源码版本为 `0.4.0a1`，阶段实现与测试结果集中在[产品追踪](docs/agent-core/PRODUCT-TRACKING.md)。
 
-- [阅读指南与源码阅读路线](docs/agent-core/READING-GUIDE.md)
-- [安装、贯通示例和排障](docs/agent-core/RUNBOOK.md)
-- [完整可运行示例](examples/agent_complete.py)
-- [诚实的项目介绍与评审材料](docs/agent-core/RUNBOOK.md)
-- [LC-M3真实命令、失败和限制](docs/agent-core/LC-M3-REPORT.md)
+## 开始使用
 
-默认离线，HTTP目标仅由可信宿主显式配置；本轮只用真实本机fixture，不调用商业模型。支持Linux/Python3.12/SQLite单进程单写端，不恢复旧62项/P01–P10平台目标。浏览器保留真实shadcn黑白工作台；研读说明留在文档。产品wheel只含46项，示例/fixture另从同候选源码取得。
+运行后端需要 Linux 和 Python 3.12；构建前端需要 Node.js 24.15 以上。WSL 2 可提供 Linux 环境。以下命令在项目目录执行。
 
-## 历史阶段说明（原文保留）
-
-以下为此前阶段记录；其“当前/待验收”等文字只表示当时状态，最新能力/支持范围以以上研读材料和正式报告指针为准。
-
-# Krim Agent
-
-Krim Agent 是用于研读和求职讲述的 Python 模块化单体：从一个真实 Run 理解模型/工具循环、审批、取消、持久事实和脱敏 Trace，再用显式人工参考完成小批次版本评测。默认目标是确定性离线脚本，不发送模型网络请求，不代表商业模型质量。
-
-LC-M1 和 React/shadcn UI 已在 `f841567656af8d3d0536c1636fcc6401768d81fb` 基线验收。本分支的 LC-M2 是按独立 评审 批准方案实现的待审候选，实际命令、首轮失败、修复、发行身份和限制见 [M2 实测报告](docs/agent-core/LC-M2-REPORT.md)。方案批准、实现方 自验和最终独立代码/视觉验收是不同结论。
-
-```mermaid
-flowchart LR
-    入口[React / SDK / API / CLI] --> EV[EvaluationService：小批次所有权]
-    入口 --> RS[唯一 RunService：共享准入]
-    EV --> ITEM[execute_item / RunTarget]
-    ITEM --> RS
-    RS --> LOOP[AgentLoop / 真实离线 Provider]
-    LOOP --> TOOL[ToolExecutor / 静态工具]
-    TOOL --> DB[SQLite 五表]
-    RS --> DB
-    EV --> DB
-    DB --> FACTS[同快照事实 / Trace]
-    FACTS --> SCORE[六类有限规则]
-    SCORE --> EV
-    DB --> REPORT[报告与逐样本 Gate]
-```
-
-## 运行与阅读
-
-支持 Linux、Python 3.12、单进程单写端。先安装本轮实际 wheel（Python 分发包），再显式指定合成或自有私有数据库路径；不自动加载 `.env`。`KRIM_AGENT_API_KEY` 设置实例密钥；无密钥时只允许回环客户端/Host，浏览器保持同源。
+用 uv 同步锁定依赖；`sync` 表示同步环境，`--frozen` 表示不改写锁文件：
 
 ```bash
-# pip：Python 包安装工具；示例路径需替换为实际候选包。
-python -m pip install /path/to/krim_agent-0.2.0a1-py3-none-any.whl
-# -m 是 module（模块入口），serve 提供本机服务。
-python -m krim_agent serve --database .data/agent-demo.db --port 8765
-# CLI（Command-Line Interface，命令行界面）；key 是原请求幂等键。
-krim run --url http://127.0.0.1:8765 --text '/add 2 3' --key demo-add
-# result 只读原 ID（identifier，标识符），不会恢复或重放任务。
-krim result --database .data/agent-demo.db --id <原Run-ID>
+uv sync --frozen
 ```
 
-浏览器打开 `http://127.0.0.1:8765/ui/`。任务页支持 `/add 2 3`（两个模型步、一次真实 add）、`/echo 你好`、需要审批的 `/note welcome` 和演示停止的 `/slow`。评测页可显式选取已完成任务的输入，人工填写参考与理由、加入样本、冻结修订，再运行 `target-v1/v2/bad` 并比较报告。观测答案不会自动变成参考。
+启动本机 API（Application Programming Interface，应用程序接口）与同包网页；`serve` 表示提供服务：
 
-SDK（Software Development Kit，软件开发工具包）完整阅读入口是 [agent_demo.py](examples/agent_demo.py) 与 [agent_eval.py](examples/agent_eval.py)。建议沿 `composition → EvaluationService → execute_item → RunService → AgentLoop → ToolExecutor → RunSnapshot → scorers → gate_reports` 阅读。[M2 方案](docs/agent-core/LC-M2-PLAN.md)保存获批契约和取舍；[现状文档](docs/agent-core/ARCHITECTURE_CURRENT.md)区分历史架构与当前实现。
+```bash
+uv run --frozen python -m krim_agent serve --database .data/krim.sqlite --port 8765
+```
 
-## 评测的含义
+浏览器打开 `http://127.0.0.1:8765/ui/`。默认不需要模型密钥，可在“对话”中新建会话，用 `/add 2 3`、`/echo 你好`、`/note welcome` 或 `/slow` 体验工具、审批与停止。
 
-- 最多8个样本、重复1–3次、最多24个 item，串行执行，一个活跃 Eval。交互任务和所有评测版本共用默认4个 Run 名额，不按版本扩容。
-- Candidate 保存来源资格、原 `source_run_id` 与指纹；Reference 必须显式填写 expected（可为 JSON null）及人工理由；DatasetRevision 以 name/version 冻结，同内容幂等、异内容冲突。后续执行生成独立子 Run，不冒用来源 Run。
-- v1 实际将加法参数向零取整，v2 保留小数，bad 对整数加法实际多加1；三者都经过 Provider 往返与真实工具。差异不来自换标签或修改评分。
-- 六类规则为状态/错误码、文本精确匹配、JSON 匹配、JSON Schema、工具序列、轨迹。缺事实、未知用量保持 null/skipped/error，布尔不当数字。执行终态、评分覆盖与质量结果分别呈现。
-- Gate 先核对同数据、规则、重复及执行配置；partial、零覆盖或不兼容为 invalid。候选逐样本退化即 fail，均分提高不能抵消；pass 只说明本次冻结数据与规则下未检测到退化。
-- 本机 `eval start --database` 持同一个 Application 等终态；可捕获中断先等真实 producer/scorer 和资源关闭。需要立即返回 ID、独立 wait/cancel 时使用 `--url` 连接长驻服务；远端客户端退出不取消批次。本机独立 wait/cancel 在开库前拒绝，report/compare/get 为只读。
+HTTP 模型地址、凭据和预算由可信宿主设置，网页不接收供应商地址或密钥。工作区文件任务还需要有效的 Linux 隔离配置；只提供普通对话服务时，不展示为可执行文件环境。SQLite 按单进程单写端运行；无访问策略的本机模式只供回环访问。
 
-## 边界与兼容
+## 工作流
 
-工具仍限可信异步 add、echo、lookup_note；没有 Shell、文件写入、插件、任意代码或 OS 沙箱承诺。权限无授权即拒绝；审批绑定 Run/call/参数/工具身份；Hook 不能改写原结果。取消必须等实际任务/流收束，SSE（Server-Sent Events，服务端事件流）断开仅停止读侧。
+- **任务与对话**：持久 Session/Turn、多轮上下文、有界队列、审批、取消、原请求键找回与执行事件。
+- **文件与结果**：工作区输入快照、受控命令、完成条件核验、不可变产物修订与分块读取。
+- **数据集与评测**：来源候选、人工参考确认、冻结版本、按工作区执行与分页报告。模型版本比较与工具/权限条件变化分开处理。
+- **Python SDK**：同进程与 HTTP 客户端复用同一业务服务；创建回程未知时先按原键读取，不自动重放。
 
-SQLite 从Krim Agent准确 v1 两表事务升级为 v2 五表，增加 dataset_revisions/evaluations/eval_items；未知或外来库仍拒绝。只读打开不会初始化、迁移、恢复或补写。写端重启将未完成执行记为 interrupted/partial，不续跑、不补评分。intent-only 仍不能证明工具已执行或未执行，也不补成功 Span。
+新工作区评测使用 v4 API 与 `WorkspaceEvaluationSDK`；旧 v1 评测接口保留兼容。详见[工作区评测接口](docs/api/workspace-evaluations.md)。
 
-私有结果包含原文本；脱敏 Trace 只展示允许字段。创建回程未知只按原键核实；首次精确未准入拒绝允许纠正后显式提交，不从一次 GET404 推断未执行。用户数据按文本渲染，无 HTML/Markdown 执行通道。
+## 开发与验证
 
-旧 AgentManager、Conversation/lease、兼容 HTTP Provider、模型评委、JSON 导入导出、离线 rescore、多 worker、持续采集/训练与 M3 均未交付。本轮不追旧 P01–P10/62项，不承诺 Windows、其它 Python/浏览器、商业模型或生产部署。M1/UI 历史失败及通过口径分别见原报告，不累计成 M2 通过数。
+普通回归入口会保存命令输出和 JUnit（测试结果交换格式）：
 
+```bash
+python scripts/validate.py --suite ci
+```
 
-## AC-M2 FINAL 0.4.0a1 候选范围（2026-10-20 UTC）
+完整测试另外需要实际隔离、外部目标或阶段材料；运行前会列出所需材料变量：
 
-本轮冻结发行集合为75项（71 Python＋4 web），通过同一Application/Run工具、摘要、隔离命令与Artifact核验链；D4已接受，FINAL正在真实新包/项目外安装/同包双视口验证，尚未M2/整体接受。以AC-M2-REPORT的本轮追加与独立FINAL-ENTRY01报告为实际执行记录，未运行的门禁不能当成通过。旧0.3/56发行历史保持；新候选revision待发布协调机械冻结，无新生产或商业应用调用声明。
+```bash
+python scripts/validate.py --suite full
+```
+
+前端类型、契约、组件与构建命令见 [frontend/package.json](frontend/package.json)。端到端演练使用真实本机服务，并按页面步骤保存截图；[P0/P1 截图](docs/testing/reports/2026-10-29-p0-p1/screenshots.md)与[普通验证结果](docs/testing/reports/2026-10-29-p0-validation/README.md)保留具体版本、命令和失败记录。
+
+## 阅读入口
+
+| 想了解什么 | 入口 |
+|---|---|
+| 当前实现与剩余阶段 | [产品追踪](docs/agent-core/PRODUCT-TRACKING.md)、[P0–P6 计划](docs/plan/2026-10-29-agent-core-completion.md) |
+| 架构与源码阅读 | [Agent 核心指南](docs/agent-core/GUIDE.md)、[协议](docs/agent-core/PROTOCOL.md) |
+| 工作台布局与交互来源 | [UI 设计](docs/architecture/workbench-ui-design.md) |
+| HTTP 运行配置 | [宿主配置决策](docs/agent-core/ADR-0003-http-runtime-profiles.md) |
+| 工作区评测 API/SDK | [接口与原键恢复](docs/api/workspace-evaluations.md) |
+| 测试与阶段演练 | [文档中心](docs/README.md)、[变更记录](docs/changelog.md) |
+
+第三方来源与许可见[来源登记](docs/agent-core/SOURCES.md)和[前端依赖声明](frontend/THIRD-PARTY-NOTICES.txt)。旧阶段入口原文保存在[文档归档](docs/archive/2026-10-29-entrypoints/README.md)。
