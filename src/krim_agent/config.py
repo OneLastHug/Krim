@@ -31,6 +31,8 @@ class Settings(BaseModel):
 
     access_policy_file: Path | None = None
     workspace_profile_file: Path | None = None
+    product_eval_enabled: bool = False
+    product_eval_database: Path | None = None
     session_max_queued: int = Field(default=8, ge=1, le=16)
     session_max_open: int = Field(default=32, ge=1, le=64)
     session_max_turns: int = Field(default=256, ge=1, le=1024)
@@ -62,6 +64,8 @@ SESSION_FIELDS = frozenset(
     {
         "access_policy_file",
         "workspace_profile_file",
+        "product_eval_enabled",
+        "product_eval_database",
         "session_max_queued",
         "session_max_open",
         "session_max_turns",

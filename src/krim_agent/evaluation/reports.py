@@ -222,6 +222,34 @@ def validate_report(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def regression_reasons(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, JsonValue]]:
+    """对已验证且可比的报告计算逐样本退化，不改写报告。"""
+    reasons: list[dict[str, JsonValue]] = []
+    old = {(i["case_id"], i["repetition"]): i for i in before["items"]}
+    for item in after["items"]:
+        prior = old[(item["case_id"], item["repetition"])]
+        if prior["quality"] == "passed" and item["quality"] != "passed":
+            reasons.append({
+                "code": "passed_to_nonpassed", "case_id": item["case_id"],
+                "repetition": item["repetition"],
+                "baseline_execution_ref" if before["schema_version"] == "safe-eval/1"
+                else "baseline_run_id": prior.get("execution_ref", prior.get("run_id")),
+                "candidate_execution_ref" if before["schema_version"] == "safe-eval/1"
+                else "candidate_run_id": item.get("execution_ref", item.get("run_id")),
+            })
+        previous = {score["rule"]["name"]: score for score in prior["scores"]}
+        for score in item["scores"]:
+            if score["value"] < previous[score["rule"]["name"]]["value"]:
+                reasons.append({
+                    "code": "score_regression", "case_id": item["case_id"],
+                    "repetition": item["repetition"], "rule": score["rule"]["name"],
+                    "before": previous[score["rule"]["name"]]["value"], "after": score["value"],
+                })
+    if after["summary"]["pass_rate"] != 1:
+        reasons.append({"code": "candidate_not_all_passed"})
+    return reasons
+
+
 def gate_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, JsonValue]:
     """纯读两个冻结报告；不访问Store/Provider/scorer。"""
     reasons: list[dict[str, JsonValue]] = []
@@ -290,48 +318,7 @@ def gate_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[st
                 return invalid("incompatible_" + key)
     except (ValueError, TypeError, KeyError, ServiceError):
         return invalid("report_invalid")
-    old = {(i["case_id"], i["repetition"]): i for i in before["items"]}
-    for item in after["items"]:
-        prior = old[(item["case_id"], item["repetition"])]
-        if prior["quality"] == "passed" and item["quality"] != "passed":
-            reasons.append(
-                {
-                    "code": "passed_to_nonpassed",
-                    "case_id": item["case_id"],
-                    "repetition": item["repetition"],
-                    (
-                        "baseline_execution_ref"
-                        if before["schema_version"] == "safe-eval/1"
-                        else "baseline_run_id"
-                    ): prior.get(
-                        "execution_ref",
-                        prior.get("run_id"),
-                    ),
-                    (
-                        "candidate_execution_ref"
-                        if before["schema_version"] == "safe-eval/1"
-                        else "candidate_run_id"
-                    ): item.get(
-                        "execution_ref",
-                        item.get("run_id"),
-                    ),
-                }
-            )
-        previous = {s["rule"]["name"]: s for s in prior["scores"]}
-        for score in item["scores"]:
-            if score["value"] < previous[score["rule"]["name"]]["value"]:
-                reasons.append(
-                    {
-                        "code": "score_regression",
-                        "case_id": item["case_id"],
-                        "repetition": item["repetition"],
-                        "rule": score["rule"]["name"],
-                        "before": previous[score["rule"]["name"]]["value"],
-                        "after": score["value"],
-                    }
-                )
-    if after["summary"]["pass_rate"] != 1:
-        reasons.append({"code": "candidate_not_all_passed"})
+    reasons = regression_reasons(before, after)
     return {
         "status": "fail" if reasons else "pass",
         "policy": "strict-regression/1",

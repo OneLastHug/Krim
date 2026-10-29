@@ -51,6 +51,9 @@ def create_app(
         else (application.settings if application is not None else Settings.from_env())
     )
 
+    if application is None and "product_eval_enabled" not in config.model_fields_set:
+        config = config.model_copy(update={"product_eval_enabled": True})
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
@@ -159,6 +162,7 @@ def create_app(
             "edition": "agent-core",
             "provider": "script+http" if enabled else "offline-script",
             "http_enabled": enabled,
+            "product_eval_enabled": current.evaluation_product is not None,
             "active": sum(not t.done() for t in current.service.tasks.values()),
         }
 
@@ -241,6 +245,17 @@ def create_app(
 
     mount_sessions(app)
     mount_workspace(app)
+    from krim_agent.evaluation.product import EvaluationProduct
+
+    from .evaluations import mount_evaluations
+
+    def product_evaluation(request: Request) -> EvaluationProduct:
+        product = active(request).evaluation_product
+        if product is None:
+            raise ServiceError("workspace_unavailable", 503)
+        return product
+
+    mount_evaluations(app, product_evaluation)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:
