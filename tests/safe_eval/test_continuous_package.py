@@ -298,8 +298,12 @@ print(json.dumps({'root':str(root),
 
 
 def run_cli_flow(tmp_path, *, installed, selection="all"):
-    root = Path(os.environ["KRIM_PN3_ROOT"])
     tmp_path.mkdir(parents=True, exist_ok=True)
+    if installed:
+        root = Path(os.environ["KRIM_PN3_ROOT"])
+    else:
+        root = tmp_path / "source-consumer"
+        (root / "outside").mkdir(parents=True)
     source = Path(__file__).resolve().parents[2]
     python = str(root / "installed/bin/python") if installed else sys.executable
     expected = root / "installed/lib/python3.12/site-packages" if installed else source / "src"

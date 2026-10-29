@@ -3,10 +3,13 @@
   "version": "0.2.0-alpha.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
   "scripts": {
     "build": "tsc --noEmit && node scripts/build.mjs",
     "check": "tsc --noEmit",
-    "test:contracts": "node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/evaluation.test.ts",
+    "test:contracts": "node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/evaluation.test.ts && node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/agent-workspace.test.ts",
     "test:e2e": "playwright test",
     "test:components": "vitest run --config vitest.config.ts"
   },

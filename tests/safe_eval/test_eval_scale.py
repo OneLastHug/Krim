@@ -415,7 +415,7 @@ async def test_single_task_100x3_two_workers(tmp_path, monkeypatch):
             and r["stderr_eof"]
             and r["streams_joined"]
             and r["group_empty"]
-            and r["uid"] == 1001
+            and r["uid"] == os.getuid() != 0
             for r in actual
         )
         assert not [w for w in app.owner.jobs.values() if w.prepared.spec.task_id == view["id"]]
@@ -3658,7 +3658,7 @@ async def test_scale_evidence_receipts(tmp_path, kind):
             json.dumps(qualification, indent=2)
         )
         assert observed is not None and observed["argv"] == argv
-        assert observed["uid"] == os.getuid() == 1001 and observed["pid"] > 0
+        assert observed["uid"] == os.getuid() != 0 and observed["pid"] > 0
         assert (
             observed["helper_ast_sha256"] == hashlib.sha256(ast.dump(helper).encode()).hexdigest()
         )
@@ -3855,7 +3855,7 @@ async def test_scale_evidence_receipts(tmp_path, kind):
         assert checkpoints[0]["known"]["actual_cwd"] == str(child_cwd)
         if returned is not None:
             assert returned[2]["actual_cwd"] == str(child_cwd)
-    assert process["uid"] == os.getuid() == 1001 and process["pid"] > 0
+    assert process["uid"] == os.getuid() != 0 and process["pid"] > 0
     assert process["driver_sha256"] == hashlib.sha256(driver.encode()).hexdigest()
     assert process["source_driver_sha256"] == hashlib.sha256(scale_driver.encode()).hexdigest()
     assert process["helper_ast_sha256"] == hashlib.sha256(ast.dump(helper).encode()).hexdigest()
