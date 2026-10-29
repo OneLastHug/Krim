@@ -75,7 +75,14 @@ async def main():
     try:
         async with await open_application(
             Path(args.database),
-            settings=Settings.from_env().model_copy(update={"database": Path(args.database)}),
+            settings=Settings.from_env().model_copy(
+                update={
+                    "database": Path(args.database),
+                    "product_eval_database": Path(args.database).with_suffix(".eval.sqlite"),
+                    "product_eval_enabled": True,
+                    "evaluation_automation_enabled": True,
+                }
+            ),
             provider=provider,
             registry=tools,
         ) as application:

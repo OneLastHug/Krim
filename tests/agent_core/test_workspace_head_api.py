@@ -6,11 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
-import pytest
 from sqlalchemy import insert
 
 from krim_agent.api.workspace import mount_workspace
@@ -28,7 +28,6 @@ from krim_agent.workspace.types import (
     InputSnapshotRequest,
     WorkspaceProfile,
 )
-
 
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -115,11 +114,13 @@ def _input_request(expected_revision: int) -> InputSnapshotRequest:
     return InputSnapshotRequest(
         request_key="head-input",
         expected_head_revision=expected_revision,
-        files=(InputFile(
-            path="head.txt",
-            data=base64.b64encode(content).decode("ascii"),
-            sha256=hashlib.sha256(content).hexdigest(),
-        ),),
+        files=(
+            InputFile(
+                path="head.txt",
+                data=base64.b64encode(content).decode("ascii"),
+                sha256=hashlib.sha256(content).hexdigest(),
+            ),
+        ),
     )
 
 
@@ -144,14 +145,20 @@ async def test_head_sdk_and_asgi_read_the_current_artifact_without_writes(
     try:
         local_initial = await sdk.head(SESSION_ID)
         assert local_initial.revision == 0 and local_initial.manifest == ()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
             initial = await client.get(base + "/artifacts/head")
             assert initial.status_code == 200
             assert initial.json() == local_initial.model_dump(mode="json")
 
-            viewer = await client.get(base + "/artifacts/head", headers={"Authorization": "Bearer viewer"})
+            viewer = await client.get(
+                base + "/artifacts/head", headers={"Authorization": "Bearer viewer"}
+            )
             assert viewer.status_code == 200 and viewer.json() == initial.json()
-            denied = await client.get(base + "/artifacts/head", headers={"Authorization": "Bearer peer"})
+            denied = await client.get(
+                base + "/artifacts/head", headers={"Authorization": "Bearer peer"}
+            )
             assert denied.status_code == 404
             rejected_write = await client.post(
                 base + "/inputs",
@@ -160,7 +167,9 @@ async def test_head_sdk_and_asgi_read_the_current_artifact_without_writes(
             )
             assert rejected_write.status_code == 403
 
-            uploaded = await client.post(base + "/inputs", json=_input_request(0).model_dump(mode="json"))
+            uploaded = await client.post(
+                base + "/inputs", json=_input_request(0).model_dump(mode="json")
+            )
             assert uploaded.status_code == 200, uploaded.text
             revision = uploaded.json()
             assert revision["revision"] == 1 and revision["parent_id"] == local_initial.revision_id
@@ -219,13 +228,17 @@ async def test_remote_sdk_head_uses_get_and_strict_artifact_contract(
     try:
         head = await sdk.head(SESSION_ID)
         assert head.revision == 0 and head.session_id == SESSION_ID
-        assert calls == [(
-            "GET",
-            "/v3/workspaces/local/sessions/" + SESSION_ID + "/artifacts/head",
-            None,
-        )]
+        assert calls == [
+            (
+                "GET",
+                "/v3/workspaces/local/sessions/" + SESSION_ID + "/artifacts/head",
+                None,
+            )
+        ]
+
         async def invalid(_method: str, _path: str, _body: Any = None) -> Any:
             return value | {"unknown": True}
+
         monkeypatch.setattr(client, "request", invalid)
         with pytest.raises(ValidationError):
             await sdk.head(SESSION_ID)

@@ -777,14 +777,14 @@ button[data-slot="button"][class~="border-border"] { border-color: var(--border)
 .sidebar-collapsed .navigation-item { justify-content: center; padding-inline: 0!important; }
 .dark .notice { color: #fca5a5; }
 .dark .chat-workbench button:focus-visible, .dark .chat-workbench select:focus-visible, .dark .chat-workbench summary:focus-visible, .dark .chat-workbench pre:focus-visible, .dark #chat-prompt:focus-visible { outline-color: var(--ring)!important; }
-.mobile-drawer-content { inset: 0 auto 0 0!important; top: 0!important; left: 0!important; width: min(88vw,310px)!important; max-width: 310px!important; height: 100dvh!important; max-height: 100dvh!important; margin: 0!important; padding: 14px!important; transform: none!important; translate: 0 0!important; border-radius: 0 10px 10px 0!important; }
+.mobile-drawer-content { align-content: start; inset: 0 auto 0 0!important; top: 0!important; left: 0!important; width: min(88vw,310px)!important; max-width: 310px!important; height: 100dvh!important; max-height: 100dvh!important; margin: 0!important; padding: 14px!important; --tw-translate-x: 0px!important; --tw-translate-y: 0px!important; transform: none!important; translate: 0 0!important; border-radius: 0 10px 10px 0!important; }
 .drawer-heading { padding: 3px 34px 12px 5px; }
 .drawer-heading [data-slot="dialog-title"] { margin: 0; font-size: 16px; }
 .drawer-sidebar { width: 100%; height: auto; min-height: 0; overflow: auto; padding: 0 2px 10px; border: 0; background: transparent; }
 .drawer-sidebar .sidebar-brand { display: none; }
 .drawer-sidebar .sidebar-context { margin-bottom: 16px; }
 .drawer-sidebar .sidebar-footer { margin-top: 18px; }
-.mobile-inspector-content { inset: auto 0 0 0!important; top: auto!important; left: 0!important; width: 100%!important; max-width: none!important; max-height: min(76dvh,620px)!important; margin: 0!important; padding: 14px 18px 24px!important; transform: none!important; translate: 0 0!important; border-radius: 14px 14px 0 0!important; }
+.mobile-inspector-content { inset: auto 0 0 0!important; top: auto!important; left: 0!important; width: 100%!important; max-width: none!important; max-height: min(76dvh,620px)!important; margin: 0!important; padding: 14px 18px 24px!important; --tw-translate-x: 0px!important; --tw-translate-y: 0px!important; transform: none!important; translate: 0 0!important; border-radius: 14px 14px 0 0!important; }
 .mobile-inspector-content .workbench-inspector { min-height: 0; padding: 0; }
 @media (max-width: 1023px) {
   .workbench-shell { --sidebar-width: 208px; }

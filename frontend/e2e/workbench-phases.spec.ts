@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { screenshotStep } from "./step-screenshot.js";
+import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 // 阶段用例使用真实本机服务，不拦截或替换业务接口。
 test("P0：真实任务、工具事实和输入拒绝", async ({ page }, info) => {
@@ -26,7 +26,7 @@ test("P0：真实任务、工具事实和输入拒绝", async ({ page }, info) =
     expect(facts.run.status).toBe("completed");
     expect(facts.text).toBe("5");
     expect(facts.tools.some((tool: { name: string; result_available: boolean }) => tool.name === "add" && tool.result_available)).toBe(true);
-    await info.attach("持久运行结果.json", { body: JSON.stringify(facts, null, 2), contentType: "application/json" });
+    await attachJsonEvidence(info, "持久运行结果.json", facts);
   });
   await step("展开工具执行结果", async () => {
     await page.getByRole("tab", { name: "工具", exact: true }).click();
@@ -94,7 +94,15 @@ test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) =
   });
   await step("展开导航抽屉", async () => {
     await page.getByRole("button", { name: "打开导航", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "主导航", exact: true })).toBeVisible();
+    const drawer = page.getByRole("dialog", { name: "主导航", exact: true });
+    await expect(drawer).toBeVisible();
+    const bounds = await drawer.boundingBox();
+    expect(bounds).toBeTruthy();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
+    await expect(drawer.getByRole("button", { name: "导航到设置", exact: true })).toBeInViewport();
   });
   await step("通过抽屉进入设置", async () => {
     await page.getByRole("dialog", { name: "主导航", exact: true }).getByRole("button", { name: "导航到设置", exact: true }).click();
@@ -103,7 +111,14 @@ test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) =
   });
   await step("展开窄屏对象详情", async () => {
     await page.getByRole("button", { name: "打开详情面板", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "对象详情", exact: true })).toBeVisible();
+    const inspector = page.getByRole("dialog", { name: "对象详情", exact: true });
+    await expect(inspector).toBeVisible();
+    const bounds = await inspector.boundingBox();
+    expect(bounds).toBeTruthy();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
   });
   await step("键盘关闭并检查无整页横溢", async () => {
     await page.keyboard.press("Escape");

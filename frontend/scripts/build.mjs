@@ -6,6 +6,8 @@ import {createHash} from "node:crypto";
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const cache=process.env.KRIM_AGENT_CORE_BUILD ?? resolve(root,"../.cache/agent-core/ac-m2-final");await mkdir(cache,{recursive:true});
 const out=await mkdtemp(resolve(cache,"build-"));let modules=[];
+async function sourceHashes(){const hashes={};const names=[...(await files(resolve(root,"src"))).map(name=>"src/"+name),...(await files(resolve(root,"scripts"))).map(name=>"scripts/"+name),"index.html","package.json","package-lock.json","tsconfig.json","vite.config.ts"];for(const name of names.sort())hashes[name]=createHash("sha256").update(await readFile(resolve(root,name))).digest("hex");return hashes;}
+const sourceSnapshot=await sourceHashes();
 await build({configFile:resolve(root,"vite.config.ts"),root,build:{outDir:out,emptyOutDir:true},plugins:[{name:"agent-ui-provenance",generateBundle(_options,bundle){modules=[...new Set(Object.values(bundle).flatMap(item=>item.type==="chunk"?Object.keys(item.modules):[]))];}}]});
 async function files(path,prefix=""){let found=[];for(const name of await readdir(path)){const full=resolve(path,name);if((await stat(full)).isDirectory())found.push(...await files(full,prefix+name+"/"));else found.push(prefix+name);}return found;}
 const actual=(await files(out)).sort();
@@ -14,6 +16,7 @@ const allowed=[...product,".vite/manifest.json",".vite/licenses.json"].sort();
 if(JSON.stringify(actual)!==JSON.stringify(allowed))throw new Error("构建资源集合不符："+JSON.stringify(actual));
 const index=await readFile(resolve(out,"index.html"),"utf8");
 if(!index.includes('/ui/assets/app.js')||!index.includes('/ui/assets/styles.css')||/https?:\/\//.test(index))throw new Error("入口资源引用不符");
+if(JSON.stringify(sourceSnapshot)!==JSON.stringify(await sourceHashes()))throw new Error("构建期间前端源码发生变化；生成物未复制，请重新构建");
 const licenses=JSON.parse(await readFile(resolve(out,".vite/licenses.json"),"utf8"));
 for(const name of ["tw-animate-css","tailwindcss"]){const meta=JSON.parse(await readFile(resolve(root,"node_modules",name,"package.json"),"utf8"));licenses.push({name,version:meta.version,identifier:meta.license,text:await readFile(resolve(root,"node_modules",name,"LICENSE"),"utf8")});}
 const marker="\n\nBundled dependencies\n\n";
@@ -28,5 +31,5 @@ for(const name of product)await copyFile(resolve(out,name),resolve(root,"../src/
 await copyFile(resolve(root,"THIRD-PARTY-NOTICES.txt"),resolve(root,"../src/krim_agent/web/THIRD-PARTY-NOTICES.txt"));
 const hashes={};for(const name of product)hashes[name]=createHash("sha256").update(await readFile(resolve(out,name))).digest("hex");
 await writeFile(resolve(out,".vite/source-modules.json"),JSON.stringify(modules,null,2));
-await writeFile(resolve(out,".vite/proof.json"),JSON.stringify({out,modules,licenses:licenses.map(item=>({name:item.name,version:item.version,license:item.identifier})),hashes,imports:modules.filter(id=>relative(root,id).startsWith("src/"))},null,2));
+await writeFile(resolve(out,".vite/proof.json"),JSON.stringify({out,modules,source_hashes:sourceSnapshot,licenses:licenses.map(item=>({name:item.name,version:item.version,license:item.identifier})),hashes,imports:modules.filter(id=>relative(root,id).startsWith("src/"))},null,2));
 console.log(JSON.stringify({out,products:[...product,"THIRD-PARTY-NOTICES.txt"],modules:modules.length}));
