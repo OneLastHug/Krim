@@ -22,6 +22,36 @@ from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 from .types import ControlRequest, ControlView, SessionCreate, SessionView, TurnRequest, TurnView
 
 
+_CONTROL_KINDS = frozenset({"rename", "close", "resume", "cancel_turn", "approval"})
+
+
+def _validate_control_arguments(
+    kind: str,
+    turn_id: str | None = None,
+    approval: ApprovalReply | None = None,
+    request_id: str | None = None,
+) -> None:
+    if kind not in _CONTROL_KINDS:
+        raise ServiceError("invalid_input", 422)
+    if kind == "approval":
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or approval is None
+            or not isinstance(request_id, str)
+            or not request_id
+        ):
+            raise ServiceError("invalid_input", 422)
+        return
+    if approval is not None or request_id is not None:
+        raise ServiceError("invalid_input", 422)
+    if kind == "cancel_turn":
+        if not isinstance(turn_id, str) or not turn_id:
+            raise ServiceError("invalid_input", 422)
+    elif turn_id is not None:
+        raise ServiceError("invalid_input", 422)
+
+
 class SessionService:
     def __init__(self, store: SQLiteStore, runs: RunService, settings: Settings) -> None:
         self.store, self.runs, self.settings = store, runs, settings
@@ -127,22 +157,33 @@ class SessionService:
         )
 
     async def submit(
-        self, principal: PrincipalContext, workspace: str, session_id: str,
-     request: TurnRequest | WorkspaceTurnRequest
+        self,
+        principal: PrincipalContext,
+        workspace: str,
+        session_id: str,
+        request: TurnRequest | WorkspaceTurnRequest,
     ) -> TurnView:
         self._admitting()
         if isinstance(request, WorkspaceTurnRequest):
             # 工作请求的嵌套expected必须在首await前脱离调用者；legacy顺序不变。
             request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
         await self.get(principal, workspace, session_id, write=True)
-        body = WorkspaceTurnRequest.model_validate_json(
-            request.model_dump_json()) if isinstance(request,
-            WorkspaceTurnRequest) else TurnRequest.model_validate_json(request.model_dump_json())
+        body = (
+            WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
+            if isinstance(request, WorkspaceTurnRequest)
+            else TurnRequest.model_validate_json(request.model_dump_json())
+        )
         if len(body.text.encode()) > self.settings.max_input_bytes:
             raise ServiceError("input_limit", 422)
-        result = await sql.submit(self.store, session_id, body, self.settings,
-                                  access=ExecutionAccess(principal, workspace,
-            session_id) if isinstance(body, WorkspaceTurnRequest) else None)
+        result = await sql.submit(
+            self.store,
+            session_id,
+            body,
+            self.settings,
+            access=ExecutionAccess(principal, workspace, session_id)
+            if isinstance(body, WorkspaceTurnRequest)
+            else None,
+        )
         self.runs.slot_changed.set()
         return result
 
@@ -184,6 +225,10 @@ class SessionService:
                 value = await self.turn(principal, workspace, session_id, turn_id)
                 if value.status not in {"queued", "running"}:
                     return value
+                if value.run_id is not None:
+                    producer = self.runs.tasks.get(value.run_id)
+                    if producer is not None and producer.done():
+                        await self.runs.wait(value.run_id)
                 await asyncio.sleep(0.02)
 
     async def _dispatch(self) -> None:
@@ -235,6 +280,7 @@ class SessionService:
         approval: ApprovalReply | None = None,
         request_id: str | None = None,
     ) -> ControlView:
+        _validate_control_arguments(kind, turn_id, approval, request_id)
         await self.get(
             principal, workspace, session_id, write=kind != "approval", approve=kind == "approval"
         )

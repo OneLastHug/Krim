@@ -36,6 +36,10 @@ class EvalApplication:
         owner: ProcessOwner | None = None,
         owns_owner: bool = True,
         campaign_binding: CampaignStoreBinding | None = None,
+        scope: str = "local",
+        actor: str = "local-user",
+        sources: dict[str, Any] | None = None,
+        clock: Any = None,
     ) -> None:
         self.repository, self.adapter = repository, adapter
         self.kernel = EvalKernel(repository)
@@ -43,6 +47,19 @@ class EvalApplication:
         self.leases = leases or ([] if adapter is None else [AdapterLease(adapter, owned=True)])
         self.owner, self.owns_owner = owner, owns_owner
         self.campaign_binding = campaign_binding
+        from .continuous import ContinuousEvaluation
+        from .continuous_metrics import register_metrics
+        from .sources import EvalSourceReader
+
+        register_metrics(repository.metric_registry)
+        self.continuous = ContinuousEvaluation(
+            repository,
+            self.kernel,
+            scope=scope,
+            actor=actor,
+            sources={"current-eval": EvalSourceReader(repository, scope=scope)} | (sources or {}),
+            clock=clock,
+        )
 
     async def run(self, request: TaskSpec) -> dict[str, Any]:
         # 在首await之前脱离调用者的可变嵌套容器。
@@ -100,8 +117,17 @@ async def open_eval(
     campaign_bootstrap: CampaignBootstrap | None = None,
     adapters: dict[str, AdapterLease] | None = None,
     process_owner: ProcessOwner | None = None,
+    execution_enabled: bool = True,
+    scope: str = "local",
+    actor: str = "local-user",
+    sources: dict[str, Any] | None = None,
+    clock: Any = None,
 ) -> EvalApplication:
     profiles = list(native_profiles or [])
+    if not execution_enabled and (
+        profiles or adapters or campaign_bootstrap is not None or process_owner is not None
+    ):
+        raise ServiceError("invalid_input", 422)
     if readonly and (profiles or campaign_bootstrap is not None or adapters):
         raise ServiceError("readonly")
     binding: CampaignStoreBinding | None = None
@@ -166,10 +192,10 @@ async def open_eval(
                 if not repo.healthy or marker.get("native_campaign") != binding.marker:
                     raise ServiceError("execution_unknown")
             binding.assert_store(path, writer_fd=repo._writer_fd)
-        owner = None if readonly else process_owner or ProcessOwner()
+        owner = None if readonly or not execution_enabled else process_owner or ProcessOwner()
         adapter = (
             None
-            if readonly
+            if readonly or not execution_enabled
             else LocalProcessAdapter(
                 workspace or path.parent / "trials",
                 owner,
@@ -228,6 +254,10 @@ async def open_eval(
             owner=owner,
             owns_owner=process_owner is None,
             campaign_binding=binding,
+            scope=scope,
+            actor=actor,
+            sources=sources,
+            clock=clock,
         )
     except BaseException:
         await asyncio.gather(

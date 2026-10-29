@@ -17,6 +17,9 @@ Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 # 中立契约只在本模块显式扩容，旧v1/public contracts的1MiB完全不改。
+SCALE_REQUEST_BYTES = 262144
+SCALE_STORAGE_BYTES = 4 * 1024 * 1048576
+
 DATASET_BYTES = 1048576
 REQUEST_BYTES = 65536
 ARTIFACT_BYTES = 1048576
@@ -131,7 +134,7 @@ class DatasetRef(StrictModel):
 class DatasetSpec(StrictModel):
     name: Identity
     version: Identity
-    cases: list[CaseSpec] = Field(min_length=1, max_length=8)
+    cases: list[CaseSpec] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
@@ -151,7 +154,7 @@ class DatasetSpec(StrictModel):
 
 class Budget(StrictModel):
     repetitions: int = Field(default=1, ge=1, le=3)
-    concurrency: Literal[1] = 1
+    concurrency: Literal[1, 2] = 1
     item_timeout_seconds: int = Field(default=20, ge=1, le=180)
     scorer_timeout_seconds: Literal[1] = 1
     batch_timeout_seconds: int = Field(default=120, ge=1, le=240)
@@ -218,6 +221,11 @@ class BatchPlan:
     item_timeout: float
     scorer_timeout: float
     batch_timeout: float
+    mode: str = "execute"
+    scoring_inputs: dict[tuple[str, int], dict[str, Any]] | None = None
+    concurrency: int = 1
+    paged: bool = False
+    plan_fingerprint: str | None = None
 
 
 class TrialView(StrictModel):

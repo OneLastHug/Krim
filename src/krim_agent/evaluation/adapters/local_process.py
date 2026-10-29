@@ -47,6 +47,7 @@ class LocalProcessAdapter:
             "key": "reconcile-reference",
             "version": "reconcile-reference/1",
             "kind": "non-model-reference",
+            "max_concurrency": 2,
             "execution_conditions": clone(self._conditions),
             "implementation_digest": hashlib.sha256(self.worker.read_bytes()).hexdigest(),
             "adapter_digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -82,6 +83,8 @@ class LocalProcessAdapter:
                 "collect",
                 "cancel",
                 "close",
+                "retirement_receipt",
+                "retire",
             ]
         )
 
@@ -155,7 +158,10 @@ class LocalProcessAdapter:
     async def collect(self, ref: ExecutionRef) -> dict[str, Any]:
         job = self.jobs[ref.id]
         assert job.ref is ref and job.collector is not None
-        return cast(dict[str, Any], clone(await asyncio.shield(job.collector)))
+        observation = cast(dict[str, Any], clone(await asyncio.shield(job.collector)))
+        if observation["cleanup"] != "closed":
+            raise ServiceError("execution_unknown")
+        return observation
 
     async def cancel(self, ref: ExecutionRef) -> CleanupResult:
         job = self.jobs[ref.id]
@@ -163,13 +169,24 @@ class LocalProcessAdapter:
         return await self.owner.cancel(job, self._lease)
 
     async def close(self) -> CleanupResult:
-        if self._close_task is None:
+        previous = self._close_task
+        if (
+            previous is None
+            or previous.done()
+            and (
+                previous.cancelled()
+                or previous.exception() is not None
+                or not previous.result().closed
+            )
+        ):
             self._close_task = asyncio.create_task(self._close())
+        assert self._close_task is not None
         return await settled(self._close_task)
 
     async def _close(self) -> CleanupResult:
         outcomes = await asyncio.gather(
-            *(self.cancel(j.ref) for j in self.jobs.values()), return_exceptions=True
+            *(self.owner._close_work(j, self._lease) for j in self.jobs.values()),
+            return_exceptions=True,
         )
         closed = all(isinstance(v, CleanupResult) and v.closed for v in outcomes)
         if self._owns_owner:
@@ -177,3 +194,61 @@ class LocalProcessAdapter:
             closed = closed and owner.closed
         self.closed = closed
         return CleanupResult(closed, None if closed else "cleanup_unknown")
+
+    def retirement_receipt(self, ref: ExecutionRef) -> dict[str, Any]:
+        job = self.jobs.get(ref.id)
+        if job is None or job.ref is not ref or self.owner.jobs.get(ref.id) is not job:
+            raise ServiceError("permission_denied")
+        if job.lease is not self._lease or job.collector is None:
+            raise ServiceError("permission_denied")
+        for task in [job.collector, *job.stream_tasks, job.cancel_task, job.close_task]:
+            if task is None:
+                continue
+            if not task.done():
+                raise ServiceError("execution_unknown")
+            if task.cancelled() or task.exception() is not None:
+                raise ServiceError("execution_unknown")
+        observation = job.collector.result()
+        known_empty = (observation.get("process") or {}).get("group_empty") is True or any(
+            r.get("group_empty") is True for r in job.cleanup_receipts
+        )
+        if (
+            job.process.returncode is None
+            or job.pidfd != -1
+            or not job.stdout_eof
+            or not job.stderr_eof
+            or not known_empty
+        ):
+            raise ServiceError("execution_unknown")
+        receipt = {
+            "schema_version": "local-process-retirement/1",
+            "execution_ref": ref.id,
+            "task_id": job.prepared.spec.task_id,
+            "case_id": job.prepared.spec.case_id,
+            "repetition": job.prepared.spec.repetition,
+            "pid": job.process.pid,
+            "wait_returncode": job.process.returncode,
+            "pidfd_closed": job.pidfd == -1,
+            "stdout_eof": job.stdout_eof,
+            "stderr_eof": job.stderr_eof,
+            "collector_joined": job.collector.done(),
+            "stream_tasks_joined": all(t.done() for t in job.stream_tasks),
+            "cleanup_tasks_joined": all(
+                t is None or t.done() for t in (job.cancel_task, job.close_task)
+            ),
+            "owned_lease": job.lease is self._lease,
+            "group_empty": known_empty,
+            "cleanup_receipts": clone(job.cleanup_receipts),
+            "closed": True,
+        }
+        from ..domain import neutral_encoded
+
+        neutral_encoded(receipt, max_bytes=16384)
+        return receipt
+
+    def retire(self, ref: ExecutionRef, receipt: dict[str, Any]) -> None:
+        if self.retirement_receipt(ref) != receipt:
+            raise ServiceError("facts_corrupt")
+        job = self.jobs[ref.id]
+        self.owner.retire(job, self._lease, receipt)
+        del self.jobs[ref.id]

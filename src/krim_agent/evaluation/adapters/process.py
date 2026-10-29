@@ -9,7 +9,7 @@ import signal
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from krim_agent.contracts import ServiceError
@@ -59,6 +59,11 @@ class ProcessWork:
     conditions: dict[str, Any]
     collector: asyncio.Task[dict[str, Any]] | None = None
     cancel_task: asyncio.Task[CleanupResult] | None = None
+    close_task: asyncio.Task[CleanupResult] | None = None
+    cleanup_receipts: list[dict[str, Any]] = field(default_factory=list)
+    stdout_eof: bool = False
+    stderr_eof: bool = False
+    stream_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
 class ProcessOwner:
@@ -71,7 +76,7 @@ class ProcessOwner:
     def identities(self) -> tuple[object, ...]:
         return tuple(
             getattr(getattr(self, n), "__func__", getattr(self, n))
-            for n in ["spawn", "observe", "cancel", "close"]
+            for n in ["spawn", "observe", "cancel", "close", "retire"]
         )
 
     async def spawn(
@@ -176,6 +181,10 @@ class ProcessOwner:
                     except ValueError:
                         pass  # codec已保存protocol_error，继续真实drain/cleanup。
                 data.extend(safe[: max(0, limit - len(data))])
+            if stream is process.stdout:
+                work.stdout_eof = True
+            else:
+                work.stderr_eof = True
             tail = redactor.feed(b"", final=True)
             if callback is not None:
                 try:
@@ -186,10 +195,13 @@ class ProcessOwner:
             return bytes(data), overflow
 
         try:
+            work.stream_tasks = [
+                asyncio.create_task(read(process.stdout, 262144, on_stdout)),
+                asyncio.create_task(read(process.stderr, 131072)),
+                asyncio.create_task(process.wait()),
+            ]
             stdout, stderr, code = await asyncio.gather(
-                read(process.stdout, 262144, on_stdout),
-                read(process.stderr, 131072),
-                process.wait(),
+                *work.stream_tasks,
             )
             # 同组后代仍存在则不能把主PID退出伪装为全体关闭。
             group_empty = False
@@ -228,70 +240,184 @@ class ProcessOwner:
                 "group_empty": group_empty,
             }
         finally:
-            if work.pidfd >= 0:
+            if work.pidfd >= 0 and all(t.done() for t in work.stream_tasks):
                 os.close(work.pidfd)
                 work.pidfd = -1
 
     async def cancel(self, job: ProcessWork, lease: object) -> CleanupResult:
         if job.lease is not lease or self.jobs.get(job.ref.id) is not job:
             raise ServiceError("permission_denied")
+        # runner的except/finally属于同次取消，unknown也必须复用同一Task和绝对截止。
         if job.cancel_task is None:
             job.cancel_task = asyncio.create_task(self._cancel(job))
+        observed = job.close_task
+        if observed is not None and observed.done() and not observed.cancelled():
+            if observed.exception() is None and observed.result().closed:
+                return await settled(observed)
         return await settled(job.cancel_task)
 
     async def _cancel(self, job: ProcessWork) -> CleanupResult:
         assert job.collector is not None
-        known_empty = False
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + 30
+        observation = None
+        known_empty = any(r["group_empty"] for r in job.cleanup_receipts)
         if (
             job.collector.done()
             and not job.collector.cancelled()
             and job.collector.exception() is None
         ):
-            prior = job.collector.result()
-            known_empty = prior.get("process", prior).get("group_empty", False)
-        # 已确认消失的旧group只返回收据，绝不以旧PID再发信号。
-        if not known_empty:
+            observation = job.collector.result()
+            known_empty = known_empty or observation.get("process", observation).get(
+                "group_empty", False
+            )
+        # 只有仍被真实Popen/pidfd持有的自有组可以收束；确认消失的组不再按旧PID发信号。
+        if not known_empty and (job.pidfd >= 0 or job.process.returncode is None):
             try:
                 os.killpg(job.process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass
-        await asyncio.gather(job.collector, return_exceptions=True)
-        observation = None
-        if not job.collector.cancelled() and job.collector.exception() is None:
-            observation = job.collector.result()
-        deadline = time.monotonic() + 30
-        group_empty = known_empty
-        while not group_empty:
-            try:
-                os.killpg(job.process.pid, 0)
-            except ProcessLookupError:
-                group_empty = True
+                known_empty = True
+        closed = False
+        while True:
+            if not known_empty:
+                try:
+                    os.killpg(job.process.pid, 0)
+                except ProcessLookupError:
+                    known_empty = True
+            joined = job.collector.done()
+            if joined and not job.collector.cancelled() and job.collector.exception() is None:
+                observation = job.collector.result()
+            streams_joined = all(t.done() for t in job.stream_tasks)
+            if joined and streams_joined and job.process.returncode is not None and job.pidfd >= 0:
+                os.close(job.pidfd)
+                job.pidfd = -1
+            for task in job.stream_tasks:
+                if task.done() and not task.cancelled():
+                    task.exception()
+            closed = (
+                joined
+                and streams_joined
+                and job.process.returncode is not None
+                and job.pidfd == -1
+                and job.stdout_eof
+                and job.stderr_eof
+                and known_empty
+            )
+            remaining = deadline - loop.time()
+            if closed or remaining <= 0:
                 break
-            if time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(0.005)
-        closed = job.process.returncode is not None and job.pidfd == -1 and group_empty
-        if observation is not None:
-            observation = clone(observation)
-            facts = observation.get("process", observation)
-            facts["cleanup_group_empty"] = group_empty
-            facts["cleanup_checked_at"] = time.time()
-            if "cleanup" in observation:
-                observation["cleanup"] = "closed" if closed else "unknown"
-        return CleanupResult(closed, None if closed else "cleanup_unknown", observation)
+            unfinished = {t for t in [job.collector, *job.stream_tasks] if not t.done()}
+            if unfinished:
+                # wait不取消collector；unknown仍保留原Task/流/pidfd，后续close可继续join。
+                await asyncio.wait(unfinished, timeout=remaining)
+            else:
+                await asyncio.sleep(min(0.005, remaining))
+        job.cleanup_receipts.append(
+            {
+                "started_at": started,
+                "checked_at": loop.time(),
+                "deadline": deadline,
+                "pid": job.process.pid,
+                "wait_returncode": job.process.returncode,
+                "collector_joined": job.collector.done(),
+                "stream_tasks_joined": all(t.done() for t in job.stream_tasks),
+                "stdout_eof": job.stdout_eof,
+                "stderr_eof": job.stderr_eof,
+                "pidfd_closed": job.pidfd == -1,
+                "group_empty": known_empty,
+                "closed": closed,
+                "reason": None if closed else "cleanup_unknown",
+            }
+        )
+        # 执行快照不含本次清理补充字段，closed与清理收据独立表达资源结论。
+        return CleanupResult(closed, None if closed else "cleanup_unknown", clone(observation))
 
     async def close(self) -> CleanupResult:
+        previous = self._close_task
         if (
-            self._close_task is None
-            or self._close_task.done()
-            and self._close_task.exception() is not None
+            previous is None
+            or previous.done()
+            and (
+                previous.cancelled()
+                or previous.exception() is not None
+                or not previous.result().closed
+            )
         ):
             self._close_task = asyncio.create_task(self._close())
+        assert self._close_task is not None
         return await settled(self._close_task)
+
+    async def _close_work(self, job: ProcessWork, lease: object) -> CleanupResult:
+        if job.lease is not lease or self.jobs.get(job.ref.id) is not job:
+            raise ServiceError("permission_denied")
+        first = job.cancel_task
+        if first is None or not first.done():
+            return await self.cancel(job, lease)
+        if not first.cancelled() and first.exception() is None and first.result().closed:
+            return await settled(first)
+        previous = job.close_task
+        if (
+            previous is None
+            or previous.done()
+            and (
+                previous.cancelled()
+                or previous.exception() is not None
+                or not previous.result().closed
+            )
+        ):
+            # 显式观察另存Task；并发的自动cancel仍可立即核实原unknown，不等待新预算。
+            job.close_task = asyncio.create_task(self._cancel(job))
+        assert job.close_task is not None
+        return await settled(job.close_task)
 
     async def _close(self) -> CleanupResult:
         results = await asyncio.gather(
-            *(self.cancel(j, j.lease) for j in self.jobs.values()), return_exceptions=True
+            *(self._close_work(j, j.lease) for j in self.jobs.values()), return_exceptions=True
         )
         self.closed = all(isinstance(r, CleanupResult) and r.closed for r in results)
         return CleanupResult(self.closed, None if self.closed else "cleanup_unknown")
+
+    def retire(self, job: ProcessWork, lease: object, receipt: dict[str, Any]) -> None:
+        if job.lease is not lease or self.jobs.get(job.ref.id) is not job:
+            raise ServiceError("permission_denied")
+        if job.collector is None:
+            raise ServiceError("execution_unknown")
+        for task in [job.collector, *job.stream_tasks, job.cancel_task, job.close_task]:
+            if task is not None:
+                if not task.done() or task.cancelled():
+                    raise ServiceError("execution_unknown")
+                if task.exception() is not None:
+                    raise ServiceError("execution_unknown")
+        observation = job.collector.result()
+        empty = (observation.get("process") or {}).get("group_empty") is True or any(
+            r.get("group_empty") is True for r in job.cleanup_receipts
+        )
+        if (
+            job.process.returncode is None
+            or job.pidfd != -1
+            or not job.stdout_eof
+            or not job.stderr_eof
+            or not empty
+        ):
+            raise ServiceError("execution_unknown")
+        expected = {
+            "execution_ref": job.ref.id,
+            "task_id": job.prepared.spec.task_id,
+            "case_id": job.prepared.spec.case_id,
+            "repetition": job.prepared.spec.repetition,
+            "pid": job.process.pid,
+            "wait_returncode": job.process.returncode,
+            "pidfd_closed": True,
+            "stdout_eof": True,
+            "stderr_eof": True,
+            "collector_joined": True,
+            "stream_tasks_joined": True,
+            "cleanup_tasks_joined": True,
+            "group_empty": True,
+            "owned_lease": True,
+            "closed": True,
+        }
+        if any(receipt.get(k) != v for k, v in expected.items()):
+            raise ServiceError("facts_corrupt")
+        del self.jobs[job.ref.id]
