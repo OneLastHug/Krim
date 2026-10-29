@@ -163,6 +163,7 @@ def create_app(
             "provider": "script+http" if enabled else "offline-script",
             "http_enabled": enabled,
             "product_eval_enabled": current.evaluation_product is not None,
+            "evaluation_automation_enabled": current.evaluation_automation is not None,
             "active": sum(not t.done() for t in current.service.tasks.values()),
         }
 
@@ -256,6 +257,17 @@ def create_app(
         return product
 
     mount_evaluations(app, product_evaluation)
+    from krim_agent.evaluation.automation import EvaluationAutomation
+
+    from .evaluation_automation import mount_evaluation_automation
+
+    def evaluation_automation(request: Request) -> EvaluationAutomation:
+        automation = active(request).evaluation_automation
+        if automation is None:
+            raise ServiceError("workspace_unavailable", 503)
+        return automation
+
+    mount_evaluation_automation(app, evaluation_automation)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:
