@@ -1,4 +1,4 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
-export default defineConfig({ plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } }, cacheDir: process.env.KRIM_AGENT_CORE_CACHE ?? "../.cache/agent-core/ac-m2/vitest", test: { environment: "jsdom", include: ["contracts/run-ui.test.tsx", "contracts/eval-ui.test.tsx", "contracts/session-ui.test.tsx", "contracts/agent-workspace-ui.test.tsx", "contracts/workbench-ui.test.tsx", "contracts/workspace-form-ui.test.tsx"], maxWorkers: 1 } });
+export default defineConfig({ plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } }, cacheDir: process.env.KRIM_AGENT_CORE_CACHE ?? "../.cache/agent-core/ac-m2/vitest", test: { environment: "jsdom", include: ["contracts/run-ui.test.tsx", "contracts/eval-ui.test.tsx", "contracts/session-ui.test.tsx", "contracts/agent-workspace-ui.test.tsx", "contracts/workbench-ui.test.tsx", "contracts/product-evaluation-ui.test.tsx", "contracts/workspace-form-ui.test.tsx"], maxWorkers: 1 } });

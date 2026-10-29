@@ -2,9 +2,11 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
+import { webcrypto } from "node:crypto";
 
 let root: Root, host: HTMLDivElement;
 let legacyIdentity = true;
+let productEnabled = false;
 const calls: { path: string; method: string }[] = [];
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 function sampleSession(id: string) {
@@ -14,7 +16,7 @@ beforeEach(() => {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
   localStorage.clear();
   history.replaceState(null, "", "/ui/");
-  legacyIdentity = true;
+  legacyIdentity = true; productEnabled = false;
   calls.length = 0;
   host = document.createElement("div");
   document.body.append(host);
@@ -23,7 +25,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => {
     const path = String(input), method = options.method ?? "GET";
     calls.push({ path, method });
-    if (path === "/healthz") return json({ http_enabled: false });
+    if (path === "/healthz") return json({ http_enabled: false, product_eval_enabled: productEnabled, evaluation_automation_enabled: productEnabled });
     if (path === "/v2/me") return json({ principal_id: "operator", generation: 1, legacy: legacyIdentity, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
     if (path === "/v2/workspaces/local/sessions?limit=50") return json([sampleSession("A"), sampleSession("B")]);
     if (path.includes("/turns?offset=")) return json([]);
@@ -50,6 +52,25 @@ function button(label: string) {
   expect(found, label).toBeTruthy();
   return found!;
 }
+
+test("评测与自动化共存时切换页面不复制工作台或复用组件身份", async () => {
+  productEnabled = true;
+  vi.stubGlobal("crypto", webcrypto);
+  history.replaceState(null, "", "/ui/?view=datasets&workspace=local");
+  await mount();
+  await until(() => expect(host.querySelector("#product-dataset-name")).toBeTruthy());
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await act(async () => button("导航到评测").click());
+    await until(() => expect(host.querySelector("#product-target")).toBeTruthy());
+    expect(host.querySelectorAll(".product-eval-workbench")).toHaveLength(1);
+    expect(host.querySelectorAll("#product-target")).toHaveLength(1);
+    await act(async () => button("导航到数据集").click());
+    await until(() => expect(host.querySelector("#product-dataset-name")).toBeTruthy());
+    expect(host.querySelectorAll(".product-eval-workbench")).toHaveLength(1);
+  }
+  expect(calls.every(value => value.method === "GET")).toBe(true);
+});
+
 
 test("首页默认对话，主导航和浏览器回退同步页面", async () => {
   await mount();
