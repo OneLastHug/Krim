@@ -81,14 +81,43 @@ async def requested(app, key="ordinary", **updates):
     )
 
 
-def resources(app, tmp_path, name):
+def resources(app, tmp_path, name, *, node=None, owner=None, role="warm"):
+    repository = app.repository if owner is None else owner
+    application_owned = repository is app.repository
+    adapter = app.adapter if application_owned else None
+    kernel = app.kernel if application_owned else None
+    close_task = app._close_task if application_owned else repository._close_task
     records = {
+        "node": node,
+        "role": role,
+        "consumer": __file__,
+        "database": str(repository.path),
+        "application_object": id(app) if application_owned else None,
+        "repository_object": id(repository),
+        "engine_object": id(repository.engine),
+        "writer_fd": repository._writer_fd,
+        "readonly": repository.readonly,
+        "close_task": None
+        if close_task is None
+        else {
+            "object": id(close_task),
+            "done": close_task.done(),
+            "cancelled": close_task.cancelled(),
+            "exception": repr(close_task.exception())
+            if (
+                close_task.done()
+                and not close_task.cancelled()
+                and close_task.exception() is not None
+            )
+            else None,
+        },
+        "execution_observation": "application" if adapter is not None else "not_applicable",
         "uid": os.getuid(),
-        "repository_closed": app.repository.closed,
-        "connections": app.repository.resources,
-        "kernel_tasks": {k: t.done() for k, t in app.kernel.tasks.items()},
-        "execute_calls": app.adapter.execute_calls,
-        "scorer_calls": app.repository.metric_registry.calls,
+        "repository_closed": repository.closed,
+        "connections": repository.resources,
+        "kernel_tasks": {} if kernel is None else {k: t.done() for k, t in kernel.tasks.items()},
+        "execute_calls": None if adapter is None else adapter.execute_calls,
+        "scorer_calls": repository.metric_registry.calls,
         "jobs": [
             {
                 "execution_ref": j.ref.id,
@@ -100,7 +129,7 @@ def resources(app, tmp_path, name):
                 if j.collector.done() and j.collector.exception() is None
                 else None,
             }
-            for j in app.adapter.jobs.values()
+            for j in ([] if adapter is None else adapter.jobs.values())
         ],
     }
     (tmp_path / f"{name}-resources.json").write_text(json.dumps(records, indent=2))
@@ -245,7 +274,8 @@ async def test_intent_commit_and_result_unknown_zero_replay(tmp_path, monkeypatc
         "scorer_failure",
     ],
 )
-async def test_cancel_timeout_and_close_join_owned_work(tmp_path, monkeypatch, action):
+async def test_cancel_timeout_and_close_join_owned_work(tmp_path, monkeypatch, action, request):
+    node_id = request.node.nodeid
     app = await open_eval(tmp_path / "cancel.sqlite")
     entered, release, cleaning = asyncio.Event(), asyncio.Event(), asyncio.Event()
     pending = []
@@ -319,9 +349,17 @@ async def test_cancel_timeout_and_close_join_owned_work(tmp_path, monkeypatch, a
         release.set()
         await asyncio.gather(*pending, return_exceptions=True)
         await app.close()
-    resources(app, tmp_path, action)
+    resources(app, tmp_path, action, node=node_id)
     writer = await Repository.open(app.repository.path)
     await writer.close()
+    resources(
+        app,
+        tmp_path,
+        action + "-second-writer",
+        node=node_id,
+        owner=writer,
+        role="second_writer",
+    )
 
 
 @pytest.mark.parametrize(
@@ -662,7 +700,10 @@ def pn1_repair_worker(app, tmp_path, *, live=False, large=False):
 
 
 @pytest.mark.parametrize("window", ["execute_before_ref", "collect_wait"])
-async def test_pn1_repair_timeout_preserves_real_observation(tmp_path, monkeypatch, window):
+async def test_pn1_repair_timeout_preserves_real_observation(
+    tmp_path, monkeypatch, window, request
+):
+    node_id = request.node.nodeid
     from sqlalchemy import select
 
     from krim_agent.evaluation.repository import evidence, trials
@@ -738,16 +779,18 @@ async def test_pn1_repair_timeout_preserves_real_observation(tmp_path, monkeypat
         if waiting is not None:
             await asyncio.gather(waiting, return_exceptions=True)
         await app.close()
-    resources(app, tmp_path, "repair-timeout")
+    resources(app, tmp_path, "repair-timeout", node=node_id)
     async with await open_eval(database, readonly=True) as reader:
         assert (await reader.repository.by_key(request.model_dump(mode="json")))["id"] == view["id"]
         assert (await reader.repository.report(view["id"]))["items"][0]["output"] == observation
         assert reader.adapter is None and reader.repository.metric_registry.calls == 0
+    resources(reader, tmp_path, "repair-timeout-cold", node=node_id, role="cold_reader")
     assert app.adapter.execute_calls == 1
 
 
 @pytest.mark.parametrize("kind", ["dataset_snapshot", "artifact_and_streams"])
-async def test_pn1_repair_capacity_closes_persistence_and_cold_reads(tmp_path, kind):
+async def test_pn1_repair_capacity_closes_persistence_and_cold_reads(tmp_path, kind, request):
+    node_id = request.node.nodeid
     database = tmp_path / "repair-capacity.sqlite"
     app = await open_eval(database)
     try:
@@ -784,12 +827,13 @@ async def test_pn1_repair_capacity_closes_persistence_and_cold_reads(tmp_path, k
         assert app.adapter.execute_calls == (8 if kind == "dataset_snapshot" else 1)
     finally:
         await app.close()
-    resources(app, tmp_path, "repair-capacity")
+    resources(app, tmp_path, "repair-capacity", node=node_id)
     async with await open_eval(database, readonly=True) as cold:
         assert await cold.repository.report(view["id"]) == report
         assert (await cold.repository.snapshot(view["id"]))["status"] == "completed"
         assert gate_reports(report, await cold.repository.report(view["id"]))["status"] == "pass"
         assert cold.repository.metric_registry.calls == 0 and cold.adapter is None
+    resources(cold, tmp_path, "repair-capacity-cold", node=node_id, role="cold_reader")
 
 
 async def test_pn1_repair_oversize_rejected_before_dispatch(tmp_path):

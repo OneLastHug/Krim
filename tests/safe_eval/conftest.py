@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -30,16 +31,22 @@ def node_databases(request, tmp_path):
             records.append({"path": str(path), "type": stat.S_IFMT(st.st_mode)})
             continue
         backup = destination / f"{tag}-{path.name}"
-        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as source:
-            with sqlite3.connect(backup) as target:
+        backup_fd_before = _backup_fds()
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as source, source:
+            with closing(sqlite3.connect(backup)) as target, target:
                 source.backup(target)
+        backup_fd_after = _backup_fds()
         records.append(
             {
                 "path": str(path),
                 "backup": str(backup),
                 "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+                "backup_fd_before": backup_fd_before,
+                "backup_fd_after": backup_fd_after,
+                "backup_fd_equal": backup_fd_after == backup_fd_before,
             }
         )
+        assert backup_fd_after == backup_fd_before
     (destination / f"{tag}.json").write_text(
         json.dumps(
             {
@@ -114,16 +121,27 @@ class ConsumerEvidence:
                         continue
                     tag = hashlib.sha256((item.nodeid + str(database)).encode()).hexdigest()
                     backup = self.output / f"{tag}.sqlite"
-                    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as reader:
-                        with sqlite3.connect(backup) as writer:
+                    backup_fd_before = _backup_fds()
+                    with (
+                        closing(
+                            sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+                        ) as reader,
+                        reader,
+                    ):
+                        with closing(sqlite3.connect(backup)) as writer, writer:
                             reader.backup(writer)
+                    backup_fd_after = _backup_fds()
                     record["databases"].append(
                         {
                             "path": str(database),
                             "backup": str(backup),
                             "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+                            "backup_fd_before": backup_fd_before,
+                            "backup_fd_after": backup_fd_after,
+                            "backup_fd_equal": backup_fd_after == backup_fd_before,
                         }
                     )
+                    assert backup_fd_after == backup_fd_before
 
     def pytest_sessionfinish(self, session, exitstatus):
         (self.output / "index.json").write_text(
@@ -140,3 +158,14 @@ class ConsumerEvidence:
 
 def pytest_configure(config):
     config.pluginmanager.register(ConsumerEvidence(config), "safe-eval-consumers")
+
+
+def _backup_fds():
+    """只观察本次备份前后的完整FD映射；listdir临时目录FD已在返回前关闭。"""
+    result = {}
+    for number in sorted(os.listdir("/proc/self/fd")):
+        try:
+            result[number] = os.readlink("/proc/self/fd/" + number)
+        except FileNotFoundError:
+            pass
+    return result
