@@ -83,6 +83,12 @@ def mount_workspace(app: FastAPI) -> None:
     ) -> ArtifactRevision:
         return await sdk(request, workspace_id).input_by_key(session_id, key)
 
+    @router.get(base + "/artifacts/head")
+    async def artifact_head(
+        workspace_id: str, session_id: str, request: Request
+    ) -> ArtifactRevision:
+        return await sdk(request, workspace_id).head(session_id)
+
     @router.get(base + "/artifacts/{revision_id}")
     async def artifact(
         workspace_id: str, session_id: str, revision_id: str, request: Request

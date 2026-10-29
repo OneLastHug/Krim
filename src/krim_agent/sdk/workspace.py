@@ -259,6 +259,20 @@ class WorkspaceSDK:
 
         return await self._read(read())
 
+    async def head(self, session_id: str) -> ArtifactRevision:
+        async def read() -> ArtifactRevision:
+            if isinstance(self.backend, AsyncRunClient):
+                return ArtifactRevision.model_validate_json(
+                    encoded(
+                        await self.backend.request(
+                            "GET", self.path(session_id) + "/artifacts/head"
+                        )
+                    )
+                )
+            return cast(ArtifactRevision, await self._artifact_read(session_id, "head"))
+
+        return await self._read(read())
+
     async def artifact(self, session_id: str, revision_id: str) -> ArtifactRevision:
         async def read() -> ArtifactRevision:
             if isinstance(self.backend, AsyncRunClient):
