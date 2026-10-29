@@ -5,7 +5,7 @@ import { chatCopy as c, chatReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 
 function records(raw: unknown) { return Array.isArray(raw) ? raw.map(object) : []; }
-export function ChatHistory({ chat }: { chat: SessionState }) {
+export function ChatHistory({ chat, onEvaluate }: { chat: SessionState; onEvaluate?: (runId: string) => void }) {
   return <div className="chat-transcript" aria-label={c.history}>
     {!chat.history.length && <p className="chat-empty">{chat.session ? "尚无消息" : c.empty}</p>}
     {chat.history.map(turn => {
@@ -21,6 +21,7 @@ export function ChatHistory({ chat }: { chat: SessionState }) {
         <pre className="chat-user-text" data-ui-data>{turn.text}</pre>
         {current && chat.approvals.map(item => <section className="approval chat-approval" key={String(item.request_id)} aria-label="等待审批"><div className="approval-title"><strong data-ui-data>{String(item.name)}</strong><span>等待审批</span></div><pre data-ui-data className="approval-arguments">{JSON.stringify(item.arguments, null, 2)}</pre><div className="approval-actions"><Button disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, true)} aria-label={"允许 " + String(item.name) + " 本次调用"}>允许本次调用</Button><Button variant="outline" disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, false)}>拒绝</Button></div></section>)}
         {(answer || streaming) && <div className="chat-assistant"><span className="chat-speaker">Krim Agent</span><pre className="chat-answer" data-ui-data>{answer || streaming}</pre></div>}
+        {onEvaluate && chat.canWrite && turn.run_id && !["queued", "running"].includes(turn.status) && <Button variant="outline" onClick={() => { if (chat.canWrite && turn.run_id) onEvaluate(turn.run_id); }}>评测此结果</Button>}
         {turn.code && <p className="notice" data-ui-data>{chatReason({ code: turn.code })}<span className="mono"> {turn.code}</span></p>}
         {turn.run_id && <details className="chat-detail" onToggle={event => { if (event.currentTarget.open) void chat.loadDetails(turn); }}><summary>{c.details}</summary>
           <p className="mono" data-ui-data>{turn.run_id}</p>

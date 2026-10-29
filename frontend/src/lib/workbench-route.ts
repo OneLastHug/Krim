@@ -6,7 +6,7 @@ const knownViews = new Set<WorkbenchView>(["chat", "run", "datasets", "eval", "s
 export function readWorkbenchView(url: URL): WorkbenchView {
   const explicit = url.searchParams.get("view");
   if (explicit && knownViews.has(explicit as WorkbenchView)) return explicit as WorkbenchView;
-  if (url.searchParams.has("eval_id")) return "eval";
+  if (url.searchParams.has("eval_id") || url.searchParams.has("product_eval_id")) return "eval";
   if (url.searchParams.has("session") || url.searchParams.has("workspace") || url.searchParams.has("turn")) return "chat";
   if (url.searchParams.has("run_id") || url.hash.length > 1) return "run";
   // 首页改为对话；旧版 run hash 与 eval query 在上面继续按原协议定位。

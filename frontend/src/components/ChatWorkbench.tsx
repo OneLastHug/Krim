@@ -9,7 +9,7 @@ import { ChatComposer } from "./ChatComposer";
 import { chatCopy as c, turnLabels } from "../lib/copy";
 import { WorkspacePanel } from "./WorkspacePanel";
 
-export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, onConnect, onIdentity, beforeSessionSelect, onSelection }: { apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; httpEnabled: boolean; onConnect: () => void; onIdentity?: (actor: Actor | null, error?: string) => void; beforeSessionSelect?: (workspace: string, sessionId: string) => void; onSelection?: (sessionId: string) => void }) {
+export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, onConnect, onIdentity, beforeSessionSelect, onSelection, onEvaluate }: { apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; httpEnabled: boolean; onConnect: () => void; onIdentity?: (actor: Actor | null, error?: string) => void; beforeSessionSelect?: (workspace: string, sessionId: string) => void; onSelection?: (sessionId: string) => void; onEvaluate?: (workspace: string, runId: string) => void }) {
   const chat = useSession(apiKey, active, fence, onLegacy);
   useEffect(() => { if (active) onIdentity?.(chat.actor, chat.actor ? "" : chat.notice ?? ""); }, [active, chat.actor, chat.notice, onIdentity]);
   useEffect(() => { if (active) onSelection?.(chat.session?.id ?? ""); }, [active, chat.session?.id, onSelection]);
@@ -22,7 +22,7 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, on
       {chat.notice && <div className="chat-notice"><p role="status">{chat.notice}</p>{chat.notice.includes("连接") && <Button variant="outline" onClick={onConnect}>连接</Button>}</div>}
       {chat.pending.length > 0 && <div className="chat-pending" role="status"><strong>{chat.pending.every(chat.posting) ? "提交中" : c.unknown}</strong>{chat.pending.map(intent => <div key={intent.id}><span data-ui-data>{intent.kind === "session" ? intent.body.title : (intent.session_id ?? "").slice(0, 8)}</span><Button variant="outline" onClick={() => void chat.recover(intent)}>{c.find}</Button></div>)}</div>}
       {chat.pendingControls.map(value => <div className="chat-pending" key={String(value.body.request_key)}><span>操作结果未确认</span><Button variant="outline" onClick={() => void chat.recoverControl(value)}>{value.rejected ? "重试原操作" : "查找操作结果"}</Button></div>)}
-      <ChatHistory chat={chat} />
+      <ChatHistory chat={chat} onEvaluate={onEvaluate ? runId => { if (active && chat.canWrite) onEvaluate(chat.workspace, runId); } : undefined} />
       {chat.session?.target_key === "target-workspace" ? <WorkspacePanel
         key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])}
         chat={chat} apiKey={apiKey} active={active} fence={fence} /> : <ChatComposer chat={chat} />}
