@@ -16,6 +16,7 @@ from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
 from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
 from krim_agent.evaluation.app import EvalApplication, open_eval
+from krim_agent.evaluation.automation import EvaluationAutomation
 from krim_agent.evaluation.ports import AdapterLease
 from krim_agent.evaluation.product import EvaluationProduct
 from krim_agent.evaluation.service import EvaluationService
@@ -27,7 +28,7 @@ from krim_agent.providers.types import ModelProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
 from krim_agent.runtime.service import RunBinding, RunService
-from krim_agent.security import AccessPolicy
+from krim_agent.security import LOCAL, AccessPolicy, PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
@@ -59,6 +60,7 @@ class Application:
     runner: SandboxRunner | None = None
     product_evaluations: EvalApplication | None = None
     evaluation_product: EvaluationProduct | None = None
+    evaluation_automation: EvaluationAutomation | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -83,7 +85,14 @@ class Application:
 
     async def _close(self) -> None:
         try:
-            # 先关闭两个准入门；即使Eval写失败，所有Run仍必须被真实join。
+            if self.evaluation_automation is not None:
+                await self.evaluation_automation.close()
+        finally:
+            await self._close_runtime()
+
+    async def _close_runtime(self) -> None:
+        try:
+            # 关闭运行准入；即使评测写失败，也等待所有Run实际收束。
             async with self.service._admission:
                 self.service.closed = True
             try:
@@ -160,6 +169,8 @@ async def open_application(
     ):
         raise ProviderError("provider_config", 422)
     agent_http = live and config.http_mode == "agent"
+    if config.evaluation_automation_enabled and not config.product_eval_enabled:
+        raise ServiceError("invalid_input", 422)
     reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
@@ -424,6 +435,20 @@ async def open_application(
             application.evaluation_product = EvaluationProduct(
                 neutral, service, application.sessions
             )
+            if config.evaluation_automation_enabled:
+                principals = (
+                    tuple(
+                        PrincipalContext(
+                            item.principal_id, item.generation, item.memberships, item.legacy
+                        )
+                        for item in active_access.credentials
+                    )
+                    if active_access is not None else (LOCAL,)
+                )
+                application.evaluation_automation = EvaluationAutomation(
+                    application.evaluation_product, principals
+                )
+                await application.evaluation_automation.start()
         return application
     except BaseException:
         if application is not None:
