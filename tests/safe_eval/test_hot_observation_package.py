@@ -167,6 +167,6 @@ async def test_installed_hot_observation_roundtrip(tmp_path):
     assert receipt["driver_sha256"] == hashlib.sha256(INSTALLED_DRIVER.encode()).hexdigest()
     assert receipt["wait_returncode"] == 0 and not receipt["signals"]
     assert consumer["error"] is None and consumer["target_calls"] == 1
-    assert consumer["uid"] == 1001 and consumer["cwd"] == str(root / "outside")
+    assert consumer["uid"] == os.getuid() != 0 and consumer["cwd"] == str(root / "outside")
     assert Path(consumer["module"]).is_relative_to(site)
     assert consumer["source_closed"] and consumer["eval_closed"] and not consumer["pending"]

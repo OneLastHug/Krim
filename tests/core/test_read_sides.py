@@ -4,7 +4,7 @@ import socket
 import httpx
 import pytest
 import uvicorn
-from conftest import pending
+from agent_helpers import pending
 
 from krim_agent.api import create_app
 from krim_agent.composition import open_application

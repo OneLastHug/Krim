@@ -133,8 +133,7 @@ only-include = [
 ]
 sources = ["src"]
 [tool.pytest.ini_options]
-testpaths = ["tests/core", "tests/agent_core"]
-python_files = ["test_contracts.py", "test_runtime.py", "test_tool_boundaries.py", "test_run_facts.py", "test_storage.py", "test_read_sides.py", "test_package.py", "test_trace_cases.py", "test_evaluation.py", "test_eval_storage.py", "test_regression.py", "test_eval_read_sides.py", "test_http_provider.py", "test_http_integration.py", "test_context.py", "test_session_api.py", "test_session_package.py", "test_session_read_sides.py", "test_session_storage.py", "test_sessions.py", "test_sandbox.py", "test_workspace_storage.py", "test_artifacts.py", "test_tool_pipeline.py", "test_compaction.py", "test_agent_tasks.py", "test_workspace_api.py", "test_workspace_package.py"]
+testpaths = ["tests/core", "tests/agent_core", "tests/safe_eval"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra -p no:cacheprovider"

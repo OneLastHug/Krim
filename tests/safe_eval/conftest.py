@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 import sys
+import tempfile
 from contextlib import closing
 from pathlib import Path
 
@@ -157,6 +158,19 @@ class ConsumerEvidence:
 
 
 def pytest_configure(config):
+    if config.option.collectonly:
+        return
+    root = os.environ.get("KRIM_SAFE_EVAL_ROOT")
+    if root is None:
+        root = tempfile.mkdtemp(prefix="krim-safe-eval-")
+        os.environ["KRIM_SAFE_EVAL_ROOT"] = root
+    location = Path(root).absolute()
+    location.mkdir(parents=True, exist_ok=True)
+    if config.option.basetemp is None:
+        run = Path(tempfile.mkdtemp(prefix="run-", dir=location))
+        config.option.basetemp = str(run / "pytest")
+    elif not Path(config.option.basetemp).absolute().is_relative_to(location):
+        raise pytest.UsageError("--basetemp 必须位于 KRIM_SAFE_EVAL_ROOT 内，避免采集外部数据库")
     config.pluginmanager.register(ConsumerEvidence(config), "safe-eval-consumers")
 
 

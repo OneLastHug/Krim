@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 import pytest
-from conftest import EventProvider, pending, registry_for
+from agent_helpers import EventProvider, pending, registry_for
 
 from krim_agent.composition import open_application
 from krim_agent.config import Settings

@@ -2,7 +2,7 @@ import asyncio
 import json
 
 import pytest
-from conftest import EventProvider, registry_for
+from agent_helpers import EventProvider, registry_for
 
 from krim_agent.composition import open_application
 from krim_agent.config import Settings

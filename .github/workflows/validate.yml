@@ -1,0 +1,64 @@
+name: Python and frontend validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-and-frontend:
+    name: Linux Python 3.12 and Node 24.15 fixture checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.15.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python development dependencies
+        run: uv sync --locked --python 3.12 --group dev
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Run fixture and frontend checks
+        run: uv run --locked python scripts/validate.py --suite ci
+      - name: Retain validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ~/.cache/krim-agent/validation/**/*.log
+            ~/.cache/krim-agent/validation/**/*.xml
+
+  python-package:
+    name: Build and independently install Python wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Build wheel and source archive
+        run: uv build --out-dir "$RUNNER_TEMP/krim-wheel"
+      - name: Install wheel into a clean environment
+        run: |
+          uv venv "$RUNNER_TEMP/krim-install" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/krim-install/bin/python" "$RUNNER_TEMP/krim-wheel/"*.whl
+          "$RUNNER_TEMP/krim-install/bin/python" -I -c "import krim_agent; print(krim_agent.__file__)"

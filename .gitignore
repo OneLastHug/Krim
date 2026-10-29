@@ -23,3 +23,5 @@ node_modules/
 *.db-wal
 playwright-report/
 test-results/
+.local-review-*/
+.claude/launch.json

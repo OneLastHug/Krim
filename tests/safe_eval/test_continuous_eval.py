@@ -232,7 +232,7 @@ async def continuous_resources(request, tmp_path, monkeypatch, recwarn):
     loop.set_exception_handler(previous)
     for kind, listener in listeners:
         event.remove(Pool, kind, listener)
-    assert os.getuid() == 1001
+    assert os.getuid() != 0
     assert not pending and not unexpected and not recwarn
     counts = [r["event"] for r in connections]
     assert counts.count("connect") == counts.count("close")
@@ -360,7 +360,7 @@ async def test_observation_import_scope_and_eligibility(tmp_path, monkeypatch, k
         assert app.adapter.execute_calls == 1
         assert Path(
             __import__("krim_agent.evaluation.continuous", fromlist=["x"]).__file__
-        ).is_relative_to(Path(os.environ["KRIM_PN3_ROOT"]) / "source/src")
+        ).is_relative_to(Path(__file__).resolve().parents[2] / "src")
     finally:
         await app.close()
 
