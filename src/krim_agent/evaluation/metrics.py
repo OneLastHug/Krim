@@ -226,6 +226,7 @@ async def exit_metric(
 class RegisteredMetric:
     spec: MetricSpec
     function: MetricFunction
+    groups: tuple[str, ...] = ()
 
 
 class MetricRegistry:
@@ -265,12 +266,17 @@ class MetricRegistry:
                 function,
             )
 
-    def register(self, spec: MetricSpec, function: MetricFunction) -> None:
+    def register(
+        self, spec: MetricSpec, function: MetricFunction, *, groups: tuple[str, ...] = ()
+    ) -> None:
         if spec.name in self._registered:
             raise ValueError("指标重复")
+        if not set(groups) <= {"reference", "native", "krim"}:
+            raise ValueError("metric_group")
         self._registered[spec.name] = RegisteredMetric(
             MetricSpec.model_validate(clone(spec.model_dump(mode="json"))),
             function,
+            tuple(groups),
         )
 
     def specs(self, group: str = "reference") -> list[MetricSpec]:
@@ -284,7 +290,7 @@ class MetricRegistry:
         return [
             r.spec.model_copy(deep=True)
             for key, r in sorted(self._registered.items())
-            if key in names[group]
+            if key in names[group] or group in r.groups
         ]
 
     def bind(self, rules: list[dict[str, Any]]) -> None:

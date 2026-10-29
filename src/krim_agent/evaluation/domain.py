@@ -156,7 +156,7 @@ class Budget(StrictModel):
     repetitions: int = Field(default=1, ge=1, le=3)
     concurrency: Literal[1, 2] = 1
     item_timeout_seconds: int = Field(default=20, ge=1, le=180)
-    scorer_timeout_seconds: Literal[1] = 1
+    scorer_timeout_seconds: int = Field(default=1, ge=1, le=30)
     batch_timeout_seconds: int = Field(default=120, ge=1, le=240)
 
 
