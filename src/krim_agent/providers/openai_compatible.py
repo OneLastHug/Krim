@@ -40,6 +40,7 @@ class OpenAICompatibleConfig(StrictModel):
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     max_output_tokens: int = Field(default=512, ge=1, le=4096)
     reasoning_effort: Literal["xhigh"] | None = None
+    thinking: Literal["disabled"] | None = None
     connect_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
     write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
@@ -116,6 +117,7 @@ class OpenAICompatibleConfig(StrictModel):
             "API_KEY",
             "MAX_OUTPUT_TOKENS",
             "REASONING_EFFORT",
+            "THINKING",
             "READ_TIMEOUT_SECONDS",
         )
         values = {
@@ -381,6 +383,8 @@ class OpenAICompatibleProvider:
         }
         if self.config.reasoning_effort is not None:
             result["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.thinking is not None:
+            result["thinking"] = self.config.thinking
         return result
 
     def execution_limits(self) -> dict[str, JsonValue]:
@@ -422,6 +426,8 @@ class OpenAICompatibleProvider:
         }
         if self.config.reasoning_effort is not None:
             body["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.thinking is not None:
+            body["thinking"] = {"type": self.config.thinking}
         if tools:
             body["tools"] = [
                 {
@@ -504,8 +510,14 @@ class OpenAICompatibleProvider:
                     or finish is not None
                 ):
                     raise ProviderError("provider_protocol")
+                allowed_delta_fields = {"role", "content", "tool_calls", "refusal"}
+                if self.config.thinking == "disabled":
+                    allowed_delta_fields.add("reasoning_content")
+                    reasoning_content = delta.get("reasoning_content")
+                    if reasoning_content is not None and reasoning_content != "":
+                        raise ProviderError("provider_protocol")
                 if (
-                    set(delta) - {"role", "content", "tool_calls", "refusal"}
+                    set(delta) - allowed_delta_fields
                     or delta.get("role", "assistant") != "assistant"
                     or delta.get("refusal")
                 ):
