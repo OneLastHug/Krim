@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { RefreshCw, Square } from "lucide-react";
+import type { Actor } from "../lib/session-contracts";
 import { Button } from "./ui/button";
 import { useSession } from "../hooks/use-session";
 import { SessionList } from "./SessionList";
@@ -7,10 +9,12 @@ import { ChatComposer } from "./ChatComposer";
 import { chatCopy as c, turnLabels } from "../lib/copy";
 import { WorkspacePanel } from "./WorkspacePanel";
 
-export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, onConnect }: { apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; httpEnabled: boolean; onConnect: () => void }) {
+export function ChatWorkbench({ apiKey, active, fence, onLegacy, httpEnabled, onConnect, onIdentity, beforeSessionSelect, onSelection }: { apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; httpEnabled: boolean; onConnect: () => void; onIdentity?: (actor: Actor | null, error?: string) => void; beforeSessionSelect?: (workspace: string, sessionId: string) => void; onSelection?: (sessionId: string) => void }) {
   const chat = useSession(apiKey, active, fence, onLegacy);
+  useEffect(() => { if (active) onIdentity?.(chat.actor, chat.actor ? "" : chat.notice ?? ""); }, [active, chat.actor, chat.notice, onIdentity]);
+  useEffect(() => { if (active) onSelection?.(chat.session?.id ?? ""); }, [active, chat.session?.id, onSelection]);
   return <section hidden={!active} className="chat-workbench" aria-label="对话工作台">
-    <SessionList chat={chat} httpEnabled={httpEnabled} />
+    <SessionList chat={chat} httpEnabled={httpEnabled} beforeSelect={beforeSessionSelect} />
     <section className="chat-main" aria-labelledby="chat-heading">
       <header className="chat-heading"><div><h2 id="chat-heading" data-ui-data>{chat.session?.title ?? c.tab}</h2><div className="chat-current-meta"><span role="status" id="chat-status">{chat.session?.status === "closed" ? "已关闭" : chat.session?.dispatch_paused ? "已暂停" : chat.currentTurn ? turnLabels[chat.currentTurn.status] : chat.reading ? "读取中" : ""}</span>{chat.id && <details><summary data-ui-data className="mono">{chat.id.slice(0, 8)}</summary><code data-ui-data>{chat.id}</code></details>}</div></div>
         <div className="chat-current-actions"><Button variant="ghost" aria-label="刷新对话" onClick={chat.refresh}><RefreshCw aria-hidden="true" /></Button>{chat.currentTurn && ["queued", "running"].includes(chat.currentTurn.status) && <Button id="chat-stop" variant="outline" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(chat.currentTurn, "cancel")}><Square aria-hidden="true" />停止</Button>}{chat.session?.dispatch_paused && <Button variant="outline" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(null, "resume")}>{c.resume}</Button>}{chat.session?.status === "open" && <Button variant="ghost" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(null, "close")}>{c.close}</Button>}</div>
