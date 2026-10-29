@@ -141,6 +141,32 @@ only-include = [
   "src/krim_agent/evaluation/adapters/krim_outbox.py",
 ]
 sources = ["src"]
+[tool.hatch.build.targets.sdist]
+# 仅分发Python与UI重建所需源码、元数据和第三方许可；不包含测试与开发环境。
+only-include = [
+  "pyproject.toml",
+  "README.md",
+  ".gitignore",
+  "src/krim_agent",
+  "frontend/src",
+  "frontend/scripts",
+  "frontend/package.json",
+  "frontend/package-lock.json",
+  "frontend/index.html",
+  "frontend/tsconfig.json",
+  "frontend/vite.config.ts",
+  "frontend/vitest.config.ts",
+  "frontend/THIRD-PARTY-NOTICES.txt",
+]
+exclude = [
+  "**/.cache/**",
+  "**/.vite/**",
+  "**/node_modules/**",
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "**/*.pyo",
+  "**/*.pyd",
+]
 [tool.pytest.ini_options]
 testpaths = ["tests/core", "tests/agent_core", "tests/safe_eval"]
 asyncio_mode = "auto"
