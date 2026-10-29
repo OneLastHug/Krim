@@ -46,6 +46,19 @@ class Clock:
         return float(self.now)
 
 
+class BoundaryClock(Clock):
+    def __init__(self, now: int) -> None:
+        super().__init__(now)
+        self.next_value: float | None = None
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        if self.reads == 1 or self.next_value is None:
+            return float(self.now)
+        return self.next_value
+
+
 def actors() -> dict[str, PrincipalContext]:
     return {
         "admin": PrincipalContext("admin", 1, (Membership(workspace_id="alpha", role="admin"),)),
@@ -315,8 +328,10 @@ async def _has_feedback_candidate(app: Application, workspace: str) -> bool:
 
 
 async def test_background_schedule_uses_product_scope_and_joins_on_close(tmp_path):
-    clock = Clock(1_800_000_000)
-    async with world(tmp_path, clock=clock) as (app, automation, directory, _wire):
+    clock = BoundaryClock(1_800_000_000)
+    async with world(
+        tmp_path, clock=clock, poll_interval=60
+    ) as (app, automation, directory, _wire):
         assert app.evaluation_product is not None
         product = app.evaluation_product
         admin = directory["admin"]
@@ -402,7 +417,7 @@ async def test_background_schedule_uses_product_scope_and_joins_on_close(tmp_pat
             template=template,
             epoch=clock.now,
             interval_seconds=60,
-            max_windows=1,
+            max_windows=2,
         )
         created_response = await post(
             "/v4/workspaces/alpha/eval/automation/schedules",
@@ -440,6 +455,41 @@ async def test_background_schedule_uses_product_scope_and_joins_on_close(tmp_pat
             "/v4/workspaces/alpha/eval/automation/schedules/nightly/tick"
         )
         assert retried.status_code == 202 and retried.json()["id"] == task["id"]
+        await asyncio.sleep(0.05)
+
+        current = await automation.current_schedule_window(admin, "alpha", "nightly")
+        assert current["window_index"] == 0 and current["eligible"] is True
+        clock.now = int(spec.epoch + 60)
+        clock.next_value = float(spec.epoch + 120)
+        clock.reads = 0
+        with pytest.raises(ServiceError) as changed_window:
+            await automation.tick_schedule(
+                admin, "alpha", "nightly", expected_window_index=0
+            )
+        assert changed_window.value.code == "snapshot_changed"
+        assert changed_window.value.status == 409
+        assert clock.reads == 1
+        unavailable = await automation.schedule_window(admin, "alpha", "nightly", 1)
+        assert unavailable["status"] == "unknown" and unavailable["task"] is None
+        async with product.evaluation.repository.engine.begin() as conn:
+            indexes_after_rejection = (
+                await conn.execute(
+                    select(eval_schedule_windows.c.window_index).where(
+                        eval_schedule_windows.c.scope == scope,
+                        eval_schedule_windows.c.schedule_id_version == "nightly/v1",
+                    )
+                )
+            ).scalars().all()
+        assert indexes_after_rejection == [0]
+
+        clock.now = int(spec.epoch + 59)
+        clock.next_value = float(spec.epoch + 60)
+        clock.reads = 0
+        same_window = await automation.tick_schedule(
+            admin, "alpha", "nightly", expected_window_index=0
+        )
+        assert same_window["id"] == task["id"]
+        assert clock.reads == 1
 
         disabled = await post(
             "/v4/workspaces/alpha/eval/automation/schedules/nightly/disable",

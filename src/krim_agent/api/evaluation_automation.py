@@ -26,6 +26,10 @@ class ScheduleDisableRequest(StrictModel):
     key: Identity
 
 
+class ScheduleTickRequest(StrictModel):
+    expected_window_index: int | None = Field(default=None, ge=0, le=2)
+
+
 def principal(request: Request) -> PrincipalContext:
     return cast(PrincipalContext, request.state.principal)
 
@@ -70,6 +74,28 @@ def mount_evaluation_automation(
             ),
         )
 
+    @router.get(base + "/schedules/{schedule_id}/windows/current")
+    async def current_schedule_window(
+        workspace_id: str, schedule_id: str, request: Request
+    ) -> dict[str, JsonValue]:
+        return cast(
+            dict[str, JsonValue],
+            await get_automation(request).current_schedule_window(
+                principal(request), workspace_id, schedule_id
+            ),
+        )
+
+    @router.get(base + "/schedules/{schedule_id}/windows/{window_index}")
+    async def schedule_window(
+        workspace_id: str, schedule_id: str, window_index: int, request: Request
+    ) -> dict[str, JsonValue]:
+        return cast(
+            dict[str, JsonValue],
+            await get_automation(request).schedule_window(
+                principal(request), workspace_id, schedule_id, window_index
+            ),
+        )
+
     @router.post(base + "/capture")
     async def capture(
         workspace_id: str, body: CaptureControl, request: Request
@@ -95,6 +121,17 @@ def mount_evaluation_automation(
             ),
         )
 
+    @router.get(base + "/feedback/{run_id}/by-key/{key}")
+    async def feedback_receipt(
+        workspace_id: str, run_id: str, key: str, request: Request
+    ) -> dict[str, JsonValue]:
+        return cast(
+            dict[str, JsonValue],
+            await get_automation(request).feedback_receipt(
+                principal(request), workspace_id, run_id, key
+            ),
+        )
+
     @router.post(base + "/schedules", status_code=201)
     async def create_schedule(
         workspace_id: str, body: ScheduleSpec, request: Request
@@ -108,12 +145,18 @@ def mount_evaluation_automation(
 
     @router.post(base + "/schedules/{schedule_id}/tick", status_code=202)
     async def tick_schedule(
-        workspace_id: str, schedule_id: str, request: Request
+        workspace_id: str,
+        schedule_id: str,
+        request: Request,
+        body: ScheduleTickRequest | None = None,
     ) -> dict[str, JsonValue]:
         return cast(
             dict[str, JsonValue],
             await get_automation(request).tick_schedule(
-                principal(request), workspace_id, schedule_id
+                principal(request),
+                workspace_id,
+                schedule_id,
+                None if body is None else body.expected_window_index,
             ),
         )
 

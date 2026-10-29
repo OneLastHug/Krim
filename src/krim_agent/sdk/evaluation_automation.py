@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from urllib.parse import quote, urlencode
 
 from pydantic import Field, ValidationError
@@ -14,7 +14,7 @@ from krim_agent.security import PrincipalContext
 from ..evaluation.automation import EvaluationAutomation
 from ..evaluation.continuous_types import ScheduleSpec
 from ..evaluation.domain import Digest, Identity
-from ..evaluation.hot_types import FeedbackSignal
+from ..evaluation.hot_types import FeedbackReason, FeedbackSignal
 
 
 class _AutomationState(StrictModel):
@@ -58,6 +58,19 @@ class _FeedbackReceipt(StrictModel):
     key: Identity
 
 
+class _FeedbackRecovery(_FeedbackReceipt):
+    reason: FeedbackReason
+    candidate_ids: list[str]
+    delivery_status: Literal["pending", "linked", "not_enqueued"]
+
+
+class _ScheduleControlReceipt(StrictModel):
+    key: Identity
+    decision: Literal["disabled"]
+    expected_revision: Literal[0]
+    revision: Literal[1]
+
+
 class _ScheduleView(StrictModel):
     schedule_id: Identity
     version: Identity
@@ -65,6 +78,7 @@ class _ScheduleView(StrictModel):
     revision: int = Field(ge=0, le=1)
     observed_through: int = Field(ge=-1)
     missed_windows: int = Field(ge=0)
+    control_receipt: _ScheduleControlReceipt | None
 
 
 class _ScheduleDataset(StrictModel):
@@ -79,16 +93,34 @@ class _ScheduleDetail(_ScheduleView):
     epoch: int = Field(ge=0)
     interval_seconds: int = Field(ge=60, le=86400)
     max_windows: int = Field(ge=1, le=3)
+    spec: dict[str, Any]
+    spec_fingerprint: Digest
 
 
 class _ScheduleTaskView(StrictModel):
     id: str
     status: str
-    request_key: str | None = None
+    request_key: str = Field(min_length=1, max_length=128)
     code: str | None = None
     revision: int | None = None
     planned_count: int | None = None
     finished_count: int | None = None
+
+
+class _CurrentScheduleWindow(StrictModel):
+    schedule_id: Identity
+    version: Identity
+    window_index: int
+    enabled: bool
+    eligible: bool
+
+
+class _ScheduleWindow(StrictModel):
+    schedule_id: Identity
+    version: Identity
+    window_index: int = Field(ge=0, le=2)
+    status: Literal["unknown", "missed", "reserved"]
+    task: _ScheduleTaskView | None
 
 
 class _DisableRequest(StrictModel):
@@ -201,6 +233,44 @@ class EvaluationAutomationSDK:
             )
         return self._response(_ScheduleDetail, value)
 
+    async def current_schedule_window(self, schedule_id: str) -> dict[str, Any]:
+        if not isinstance(schedule_id, str) or not schedule_id:
+            raise ServiceError("invalid_input", 422)
+        if isinstance(self.backend, EvaluationAutomation):
+            value = await self.backend.current_schedule_window(
+                self.principal, self.workspace, schedule_id
+            )
+        else:
+            value = await self._http(
+                "GET",
+                "/schedules/" + self._path_segment(schedule_id) + "/windows/current",
+            )
+        return self._response(_CurrentScheduleWindow, value)
+
+    async def schedule_window(
+        self, schedule_id: str, window_index: int
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(schedule_id, str)
+            or not schedule_id
+            or type(window_index) is not int
+            or not 0 <= window_index <= 2
+        ):
+            raise ServiceError("invalid_input", 422)
+        if isinstance(self.backend, EvaluationAutomation):
+            value = await self.backend.schedule_window(
+                self.principal, self.workspace, schedule_id, window_index
+            )
+        else:
+            value = await self._http(
+                "GET",
+                "/schedules/"
+                + self._path_segment(schedule_id)
+                + "/windows/"
+                + str(window_index),
+            )
+        return self._response(_ScheduleWindow, value)
+
     async def set_capture(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
             raise ServiceError("invalid_input", 422)
@@ -231,6 +301,27 @@ class EvaluationAutomationSDK:
             )
         return self._response(_FeedbackReceipt, value)
 
+    async def feedback_receipt(self, run_id: str, key: str) -> dict[str, Any]:
+        if not isinstance(run_id, str) or not run_id:
+            raise ServiceError("invalid_input", 422)
+        try:
+            frozen_key = FeedbackSignal(key=key, reason="other").key
+        except (TypeError, ValueError, ValidationError):
+            raise ServiceError("invalid_input", 422) from None
+        if isinstance(self.backend, EvaluationAutomation):
+            value = await self.backend.feedback_receipt(
+                self.principal, self.workspace, run_id, frozen_key
+            )
+        else:
+            value = await self._http(
+                "GET",
+                "/feedback/"
+                + self._path_segment(run_id)
+                + "/by-key/"
+                + self._path_segment(frozen_key),
+            )
+        return self._response(_FeedbackRecovery, value)
+
     async def create_schedule(self, request: ScheduleSpec) -> dict[str, Any]:
         try:
             frozen = ScheduleSpec.model_validate(request.model_dump(mode="json"))
@@ -244,18 +335,38 @@ class EvaluationAutomationSDK:
             value = await self._http(
                 "POST", "/schedules", frozen.model_dump(mode="json")
             )
-        return self._response(_ScheduleView, value)
+        return self._response(_ScheduleDetail, value)
 
-    async def tick_schedule(self, schedule_id: str) -> dict[str, Any]:
-        if not isinstance(schedule_id, str) or not schedule_id:
+    async def tick_schedule(
+        self, schedule_id: str, *, expected_window_index: int | None = None
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(schedule_id, str)
+            or not schedule_id
+            or expected_window_index is not None
+            and (
+                type(expected_window_index) is not int
+                or not 0 <= expected_window_index <= 2
+            )
+        ):
             raise ServiceError("invalid_input", 422)
         if isinstance(self.backend, EvaluationAutomation):
             value = await self.backend.tick_schedule(
-                self.principal, self.workspace, schedule_id
+                self.principal,
+                self.workspace,
+                schedule_id,
+                expected_window_index,
             )
         else:
+            body = (
+                None
+                if expected_window_index is None
+                else {"expected_window_index": expected_window_index}
+            )
             value = await self._http(
-                "POST", "/schedules/" + self._path_segment(schedule_id) + "/tick"
+                "POST",
+                "/schedules/" + self._path_segment(schedule_id) + "/tick",
+                body,
             )
         return self._response(_ScheduleTaskView, value)
 
