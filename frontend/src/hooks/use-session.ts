@@ -90,18 +90,23 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
         const sessions = rows.map(parseSession); if (sessions.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配"); setList(sessions);
         if (!id) { setSession(null); setHistory([]); return; }
         let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
+        let turns: Turn[] = [], historyLoaded = false;
         while (current()) {
           const value = parseSession(await request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal));
           if (!current()) return; if (value.id !== id || value.workspace_id !== workspace) throw new Error("对话身份不匹配");
-          const turns: Turn[] = [];
-          for (let offset = 0; offset <= 1024; offset += 50) {
-            const raw = await request(sessionPath(workspace) + "/" + encodeURIComponent(id) + `/turns?offset=${offset}&limit=50`, apiKey, undefined, controller.signal);
+          const firstMutable = historyLoaded ? turns.findIndex(t => t.status === "queued" || t.status === "running") : 0;
+          if (historyLoaded && firstMutable < 0) break;
+          const offset = historyLoaded ? Math.floor(firstMutable / 50) * 50 : 0;
+          const refreshed = historyLoaded ? turns.slice(0, offset) : [];
+          for (let pageOffset = offset; pageOffset <= 1024; pageOffset += 50) {
+            const raw = await request(sessionPath(workspace) + "/" + encodeURIComponent(id) + `/turns?offset=${pageOffset}&limit=50`, apiKey, undefined, controller.signal);
             if (!current()) return; if (!Array.isArray(raw)) throw new Error("历史无效");
-            const page = raw.map(parseTurn); if (page.some(t => t.session_id !== id || t.workspace_id !== workspace)) throw new Error("历史身份不匹配"); turns.push(...page);
+            const page = raw.map(parseTurn); if (page.some(t => t.session_id !== id || t.workspace_id !== workspace)) throw new Error("历史身份不匹配"); refreshed.push(...page);
             if (page.length < 50) break;
-            if (offset === 1000) throw new Error("历史容量超限");
+            if (pageOffset === 1000) throw new Error("历史容量超限");
           }
-          if (new Set(turns.map(t => t.id)).size !== turns.length) throw new Error("历史重复");
+          if (new Set(refreshed.map(t => t.id)).size !== refreshed.length) throw new Error("历史重复");
+          turns = refreshed; historyLoaded = true;
           setSession(value); setHistory(turns); setReading(false);
           const running = turns.find(t => t.status === "running");
           if (running?.run_id) {

@@ -67,6 +67,9 @@ function deferred() { let release!: () => void; const promise = new Promise<void
 function turn(body: { text: string; request_key: string; expected_revision: number }, status: "queued" | "running" | "completed" = "completed") {
   return { id: "A1", session_id: "A", workspace_id: "local", owner_id: "local", ordinal: 1, request_key: body.request_key, text: body.text, accepted_revision: body.expected_revision, status, run_id: "run-A1", context_fingerprint: "1".repeat(64), transcript: [{ role: "user", content: body.text, call_id: null, tool_calls: [] }, { role: "assistant", content: "已完成", call_id: null, tool_calls: [] }], code: null, created_at: 1, started_at: 1, finished_at: 2 };
 }
+function historyTurn(id: string, ordinal: number, status: "queued" | "running" | "completed" = "completed") {
+  return { ...turn({ text: id, request_key: "key-" + id, expected_revision: 0 }, status), id, ordinal, run_id: "run-" + id };
+}
 function server(barrier: "post" | "get" | "none", hold = deferred()) {
   const base = "/v2/workspaces/local/sessions"; let accepted: ReturnType<typeof turn> | null = null, findCount = 0, rejectFirst: { status: number; code: string } | null = null;
   override = (path, options) => {
@@ -93,6 +96,63 @@ async function mountExisting() {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
 }
+test("长历史轮询只重读活动页，并合并终态后的新Turn", async () => {
+  const base = "/v2/workspaces/local/sessions", prefix = Array.from({ length: 50 }, (_, index) => historyTurn("old-" + index, index + 1));
+  const active = historyTurn("active-50", 51, "running"), added = historyTurn("new-51", 52, "queued");
+  const offsets: number[] = []; let activePageReads = 0;
+  override = path => {
+    if (path === base + "?limit=50") return json([{ ...session("A"), title: "长历史" }]);
+    if (path === base + "/A") return json({ ...session("A"), title: "长历史" });
+    if (path.startsWith(base + "/A/turns?offset=")) {
+      const offset = Number(new URL("http://local" + path).searchParams.get("offset")); offsets.push(offset);
+      if (offset === 0) return json(prefix);
+      if (offset === 50) {
+        activePageReads++;
+        if (activePageReads === 1) return json([active]);
+        if (activePageReads === 2) return json([{ ...active, status: "completed" }, added]);
+        return json([{ ...active, status: "completed" }, { ...added, status: "completed" }]);
+      }
+    }
+    if (path.includes("/events?") || path.endsWith("/approvals")) return json([]);
+    return undefined;
+  };
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  await act(async () => root.render(<App />));
+  await until(() => expect(activePageReads).toBe(1));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+  await until(() => expect(activePageReads).toBe(2));
+  await until(() => expect(document.querySelector('[data-turn-id="new-51"]')).toBeTruthy());
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+  await until(() => expect(document.querySelector('[data-turn-id="new-51"]')?.textContent).toContain("已完成"));
+  expect(offsets).toEqual([0, 50, 50, 50]);
+});
+
+test("会话切换时丢弃迟到的历史页响应", async () => {
+  server("none"); const fallback = override!, base = "/v2/workspaces/local/sessions";
+  const prefix = Array.from({ length: 50 }, (_, index) => historyTurn("old-" + index, index + 1));
+  let release!: (response: Response) => void, started = 0;
+  const delayed = new Promise<Response>(resolve => { release = resolve; });
+  override = (path, options) => {
+    if (path === base + "?limit=50") return json([{ ...session("A"), title: "会话 A" }, { ...session("B"), title: "会话 B" }]);
+    if (path === base + "/A") return json({ ...session("A"), title: "会话 A" });
+    if (path === base + "/B") return json({ ...session("B"), title: "会话 B" });
+    if (path === base + "/A/turns?offset=0&limit=50") return json(prefix);
+    if (path === base + "/A/turns?offset=50&limit=50") { started++; return delayed; }
+    if (path.startsWith(base + "/B/turns?")) return json([]);
+    return fallback(path, options);
+  };
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  await act(async () => root.render(<App />));
+  await until(() => expect(started).toBe(1));
+  await until(() => expect(button("会话 B")).toBeTruthy());
+  await act(async () => button("会话 B").click());
+  await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("B"));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  await act(async () => { release(json([historyTurn("late-A", 51, "running")])); await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(new URL(location.href).searchParams.get("session")).toBe("B");
+  expect(document.querySelector('[data-turn-id="late-A"]')).toBeNull();
+  expect(document.querySelector('[data-turn-id="old-0"]')).toBeNull();
+});
 function controlServer(action: "close" | "cancel", first: "conflict" | "unknown" = "conflict") {
   server("none");
   const fallback = override!, base = "/v2/workspaces/local/sessions";
