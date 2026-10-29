@@ -95,6 +95,15 @@ async function readIndex(path: string): Promise<ScreenshotRecord[]> {
   }
 }
 
+/** 将API结果写入本轮独立目录；不依赖报告器是否保留内存附件。 */
+export async function attachJsonEvidence(testInfo: TestInfo, name: string, value: unknown): Promise<string> {
+  const path = testInfo.outputPath("api-results", filePart(name, 60) + ".json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(value, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
+  await testInfo.attach(name, { path, contentType: "application/json" });
+  return path;
+}
+
 /** 在一个可追踪的 Playwright step 中执行动作并保存脱敏截图与索引。 */
 export async function screenshotStep<T>(
   page: Page,
