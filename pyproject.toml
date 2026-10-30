@@ -99,6 +99,8 @@ only-include = [
   "src/krim_agent/workspace/types.py",
   "src/krim_agent/workspace/verification.py",
   "src/krim_agent/evaluation/domain.py",
+  "src/krim_agent/evaluation/agent_benchmark.py",
+  "src/krim_agent/evaluation/benchmark_verifier.py",
   "src/krim_agent/evaluation/ports.py",
   "src/krim_agent/evaluation/kernel.py",
   "src/krim_agent/evaluation/repository.py",

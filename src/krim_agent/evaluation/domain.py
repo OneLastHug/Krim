@@ -108,6 +108,7 @@ class CaseSpec(StrictModel):
         "reconciliation/1",
         "repository-repair/1",
         "krim-script/1",
+        "agent-bench/1",
     ] = "reconciliation/1"
 
     @model_validator(mode="after")
