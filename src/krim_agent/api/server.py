@@ -242,9 +242,11 @@ def create_app(
 
     mount_browser_ui(app)
     from .sessions import mount_sessions
+    from .traces import mount_traces
     from .workspace import mount_workspace
 
     mount_sessions(app)
+    mount_traces(app)
     mount_workspace(app)
     from krim_agent.evaluation.product import EvaluationProduct
 

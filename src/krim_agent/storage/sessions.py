@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import JsonValue
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.config import Settings
@@ -26,7 +26,7 @@ from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, T
 from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
 from . import work as work_sql
-from .models import session_controls, sessions, turns, work_turns
+from .models import runs, session_controls, sessions, turns, work_turns
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
@@ -258,6 +258,76 @@ async def list_turns(
             .all()
         )
         return [turn_view(row) for row in rows]
+
+    return await read(store, operation)
+
+
+async def list_trace_index(
+    store: SQLiteStore,
+    workspace: str,
+    owner: str,
+    admin: bool,
+    limit: int,
+    *,
+    status: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    before: tuple[float, str] | None = None,
+) -> list[dict[str, Any]]:
+    """单条受限查询；不装配Turn或Run快照，也不读取正文。"""
+    require(store)
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ServiceError("invalid_input", 422)
+
+    async def operation(conn: AsyncConnection) -> list[dict[str, Any]]:
+        query = (
+            select(
+                runs.c.id.label("run_id"),
+                runs.c.trace_id,
+                sessions.c.id.label("session_id"),
+                turns.c.id.label("turn_id"),
+                sessions.c.title.label("session_title"),
+                sessions.c.target_key,
+                runs.c.status,
+                runs.c.created_at,
+                runs.c.finished_at,
+            )
+            .select_from(
+                turns.join(sessions, turns.c.session_id == sessions.c.id).join(
+                    runs, turns.c.run_id == runs.c.id
+                )
+            )
+            .where(
+                sessions.c.workspace_id == workspace,
+                turns.c.workspace_id == workspace,
+                turns.c.owner_id == sessions.c.owner_id,
+            )
+        )
+        if not admin:
+            query = query.where(
+                sessions.c.owner_id == owner,
+                turns.c.owner_id == owner,
+            )
+        if status is not None:
+            query = query.where(runs.c.status == status)
+        if session_id is not None:
+            query = query.where(sessions.c.id == session_id)
+        if turn_id is not None:
+            query = query.where(turns.c.id == turn_id)
+        if before is not None:
+            created_at, run_id = before
+            query = query.where(
+                or_(
+                    runs.c.created_at < created_at,
+                    and_(runs.c.created_at == created_at, runs.c.id < run_id),
+                )
+            )
+        rows = (
+            await conn.execute(
+                query.order_by(runs.c.created_at.desc(), runs.c.id.desc()).limit(limit + 1)
+            )
+        ).mappings().all()
+        return [dict(row) for row in rows]
 
     return await read(store, operation)
 

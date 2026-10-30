@@ -74,6 +74,24 @@ class TurnView(StrictModel):
     finished_at: float | None
 
 
+class TraceIndexItem(StrictModel):
+    source_kind: Literal["session_turn"]
+    run_id: str
+    trace_id: str
+    session_id: str
+    turn_id: str
+    session_title: str
+    target_key: TargetKey
+    status: Literal["queued", "running", "completed", "failed", "aborted", "interrupted"]
+    created_at: float
+    finished_at: float | None
+
+
+class TraceIndexPage(StrictModel):
+    items: list[TraceIndexItem]
+    next_cursor: str | None
+
+
 class ControlView(StrictModel):
     id: str
     session_id: str
