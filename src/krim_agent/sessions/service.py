@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import builtins
+import json
+import math
+import re
 from typing import Literal, cast
+from uuid import UUID
 
 from pydantic import JsonValue
 
 from krim_agent.config import Settings
 from krim_agent.context.types import ContextPolicy
-from krim_agent.contracts import ApprovalReply, ServiceError, encoded, fingerprint, parse_json
+from krim_agent.contracts import (
+    ApprovalReply,
+    RunStatus,
+    ServiceError,
+    encoded,
+    fingerprint,
+    parse_json,
+)
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.service import RunService
@@ -19,10 +32,140 @@ from krim_agent.storage import sessions as sql
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
-from .types import ControlRequest, ControlView, SessionCreate, SessionView, TurnRequest, TurnView
-
+from .types import (
+    ControlRequest,
+    ControlView,
+    SessionCreate,
+    SessionView,
+    TraceIndexItem,
+    TraceIndexPage,
+    TurnRequest,
+    TurnView,
+)
 
 _CONTROL_KINDS = frozenset({"rename", "close", "resume", "cancel_turn", "approval"})
+_TRACE_STATUSES = frozenset(
+    {"queued", "running", "completed", "failed", "aborted", "interrupted"}
+)
+_TRACE_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,1024}\Z")
+
+
+def _trace_cursor_scope(
+    principal: PrincipalContext,
+    workspace: str,
+    role: str,
+    limit: int,
+    status: RunStatus | None,
+    session_id: str | None,
+    turn_id: str | None,
+) -> str:
+    return fingerprint(
+        {
+            "version": 1,
+            "principal_id": principal.principal_id,
+            "generation": principal.generation,
+            "workspace_id": workspace,
+            "role": role,
+            "limit": limit,
+            "status": status,
+            "session_id": session_id,
+            "turn_id": turn_id,
+        }
+    )
+
+
+def _decode_trace_cursor(cursor: str | None, scope: str) -> tuple[float, str] | None:
+    if cursor is None:
+        return None
+    try:
+        if not _TRACE_CURSOR_RE.fullmatch(cursor):
+            raise ValueError
+        raw = base64.b64decode(
+            cursor + "=" * ((4 - len(cursor) % 4) % 4), altchars=b"-_", validate=True
+        )
+        if base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != cursor:
+            raise ValueError
+        payload = json.loads(raw)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"version", "scope", "created_at", "run_id"}
+            or type(payload["version"]) is not int
+            or payload["version"] != 1
+            or payload["scope"] != scope
+            or type(payload["created_at"]) is not float
+            or not math.isfinite(payload["created_at"])
+            or not isinstance(payload["run_id"], str)
+            or str(UUID(payload["run_id"])) != payload["run_id"]
+            or encoded(payload).encode("utf-8") != raw
+        ):
+            raise ValueError
+        return payload["created_at"], payload["run_id"]
+    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError):
+        raise ServiceError("invalid_cursor", 416) from None
+
+
+def _encode_trace_cursor(scope: str, item: TraceIndexItem) -> str:
+    payload = {
+        "version": 1,
+        "scope": scope,
+        "created_at": item.created_at,
+        "run_id": item.run_id,
+    }
+    return base64.urlsafe_b64encode(encoded(payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+async def read_trace_index(
+    store: SQLiteStore,
+    principal: PrincipalContext,
+    workspace: str,
+    *,
+    limit: int = 20,
+    cursor: str | None = None,
+    status: RunStatus | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+) -> TraceIndexPage:
+    """读取当前身份可见的Session Turn索引，不读取Run快照。"""
+    membership = principal.member(workspace)
+    if type(principal.generation) is not int or principal.generation < 1:
+        raise ServiceError("unauthorized", 401)
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ServiceError("invalid_input", 422)
+    if status is not None and (not isinstance(status, str) or status not in _TRACE_STATUSES):
+        raise ServiceError("invalid_input", 422)
+    if session_id is not None and (
+        not isinstance(session_id, str) or not session_id or len(session_id) > 128
+    ):
+        raise ServiceError("invalid_input", 422)
+    if turn_id is not None and (
+        not isinstance(turn_id, str) or not turn_id or len(turn_id) > 128
+    ):
+        raise ServiceError("invalid_input", 422)
+
+    scope = _trace_cursor_scope(
+        principal, workspace, membership.role, limit, status, session_id, turn_id
+    )
+    before = _decode_trace_cursor(cursor, scope)
+    rows = await sql.list_trace_index(
+        store,
+        workspace,
+        principal.principal_id,
+        membership.role == "admin",
+        limit,
+        status=status,
+        session_id=session_id,
+        turn_id=turn_id,
+        before=before,
+    )
+    try:
+        items = [
+            TraceIndexItem.model_validate({"source_kind": "session_turn", **row})
+            for row in rows[:limit]
+        ]
+    except ValueError:
+        raise ServiceError("facts_corrupt") from None
+    next_cursor = _encode_trace_cursor(scope, items[-1]) if len(rows) > limit else None
+    return TraceIndexPage(items=items, next_cursor=next_cursor)
 
 
 def _validate_control_arguments(
@@ -102,6 +245,29 @@ class SessionService:
             raise ServiceError("invalid_input", 422)
         return await sql.list_sessions(
             self.store, workspace, principal.principal_id, membership.role == "admin", offset, limit
+        )
+
+    async def traces(
+        self,
+        principal: PrincipalContext,
+        workspace: str,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+        status: RunStatus | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> TraceIndexPage:
+        self._admitting()
+        return await read_trace_index(
+            self.store,
+            principal,
+            workspace,
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            session_id=session_id,
+            turn_id=turn_id,
         )
 
     async def create(
