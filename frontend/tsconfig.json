@@ -58,6 +58,7 @@
     "e2e/evaluation-automation.spec.ts",
     "e2e/installed-package-readonly.spec.ts",
     "e2e/workbench-redesign.spec.ts",
-    "e2e/legacy-access.spec.ts"
+    "e2e/legacy-access.spec.ts",
+    "e2e/compact-composer.spec.ts"
   ]
 }
