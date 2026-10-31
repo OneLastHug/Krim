@@ -6,7 +6,7 @@
 }
 
 .product-eval-table-wrap { width: 100%; min-width: 0; overflow-x: auto; }
-.product-eval-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+.product-eval-table { width: 100%; border-collapse: collapse; text-align: left; font-size: var(--font-size-ui); }
 .product-eval-table th { padding: 10px 14px; color: var(--muted-foreground); background: var(--muted); font-size: 12px; font-weight: 550; white-space: nowrap; }
 .product-eval-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .product-eval-table tr:last-child td { border-bottom: 0; }
@@ -19,7 +19,7 @@
 .product-eval-record-meta { margin-top: 5px; font-size: 12px; color: var(--muted-foreground); }
 .product-eval-record-meta code { display: block; max-width: 32ch; font-size: 11px; overflow-wrap: anywhere; }
 .product-eval-editor { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--background); }
-.product-eval-editor > summary { display: list-item; padding: 14px 18px; cursor: pointer; color: var(--primary); font-size: 14px; font-weight: 550; }
+.product-eval-editor > summary { display: list-item; padding: 14px 18px; cursor: pointer; color: var(--primary); font-size: var(--font-size-ui); font-weight: 550; }
 .product-eval-editor > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .product-eval-editor > .product-eval-section { border: 0; border-top: 1px solid var(--border); border-radius: 0 0 8px 8px; }
 
@@ -35,7 +35,7 @@
 
 .product-eval-header h1 {
   margin: 0;
-  font-size: 22px;
+  font-size: 16px;
   line-height: 1.35;
   font-weight: 650;
 }
@@ -43,7 +43,7 @@
 .product-eval-header p,
 .product-eval-section-heading p {
   color: var(--muted-foreground);
-  font-size: 14px;
+  font-size: var(--font-size-ui);
   line-height: 1.55;
   margin-top: 5px;
 }
@@ -54,7 +54,7 @@
   border: 1px dashed var(--border);
   border-radius: 6px;
   color: var(--muted-foreground);
-  font-size: 14px;
+  font-size: var(--font-size-ui);
 }
 
 .product-eval-empty strong {
@@ -137,7 +137,7 @@
 
 .product-eval-list-row strong,
 .product-eval-task-row strong {
-  font-size: 14px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
@@ -181,7 +181,7 @@
 
 .product-eval-field > label {
   color: var(--foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 550;
 }
 
@@ -209,7 +209,7 @@
   background: var(--background);
   color: var(--foreground);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--font-size-ui);
 }
 
 .product-eval-field select:focus-visible,
@@ -242,7 +242,7 @@
   gap: 8px;
   margin-bottom: 12px;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
 }
 
 .product-eval-candidates,
@@ -274,7 +274,7 @@
 }
 
 .product-eval-candidates li > div strong {
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
 }
 
@@ -290,7 +290,7 @@
   border-left: 3px solid #b7791f;
   background: color-mix(in srgb, #b7791f 8%, var(--background));
   color: var(--foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   line-height: 1.55;
 }
 
@@ -305,7 +305,7 @@
 .product-eval-message {
   margin: -6px 0 16px;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
 }
 
 .product-eval-error {
@@ -318,7 +318,7 @@
   color: var(--foreground);
 }
 
-.product-eval-error p { font-size: 14px; font-weight: 550; }
+.product-eval-error p { font-size: var(--font-size-ui); font-weight: 550; }
 .product-eval-error small { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 12px; }
 .product-eval-workbench details { margin-top: 10px; color: var(--muted-foreground); font-size: 12px; }
 .product-eval-workbench details summary { min-height: 28px; }
@@ -346,7 +346,7 @@
 .product-eval-metrics legend {
   padding: 0;
   margin: 0 0 8px;
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 550;
 }
 
@@ -368,7 +368,7 @@
 }
 
 .product-eval-metric-choice span { display: grid; gap: 2px; }
-.product-eval-metric-choice strong { font-size: 13px; font-weight: 550; }
+.product-eval-metric-choice strong { font-size: var(--font-size-ui); font-weight: 550; }
 .product-eval-metric-choice small { color: var(--muted-foreground); font-size: 11px; }
 
 .product-eval-selected-meta { margin: 6px 0 0; }
@@ -423,7 +423,7 @@
   grid-template-columns: minmax(94px, .4fr) minmax(0, 1fr);
   gap: 8px 12px;
   margin: 0 0 14px;
-  font-size: 13px;
+  font-size: var(--font-size-ui);
 }
 
 .product-eval-task-facts dt,
@@ -453,7 +453,7 @@
 }
 
 .product-eval-report-summary small { color: var(--muted-foreground); font-size: 11px; }
-.product-eval-report-summary strong { font-size: 14px; font-variant-numeric: tabular-nums; }
+.product-eval-report-summary strong { font-size: var(--font-size-ui); font-variant-numeric: tabular-nums; }
 .product-eval-report-rows { display: grid; gap: 8px; }
 
 .product-eval-report-row {
@@ -465,7 +465,7 @@
 
 .product-eval-report-row.is-failed { border-left: 3px solid var(--destructive); }
 .product-eval-report-row header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
-.product-eval-report-row header strong { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-size: 13px; }
+.product-eval-report-row header strong { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-ui); }
 .product-eval-report-row header span { color: var(--muted-foreground); }
 .product-eval-report-row > ul { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
 .product-eval-report-row > ul li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; font-size: 12px; }
@@ -477,7 +477,7 @@
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  font-size: 13px;
+  font-size: var(--font-size-ui);
 }
 .product-eval-comparison-pass { border-left: 3px solid #26734d; }
 .product-eval-comparison-invalid,
@@ -492,7 +492,7 @@
 
 @media (max-width: 640px) {
   .product-eval-header { align-items: center; gap: 10px; padding-top: 2px; }
-  .product-eval-header h1 { font-size: 20px; }
+  .product-eval-header h1 { font-size: 16px; }
   .product-eval-section { padding: 14px; }
   .product-eval-side-column { grid-template-columns: minmax(0, 1fr); }
   .product-eval-form-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }

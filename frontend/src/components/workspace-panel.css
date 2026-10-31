@@ -10,7 +10,7 @@
 .workspace-panel .workspace-list-heading h5 {
   margin: 0;
   color: var(--foreground);
-  font-size: 14px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
 }
 
@@ -104,7 +104,7 @@
   margin: 0;
   padding: 10px 0;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
 }
 
 .workspace-panel .workspace-file-content {
@@ -129,7 +129,7 @@
 }
 
 .workspace-panel .workspace-list-heading { align-items: baseline; }
-.workspace-panel .workspace-list-heading h5 { font-size: 13px; }
+.workspace-panel .workspace-list-heading h5 { font-size: var(--font-size-ui); }
 .workspace-panel .workspace-inline-edit { align-items: stretch; }
 .workspace-panel .workspace-inline-edit > :first-child { flex: 1 1 auto; }
 .workspace-panel .workspace-check-list,
@@ -192,7 +192,7 @@
 .workspace-panel .workspace-condition-title {
   min-height: 32px;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 500;
 }
 
