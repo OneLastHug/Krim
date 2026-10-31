@@ -982,12 +982,13 @@ input[data-slot="input"], textarea[data-slot="textarea"], .chat-workbench select
 .chat-user-text { margin: 6px 0 20px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--muted); color: var(--foreground); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
 .chat-speaker { color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
 .chat-answer { margin: 8px 0; font-family: inherit; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 560px; overflow: auto; }
-.chat-composer { position: sticky; z-index: 2; bottom: 0; display: grid; flex: 0 0 auto; gap: 8px; width: 100%; max-width: 790px; margin: 0 auto; padding: 14px 14px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--input-surface); }
+.chat-composer { position: sticky; z-index: 2; bottom: 0; display: flex; align-items: center; flex: 0 0 auto; gap: 8px; width: 100%; max-width: 790px; margin: 0 auto; padding: 4px 8px; border: 1px solid var(--border); border-radius: 18px; background: var(--input-surface); }
 .chat-composer label { color: var(--muted-foreground); font-size: 12px; }
 .chat-composer:focus-within { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
-.chat-composer #chat-prompt { min-height: 76px; max-height: min(320px,40vh); overflow: auto; resize: vertical; padding: 6px 2px; border: 0; box-shadow: none; background: transparent; color: var(--foreground); }
+.chat-composer #chat-prompt { flex: 1 1 0%; min-width: 0; min-height: 32px; max-height: min(240px,32dvh); field-sizing: content; overflow-y: auto; resize: none; padding: 4px 6px; border: 0; box-shadow: none; background: transparent; color: var(--foreground); font-size: 16px; line-height: 24px; }
 .chat-composer #chat-prompt:focus-visible { outline: 0; box-shadow: none; }
-.chat-compose-actions { display: flex; justify-content: flex-end; }
+.chat-compose-actions { display: flex; align-self: flex-end; flex: 0 0 auto; justify-content: flex-end; }
+.chat-compose-actions .chat-send { width: 44px; height: 44px; min-width: 44px; padding: 0!important; border-radius: 12px; color: var(--foreground); }
 .chat-notice, .chat-pending { flex: 0 0 auto; border-bottom: 1px solid var(--border); padding: 10px 0; color: var(--muted-foreground); font-size: 13px; }
 .chat-notice p { margin: 0; }
 .chat-pending > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -1049,8 +1050,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .chat-workbench select
   .chat-workbench { height: 100%; }
   .chat-main { height: 100%; }
   .chat-transcript { min-height: 80px; padding: 15px 3px; }
-  .chat-composer { padding: 10px; border-radius: 10px; }
-  #chat-prompt { min-height: 66px; max-height: 32vh; }
+  .chat-composer { padding: 4px 6px; border-radius: 16px; }
   .chat-answer { max-height: 38vh; }
   .task-settings-drawer { inset: 0!important; top: 0!important; left: 0!important; width: 100vw!important; max-width: none!important; height: 100dvh!important; max-height: 100dvh!important; padding: 16px!important; --tw-translate-x: 0px!important; --tw-translate-y: 0px!important; transform: none!important; translate: 0 0!important; border-radius: 0!important; }
   .workspace-task-launch { align-items: stretch; flex-direction: column; }
