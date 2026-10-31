@@ -34,10 +34,11 @@ function clearFreeze(store: Storage, intent: FreezeIntent) {
     if (loadFreeze(store)?.nonce === intent.nonce)
         store.removeItem(FREEZE_INTENT);
 }
-export async function freezeOrFind(store: Storage, fresh: FreezeIntent, key: string): Promise<{
+export async function freezeOrFind(store: Storage, fresh: FreezeIntent, key: string, current = () => true): Promise<{
     dataset: Dataset;
     intent: FreezeIntent;
 }> {
+    if (!current()) throw new Error("request_scope_changed");
     const prior = loadFreeze(store), intent = prior ?? fresh;
     if (!prior)
         store.setItem(FREEZE_INTENT, JSON.stringify(intent));
@@ -47,6 +48,7 @@ export async function freezeOrFind(store: Storage, fresh: FreezeIntent, key: str
         dataset = parseDataset(await request(prior ? path : "/v1/datasets", key, prior ? undefined : intent.body));
     }
     catch (error) {
+        if (!current()) throw new Error("request_scope_changed");
         if (!prior && unadmitted(error, "freeze", "POST")) {
             clearFreeze(store, intent);
             throw error;
@@ -55,6 +57,7 @@ export async function freezeOrFind(store: Storage, fresh: FreezeIntent, key: str
             const existing = parseDataset(await request(path, key));
             if (existing.name !== intent.body.name || existing.version !== intent.body.version)
                 throw new Error("修订身份不一致");
+            if (!current()) throw new Error("request_scope_changed");
             // 原POST已由服务端规范指纹判为冲突，GET再确认原键确有修订。
             // JS数值表示合并（如1与1.0）不能反过来把这个冲突升级为成功。
             clearFreeze(store, intent);
@@ -65,6 +68,7 @@ export async function freezeOrFind(store: Storage, fresh: FreezeIntent, key: str
     }
     if (!(await matchesRevision(dataset, intent.body)))
         throw new Error("修订内容不一致");
+    if (!current()) throw new Error("request_scope_changed");
     clearFreeze(store, intent);
     return { dataset, intent };
 }
@@ -77,7 +81,8 @@ export function loadEval(store: Storage): EvalBody | null {
         throw new Error("原评测请求无效");
     return value as unknown as EvalBody;
 }
-export async function evalOrFind(store: Storage, body: EvalBody, key: string): Promise<EvalData> {
+export async function evalOrFind(store: Storage, body: EvalBody, key: string, current = () => true): Promise<EvalData> {
+    if (!current()) throw new Error("request_scope_changed");
     const prior = loadEval(store), intent = prior ?? body;
     if (!prior)
         store.setItem(EVAL_INTENT, JSON.stringify(intent));
@@ -87,6 +92,7 @@ export async function evalOrFind(store: Storage, body: EvalBody, key: string): P
         view = parseEval(await request(prior ? path : "/v1/evals", key, prior ? undefined : intent));
     }
     catch (error) {
+        if (!current()) throw new Error("request_scope_changed");
         if (!prior && unadmitted(error, "eval", "POST")) {
             if (loadEval(store)?.request_key === intent.request_key)
                 store.removeItem(EVAL_INTENT);
@@ -94,6 +100,7 @@ export async function evalOrFind(store: Storage, body: EvalBody, key: string): P
         }
         view = parseEval(await request(path, key));
     }
+    if (!current()) throw new Error("request_scope_changed");
     const confirmed = parseEval(await request(path, key));
     if (confirmed.id !== view.id || confirmed.request_key !== intent.request_key)
         throw new Error("评测身份不一致");

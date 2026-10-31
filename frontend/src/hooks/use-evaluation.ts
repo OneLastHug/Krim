@@ -22,11 +22,12 @@ export function useEvaluation(key: string, active: boolean) {
     activeRef.current = active;
     const epoch = useRef(0), compareEpoch = useRef(0), mounted = useRef(false), flight = useRef(false), stopFlight = useRef(false), compareFlight = useRef<number | null>(null), reader = useRef<AbortController | null>(null), compareReader = useRef<AbortController | null>(null), keyRef = useRef(key);
     keyRef.current = key;
+    function available() { return mounted.current && activeRef.current && keyRef.current === key; }
     function invalidate() { epoch.current++; reader.current?.abort(); }
     function refresh() { invalidate(); setVersion(v => v + 1); }
     function select(value: string) { localStorage.setItem(EVAL_CURRENT, value); const url = new URL(location.href); url.searchParams.set("eval_id", value); url.searchParams.set("view", "eval"); history.replaceState(null, "", url); invalidate(); setId(value); setView(null); setReport(null); setNotice(""); setVersion(v => v + 1); }
     useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); compareEpoch.current++; compareReader.current?.abort(); }; }, []);
-    useEffect(() => { const change = () => select(new URL(location.href).searchParams.get("eval_id") ?? ""); window.addEventListener("popstate", change); return () => window.removeEventListener("popstate", change); }, []);
+    useEffect(() => { const change = () => { invalidate(); setId(new URL(location.href).searchParams.get("eval_id") ?? ""); setView(null); setReport(null); setNotice(""); setVersion(value => value + 1); }; window.addEventListener("popstate", change); return () => window.removeEventListener("popstate", change); }, []);
     useEffect(() => { compareEpoch.current++; compareReader.current?.abort(); setGate(null); }, [key, active]);
     useEffect(() => {
         if (!active)
@@ -36,7 +37,7 @@ export function useEvaluation(key: string, active: boolean) {
         void (async () => {
             try {
                 const [a, b] = await Promise.all([request("/v1/eval-targets", key, undefined, controller.signal), request("/v1/eval-rules", key, undefined, controller.signal)]);
-                if (!live)
+                if (!live || !available())
                     return;
                 if (!Array.isArray(a) || !Array.isArray(b))
                     throw new Error("目录无效");
@@ -45,7 +46,7 @@ export function useEvaluation(key: string, active: boolean) {
                 setCatalogueNotice("");
             }
             catch (error) {
-                if (live)
+                if (live && available())
                     setCatalogueNotice(reason(error, "目录读取未完成"));
             }
         })();
@@ -60,7 +61,7 @@ export function useEvaluation(key: string, active: boolean) {
         setNotice("");
         const token = epoch.current, controller = new AbortController();
         reader.current = controller;
-        const current = () => mounted.current && token === epoch.current && !controller.signal.aborted;
+        const current = () => available() && token === epoch.current && !controller.signal.aborted;
         void (async () => {
             try {
                 while (current()) {
@@ -95,7 +96,7 @@ export function useEvaluation(key: string, active: boolean) {
         return () => controller.abort();
     }, [id, key, active, version]);
     async function start(dataset: Dataset | null) {
-        if (flight.current)
+        if (!available() || flight.current)
             return;
         flight.current = true;
         setBusy(true);
@@ -112,7 +113,7 @@ export function useEvaluation(key: string, active: boolean) {
                     return value;
                 }), execution: { repetitions, concurrency: 1, item_timeout_seconds: 12, scorer_timeout_seconds: 1, batch_timeout_seconds: 600 } };
             setPendingKey(body.request_key);
-            const value = await evalOrFind(localStorage, body, key);
+            const value = await evalOrFind(localStorage, body, key, () => available() && token === epoch.current);
             if (mounted.current && activeRef.current && token === epoch.current && keyRef.current === capturedKey) {
                 select(value.id);
                 acknowledgeEval(localStorage, body, value);
@@ -131,7 +132,7 @@ export function useEvaluation(key: string, active: boolean) {
         }
     }
     async function stop() {
-        if (!id || stopFlight.current)
+        if (!available() || !id || stopFlight.current)
             return;
         stopFlight.current = true;
         setStopping(true);
@@ -140,13 +141,13 @@ export function useEvaluation(key: string, active: boolean) {
             const value = parseEval(await request(`/v1/evals/${encodeURIComponent(currentId)}/cancel`, key, {}));
             if (value.id !== currentId)
                 throw new Error("评测身份不一致");
-            if (mounted.current && token === epoch.current) {
+            if (available() && token === epoch.current) {
                 setView(value);
                 refresh();
             }
         }
         catch (error) {
-            if (mounted.current && token === epoch.current)
+            if (available() && token === epoch.current)
                 setNotice(reason(error, "停止结果未确认"));
         }
         finally {
@@ -157,6 +158,7 @@ export function useEvaluation(key: string, active: boolean) {
     }
     function changePair(field: "baseline" | "candidate", value: string) { compareEpoch.current++; compareReader.current?.abort(); setGate(null); setPair(old => ({ ...old, [field]: value })); setComparing(false); }
     async function compare() {
+        if (!available()) return;
         const token = compareEpoch.current;
         if (compareFlight.current === token)
             return;
@@ -167,7 +169,7 @@ export function useEvaluation(key: string, active: boolean) {
         setComparing(true);
         setGate(null);
         setNotice("");
-        const current = () => mounted.current && token === compareEpoch.current && !controller.signal.aborted;
+        const current = () => available() && token === compareEpoch.current && !controller.signal.aborted;
         try {
             const [a, b] = await Promise.all([request(`/v1/evals/${encodeURIComponent(pair.baseline)}/report`, key, undefined, controller.signal), request(`/v1/evals/${encodeURIComponent(pair.candidate)}/report`, key, undefined, controller.signal)]);
             if (!current())

@@ -13,9 +13,17 @@ let readonlyScheduleId = "";
 let readonlyTaskRequestKey = "";
 let readonlyDisableKey = "";
 
-function step(page: Page, info: TestInfo, caseName: string, theme: "light" | "dark" = "light") {
+type Theme = "warm" | "bright" | "dark";
+function step(page: Page, info: TestInfo, caseName: string, theme: Theme = "warm") {
   return (label: string) => (action: () => Promise<void>) => screenshotStep(page, info,
     { caseName, stepName: label, theme }, action);
+}
+
+async function selectTheme(page: Page, theme: Theme) {
+  const labels: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
+  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
 async function readJson(page: Page, info: TestInfo, path: string, name: string): Promise<any> {
@@ -223,11 +231,9 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
     await desktopStep("打开评测并核验本机身份与能力")(async () => {
       await page.goto("/ui/?view=eval&workspace=local");
       await expect(page.getByRole("button", { name: "导航到评测", exact: true })).toBeVisible();
+      await selectTheme(page, "warm");
       const html = page.locator("html");
-      if (await html.evaluate(element => element.classList.contains("dark"))) {
-        await page.getByRole("button", { name: "切换到浅色主题", exact: true }).click();
-      }
-      await expect(html).not.toHaveClass(/dark/);
+      await expect(html).toHaveAttribute("data-theme", "warm");
       const health = await readJson(page, info, "/healthz", "宿主评测能力.json");
       expect(health.product_eval_enabled).toBe(true);
       expect(health.evaluation_automation_enabled).toBe(true);
@@ -302,7 +308,15 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
       expect(response.status()).toBe(202);
       acceptedTurn = await saveActionResponse(info, "本机加法轮次-原请求与接收回执.json", request, response);
       expect(acceptedTurn.text).toBe("/add 2.5 3.5");
-      await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("已完成", { timeout: 45000 });
+      await expect.poll(async () => {
+        const result = await page.request.get(`${turnPath}/${encodeURIComponent(acceptedTurn.id)}`);
+        expect(result.ok()).toBe(true);
+        const turn = await result.json();
+        expect(turn.id).toBe(acceptedTurn.id);
+        expect(turn.session_id).toBe(session.id);
+        return turn.status;
+      }, { timeout: 45000 }).toBe("completed");
+      await expect(page.locator(".chat-answer").last()).toHaveText("6");
       const turns = await readJson(page, info,
         `${sessionBase}/${encodeURIComponent(session.id)}/turns?offset=0&limit=50`,
         "本机加法轮次完成事实.json");
@@ -310,11 +324,18 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
       expect(completed?.status).toBe("completed");
       expect(completed?.run_id).toBeTruthy();
       acceptedTurn = completed;
-      await expect(page.getByRole("button", { name: "评测此结果", exact: true })).toBeVisible();
+      await expect(page.locator(".chat-turn").last().getByRole("button", { name: "更多操作", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "评测此结果", exact: true })).toHaveCount(0);
     });
 
     await desktopStep("从对话结果直达来源运行")(async () => {
-      await page.getByRole("button", { name: "评测此结果", exact: true }).click();
+      const last = page.locator(".chat-turn").last();
+      await last.getByRole("button", { name: "更多操作", exact: true }).click();
+      await expect(last.locator(".chat-detail")).toContainText("工具摘要");
+      await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
+      await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
+      await expect(page.locator(".trace-span-node").first()).toBeVisible();
+      await page.getByRole("button", { name: "加入数据集", exact: true }).click();
       await expect.poll(() => new URL(page.url()).searchParams.get("source_run")).toBe(acceptedTurn.run_id);
       sourceRunId = new URL(page.url()).searchParams.get("source_run") ?? "";
       expect(sourceRunId).toBeTruthy();
@@ -446,8 +467,8 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
 
     let frozenDataset: any;
     await desktopStep("冻结唯一连续数据集并读取服务端包络")(async () => {
-      await page.locator("#product-dataset-name").fill(datasetName);
-      await page.locator("#product-dataset-version").fill("v1");
+      await page.locator("#product-confirmed-dataset-name").fill(datasetName);
+      await page.locator("#product-confirmed-dataset-version").fill("v1");
       const freezePath = `${evalBase}/datasets/confirmed`;
       const requestPromise = page.waitForRequest(request =>
         new URL(request.url()).pathname === freezePath && request.method() === "POST",
@@ -721,11 +742,12 @@ test("P4：窄屏深色只读恢复本机持久计划", async ({ page }, info) =
     expect(row).toBeTruthy();
     expect(row.enabled).toBe(false);
     await page.goto("/ui/?view=eval&workspace=local");
+    await selectTheme(page, "dark");
     if (await page.getByRole("button", { name: "打开导航", exact: true }).isVisible().catch(() => false)) {
       await page.getByRole("button", { name: "打开导航", exact: true }).click();
       await page.getByRole("dialog", { name: "主导航" }).getByRole("button", { name: "导航到评测", exact: true }).click();
     }
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await openAutomation(page);
     const detail = await readJson(page, info, `${automationBase}/schedules/${encodeURIComponent(planId)}`, "窄屏恢复-既有计划只读详情.json");
     expect(detail.schedule_id).toBe(planId);
@@ -737,7 +759,7 @@ test("P4：窄屏深色只读恢复本机持久计划", async ({ page }, info) =
   });
   await stepNarrow("刷新后继续只读恢复原计划与控制回执")(async () => {
     await page.reload();
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await openAutomation(page);
     const detail = await readJson(page, info, `${automationBase}/schedules/${encodeURIComponent(planId)}`, "窄屏刷新-原计划持久回执.json");
     expect(detail.schedule_id).toBe(planId);
@@ -849,7 +871,8 @@ test("P4：窄屏深色只读核验报告与控制回执", async ({ page }, info
 
   await narrowReadStep("窄屏深色只读恢复原窗口报告")(async () => {
     await page.goto(`/ui/?view=eval&workspace=local&product_eval_id=${encodeURIComponent(readonlyTaskId)}`);
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await selectTheme(page, "dark");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator(".product-eval-task-facts")).toContainText(readonlyTaskId);
     await page.getByRole("button", { name: "查看报告", exact: true }).click();
     await expect(page.locator(".product-eval-report-row").first()).toBeVisible();

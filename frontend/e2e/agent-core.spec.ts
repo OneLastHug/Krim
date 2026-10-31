@@ -66,8 +66,8 @@ if (["capacity", "auth"].includes(process.env.KRIM_GUIDE_PHASE ?? "")) {
       expect(submitted).toHaveLength(2);expect(submitted.every(body=>body.text==="/add 2 3")).toBe(true);
       const database=new DatabaseSync(file("browser.sqlite"),{readOnly:true});
       try {
-        expect(Number(database.prepare("SELECT count(*) AS count FROM runs WHERE request_key=?").get(String(submitted[0].request_key))!.count)).toBe(submitted[0].request_key===submitted[1].request_key?1:0);
-        expect(Number(database.prepare("SELECT count(*) AS count FROM runs WHERE request_key=?").get(String(submitted[1].request_key))!.count)).toBe(1);
+        expect(Number(database.prepare("SELECT count(*) AS count FROM runs WHERE request_key=?").get(String(submitted[0]!.request_key))!.count)).toBe(submitted[0]!.request_key===submitted[1]!.request_key?1:0);
+        expect(Number(database.prepare("SELECT count(*) AS count FROM runs WHERE request_key=?").get(String(submitted[1]!.request_key))!.count)).toBe(1);
       }finally{database.close();}
       writeFileSync(file("recovery-completed.json"),JSON.stringify({id,before,after:{runs:counts(),provider:entries(),tools:countTools()},submitted},null,2));
       await page.screenshot({path:file("recovery-completed.png"),fullPage:true});
@@ -198,8 +198,8 @@ if (["capacity", "auth"].includes(process.env.KRIM_GUIDE_PHASE ?? "")) {
     expect(facts.model_steps).toBe(2);
     expect(facts.tools).toHaveLength(1);
     expect(facts.tools[0].value).toEqual({ sum: 5 });
-    expect(trace.spans.find(value => value.kind === "tool").span_id).toBe(facts.tools[0].span_id);
-    expect(trace.spans.every(value => value.run_id === add)).toBe(true);
+    expect(trace.spans.find((value: { kind: string; span_id: string }) => value.kind === "tool").span_id).toBe(facts.tools[0].span_id);
+    expect(trace.spans.every((value: { run_id: string }) => value.run_id === add)).toBe(true);
     expect(entries()).toBe(initialEntries + 2);
     await page.screenshot({ path: file("add-trace.png"), fullPage: true });
 

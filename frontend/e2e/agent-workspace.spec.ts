@@ -70,11 +70,40 @@ async function connect(page: Page, token = "final-api-token") {
   await page.locator("#api-key").fill(token); await page.locator("#connect-save").click();
   await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
 }
+async function navigateView(page: Page, view: "chat" | "run") {
+  const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+  let sidebar = page.locator(".desktop-sidebar");
+  if (await mobileMenu.isVisible()) {
+    await mobileMenu.click();
+    sidebar = page.getByRole("dialog", { name: "主导航", exact: true });
+  }
+  const navigation = sidebar.locator(".workspace-navigation");
+  if (await navigation.getAttribute("open") === null) await navigation.locator("summary").click();
+  const button = sidebar.getByRole("button", { name: view === "run" ? "导航到运行记录" : "导航到对话", exact: true });
+  await button.focus(); await expect(button).toBeFocused(); await page.keyboard.press("Enter");
+  await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe(view);
+}
+async function selectSession(page: Page, title: string) {
+  const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+  if (await mobileMenu.isVisible()) {
+    await mobileMenu.click();
+    await page.getByRole("dialog", { name: "主导航", exact: true }).getByRole("button", { name: title, exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: title, exact: true }).click();
+  }
+}
+async function openWorkspaceTaskArea(page: Page) {
+  const area = page.locator(".workspace-task-area");
+  await expect(area).toBeVisible();
+  if (await area.getAttribute("open") === null) await area.locator("summary").click();
+  await expect(page.locator("#workspace-text")).toBeVisible();
+}
 async function open(page: Page, owner: State) {
   await page.goto(owner.url+"/ui/?view=chat&workspace=local&session="+owner.session_id);
   await connect(page);
+  await expect(page.locator(".topbar-title h1")).toHaveText("FINAL工作A");
+  await openWorkspaceTaskArea(page);
   await expect(page.locator("#workspace-text")).toBeEnabled();
-  await expect(page.locator("#chat-heading")).toHaveText("FINAL工作A");
 }
 async function resetTurnChecks(page: Page) {
   while(await page.locator(".workspace-check-list li").count())
@@ -130,6 +159,18 @@ async function work(request: APIRequestContext, owner: State) {
   const response = await request.get(owner.url+"/v3/workspaces/local/sessions/"+owner.session_id+"/work",
     { headers: AUTH }); expect(response.ok()).toBe(true); return await response.json();
 }
+async function expectTurnStatus(page: Page, request: APIRequestContext, owner: State, status: string) {
+  const turnId = await page.locator(".chat-turn").last().getAttribute("data-turn-id");
+  expect(turnId).toBeTruthy();
+  await expect.poll(async () => {
+    const response = await request.get(owner.url+"/v2/workspaces/local/sessions/"+owner.session_id+
+      "/turns/"+encodeURIComponent(turnId!), { headers: AUTH });
+    expect(response.ok()).toBe(true);
+    const turn = await response.json();
+    expect(turn.id).toBe(turnId);
+    return turn.status as string;
+  }).toBe(status);
+}
 async function capture(page: Page, info: TestInfo, name: string) {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.keyboard.press("Tab");
@@ -150,7 +191,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
     };
     const lum=(c:number[])=>c.slice(0,3).map(v=>{ const n=v/255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4; })
       .reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i]!,0);
-    const contrast=[...document.querySelectorAll<HTMLElement>(".chat-workbench button,.workspace-panel p,.chat-heading h2,#chat-status")]
+    const contrast=[...document.querySelectorAll<HTMLElement>(".chat-workbench button,.workspace-panel p,.topbar-title h1,.chat-turn [role=status]")]
       .filter(el=>el.getClientRects().length&&!el.closest("[hidden]")&&!el.matches(":disabled")&&getComputedStyle(el).visibility!=="hidden")
       .map(el=>{ const a=lum(rgb(getComputedStyle(el).color)),b=lum(background(el));return {
         text:el.innerText.slice(0,100),ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05) }; });
@@ -159,7 +200,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
       .map(el=>({text:el.innerText,rect:rect(el)}));
     const active=document.activeElement as HTMLElement;
     return { viewport:{width:innerWidth,height:innerHeight},
-      overflow:document.documentElement.scrollWidth>innerWidth,heading:rect(document.querySelector(".chat-heading")),
+      overflow:document.documentElement.scrollWidth>innerWidth,heading:rect(document.querySelector(".topbar-title h1")),
       session:new URL(location.href).searchParams.get("session"),turn:new URL(location.href).searchParams.get("turn"),
       stop:rect(document.querySelector("#chat-stop")),find:[...document.querySelectorAll(".workspace-pending button,.workspace-known button")].map(rect),
       buttons,contrast,focus:{tag:active?.tagName,id:active?.id,outline:getComputedStyle(active).outlineWidth},
@@ -297,7 +338,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
     try {
       await open(page,owner);await send(page);
       await expect(page.locator(".chat-approval")).toBeVisible();await capture(page,info,"approval");
-      await approve(page);await expect(page.locator("#chat-status")).toHaveText("已完成");
+      await approve(page);await expectTurnStatus(page,request,owner,"completed");
       await page.getByRole("button",{name:"刷新工作结果",exact:true}).click();
       await expect(page.locator(".workspace-facts")).toContainText("passed");
       const value=await work(request,owner);expect(value.verification.state).toBe("passed");
@@ -306,7 +347,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
       await expect(page.locator(".workspace-artifact")).toContainText("answer.json");
       await capture(page,info,"verified-artifact");
       await send(page,"D4_NEXT "+value.verification.revision_id);
-      await expect(page.locator("#chat-status")).toHaveText("失败");
+      await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("失败");
       const next=await work(request,owner);expect(next.effects).toHaveLength(1);
       expect(next.effects[0].kind).toBe("read");
       const seen=await state(request,owner);expect(seen.requests.some(v=>!("tools" in v))).toBe(true);
@@ -349,7 +390,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
             await page.locator("#chat-stop").click();
           }
         }
-        await expect(page.locator("#chat-status")).toHaveText(mode==="command-stop"?"已停止":"失败");
+        await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText(mode==="command-stop"?"已停止":"失败");
         await page.getByRole("button",{name:"刷新工作结果",exact:true}).click();
         const value=await work(request,owner);expect(value.verification?.state).not.toBe("passed");
         if(mode==="summary-fail"||mode==="approval-denied")
@@ -387,10 +428,9 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
         await expect(page.locator(".workspace-artifact")).toContainText("hello.txt");
         const ledger=await page.evaluate(key=>localStorage.getItem(key),KNOWN);expect(ledger).not.toBeNull();
         const identity=Object.values(JSON.parse(ledger!))[0] as {identity:string;manifest_hash:string};
-        await page.reload();await connect(page);
+        await page.reload();await connect(page);await openWorkspaceTaskArea(page);
         await expect(page.locator(".workspace-artifact")).toContainText(identity.manifest_hash);
-        await page.getByRole("tab",{name:"任务",exact:true}).click();
-        await page.getByRole("tab",{name:"对话",exact:true}).click();
+        await navigateView(page,"run");await navigateView(page,"chat");await openWorkspaceTaskArea(page);
         await expect(page.locator(".workspace-artifact")).toContainText("hello.txt");
         const snapshot=await state(request,owner);
         expect(snapshot.http.filter(v=>v.method==="POST"&&v.path.endsWith("/inputs"))).toHaveLength(1);
@@ -421,12 +461,12 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
           await page.getByRole("button",{name:"查找原工作请求",exact:true}).click();}
         await entered.promise;
         if(steering==="session-return") {
-          await page.getByRole("button",{name:"FINAL工作B",exact:true}).click();
-          await expect(page.locator("#chat-heading")).toHaveText("FINAL工作B");
-          await page.getByRole("button",{name:"FINAL工作A",exact:true}).click();
+          await selectSession(page,"FINAL工作B");
+          await expect(page.locator(".topbar-title h1")).toHaveText("FINAL工作B");
+          await selectSession(page,"FINAL工作A");
         } else if(steering==="credential") {await connect(page,"final-peer-token");await connect(page);}
-        else {await page.getByRole("tab",{name:"任务",exact:true}).click();
-          await page.getByRole("tab",{name:"对话",exact:true}).click();}
+        else {await navigateView(page,"run");await navigateView(page,"chat");}
+        await openWorkspaceTaskArea(page);
         hold.release();
         await expect.poll(async()=>page.evaluate(key=>JSON.parse(localStorage.getItem(key)??"[]"),INTENTS))
           .toEqual(expect.arrayContaining([expect.objectContaining({body:original})]));

@@ -39,7 +39,7 @@ function reference(draft: Draft): Reference {
     const trajectory = raw ? { exact_steps: raw.exact_steps ?? null, min_steps: raw.min_steps ?? null, max_steps: raw.max_steps ?? null, tool_names: raw.tool_names ?? null } : null;
     return { expected: strictJson(draft.expected), expected_status: draft.status, expected_code: draft.code.trim() || null, expected_tools: tools, trajectory, expected_schema: jsonObject(draft.schema) };
 }
-export function useDataset(key: string, sourceRun: string) {
+export function useDataset(key: string, sourceRun: string, active: boolean) {
     const [initial] = useState(() => {
         try {
             return { intent: loadFreeze(localStorage), invalid: false };
@@ -52,21 +52,24 @@ export function useDataset(key: string, sourceRun: string) {
     const [cases, setCases] = useState<CaseSelection[]>(initial.intent?.body.cases ?? []), [candidate, setCandidate] = useState<Candidate | null>(null), [source, setSource] = useState<Candidate | null>(null);
     const [frozen, setFrozen] = useState<Dataset | null>(null), [pending, setPending] = useState(Boolean(initial.intent) || initial.invalid), [busy, setBusy] = useState(false), [notice, setNotice] = useState(initial.invalid ? "原冻结请求记录无效" : "");
     const draftId = useRef(initial.intent?.draftId ?? crypto.randomUUID()), edit = useRef(initial.intent?.editRevision ?? 0), epoch = useRef(0), reader = useRef<AbortController | null>(null), mounted = useRef(false), flight = useRef(false), keyRef = useRef(key);
-    keyRef.current = key;
+    const activeRef = useRef(active);
+    keyRef.current = key; activeRef.current = active;
+    function available() { return mounted.current && activeRef.current && keyRef.current === key; }
     function invalidate() { epoch.current++; reader.current?.abort(); }
     useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); }; }, []);
-    useEffect(() => { invalidate(); setCandidate(null); }, [key]);
+    useEffect(() => { invalidate(); setCandidate(null); }, [key, active]);
     function changed() { edit.current++; invalidate(); setCandidate(null); setNotice(""); }
     function change(patch: Partial<Draft>) { changed(); setDraft(d => ({ ...d, ...patch })); }
     function rename(value: string) { changed(); setName(value); }
     function revise(value: string) { changed(); setVersion(value); }
     async function collect(id: string, includeInput = false) {
+        if (!available()) return;
         invalidate();
         const token = epoch.current, revision = edit.current, controller = new AbortController();
         reader.current = controller;
         try {
             const value = parseCandidate(await request(`/v1/runs/${encodeURIComponent(id)}/candidate?include_input=${includeInput}`, key, undefined, controller.signal));
-            if (!mounted.current || token !== epoch.current || revision !== edit.current)
+            if (!available() || token !== epoch.current || revision !== edit.current)
                 return;
             if (value.source_run_id !== id)
                 throw new Error("来源身份不一致");
@@ -80,17 +83,17 @@ export function useDataset(key: string, sourceRun: string) {
             }
         }
         catch (error) {
-            if (mounted.current && token === epoch.current)
+            if (available() && token === epoch.current)
                 setNotice(reason(error, error instanceof Error ? error.message : "来源读取未完成"));
         }
     }
     useEffect(() => {
-        if (sourceRun) {
+        if (active && sourceRun) {
             changed();
             setDraft(d => ({ ...d, sourceRun }));
             void collect(sourceRun);
         }
-    }, [sourceRun]);
+    }, [sourceRun, active]);
     function manual() { changed(); setSource(null); }
     function add() {
         try {
@@ -110,7 +113,7 @@ export function useDataset(key: string, sourceRun: string) {
     function remove(id: string) { changed(); setCases(old => old.filter(c => c.case_id !== id)); }
     function editCase(value: CaseSelection) { changed(); const r = value.reference; setSource(value.source_kind === "run" ? { source_kind: "run", source_run_id: value.source_run_id!, candidate_fingerprint: value.candidate_fingerprint!, selected_input: value.selected_input!, eligibility: "eligible", reasons: ["eligible"], input_fingerprint: "" } : null); setDraft({ caseId: value.case_id, input: value.input ?? value.selected_input ?? "", expected: JSON.stringify(r.expected), reason: value.reason, status: r.expected_status, code: r.expected_code ?? "", tools: r.expected_tools === null ? "" : JSON.stringify(r.expected_tools), trajectory: r.trajectory === null ? "" : JSON.stringify(r.trajectory), schema: r.expected_schema === null ? "" : JSON.stringify(r.expected_schema), sourceRun: value.source_run_id ?? "" }); }
     async function freeze() {
-        if (flight.current)
+        if (!available() || flight.current)
             return;
         flight.current = true;
         setBusy(true);
@@ -118,15 +121,15 @@ export function useDataset(key: string, sourceRun: string) {
         const capturedKey = key;
         const fresh: FreezeIntent = { body: { schema_version: 1, name, version, cases }, draftId: draftId.current, editRevision: edit.current, nonce: crypto.randomUUID() };
         try {
-            const result = await freezeOrFind(localStorage, fresh, key);
-            if (mounted.current && keyRef.current === capturedKey) {
+            const result = await freezeOrFind(localStorage, fresh, key, () => available() && keyRef.current === capturedKey);
+            if (available() && keyRef.current === capturedKey) {
                 if (result.intent.draftId === draftId.current && result.intent.editRevision === edit.current)
                     setFrozen(result.dataset);
                 setNotice(result.intent.editRevision === edit.current ? "修订已冻结" : "原提交已确认");
             }
         }
         catch (error) {
-            if (mounted.current && keyRef.current === capturedKey)
+            if (available() && keyRef.current === capturedKey)
                 setNotice(localStorage.getItem(FREEZE_INTENT) ? "冻结结果未确认" : reason(error, error instanceof Error ? error.message : "冻结未完成"));
         }
         finally {
@@ -138,6 +141,7 @@ export function useDataset(key: string, sourceRun: string) {
         }
     }
     async function open() {
+        if (!available()) return;
         invalidate();
         const token = epoch.current;
         const controller = new AbortController();
@@ -145,14 +149,14 @@ export function useDataset(key: string, sourceRun: string) {
         setNotice("");
         try {
             const value = parseDataset(await request(`/v1/datasets/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, key, undefined, controller.signal));
-            if (mounted.current && token === epoch.current) {
+            if (available() && token === epoch.current) {
                 if (value.name !== name || value.version !== version)
                     throw new Error("修订身份不一致");
                 setFrozen(value);
             }
         }
         catch (error) {
-            if (mounted.current && token === epoch.current)
+            if (available() && token === epoch.current)
                 setNotice(reason(error, "修订读取未完成"));
         }
     }

@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { webcrypto } from "node:crypto";
 import { EvaluationProductWorkbench } from "../src/components/EvaluationProductWorkbench";
-import { buildProductDatasetRequest, evaluationStorageKey, normalizeProductTask } from "../src/lib/product-evaluation";
+import { buildProductDatasetRequest, evaluationStorageKey, normalizeProductTask, type ProductCandidateSummary } from "../src/lib/product-evaluation";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
@@ -84,7 +84,7 @@ async function freezeManualDataset() {
 }
 async function switchToEval() {
   await act(async () => root.render(<StrictMode><EvaluationProductWorkbench apiKey="access-key" workspace="team" active view="eval" canWrite canApprove /></StrictMode>));
-  await until(() => expect(host.querySelector("#product-target option")?.value).toBe("target-script"));
+  await until(() => expect(host.querySelector<HTMLOptionElement>("#product-target option")?.value).toBe("target-script"));
 }
 const storedDatasetRow = { name: "suite", version: "v1", fingerprint: "a".repeat(64), case_count: 1 };
 function storedDataset(envelope?: string) {
@@ -96,7 +96,7 @@ function storedDatasetHandler(envelope?: string) {
 }
 async function chooseStoredDataset() {
   await mount({ view: "eval" });
-  await until(() => expect(host.querySelector("#product-target option")?.value).toBe("target-script"));
+  await until(() => expect(host.querySelector<HTMLOptionElement>("#product-target option")?.value).toBe("target-script"));
   await until(() => expect(host.querySelector('#product-dataset-choice option[value="suite/v1"]')).toBeTruthy());
   await select("product-dataset-choice", "suite/v1");
   await until(() => expect(host.textContent).toContain("已选择 suite · v1"));
@@ -359,7 +359,7 @@ test("permission failures show scoped raw response and allow an explicit read re
     : undefined;
   await mount();
   await until(() => expect(host.querySelector('[role="alert"]')?.textContent).toContain("当前身份没有此工作区的相应权限"));
-  const detail = host.querySelector(".product-eval-error details")!;
+  const detail = host.querySelector<HTMLDetailsElement>(".product-eval-error details")!;
   expect(detail.open).toBe(false);
   expect(detail.textContent).toContain("permission_denied");
   expect(calls.filter(item => item.method === "POST")).toEqual([]);
@@ -524,7 +524,7 @@ test("late initial metric catalog cannot strand a fast dataset and target switch
     return undefined;
   };
   await mount({ view: "eval" });
-  await until(() => expect(host.querySelector("#product-target option")?.value).toBe("krim-script-bad"));
+  await until(() => expect(host.querySelector<HTMLOptionElement>("#product-target option")?.value).toBe("krim-script-bad"));
   await until(() => expect(seenTargets).toContain("krim-script-bad"));
   await until(() => expect(host.querySelector('#product-dataset-choice option[value="suite/v1"]')).toBeTruthy());
   await select("product-dataset-choice", "suite/v1");
@@ -565,9 +565,10 @@ test("unknown run import keeps its request key and recovers only through the mat
   await until(() => expect(button("导入候选").disabled).toBe(false));
   await click("导入候选");
   await until(() => expect(host.textContent).toContain("网络连接中断"));
-  expect(accepted?.request_key).toMatch(/^import-run-/);
+  const admitted = accepted as Record<string, unknown> | null;
+  expect(admitted?.request_key).toMatch(/^import-run-/);
   const storageKey = await evaluationStorageKey("access-key", "team");
-  expect(localStorage.getItem(storageKey)).toContain(String(accepted?.request_key));
+  expect(localStorage.getItem(storageKey)).toContain(String(admitted?.request_key));
   await click("只读检查");
   await until(() => expect(host.textContent).toContain("已按原请求键找回 1 个候选"));
   expect(calls.filter(item => item.path.startsWith(`${base}/sources/runs/imports/by-key/`) && item.method === "GET")).toHaveLength(1);
@@ -623,7 +624,7 @@ test("identity or workspace switch fences late catalog responses and isolates le
   await mount({ identity: { principal_id: "alice", generation: 1 } });
   await until(() => expect(calls.some(item => item.path === `${base}/targets`)).toBe(true));
   await act(async () => root.render(<StrictMode><EvaluationProductWorkbench apiKey="access-key" workspace="team" identity={{ principal_id: "bob", generation: 2 }} active view="eval" /></StrictMode>));
-  await until(() => expect(host.querySelector("#product-target option")?.value).toBe("fresh-target"));
+  await until(() => expect(host.querySelector<HTMLOptionElement>("#product-target option")?.value).toBe("fresh-target"));
   await act(async () => release(json([{ key: "stale-target", version: "1", kind: "registered" }])));
   expect(host.querySelector("#product-target")?.textContent).not.toContain("stale-target");
   expect(await evaluationStorageKey("access-key", "team", { principal_id: "alice", generation: 1 })).not.toBe(await evaluationStorageKey("access-key", "team", { principal_id: "bob", generation: 2 }));

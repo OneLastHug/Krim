@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); await act(async () => { for (const release of releases.splice(0)) release(); await Promise.resolve(); }); container.remove(); vi.unstubAllGlobals(); });
 async function until(check: () => void) { let error: unknown; for (let i = 0; i < 60; i++) { try { check(); return; } catch (value) { error = value; await act(async () => { await new Promise(r => setTimeout(r, 0)); }); } } throw error; }
-function button(label: string) { const item = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === label); expect(item, label).toBeTruthy(); return item!; }
+function button(label: string) { const item = [...document.querySelectorAll("button")].find(b => b.getAttribute("aria-label") === label || b.textContent?.trim() === label); expect(item, label).toBeTruthy(); return item!; }
 
 test("真实App StrictMode对话入口零自动POST，新建仅由显式操作", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
@@ -272,4 +272,31 @@ test("双击固定原键，GET404不解除未知intent", async () => {
   expect(localStorage.getItem(INTENTS)).toBe(stored); expect(calls.filter(c => c.method === "POST")).toHaveLength(1);
   reject = false; fixture.hold.release();
   await act(async () => button("查找原请求").click()); await until(() => expect(readIntents(localStorage)).toEqual([]));
+});
+
+test("消息更多操作提供可导航Trace路由且保持只读", async () => {
+  server("none");
+  const fallback = override!, base = "/v2/workspaces/local/sessions";
+  override = (path, options) => {
+    if (path === base + "/A/turns?offset=0&limit=50") return json([historyTurn("A1", 1)]);
+    if (path.startsWith("/v2/workspaces/local/traces?")) return json({ items: [{ source_kind: "session_turn", run_id: "run-A1", trace_id: "trace-A1", session_id: "A", turn_id: "A1", session_title: "会话 A", target_key: "demo", status: "completed", created_at: 1, finished_at: 2 }], next_cursor: null });
+    return fallback(path, options);
+  };
+  await mountExisting();
+  await until(() => expect(button("更多操作")).toBeTruthy());
+  await act(async () => button("更多操作").click());
+  await until(() => expect(button("查看 Trace")).toBeTruthy());
+  await act(async () => button("查看 Trace").click());
+  await until(() => expect(container.querySelector('section[aria-label="Trace 页面"]')?.hasAttribute("hidden")).toBe(false));
+  const url = new URL(location.href);
+  expect(url.searchParams.get("view")).toBe("trace");
+  expect(url.searchParams.get("workspace")).toBe("local");
+  expect(url.searchParams.get("session")).toBe("A");
+  expect(url.searchParams.get("turn")).toBe("A1");
+  expect(calls.every(item => item.method === "GET")).toBe(true);
+  await until(() => expect(button("返回对话")).toBeTruthy());
+  await act(async () => button("返回对话").click());
+  await until(() => expect(new URL(location.href).searchParams.get("view")).toBe("chat"));
+  expect(new URL(location.href).searchParams.get("session")).toBe("A");
+  expect(calls.every(item => item.method === "GET")).toBe(true);
 });

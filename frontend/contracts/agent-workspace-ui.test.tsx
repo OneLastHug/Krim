@@ -42,7 +42,7 @@ async function until(check: () => void) {
   throw error;
 }
 function button(label: string) {
-  const value = [...document.querySelectorAll("button")].find(item => item.textContent?.trim() === label);
+  const value = [...document.querySelectorAll("button")].find(item => item.getAttribute("aria-label") === label || item.textContent?.trim() === label);
   expect(value).toBeTruthy(); return value!;
 }
 

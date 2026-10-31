@@ -29,14 +29,25 @@ function read(path: string) {
         return json({ run_id: id, trace_id: "trace-" + id, complete: true, spans: [], reasons: [] });
     return json(view(id));
 }
+const identity = { principal_id: "local", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] };
+let identityRead = false;
 function intercept(handler: (path: string, options: RequestInit) => Promise<Response> | Response) {
+    identityRead = false;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => {
         const path = String(input);
         calls.push({ path, method: options.method ?? "GET", body: options.body ? JSON.parse(String(options.body)) : undefined, key: new Headers(options.headers).get("Authorization") ?? "" });
+        if (path === "/v2/me") {
+            identityRead = true;
+            return json(identity);
+        }
         return handler(path, options);
     }));
 }
-async function mount() { await act(async () => root.render(<StrictMode><App /></StrictMode>)); }
+async function mount() {
+    await act(async () => root.render(<StrictMode><App /></StrictMode>));
+    await until(() => expect(identityRead).toBe(true));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+}
 async function until(check: () => void) { let error: unknown; for (let i = 0; i < 60; i++) {
     try {
         check();
@@ -50,7 +61,7 @@ async function until(check: () => void) { let error: unknown; for (let i = 0; i 
 function button(label: string) { const found = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
 async function click(label: string) { await act(async () => button(label).click()); }
 async function type(id: string, value: string) { await act(async () => { const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement; expect(input).toBeTruthy(); Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }
-beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/"); calls = []; container = document.createElement("div"); document.body.append(container); root = createRoot(container); intercept((p) => read(p)); });
+beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=run"); calls = []; container = document.createElement("div"); document.body.append(container); root = createRoot(container); intercept((p) => read(p)); });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 test("真实App StrictMode及重挂没有自动POST", async () => { await mount(); await act(async () => root.unmount()); root = createRoot(container); await mount(); expect(calls.filter(c => c.method === "POST")).toEqual([]); expect(container.textContent).toContain("暂无任务"); });
 test("双击创建固定原键并只有一次POST", async () => {
@@ -87,7 +98,7 @@ test("历史GET、换ID、迟到回程和卸载均不POST且不覆盖当前对�
     let release!: (r: Response) => void;
     const held = new Promise<Response>(r => { release = r; });
     intercept((path) => path === "/v1/runs/A" ? held : read(path));
-    history.replaceState(null, "", "/ui/#A");
+    history.replaceState(null, "", "/ui/?view=run#A");
     await mount();
     await until(() => expect(calls.some(c => c.path === "/v1/runs/A")).toBe(true));
     await act(async () => { location.hash = "B"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
@@ -100,7 +111,7 @@ test("换密钥中止旧读取，晚回程不覆盖新认证视图，Tab不写�
     let release!: (r: Response) => void;
     const held = new Promise<Response>(r => { release = r; });
     intercept((path, options) => path === "/v1/runs/A" && !new Headers(options.headers).get("Authorization") ? held : read(path));
-    history.replaceState(null, "", "/ui/#A");
+    history.replaceState(null, "", "/ui/?view=run#A");
     await mount();
     await until(() => expect(calls.some(c => c.path === "/v1/runs/A")).toBe(true));
     await click("连接");
@@ -132,7 +143,7 @@ test("审批双击只发一次，未知回程重试保留原键原决定与绑�
             return json(committed ? [] : [approval]);
         return read(path);
     });
-    history.replaceState(null, "", "/ui/#A");
+    history.replaceState(null, "", "/ui/?view=run#A");
     await mount();
     await until(() => expect(document.querySelector("#approval")).not.toBeNull());
     await act(async () => { button("允许").click(); button("允许").click(); });
@@ -162,7 +173,7 @@ test("取消双击只请求一次，并展示实际读回的终态", async () =>
             return json({ run: { ...view("A"), status: "aborted" }, text: "", tools: [], events: [] });
         return read(path);
     });
-    history.replaceState(null, "", "/ui/#A");
+    history.replaceState(null, "", "/ui/?view=run#A");
     await mount();
     await until(() => expect(document.getElementById("status")?.textContent).toBe("执行中"));
     await act(async () => { button("停止").click(); button("停止").click(); });
@@ -205,7 +216,7 @@ test("创建等待中换密钥后未知回程仍锁定原输入并显示查找",
 
 test("修正读取密钥后只读成功，不保留旧认证错误",async()=>{
  intercept((path,options)=>!new Headers(options.headers).get("Authorization")?json({error:{code:"unauthorized"}},401):read(path));
- history.replaceState(null,"","/ui/#A");await mount();await until(()=>expect(container.textContent).toContain("密钥无效"));
+ history.replaceState(null,"","/ui/?view=run#A");await mount();await until(()=>expect(container.textContent).toContain("密钥无效"));
  await click("连接");await type("api-key","correct-key");await click("应用");
  await until(()=>expect(document.getElementById("result")?.textContent).toBe("A"));
  expect(container.textContent).not.toContain("密钥无效");expect(calls.filter(c=>c.method==="POST")).toEqual([]);

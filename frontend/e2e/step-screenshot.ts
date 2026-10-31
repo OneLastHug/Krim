@@ -16,7 +16,7 @@ type ScreenshotRecord = {
   case: string;
   step: string;
   viewport: { width: number; height: number };
-  theme: "dark" | "light" | "unknown";
+  theme: "dark" | "light" | "warm" | "bright" | "unknown";
   runtimeRevision: string;
   workingTree: "clean" | "dirty" | "unknown";
   nodeVersion: string;
@@ -28,7 +28,7 @@ type ScreenshotRecord = {
 export type StepScreenshotOptions = {
   caseName?: string;
   stepName: string;
-  theme?: "dark" | "light";
+  theme?: "dark" | "light" | "warm" | "bright";
   fullPage?: boolean;
   maskSelectors?: readonly string[];
 };
@@ -133,13 +133,16 @@ export async function screenshotStep<T>(
 
     let captureError: unknown;
     let viewport = { width: 0, height: 0 };
-    let theme: "dark" | "light" | "unknown" = options.theme ?? "unknown";
+    let theme: "dark" | "light" | "warm" | "bright" | "unknown" = options.theme ?? "unknown";
     try {
       viewport = page.viewportSize() ?? await page.evaluate(() => ({
         width: window.innerWidth,
         height: window.innerHeight,
       }));
-      if (!options.theme) {
+      const actualTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+      if (actualTheme === "warm" || actualTheme === "bright" || actualTheme === "dark" || actualTheme === "light") {
+        theme = actualTheme;
+      } else if (!options.theme) {
         theme = await page.evaluate(() =>
           window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
         );

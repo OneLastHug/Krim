@@ -2,7 +2,7 @@ import type { Actor } from "../lib/session-contracts";
 import type { WorkbenchView } from "../lib/workbench-route";
 
 export function WorkbenchInspector({ view, objectId, identity }: { view: WorkbenchView; objectId: string; identity: Actor | null }) {
-  const objectLabel = view === "chat" ? "对话" : view === "run" ? "运行" : view === "eval" ? "评测" : "对象";
+  const objectLabel = view === "chat" ? "对话" : view === "run" ? "运行" : view === "trace" ? "运行" : view === "eval" ? "评测" : "对象";
   return <aside className="workbench-inspector" aria-label="对象详情">
     <header className="inspector-heading"><div><span className="inspector-kicker">当前上下文</span><h2>详情</h2></div></header>
     <section className="inspector-section" aria-labelledby="inspector-object-heading">
