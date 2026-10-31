@@ -4,6 +4,8 @@ import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 type Theme = "warm" | "bright" | "dark";
 const themes: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
 async function geometry(page: Page) {
+  // 视口与内容变化后等待布局帧，避免把上一个宽度的原生自适应高度记入证据。
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   return page.evaluate(() => {
     const input = document.querySelector<HTMLTextAreaElement>("#chat-prompt")!;
     const composer = document.querySelector<HTMLElement>(".chat-composer")!;
@@ -12,9 +14,31 @@ async function geometry(page: Page) {
       const value = element.getBoundingClientRect();
       return { x: value.x, y: value.y, width: value.width, height: value.height, bottom: value.bottom };
     };
+    const padding = (element: HTMLElement) => {
+      const style = getComputedStyle(element);
+      return { top: style.paddingTop, right: style.paddingRight, bottom: style.paddingBottom, left: style.paddingLeft };
+    };
+    const lastFontSize = (selector: string) => {
+      const elements = document.querySelectorAll<HTMLElement>(selector);
+      const last = elements.item(elements.length - 1);
+      return last ? getComputedStyle(last).fontSize : null;
+    };
+    const inputStyle = getComputedStyle(input);
+    const sendStyle = getComputedStyle(send);
     return { composer: box(composer), input: box(input), send: box(send),
       rows: input.rows, value: input.value, scrollHeight: input.scrollHeight, clientHeight: input.clientHeight,
-      resize: getComputedStyle(input).resize, fieldSizing: getComputedStyle(input).getPropertyValue("field-sizing"),
+      resize: inputStyle.resize, fieldSizing: inputStyle.getPropertyValue("field-sizing"),
+      typography: {
+        body: getComputedStyle(document.body).fontSize,
+        input: { fontSize: inputStyle.fontSize, lineHeight: inputStyle.lineHeight, minHeight: inputStyle.minHeight, padding: padding(input) },
+        composerPadding: padding(composer),
+        send: { fontSize: sendStyle.fontSize, minHeight: sendStyle.minHeight },
+        buttons: Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+          .filter(button => button.getClientRects().length > 0 && getComputedStyle(button).fontSize !== "0px")
+          .map(button => ({ label: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "", fontSize: getComputedStyle(button).fontSize })),
+        userMessage: lastFontSize(".chat-user-text"),
+        answer: lastFontSize(".chat-answer"),
+      },
       viewport: { width: innerWidth, height: innerHeight }, pageOverflow: document.documentElement.scrollWidth > innerWidth };
   });
 }
@@ -44,11 +68,24 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
       const value = await geometry(page);
       empty = value.composer.height;
       expect(value.rows).toBe(1);
-      expect(value.composer.height).toBeGreaterThanOrEqual(44);
-      expect(value.composer.height).toBeLessThanOrEqual(64);
+      const expectedComposerHeight = mobile ? 52 : 40;
+      expect(value.composer.height).toBeGreaterThanOrEqual(expectedComposerHeight - 1);
+      expect(value.composer.height).toBeLessThanOrEqual(expectedComposerHeight + 1);
       expect(value.input.height).toBeLessThanOrEqual(40);
-      expect(value.send.width).toBeGreaterThanOrEqual(44);
-      expect(value.send.width).toBeLessThanOrEqual(48);
+      const expectedSendSize = mobile ? 44 : 32;
+      expect(value.send.width).toBeGreaterThanOrEqual(expectedSendSize - 1);
+      expect(value.send.width).toBeLessThanOrEqual(expectedSendSize + 1);
+      expect(value.send.height).toBeGreaterThanOrEqual(expectedSendSize - 1);
+      expect(value.send.height).toBeLessThanOrEqual(expectedSendSize + 1);
+      expect(value.typography.body).toBe("12px");
+      expect(value.typography.input.fontSize).toBe("12px");
+      expect(value.typography.input.lineHeight).toBe("18px");
+      expect(value.typography.input.minHeight).toBe("26px");
+      expect(value.typography.input.padding).toEqual({ top: "4px", right: "6px", bottom: "4px", left: "6px" });
+      expect(value.typography.composerPadding).toEqual({ top: "3px", right: "6px", bottom: "3px", left: "6px" });
+      if (!mobile) expect(value.typography.send.minHeight).toBe("32px");
+      expect(value.typography.buttons.length).toBeGreaterThan(0);
+      for (const button of value.typography.buttons) expect(button.fontSize).toBe("12px");
       expect(value.resize).toBe("none");
       expect(value.fieldSizing).toBe("content");
       expect(value.pageOverflow).toBe(false);
@@ -66,7 +103,8 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
     await step("多行内容自动长高", async () => {
       await page.locator("#chat-prompt").fill("整理会议内容\n列出需要确认的事项\n保留原始日期和负责人\n输出简明的行动清单");
       const value = await geometry(page);
-      expect(value.composer.height).toBeGreaterThan(empty + 40);
+      expect(value.composer.height).toBeGreaterThanOrEqual(87);
+      expect(value.composer.height).toBeLessThanOrEqual(89);
       expect(value.scrollHeight).toBeLessThanOrEqual(value.clientHeight + 1);
       expect(posts).toHaveLength(0);
       await attachJsonEvidence(info, "多行输入几何", value);
@@ -110,6 +148,8 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
       const value = await geometry(page);
       expect(value.composer.height).toBeLessThanOrEqual(empty + 1);
       expect(value.composer.bottom).toBeLessThanOrEqual(viewport.height);
+      expect(value.typography.userMessage).toBe("12px");
+      expect(value.typography.answer).toBe("12px");
       await attachJsonEvidence(info, "发送后原请求与收缩", { posts, geometry: value, provider: "offline-script" });
     });
   });
