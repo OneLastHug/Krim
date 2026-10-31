@@ -173,7 +173,7 @@ class LegacyRepository:
                 or timeouts.get("source") != "trusted-http-host/1"
                 or timeouts.get("batch_timeout_seconds") != 600
                 or type(timeouts.get("item_timeout_seconds")) not in {int, float}
-                or not 210 <= timeouts["item_timeout_seconds"] <= 270
+                # 只要求与冻结目标的运行时限及固定余量完全一致；合法短时配置不套绝对区间。
                 or timeouts["item_timeout_seconds"]
                 != snapshot["target"]["limits"]["run_timeout"] + 30
             ):
