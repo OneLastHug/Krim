@@ -53,6 +53,7 @@ only-include = [
   "src/krim_agent/providers/__init__.py",
   "src/krim_agent/providers/eval_script.py",
   "src/krim_agent/providers/budget_gateway.py",
+  "src/krim_agent/providers/gateway_runtime.py",
   "src/krim_agent/providers/fake.py",
   "src/krim_agent/providers/openai_compatible.py",
   "src/krim_agent/providers/types.py",
