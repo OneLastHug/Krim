@@ -1,15 +1,30 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
+type Theme = "warm" | "bright" | "dark";
+async function selectTheme(page: Page, theme: Theme) {
+  const labels: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
+  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+}
+async function openDisclosure(page: Page, label: string): Promise<Locator> {
+  const details = page.locator("details.product-eval-editor").filter({ hasText: label });
+  await expect(details).toHaveCount(1);
+  if (await details.getAttribute("open") === null) await details.locator("summary").click();
+  return details;
+}
+
 const scope = "/v4/workspaces/local/eval";
-function steps(page: Page, info: TestInfo, name: string, theme: "light" | "dark" = "light") {
+function steps(page: Page, info: TestInfo, name: string, theme: Theme = "warm") {
   return (label: string, action: () => Promise<void>) => screenshotStep(page, info,
     { caseName: name, stepName: label, theme }, action);
 }
 async function startTask(page: Page, info: TestInfo, target: string) {
+  const launchDetails = await openDisclosure(page, "新建评测");
   await page.locator("#product-target").selectOption(target);
   await page.getByRole("checkbox", { name: /Krim 执行结果/ }).check();
-  const launch = page.getByRole("button", { name: "启动评测", exact: true });
+  const launch = launchDetails.getByRole("button", { name: "启动评测", exact: true });
   await expect(launch).toBeEnabled();
   const created = page.waitForResponse(response => response.url().endsWith(scope + "/tasks") && response.request().method() === "POST");
   await launch.click();
@@ -30,10 +45,13 @@ test("P3：多样本冻结、真实执行与版本退化比较", async ({ page }
   let baselineId = "", candidateId = "";
   await step("打开工作区数据集", async () => {
     await page.goto("/ui/?view=datasets&workspace=local");
-    await expect(page.locator("#product-dataset-name")).toBeVisible();
-    await expect(page.getByRole("button", { name: "加入样本", exact: true })).toBeEnabled();
+    await selectTheme(page, "warm");
+    await expect(page.getByRole("heading", { name: "已冻结的数据集" })).toBeVisible();
+    await expect(page.locator("#product-dataset-name")).toBeHidden();
   });
   await step("填写人工样本并加入列表", async () => {
+    await openDisclosure(page, "新建数据集");
+    await expect(page.getByRole("button", { name: "加入样本", exact: true })).toBeEnabled();
     await page.locator("#product-dataset-name").fill(name);
     await page.locator("#product-dataset-version").fill("v1");
     await page.locator("#product-instruction").fill("/add 2.5 3.5");
@@ -52,7 +70,7 @@ test("P3：多样本冻结、真实执行与版本退化比较", async ({ page }
   await step("冻结真实数据集版本", async () => {
     await page.getByRole("button", { name: "冻结 2 个样本", exact: true }).click();
     const row = page.locator(".product-eval-list-row").filter({ hasText: name });
-    await expect(row).toContainText("2 个样本");
+    await expect(row.getByRole("cell").nth(2)).toHaveText("2");
     const saved = await page.request.get(`${scope}/datasets/${name}/v1`);
     expect(saved.ok()).toBe(true);
     const data = await saved.json();
@@ -62,10 +80,12 @@ test("P3：多样本冻结、真实执行与版本退化比较", async ({ page }
   });
   await step("选择数据集与真实运行目标", async () => {
     await page.getByRole("button", { name: "导航到评测", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "评测任务" })).toBeVisible();
+    const launchDetails = await openDisclosure(page, "新建评测");
     await page.locator("#product-dataset-choice").selectOption(`${name}/v1`);
     await page.locator("#product-target").selectOption("krim-script-v2");
     await page.getByRole("checkbox", { name: /Krim 执行结果/ }).check();
-    await expect(page.getByRole("button", { name: "启动评测", exact: true })).toBeEnabled();
+    await expect(launchDetails.getByRole("button", { name: "启动评测", exact: true })).toBeEnabled();
   });
   await step("执行精度正确版本并读取报告", async () => {
     baselineId = (await startTask(page, info, "krim-script-v2")).id;
@@ -113,8 +133,8 @@ test("P3：窄屏深色报告与刷新恢复", async ({ page }, info) => {
   await step("打开持久任务深链接", async () => {
     await page.goto(`/ui/?view=eval&workspace=local&product_eval_id=${encodeURIComponent(task.id)}`);
     await expect(page.locator(".product-eval-task-facts")).toContainText(task.id);
-    await page.getByRole("button", { name: "切换到深色主题", exact: true }).click();
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await selectTheme(page, "dark");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   });
   await step("读取窄屏报告并核对布局", async () => {
     await page.getByRole("button", { name: "查看报告", exact: true }).click();
@@ -130,7 +150,7 @@ test("P3：窄屏深色报告与刷新恢复", async ({ page }, info) => {
   });
   await step("刷新后保留深色主题与任务", async () => {
     await page.reload();
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator(".product-eval-task-facts")).toContainText(task.id);
     await page.getByRole("button", { name: "查看报告", exact: true }).click();
     await expect(page.locator(".product-eval-report-row").first()).toBeVisible();
@@ -147,6 +167,7 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
   let runId = "", taskId = "";
   await step("创建来源对话", async () => {
     await page.goto("/ui/");
+    await selectTheme(page, "warm");
     await page.getByRole("button", { name: "新建对话", exact: true }).click();
     await page.locator("#session-title").fill("人工参考来源");
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
@@ -155,11 +176,28 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
   await step("运行真实加法任务", async () => {
     await page.locator("#chat-prompt").fill("/add 2.5 3.5");
     await page.locator(".chat-compose-actions").getByRole("button", { name: "发送", exact: true }).click();
-    await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("已完成");
-    await expect(page.getByRole("button", { name: "评测此结果", exact: true })).toBeVisible();
+    await expect.poll(async () => {
+      const sessionId = new URL(page.url()).searchParams.get("session");
+      const turnId = await page.locator(".chat-turn").last().getAttribute("data-turn-id");
+      expect(sessionId).toBeTruthy(); expect(turnId).toBeTruthy();
+      const response = await page.request.get(`/v2/workspaces/local/sessions/${encodeURIComponent(sessionId!)}/turns/${encodeURIComponent(turnId!)}`);
+      expect(response.ok()).toBe(true);
+      const turn = await response.json();
+      expect(turn.id).toBe(turnId); expect(turn.session_id).toBe(sessionId);
+      return turn.status;
+    }).toBe("completed");
+    await expect(page.locator(".chat-answer").last()).toHaveText("6");
+    await expect(page.locator(".chat-turn").last().getByRole("button", { name: "更多操作", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "评测此结果", exact: true })).toHaveCount(0);
   });
   await step("直接进入来源候选而不复制标识", async () => {
-    await page.getByRole("button", { name: "评测此结果", exact: true }).click();
+    const last = page.locator(".chat-turn").last();
+    await last.getByRole("button", { name: "更多操作", exact: true }).click();
+    await expect(last.locator(".chat-detail")).toContainText("工具摘要");
+    await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
+    await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
+    await expect(page.locator(".trace-span-node").first()).toBeVisible();
+    await page.getByRole("button", { name: "加入数据集", exact: true }).click();
     runId = new URL(page.url()).searchParams.get("source_run") ?? "";
     expect(runId).toBeTruthy();
     await expect(page.locator("#product-source-run")).toHaveValue(runId);
@@ -173,6 +211,11 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
     await expect(page.locator("#product-candidate-instruction")).toBeVisible();
   });
   await step("明确填写人工参考与初态", async () => {
+    await expect(page.locator("#product-confirmed-dataset-name")).toBeVisible();
+    await expect(page.locator("#product-confirmed-dataset-version")).toBeVisible();
+    await expect(page.locator("#product-dataset-name")).toBeHidden();
+    await page.locator("#product-confirmed-dataset-name").fill(name);
+    await page.locator("#product-confirmed-dataset-version").fill("v1");
     await page.locator("#product-candidate-instruction").fill("/add 2.5 3.5");
     await page.locator("#product-candidate-input").fill("/add 2.5 3.5");
     await page.locator("#product-candidate-expected").fill("6");
@@ -181,8 +224,8 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
     await expect(page.getByRole("button", { name: "冻结连续评测版本", exact: true })).toBeVisible();
   });
   await step("冻结带人工确认记录的连续版本", async () => {
-    await page.locator("#product-dataset-name").fill(name);
-    await page.locator("#product-dataset-version").fill("v1");
+    await expect(page.locator("#product-confirmed-dataset-name")).toHaveValue(name);
+    await expect(page.locator("#product-confirmed-dataset-version")).toHaveValue("v1");
     await page.getByRole("button", { name: "冻结连续评测版本", exact: true }).click();
     await expect(page.locator(".product-eval-list-row").filter({ hasText: name })).toBeVisible();
   });
@@ -191,6 +234,7 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
     await page.evaluate(() => localStorage.clear());
     await page.reload();
     await page.getByRole("button", { name: "导航到评测", exact: true }).click();
+    await openDisclosure(page, "新建评测");
     await page.locator("#product-dataset-choice").selectOption(`${name}/v1`);
     await expect(page.locator(".product-eval-selected-meta")).toContainText("已包含人工确认记录");
     await page.locator("#product-target").selectOption("krim-script-v2");

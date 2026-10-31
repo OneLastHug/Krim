@@ -1024,14 +1024,19 @@ function ProductDatasets(props: ProductDatasetsProps) {
       {!props.canWrite ? <p className="product-eval-inline-warning">当前身份只能查看工作区数据，无法修改。</p> : !props.canApprove ? <p className="product-eval-muted">候选确认和连续版本冻结需要审批权限；数据集维护仍可用。</p> : null}
       <section className="product-eval-section" aria-labelledby="product-dataset-list-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-dataset-list-heading">已冻结的数据集</h2><p>选择已有版本可直接用于普通评测。</p></div></div>
-        {props.datasets.length ? <div className="product-eval-list">
-          {props.datasets.map(row => <article className="product-eval-list-row" key={`${row.name}/${row.version}`}>
-            <div><strong>{row.name} <span>· {row.version}</span></strong><small>{row.case_count} 个样本</small><details><summary>数据版本指纹</summary><code>{row.fingerprint}</code></details></div>
-            <Button variant="outline" size="sm" onClick={() => props.onChooseDataset(row)}>用于评测</Button>
-          </article>)}
-        </div> : <div className="product-eval-empty"><strong>还没有冻结版本</strong><p>填写一个 Krim Script 样本，保存为可复用数据集。</p></div>}
+        {props.datasets.length ? <div className="product-eval-table-wrap"><table className="product-eval-table">
+          <caption className="sr-only">已冻结的数据集版本</caption>
+          <thead><tr><th scope="col">名称</th><th scope="col">版本</th><th scope="col">样本</th><th scope="col">操作</th></tr></thead>
+          <tbody>{props.datasets.map(row => <tr className="product-eval-list-row" key={`${row.name}/${row.version}`}>
+            <td><strong>{row.name}</strong><details className="product-eval-record-meta"><summary>版本指纹</summary><code>{row.fingerprint}</code></details></td>
+            <td>{row.version}</td><td>{row.case_count}</td>
+            <td><Button variant="outline" size="sm" onClick={() => props.onChooseDataset(row)}>用于评测</Button></td>
+          </tr>)}</tbody>
+        </table></div> : <div className="product-eval-empty"><strong>还没有冻结版本</strong><p>新建样本，或从已有运行导入候选。</p></div>}
         <ProductPagination offset={props.offset} count={props.datasets.length} limit={20} onChange={props.onOffset} label="数据集" />
       </section>
+      <details className="product-eval-editor">
+        <summary>新建数据集</summary>
       <section className="product-eval-section" aria-labelledby="product-dataset-create-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-dataset-create-heading">新建 Krim Script 数据集</h2><p>参考答案由你填写；来源输出不会自动成为正确答案。</p></div></div>
         <div className="product-eval-form-grid">
@@ -1057,8 +1062,11 @@ function ProductDatasets(props: ProductDatasetsProps) {
         {hasUnjoinedSample && <p className="product-eval-inline-warning">当前表单还有未加入的样本内容；先加入样本或清空表单，避免冻结时丢失。</p>}
         <div className="product-eval-form-foot"><span>{props.sampleDrafts.length ? "冻结草稿列表中的样本；整个请求上限 64 KiB。" : "未加入草稿时可直接冻结当前单样本；整个请求上限 64 KiB。"}</span><Button disabled={props.loading || !props.canWrite || manualFreezePending || !canFreezeManual} onClick={props.onFreeze}>{props.loading ? "正在保存…" : manualFreezePending ? "等待只读核实" : props.sampleDrafts.length ? `冻结 ${props.sampleDrafts.length} 个样本` : "冻结数据集版本"}</Button></div>
       </section>
+      </details>
     </div>
     <div className="product-eval-side-column">
+      <details className="product-eval-editor" open={Boolean(props.sourceRun) || props.candidates.length > 0}>
+        <summary>导入运行候选</summary>
       <section className="product-eval-section" aria-labelledby="product-source-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-source-heading">从运行记录导入候选</h2><p>先检查资格，再补充人工参考。</p></div></div>
         {props.sourceRun && <p className="product-eval-source-context">来源运行：<code>{props.sourceRun}</code>{props.onRun && <Button variant="link" size="sm" onClick={() => props.onRun?.(props.sourceRun!)}>打开运行记录</Button>}</p>}
@@ -1071,6 +1079,7 @@ function ProductDatasets(props: ProductDatasetsProps) {
           </li>)}
         </ul>}
       </section>
+      </details>
       {props.operationIntents.length > 0 && <section className="product-eval-section" aria-labelledby="product-operation-recovery-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-operation-recovery-heading">待核实的原操作</h2><p>未知回程只读取原对象，不会重新发送 POST。</p></div></div>
         <ul className="product-eval-recovery-list">{props.operationIntents.map(item => {
@@ -1085,6 +1094,10 @@ function ProductDatasets(props: ProductDatasetsProps) {
       </section>}
       {currentCandidate && <section className="product-eval-section product-eval-candidate-editor" aria-labelledby="product-candidate-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-candidate-heading">人工确认候选</h2><p>候选资格：{eligibilityLabel(currentCandidate.eligibility)}</p></div></div>
+        <div className="product-eval-form-grid">
+          <div><Label htmlFor="product-confirmed-dataset-name">冻结数据集名称</Label><Input id="product-confirmed-dataset-name" value={props.name} maxLength={38} onChange={event => props.onName(event.target.value)} /></div>
+          <div><Label htmlFor="product-confirmed-dataset-version">冻结版本</Label><Input id="product-confirmed-dataset-version" value={props.version} maxLength={64} onChange={event => props.onVersion(event.target.value)} /></div>
+        </div>
         <p className="product-eval-candidate-note">评测输出只作为来源线索。任务指令、输入材料和参考答案均由你核对填写。</p>
         {candidateSourceRun && <p className="product-eval-source-context">来源运行：<code>{candidateSourceRun}</code></p>}
         <div className="product-eval-field"><Label htmlFor="product-candidate-instruction">任务指令</Label><Textarea id="product-candidate-instruction" value={props.candidateInstruction} rows={3} onChange={event => props.onCandidateInstruction(event.target.value)} /></div>
@@ -1132,6 +1145,24 @@ function ProductEvaluation(props: ProductEvaluationProps) {
   return <div className="product-eval-columns product-eval-eval-columns">
     <div className="product-eval-main-column">
       {!props.canWrite && <p className="product-eval-inline-warning">当前身份只能查看评测结果；启动和取消任务需要写入权限。</p>}
+      <section className="product-eval-section" aria-labelledby="product-task-list-heading">
+        <div className="product-eval-section-heading"><div><h2 id="product-task-list-heading">评测任务</h2><p>选择一次运行，查看样本与评分。</p></div></div>
+        {props.tasks.length ? <div className="product-eval-table-wrap product-eval-task-list"><table className="product-eval-table">
+          <caption className="sr-only">当前工作区评测任务</caption>
+          <thead><tr><th scope="col">数据集与版本</th><th scope="col">目标</th><th scope="col">状态</th><th scope="col">完成</th></tr></thead>
+          <tbody>{props.tasks.map(task => <tr className={props.selectedTask?.id === task.id ? "is-selected" : undefined} key={task.id}>
+            <td><button type="button" className="product-eval-task-row" aria-pressed={props.selectedTask?.id === task.id} onClick={() => props.onSelectTask(task)}>
+              <span><strong>{task.dataset.name} · {task.dataset.version}</strong><small>{task.metrics.map(metric => metricLabel(metric.name)).join("、")}</small></span>
+              <span className="sr-only">{taskStateLabel[task.status] ?? task.status} {task.finished_count ?? "—"}/{task.planned_count ?? "—"}</span>
+            </button></td>
+            <td>{task.target_key}</td><td>{taskStateLabel[task.status] ?? task.status}</td><td>{task.finished_count ?? "—"}/{task.planned_count ?? "—"}</td>
+          </tr>)}</tbody>
+        </table></div> : <div className="product-eval-empty"><strong>还没有评测任务</strong><p>新建评测，选择冻结数据集与目标。</p></div>}
+        <ProductPagination offset={props.offsets.task} count={props.tasks.length} limit={20} onChange={props.onOffsets.tasks} label="任务" />
+      </section>
+      {props.selectedTask && <ProductTaskDetail task={props.selectedTask} canWrite={props.canWrite} onCancel={props.onCancel} onReport={props.onReport} loading={props.loading} reportLoading={props.reportLoading} report={props.report} reportPage={props.reportPage} hasPrevious={props.hasPreviousReport} onPrevious={props.onPreviousReport} onNext={props.onNextReport} />}
+      <details className="product-eval-editor">
+        <summary>新建评测</summary>
       <section className="product-eval-section" aria-labelledby="product-launch-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-launch-heading">启动评测</h2><p>先选冻结版本，再选择目录中可用的目标与指标。</p></div></div>
         {options.length ? <div className="product-eval-field"><Label htmlFor="product-dataset-choice">数据集版本</Label><select id="product-dataset-choice" value={props.selectedDataset ? `${props.selectedDataset.name}/${props.selectedDataset.version}` : ""} onChange={event => {
@@ -1156,19 +1187,11 @@ function ProductEvaluation(props: ProductEvaluationProps) {
         {props.selectedDataset?.datasetEnvelopeFp && <p className="product-eval-inline-warning">连续评测需要：{["fact_integrity", "context_coverage", ...(props.selectedDataset.verifier === "krim-script/1" ? ["krim_result"] : []), ...(props.selectedDataset.requiresProcessMetric ? ["process_constraints"] : [])].map(metricLabel).join("、")}。{props.missingContinuousMetrics.length ? `还需选择 ${props.missingContinuousMetrics.map(metricLabel).join("、")}。` : "必需指标已选。"}</p>}
         <Button disabled={!canStart || props.missingContinuousMetrics.length > 0} onClick={props.onStart}>{props.loading ? "正在处理…" : "启动评测"}</Button>
       </section>
+      </details>
       {props.intents.length > 0 && <section className="product-eval-section" aria-labelledby="product-recovery-heading">
         <div className="product-eval-section-heading"><div><h2 id="product-recovery-heading">待查找的原请求</h2><p>仅按原键读取，不会再次提交创建请求。</p></div></div>
         <ul className="product-eval-recovery-list">{props.intents.map(intent => <li key={intent.request_key}><div><code>{intent.request_key}</code><small>{intent.state === "unknown" ? "创建结果未确认" : "尚未找到任务"}</small></div><Button variant="outline" size="sm" disabled={props.loading} onClick={() => props.onFind(intent)}>只读查找</Button></li>)}</ul>
       </section>}
-      <section className="product-eval-section" aria-labelledby="product-task-list-heading">
-        <div className="product-eval-section-heading"><div><h2 id="product-task-list-heading">评测任务</h2><p>显示当前工作区的任务进度和状态。</p></div></div>
-        {props.tasks.length ? <div className="product-eval-list product-eval-task-list">{props.tasks.map(task => <button type="button" className={`product-eval-task-row${props.selectedTask?.id === task.id ? " is-selected" : ""}`} key={task.id} onClick={() => props.onSelectTask(task)}>
-          <span><strong>{task.dataset.name} · {task.dataset.version}</strong><small>{task.target_key} · {task.metrics.map(metric => metricLabel(metric.name)).join("、")}</small></span>
-          <span className="product-eval-task-status">{taskStateLabel[task.status] ?? task.status}<small>{task.finished_count ?? "—"}/{task.planned_count ?? "—"}</small></span>
-        </button>)}</div> : <div className="product-eval-empty"><strong>还没有评测任务</strong><p>选择冻结版本、目标和指标后启动任务。</p></div>}
-        <ProductPagination offset={props.offsets.task} count={props.tasks.length} limit={20} onChange={props.onOffsets.tasks} label="任务" />
-      </section>
-      {props.selectedTask && <ProductTaskDetail task={props.selectedTask} canWrite={props.canWrite} onCancel={props.onCancel} onReport={props.onReport} loading={props.loading} reportLoading={props.reportLoading} report={props.report} reportPage={props.reportPage} hasPrevious={props.hasPreviousReport} onPrevious={props.onPreviousReport} onNext={props.onNextReport} />}
     </div>
     <aside className="product-eval-side-column">
       <section className="product-eval-section" aria-labelledby="product-compare-heading">

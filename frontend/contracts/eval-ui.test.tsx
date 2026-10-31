@@ -25,7 +25,9 @@ const realReport = wire.find((v: {
 function revision(body: FreezeBody): Dataset { const cases = body.cases.map(c => { const input = c.input ?? c.selected_input!; const source = { schema_version: 1, filter_version: "self-contained/1", source_kind: "manual" as const, source_run_id: null, eligibility: "eligible", reasons: ["manual_input_only"], input_fingerprint: fp(input), selected_input: null, source_snapshot_fingerprint: fp({ kind: "manual", input_fingerprint: fp(input) }), source_target_key: null, source_target_fingerprint: null, observed: null, evidence: null }; const candidate = { ...source, candidate_fingerprint: fp(Object.fromEntries(Object.entries(source).filter(([k]) => k !== "selected_input"))) }; return { case_id: c.case_id, input, input_fingerprint: fp(input), source: candidate, reference: c.reference, reference_fingerprint: fp(c.reference), reason: c.reason }; }).sort((a, b) => a.case_id < b.case_id ? -1 : 1); const content = { schema_version: 1 as const, name: body.name, version: body.version, cases }; return { ...content, fingerprint: fp(content), created_at: 1 }; }
 const evalView = (id: string, revision = 1) => ({ id, request_key: "key-" + id, status: "completed", code: null, created_at: 1, finished_at: 2, stop_requested: false, revision, planned_count: 1, finished_count: 1 });
 function report(id: string, revision = 1) { const value = structuredClone(realReport); value.eval_id = id; value.revision = revision; value.report_hash = fp(Object.fromEntries(Object.entries(value).filter(([k]) => k !== "report_hash"))); return value; }
-function intercept(handler: (path: string, options: RequestInit) => Promise<Response> | Response) { vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => { calls.push({ path: String(input), method: options.method ?? "GET", body: options.body ? JSON.parse(String(options.body)) : null }); return handler(String(input), options); })); }
+const identity = { principal_id: "local", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] };
+let identityRead = false;
+function intercept(handler: (path: string, options: RequestInit) => Promise<Response> | Response) { identityRead = false; vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => { const path = String(input); calls.push({ path, method: options.method ?? "GET", body: options.body ? JSON.parse(String(options.body)) : null }); if (path === "/v2/me") { identityRead = true; return json(identity); } return handler(path, options); })); }
 function reads(path: string) {
     if (path === "/v1/eval-targets")
         return json([{ key: "target-v1" }, { key: "target-v2" }, { key: "target-bad" }]);
@@ -39,7 +41,7 @@ function reads(path: string) {
         return json(evalView(path.split("/")[3]!));
     return json([]);
 }
-async function mount() { await act(async () => root.render(<StrictMode><App /></StrictMode>)); }
+async function mount() { await act(async () => root.render(<StrictMode><App /></StrictMode>)); await until(() => expect(identityRead).toBe(true)); await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); }
 function button(label: string) { const value = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === label); expect(value, label).toBeTruthy(); return value!; }
 async function click(label: string) { await act(async () => button(label).click()); }
 async function type(id: string, value: string) { await act(async () => { const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement; expect(input, id).toBeTruthy(); Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }
@@ -61,8 +63,8 @@ async function oneCase() { await type("dataset-name", "unit"); await type("case-
 async function connect(key: string) { await click("连接"); await type("api-key", key); await click("应用"); }
 beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=eval"); calls = []; host = document.createElement("div"); document.body.append(host); root = createRoot(host); vi.stubGlobal("crypto", webcrypto); intercept(path => reads(path)); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
-test("zero automatic writes", async () => { await act(async () => root.render(<StrictMode><App /></StrictMode>)); expect(calls.filter(c => c.method === "POST")).toEqual([]); });
-test("真实App提供评测与显式冻结入口", async () => { await act(async () => root.render(<StrictMode><App /></StrictMode>)); expect(host.textContent).toContain("冻结修订"); expect(document.getElementById("case-expected")).not.toBeNull(); });
+test("zero automatic writes", async () => { await mount(); expect(calls.filter(c => c.method === "POST")).toEqual([]); });
+test("真实App提供评测与显式冻结入口", async () => { await mount(); expect(host.textContent).toContain("冻结修订"); expect(document.getElementById("case-expected")).not.toBeNull(); });
 test("freeze unauthorized keeps draft for explicit retry and one intent per double click", async () => {
     let stored: Dataset | null = null;
     intercept((path, options) => {
@@ -238,6 +240,7 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
             await click("开始评测");
             await until(() => expect(entered).toBe(true));
             const original = JSON.parse(localStorage.getItem(EVAL_INTENT)!);
+            const confirmationsBefore = confirmations;
             if (steering === "task")
                 await click("任务");
             if (steering === "other") {
@@ -254,8 +257,8 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
                 await mount();
             }
             await act(async () => release(json({ ...evalView("accepted"), request_key: acceptedKey })));
-            await until(() => expect(confirmations).toBeGreaterThan(0));
             await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+            expect(confirmations).toBe(confirmationsBefore);
             expect(JSON.parse(localStorage.getItem(EVAL_INTENT)!)).toEqual(original);
             expect(localStorage.getItem(EVAL_CURRENT)).toBe(steering === "other" ? "B" : "A");
             expect(document.getElementById("eval-id")?.textContent).not.toBe("accepted");
@@ -266,6 +269,7 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
             expect(localStorage.getItem(EVAL_CURRENT)).toBe("accepted");
             expect(new URL(location.href).searchParams.get("eval_id")).toBe("accepted");
             expect(localStorage.getItem(EVAL_INTENT)).toBeNull();
+            expect(confirmations).toBeGreaterThan(confirmationsBefore);
             expect(calls.filter(c => c.path === "/v1/evals" && c.method === "POST")).toHaveLength(1);
             expect(calls.filter(c => c.path.endsWith("/cancel"))).toEqual([]);
             expect(calls.filter(c => c.path.startsWith("/v1/evals/by-key/")).every(c => c.path.endsWith(original.request_key))).toBe(true);

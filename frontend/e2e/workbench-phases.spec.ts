@@ -1,11 +1,18 @@
 import { expect, test } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
+async function selectTheme(page: import("@playwright/test").Page, theme: "warm" | "bright" | "dark") {
+  const labels = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
+  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+}
+
 // 阶段用例使用真实本机服务，不拦截或替换业务接口。
 test("P0：真实任务、工具事实和输入拒绝", async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const step = (name: string, action: () => Promise<void>) => screenshotStep(page, info,
-    { caseName: "P0-真实运行", stepName: name, theme: "light" }, action);
+    { caseName: "P0-真实运行", stepName: name, theme: "warm" }, action);
   await step("打开运行入口", async () => {
     await page.goto("/ui/?view=run");
     await expect(page.locator("#prompt")).toBeVisible();
@@ -42,13 +49,18 @@ test("P0：真实任务、工具事实和输入拒绝", async ({ page }, info) =
 
 test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  let theme: "light" | "dark" = "light";
+  let theme: "warm" | "dark" = "warm";
   const step = (name: string, action: () => Promise<void>) => screenshotStep(page, info,
     { caseName: "P1-桌面工作台", stepName: name, theme }, action);
   await step("默认进入对话工作台", async () => {
     await page.goto("/ui/");
+    await selectTheme(page, "warm");
     await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+    await expect(page.locator(".workspace-navigation > summary")).toBeVisible();
+    await page.locator(".workspace-navigation > summary").click();
     await expect(page.locator(".primary-navigation")).toBeVisible();
+    expect(await page.locator(".desktop-sidebar").count()).toBe(1);
+    await expect(page.locator(".chat-main .chat-heading")).toHaveCount(0);
   });
   await step("填写新建对话", async () => {
     await page.getByRole("button", { name: "新建对话", exact: true }).click();
@@ -58,12 +70,21 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
   await step("创建并选中对话", async () => {
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
     await expect(page.locator("#chat-prompt")).toBeEnabled();
-    await expect(page.locator("#chat-heading")).toHaveText("工作台阶段演示");
+    await expect(page.locator(".topbar-title h1")).toHaveText("工作台阶段演示");
   });
   await step("发送消息并读取真实答复", async () => {
     await page.locator("#chat-prompt").fill("/echo 工作台已连通");
     await page.locator(".chat-compose-actions").getByRole("button", { name: "发送", exact: true }).click();
-    await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("已完成");
+    await expect.poll(async () => {
+      const sessionId = new URL(page.url()).searchParams.get("session");
+      const turnId = await page.locator(".chat-turn").last().getAttribute("data-turn-id");
+      expect(sessionId).toBeTruthy(); expect(turnId).toBeTruthy();
+      const response = await page.request.get(`/v2/workspaces/local/sessions/${encodeURIComponent(sessionId!)}/turns/${encodeURIComponent(turnId!)}`);
+      expect(response.ok()).toBe(true);
+      const turn = await response.json();
+      expect(turn.id).toBe(turnId); expect(turn.session_id).toBe(sessionId);
+      return turn.status;
+    }).toBe("completed");
     await expect(page.locator(".chat-answer").last()).toHaveText("工作台已连通");
   });
   await step("打开右侧对象详情", async () => {
@@ -73,13 +94,13 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
   });
   theme = "dark";
   await step("切换深色主题", async () => {
-    await page.getByRole("button", { name: "切换到深色主题", exact: true }).click();
-    await expect(page.locator("html")).toHaveClass(/dark/);
+    await selectTheme(page, "dark");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   });
   await step("刷新后保留主题和对话", async () => {
     await page.reload();
-    await expect(page.locator("html")).toHaveClass(/dark/);
-    await expect(page.locator("#chat-heading")).toHaveText("工作台阶段演示");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator(".topbar-title h1")).toHaveText("工作台阶段演示");
     await expect(page.locator(".chat-answer").last()).toHaveText("工作台已连通");
   });
 });
@@ -87,15 +108,17 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
 test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const step = (name: string, action: () => Promise<void>) => screenshotStep(page, info,
-    { caseName: "P1-手机工作台", stepName: name, theme: "light" }, action);
+    { caseName: "P1-手机工作台", stepName: name, theme: "warm" }, action);
   await step("打开窄屏工作台", async () => {
     await page.goto("/ui/");
+    await selectTheme(page, "warm");
     await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeVisible();
   });
   await step("展开导航抽屉", async () => {
     await page.getByRole("button", { name: "打开导航", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "主导航", exact: true });
     await expect(drawer).toBeVisible();
+    await drawer.locator(".workspace-navigation > summary").click();
     const bounds = await drawer.boundingBox();
     expect(bounds).toBeTruthy();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);

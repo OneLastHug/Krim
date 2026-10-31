@@ -15,6 +15,7 @@ export function savedIntent(store: Storage): Intent | null {
     return { text: body.text, request_key: body.request_key, target: "demo" };
 }
 export async function createOrFind(store: Storage, text: string, key: string, current: () => boolean) {
+    if (!current()) throw new Error("request_scope_changed");
     const saved = savedIntent(store);
     const body: Intent = saved ?? { text, request_key: crypto.randomUUID(), target: "demo" };
     if (saved && saved.text !== text)
@@ -26,6 +27,7 @@ export async function createOrFind(store: Storage, text: string, key: string, cu
         run = parseRun(await request(saved ? path : "/v1/runs", key, saved ? undefined : body));
     }
     catch (error) {
+        if (!current()) throw new Error("request_scope_changed");
         if (!saved && isUnadmittedCreate(error)) {
             if (savedIntent(store)?.request_key === body.request_key)
                 store.removeItem(INTENT);
@@ -33,6 +35,7 @@ export async function createOrFind(store: Storage, text: string, key: string, cu
         }
         run = parseRun(await request(path, key));
     }
+    if (!current()) throw new Error("request_scope_changed");
     const confirmed = parseRun(await request(path, key));
     if (confirmed.id !== run.id || confirmed.request_key !== body.request_key)
         throw new Error("identity");

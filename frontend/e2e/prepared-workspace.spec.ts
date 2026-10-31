@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 const token = "p5-prepared-smoke-local-only";
 const headers = { Authorization: "Bearer " + token };
 test.skip(process.env.KRIM_PREPARED_WORKSPACE !== "1", "需要当前已资格的独立 Workspace 服务");
 
-for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "light" as const },
+async function selectTheme(page: Page, theme: "warm" | "bright" | "dark") {
+  const labels = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
+  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+}
+
+for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "warm" as const },
   { name: "窄屏", width: 390, height: 844, theme: "dark" as const }]) {
   test(`P2/P5：${viewport.name}文件、审批、实际命令与产物`, async ({ page }, info) => {
     test.setTimeout(90000);
@@ -20,16 +27,15 @@ for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "lig
       await page.locator("#api-key").fill(token);
       await page.locator("#connect-save").click();
       await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
-      if (viewport.theme === "dark") {
-        await page.getByRole("button", { name: "切换到深色主题", exact: true }).click();
-        await expect(page.locator("html")).toHaveClass(/dark/);
-      }
+      await selectTheme(page, viewport.theme);
     });
     await step("新建文件任务会话", async () => {
       await page.getByRole("button", { name: "新建对话", exact: true }).click();
       await page.locator("#session-title").fill(`${viewport.name}文件验收`);
       await page.locator("#chat-target").selectOption("target-workspace");
       await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
+      await page.locator(".workspace-task-area > summary").click();
+      await expect(page.locator("#workspace-text")).toBeVisible();
       await expect(page.locator("#workspace-text")).toBeEnabled();
       sessionId = new URL(page.url()).searchParams.get("session") ?? "";
       expect(sessionId).toBeTruthy();
@@ -84,7 +90,15 @@ for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "lig
     });
     await step("批准一次调用并等待实际执行", async () => {
       await page.getByRole("button", { name: "允许 command_run 本次调用", exact: true }).click();
-      await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("已完成", { timeout: 30000 });
+      await expect.poll(async () => {
+        const turnId = await page.locator(".chat-turn").last().getAttribute("data-turn-id");
+        expect(turnId).toBeTruthy();
+        const response = await page.request.get(base + "/turns/" + encodeURIComponent(turnId!), { headers });
+        expect(response.ok()).toBe(true);
+        const turn = await response.json();
+        expect(turn.id).toBe(turnId); expect(turn.session_id).toBe(sessionId);
+        return turn.status;
+      }, { timeout: 30000 }).toBe("completed");
       await page.getByRole("button", { name: "刷新工作结果", exact: true }).click();
       await expect(page.locator(".workspace-facts")).toContainText("exit=0");
       await expect(page.locator(".workspace-facts")).toContainText("passed");
@@ -124,7 +138,7 @@ test("P2/P5：桌面拒绝command_run审批后不启动执行器且不生成answ
   await page.setViewportSize(viewport);
   let sessionId = "", base = "";
   const step = (name: string, action: () => Promise<void>) => screenshotStep(page, info,
-    { caseName: "P2-P5-桌面拒绝审批", stepName: name, theme: "light" }, action);
+    { caseName: "P2-P5-桌面拒绝审批", stepName: name, theme: "warm" }, action);
   const saveApi = async (name: string, response: { status(): number; json(): Promise<any> }) => {
     const body = await response.json();
     await attachJsonEvidence(info, name, { status: response.status(), body });
@@ -137,12 +151,15 @@ test("P2/P5：桌面拒绝command_run审批后不启动执行器且不生成answ
     await page.locator("#api-key").fill(token);
     await page.locator("#connect-save").click();
     await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+    await selectTheme(page, "warm");
   });
   await step("新建独立Workspace会话", async () => {
     await page.getByRole("button", { name: "新建对话", exact: true }).click();
     await page.locator("#session-title").fill("桌面拒绝审批验收");
     await page.locator("#chat-target").selectOption("target-workspace");
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
+    await page.locator(".workspace-task-area > summary").click();
+    await expect(page.locator("#workspace-text")).toBeVisible();
     await expect(page.locator("#workspace-text")).toBeEnabled();
     sessionId = new URL(page.url()).searchParams.get("session") ?? "";
     expect(sessionId).toBeTruthy();
@@ -251,7 +268,7 @@ test("P2/P5：桌面拒绝command_run审批后不启动执行器且不生成answ
     }, { timeout: 30000 }).toBe(false);
     await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText(
       /^(已完成|失败|已停止|已中断)$/);
-    await page.locator(".chat-turn").last().locator(".chat-detail summary").click();
+    await page.locator(".chat-turn").last().getByRole("button", { name: "更多操作", exact: true }).click();
     const visibleTool = page.locator(".chat-turn").last().locator(".tool");
     await expect(visibleTool).toHaveCount(1);
     await expect(visibleTool).toContainText("command_run");

@@ -99,7 +99,7 @@ function json(value: unknown, status = 200): Response {
 let root: Root;
 let host: HTMLDivElement;
 let calls: Array<{ path: string; method: string; body: Record<string, unknown> | null }> = [];
-let handler: ((path: string, method: string, body: Record<string, unknown> | null) => Promise<Response> | Response | undefined) | undefined;
+let handler: ((path: string, method: string, body: Record<string, unknown> | null) => Promise<Response | undefined> | Response | undefined) | undefined;
 let schedules: ScheduleView[];
 
 async function defaultHandler(path: string, method: string, body: Record<string, unknown> | null): Promise<Response> {
@@ -134,8 +134,9 @@ async function defaultHandler(path: string, method: string, body: Record<string,
     const id = decodeURIComponent(path.split("/").at(-2) ?? "");
     const current = schedules.find(item => item.schedule_id === id);
     if (!current) return json({ error: { code: "not_found" } }, 404);
-    const disabled = { ...current, enabled: false, revision: current.revision + 1,
-      control_receipt: { key: body.key, decision: "disabled", expected_revision: body.revision, revision: current.revision + 1 } };
+    expect(typeof body.key).toBe("string"); expect(typeof body.revision).toBe("number");
+    const disabled: ScheduleView = { ...current, enabled: false, revision: current.revision + 1,
+      control_receipt: { key: body.key as string, decision: "disabled", expected_revision: body.revision as number, revision: current.revision + 1 } };
     schedules = schedules.map(item => item.schedule_id === id ? disabled : item);
     return json(disabled);
   }
