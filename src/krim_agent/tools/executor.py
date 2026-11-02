@@ -19,7 +19,8 @@ from krim_agent.contracts import (
 )
 from krim_agent.runtime.contracts import settled
 
-from .core import Decision, Invocation, Policy, PostHook, PreHook
+from .core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
+from .mcp_schema import MCPContract
 from .output import OutputContract
 from .pipeline import CURRENT, Middleware, Scope, Wrap, _calling
 from .registry import ToolRegistry
@@ -50,6 +51,18 @@ class ToolExecutor:
     ) -> None:
         self.registry, self.policy, self.pre, self.post = registry, policy, pre, post
         self.middleware, self.wrap = tuple(middleware), wrap
+
+    async def _decision(self, invocation: Invocation, spec: ToolSpec) -> Decision:
+        if self.policy is None:
+            return "deny"
+        decisions = [await self.policy(invocation)]
+        if spec.binding_target is not None:
+            target = spec.binding_target
+            decisions.append(await self.policy(replace(
+                invocation, name=target.name, tool_hash=target.fingerprint)))
+        if any(value not in {"allow", "ask"} for value in decisions):
+            return "deny"
+        return "ask" if "ask" in decisions else "allow"
 
     async def execute(self, invocation: Invocation, context: ToolContext) -> ToolObservation:
         with _calling(invocation):
@@ -120,8 +133,7 @@ class ToolExecutor:
                     async def security() -> JsonValue:
                         nonlocal decision, entering, returned, available, value
                         check()
-                        decision = await self.policy(
-                            invocation) if self.policy is not None else "deny"
+                        decision = await self._decision(invocation, spec)
                         check()
                         if decision not in {"allow", "deny", "ask"}:
                             decision = "deny"
@@ -142,7 +154,9 @@ class ToolExecutor:
                         })
                         check()
                         entering = True
-                        if spec.scoped_executor is None:
+                        if spec.external_executor is not None:
+                            raw = await spec.external_executor(invocation, parsed)
+                        elif spec.scoped_executor is None:
                             raw = await spec.executor(parsed)
                         elif context.scope is None:
                             entering = False
@@ -152,7 +166,10 @@ class ToolExecutor:
                         returned = True
                         try:
                             value = parse_json(encoded(raw))
-                            OutputContract(spec.output_schema).validate(value)
+                            contract = (MCPContract(spec.output_schema)
+                                if spec.source is not None and spec.source.kind == "mcp"
+                                else OutputContract(spec.output_schema))
+                            contract.validate(value)
                             available = True
                         except (TypeError, ValueError, RecursionError):
                             raise ServiceError("invalid_output") from None

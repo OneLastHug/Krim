@@ -132,8 +132,14 @@ class RunBinding:
                 ),
             )
         )
-        return result + tuple(id(spec.scoped_executor) for spec,
+        result += tuple(id(spec.scoped_executor) for spec,
             _ in loop.executor.registry._frozen if spec.scoped_executor is not None)
+        return result + tuple(
+            token
+            for spec, _ in loop.executor.registry._frozen if spec.external_executor is not None
+            for token in (id(spec.external_executor), id(getattr(spec.external_executor, "__code__", None)),
+                          id(spec.source), id(spec.binding_target))
+        )
 
     @staticmethod
     def describe(key: str, loop: AgentLoop, settings: Settings) -> dict[str, JsonValue]:
@@ -496,6 +502,16 @@ class RunService:
         tool_deadline = time.monotonic() + remaining_seconds
         snapshot = await self.store.snapshot(invocation.run_id)
         request_id = secrets.token_hex(16)
+        provenance: dict[str, JsonValue] = {}
+        declared = snapshot.target.get("tools")
+        if isinstance(declared, list):
+            for spec in declared:
+                if (isinstance(spec, dict) and spec.get("name") == invocation.name
+                    and isinstance(spec.get("source"), dict)):
+                    if fingerprint(spec) != invocation.tool_hash:
+                        raise ServiceError("target_binding_changed")
+                    provenance = {"source": spec["source"], "risk": spec.get("risk")}
+                    break
         if snapshot.request.target == "target-workspace":
             binding = self.bindings.get("target-workspace")
             if snapshot.work is None or binding is None or binding.loop.work is None:
@@ -543,6 +559,7 @@ class RunService:
                     "arguments": parse_json(invocation.arguments_json),
                     "name": invocation.name,
                     "expires_at": expires,
+                    **provenance,
                 },
             )
             try:
