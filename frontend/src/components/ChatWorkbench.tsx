@@ -4,6 +4,7 @@ import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { useSession } from "../hooks/use-session";
 import { ChatHistory } from "./ChatHistory";
+import { ToolCatalog } from "./ToolCatalog";
 import { ChatComposer } from "./ChatComposer";
 import { Button } from "./ui/button";
 import { chatCopy as c } from "../lib/copy";
@@ -33,6 +34,7 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, onConnect, onId
       {chat.notice && <div className="chat-notice"><p role="status">{chat.notice}</p>{!chat.session && <Button variant="outline" aria-label="刷新对话" onClick={chat.refresh}><RefreshCw aria-hidden="true"/>刷新</Button>}{chat.notice.includes("连接") && <Button variant="outline" onClick={onConnect}>连接</Button>}</div>}
       {chat.pending.length > 0 && <div className="chat-pending" role="status"><strong>{chat.pending.every(chat.posting) ? "提交中" : c.unknown}</strong>{chat.pending.map(intent => <div key={intent.id}><span data-ui-data>{intent.kind === "session" ? intent.body.title : (intent.session_id ?? "").slice(0, 8)}</span><Button variant="outline" onClick={() => void chat.recover(intent)}>{c.find}</Button></div>)}</div>}
       {chat.pendingControls.map(value => <div className="chat-pending" key={String(value.body.request_key)}><span>操作结果未确认</span><Button variant="outline" onClick={() => void chat.recoverControl(value)}>{value.rejected ? "重试原操作" : "查找操作结果"}</Button></div>)}
+      {chat.ready && chat.session && chat.actor && <ToolCatalog apiKey={apiKey} targetKey={chat.session.target_key} scope={{ principal_id: chat.actor.principal_id, generation: chat.actor.generation, workspace: chat.workspace, session: chat.session.id, target: chat.session.target_key }} active={active} />}
       <ChatHistory chat={chat} onTrace={turnId => { if (active && chat.session?.id) onTrace?.(chat.workspace, chat.session.id, turnId); }} />
       {workspaceMode ? <details className="workspace-task-area">
         <summary><strong>工作区任务</strong><span>输入文件、工作请求与完成条件</span></summary>

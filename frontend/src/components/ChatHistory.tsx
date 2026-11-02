@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ToolProvenance } from "./ToolProvenance";
 import { Button } from "./ui/button";
 import { object } from "../api";
 import { chatCopy as c, chatReason, turnLabels } from "../lib/copy";
@@ -26,7 +27,7 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
           }}>更多操作</Button>}
         </div>
         <pre className="chat-user-text" data-ui-data>{turn.text}</pre>
-        {current && chat.approvals.map(item => <section className="approval chat-approval" key={String(item.request_id)} aria-label="等待审批"><div className="approval-title"><strong data-ui-data>{String(item.name)}</strong><span>等待审批</span></div><pre data-ui-data className="approval-arguments">{JSON.stringify(item.arguments, null, 2)}</pre><div className="approval-actions"><Button disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, true)} aria-label={"允许 " + String(item.name) + " 本次调用"}>允许本次调用</Button><Button variant="outline" disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, false)}>拒绝</Button></div></section>)}
+        {current && chat.approvals.map(item => <section className="approval chat-approval" key={String(item.request_id)} aria-label="等待审批"><div className="approval-title"><strong data-ui-data>{String(item.name)}</strong><span>等待审批</span></div><ToolProvenance value={item}/><pre data-ui-data className="approval-arguments">{JSON.stringify(item.arguments, null, 2)}</pre><div className="approval-actions"><Button disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, true)} aria-label={"允许 " + String(item.name) + " 本次调用"}>允许本次调用</Button><Button variant="outline" disabled={!chat.canApprove || chat.controlling || chat.pendingControls.some(saved => saved.target.endsWith("/approvals/" + encodeURIComponent(String(item.request_id))))} onClick={() => void chat.control(turn, "approval", item, false)}>拒绝</Button></div></section>)}
         {(answer || streaming) && <div className="chat-assistant"><span className="chat-speaker">Krim Agent</span><pre className="chat-answer" data-ui-data>{answer || streaming}</pre></div>}
         {turn.code && <p className="notice" data-ui-data>{chatReason({ code: turn.code })}<span className="mono"> {turn.code}</span></p>}
         {moreOpen && turn.run_id && <section className="chat-detail" aria-label="运行详情">
