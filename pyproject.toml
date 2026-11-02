@@ -8,6 +8,9 @@ description = "Krim Agent: persistent sessions, controlled runs and rule evaluat
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = ["fastapi>=0.115,<1", "pydantic>=2.10,<3", "sqlalchemy>=2.0,<2.1", "aiosqlite>=0.20,<1", "uvicorn>=0.30,<1", "jsonschema>=4.23,<5", "referencing>=0.37,<0.38", "httpx>=0.27,<1"]
+[project.optional-dependencies]
+mcp = ["mcp==1.30.0"]
+
 [project.scripts]
 krim = "krim_agent.cli:main"
 krim-eval = "krim_agent.evaluation.cli:main"
@@ -88,6 +91,12 @@ only-include = [
   "src/krim_agent/tools/pipeline.py",
   "src/krim_agent/tools/registry.py",
   "src/krim_agent/tools/workspace.py",
+  "src/krim_agent/tools/mcp.py",
+  "src/krim_agent/tools/mcp_schema.py",
+  "src/krim_agent/tools/bindings.py",
+  "src/krim_agent/mcp/__init__.py",
+  "src/krim_agent/mcp/types.py",
+  "src/krim_agent/mcp/client.py",
   "src/krim_agent/usage.py",
   "src/krim_agent/web/THIRD-PARTY-NOTICES.txt",
   "src/krim_agent/web/assets/app.js",
