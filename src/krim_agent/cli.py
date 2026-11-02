@@ -425,6 +425,7 @@ def main() -> None:
     serve = sub.add_parser("serve")
     serve.add_argument("--database", required=True)
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--tool-config", type=Path)
     for command in ("run", "get", "result", "trace", "events", "cancel"):
         child = sub.add_parser(command)
         child.add_argument("--database", default=".data/krim-agent.db")
@@ -537,7 +538,10 @@ def main() -> None:
 
             from krim_agent.api import create_app
 
-            settings = Settings.from_env().model_copy(update={"database": Path(args.database)})
+            changes: dict[str, Any] = {"database": Path(args.database)}
+            if args.tool_config is not None:
+                changes["tool_config_file"] = args.tool_config
+            settings = Settings.from_env().model_copy(update=changes)
             uvicorn.run(
                 create_app(settings, http_config=OpenAICompatibleConfig.from_env()),
                 host="127.0.0.1",

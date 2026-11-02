@@ -23,6 +23,15 @@ class RunSDK:
             RunRequest.model_validate({"text": text, "request_key": request_key, "target": target})
         )
 
+    def tools(self, target: str = "demo") -> list[dict[str, Any]]:
+        from krim_agent.contracts import ServiceError
+        binding = self.service.bindings.get(target)
+        if binding is None:
+            raise ServiceError("not_found", 404)
+        binding.assert_current()
+        return [dict(spec.descriptor(), fingerprint=spec.fingerprint)
+                for spec, _ in binding.loop.executor.registry._frozen]
+
     async def wait(self, run_id: str) -> RunView:
         return await self.service.wait(run_id)
 

@@ -32,6 +32,7 @@ from krim_agent.evaluation.types import (
 from krim_agent.observability import TraceView
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.security import PrincipalContext
+from krim_agent.tools.runtime import ToolRuntimeConfig
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
@@ -42,8 +43,9 @@ def create_app(
     *,
     application: Application | None = None,
     http_config: OpenAICompatibleConfig | None = None,
+    tool_config: ToolRuntimeConfig | None = None,
 ) -> FastAPI:
-    if application is not None and http_config is not None:
+    if application is not None and (http_config is not None or tool_config is not None):
         raise ServiceError("provider_config", 422)
     config = (
         settings
@@ -58,7 +60,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
         active = (
-            await open_application(config.database, settings=config, http_config=http_config)
+            await open_application(config.database, settings=config, http_config=http_config,
+                                   tool_config=tool_config)
             if owned
             else application
         )

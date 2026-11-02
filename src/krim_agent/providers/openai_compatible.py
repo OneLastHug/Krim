@@ -432,7 +432,8 @@ class OpenAICompatibleProvider:
             body["tools"] = [
                 {
                     "type": "function",
-                    "function": {"name": tool["name"], "parameters": tool["input_schema"]},
+                    "function": {"name": tool["name"], "parameters": tool["input_schema"]}
+                    | ({"description": tool["description"]} if tool.get("description") else {}),
                 }
                 for tool in tools
             ]
