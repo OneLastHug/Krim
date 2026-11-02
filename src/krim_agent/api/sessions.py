@@ -64,6 +64,16 @@ def mount_sessions(app: FastAPI) -> None:
             ],
         }
 
+    @router.get("/v2/targets/{target_key}/tools")
+    async def tool_catalog(target_key: str, request: Request) -> list[dict[str, JsonValue]]:
+        principal(request)
+        binding = application(request).service.bindings.get(target_key)
+        if binding is None:
+            raise ServiceError("not_found", 404)
+        binding.assert_current()
+        return [dict(spec.descriptor(), fingerprint=spec.fingerprint)
+                for spec, _ in binding.loop.executor.registry._frozen]
+
     base = "/v2/workspaces/{workspace_id}/sessions"
 
     @router.get(base)

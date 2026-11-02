@@ -31,6 +31,7 @@ class Settings(BaseModel):
 
     access_policy_file: Path | None = None
     workspace_profile_file: Path | None = None
+    tool_config_file: Path | None = None
     product_eval_enabled: bool = False
     product_eval_database: Path | None = None
     evaluation_automation_enabled: bool = False
@@ -65,6 +66,7 @@ SESSION_FIELDS = frozenset(
     {
         "access_policy_file",
         "workspace_profile_file",
+        "tool_config_file",
         "product_eval_enabled",
         "product_eval_database",
         "evaluation_automation_enabled",

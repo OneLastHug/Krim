@@ -37,6 +37,7 @@ from krim_agent.tools.core import Policy, PostHook, PreHook
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.pipeline import Middleware, Wrap
 from krim_agent.tools.registry import ToolRegistry
+from krim_agent.tools.runtime import ToolRuntime, ToolRuntimeConfig
 from krim_agent.tools.workspace import registry as workspace_registry
 from krim_agent.workspace.artifacts import ArtifactStore
 from krim_agent.workspace.operations import WorkspaceOperations
@@ -61,6 +62,7 @@ class Application:
     product_evaluations: EvalApplication | None = None
     evaluation_product: EvaluationProduct | None = None
     evaluation_automation: EvaluationAutomation | None = None
+    tool_runtime: ToolRuntime | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -122,11 +124,15 @@ class Application:
                             await self.artifacts.close()
             finally:
                 try:
-                    outcomes = await asyncio.gather(*(p.close() for p in self.owned_providers),
-                        return_exceptions=True)
-                    for outcome in outcomes:
-                        if isinstance(outcome, BaseException):
-                            raise outcome
+                    try:
+                        if self.tool_runtime is not None:
+                            await self.tool_runtime.close()
+                    finally:
+                        outcomes = await asyncio.gather(*(p.close() for p in self.owned_providers),
+                            return_exceptions=True)
+                        for outcome in outcomes:
+                            if isinstance(outcome, BaseException):
+                                raise outcome
                 finally:
                     await self.store.close()
 
@@ -153,6 +159,7 @@ async def open_application(
     workspace_profile: WorkspaceConfiguration | None = None,
     workspace_middleware: tuple[Middleware, ...] = (),
     workspace_wrap: Wrap | None = None,
+    tool_config: ToolRuntimeConfig | None = None,
 ) -> Application:
     from sqlalchemy import select
 
@@ -299,6 +306,11 @@ async def open_application(
     if active_access is not None and config.api_key.get_secret_value():
         raise ServiceError("access_policy_invalid", 422)
     tools = registry if registry is not None else builtin_registry()
+    if tool_config is not None and config.tool_config_file is not None:
+        raise ServiceError("invalid_input", 422)
+    external_config = (tool_config if tool_config is not None else
+        ToolRuntimeConfig.load(config.tool_config_file)
+        if config.tool_config_file is not None else None)
     evaluation_path = (
         _evaluation_database_path(path, config.product_eval_database)
         if config.product_eval_enabled else None
@@ -309,7 +321,11 @@ async def open_application(
     runner = None
     operations = None
     application: Application | None = None
+    tool_runtime: ToolRuntime | None = None
     try:
+        if external_config is not None:
+            tool_runtime = await ToolRuntime.open(tools, external_config, policy)
+            tools, policy = tool_runtime.registry, tool_runtime.policy
         if workspace is None:
             # 只读判定恢复需求；缺可信工作区资源时不先写 interrupted/paused。
             async with store.engine.connect() as conn:
@@ -381,10 +397,14 @@ async def open_application(
                 http_config, max_connections=config.max_active_runs
             )
             owned.append(http_provider)
-            bindings["target-http"] = _make_http_binding(store, config, http_provider)
+            bindings["target-http"] = (_make_http_binding(store, config, http_provider,
+                registry=tools, policy=policy) if tool_runtime is not None else
+                _make_http_binding(store, config, http_provider))
         if workspace is not None:
             if "target-http" not in bindings and isinstance(provider, OpenAICompatibleProvider):
-                bindings["target-http"] = _make_http_binding(store, config, provider)
+                bindings["target-http"] = (_make_http_binding(store, config, provider,
+                    registry=tools, policy=policy) if tool_runtime is not None else
+                    _make_http_binding(store, config, provider))
             http_binding = bindings.get("target-http")
             if http_binding is None or not isinstance(http_binding.loop.provider,
                 OpenAICompatibleProvider):
@@ -418,6 +438,7 @@ async def open_application(
             work=operations,
             artifacts=artifacts,
             runner=runner,
+            tool_runtime=tool_runtime,
         )
         if evaluation_path is not None:
             adapters = {
@@ -467,8 +488,12 @@ async def open_application(
                         await settled(artifacts.close())
         finally:
             try:
-                outcomes = await settled(asyncio.gather(*(p.close() for p in owned),
-                    return_exceptions=True))
+                try:
+                    if tool_runtime is not None:
+                        await settled(tool_runtime.close())
+                finally:
+                    outcomes = await settled(asyncio.gather(*(p.close() for p in owned),
+                        return_exceptions=True))
             finally:
                 await settled(store.close())
         for outcome in outcomes:
@@ -478,7 +503,8 @@ async def open_application(
 
 
 def _make_http_binding(
-    store: SQLiteStore, settings: Settings, provider: OpenAICompatibleProvider
+    store: SQLiteStore, settings: Settings, provider: OpenAICompatibleProvider,
+    *, registry: ToolRegistry | None = None, policy: Policy | None = controlled_policy,
 ) -> RunBinding:
     config = settings.model_copy(
         update={
@@ -494,5 +520,6 @@ def _make_http_binding(
             "tool_timeout": min(2, settings.tool_timeout),
         }
     )
-    loop = AgentLoop(store, provider, ToolExecutor(builtin_registry(), controlled_policy), config)
+    loop = AgentLoop(store, provider, ToolExecutor(
+        registry if registry is not None else builtin_registry(), policy), config)
     return RunBinding.freeze("target-http", loop, config)

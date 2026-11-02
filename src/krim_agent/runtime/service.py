@@ -137,8 +137,10 @@ class RunBinding:
         return result + tuple(
             token
             for spec, _ in loop.executor.registry._frozen if spec.external_executor is not None
-            for token in (id(spec.external_executor), id(getattr(spec.external_executor, "__code__", None)),
-                          id(spec.source), id(spec.binding_target))
+            for token in (
+                id(spec.external_executor), id(getattr(spec.external_executor, "__code__", None)),
+                id(spec.source), id(spec.binding_target),
+            )
         )
 
     @staticmethod

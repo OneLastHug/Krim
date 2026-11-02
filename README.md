@@ -22,7 +22,7 @@ uv run --frozen python -m krim_agent serve --database .data/krim.sqlite --port 8
 
 浏览器打开 `http://127.0.0.1:8765/ui/`。默认不需要模型密钥，可在“对话”中新建会话，用 `/add 2 3`、`/echo 你好`、`/note welcome` 或 `/slow` 体验工具、审批与停止。
 
-HTTP 模型地址、凭据和预算由可信宿主设置，网页不接收供应商地址或密钥。工作区文件任务还需要有效的 Linux 隔离配置；只提供普通对话服务时，不展示为可执行文件环境。SQLite 按单进程单写端运行；无访问策略的本机模式只供回环访问。
+HTTP 模型地址、凭据和预算由可信宿主设置，网页不接收供应商地址或密钥。网页搜索/读取与 MCP 工具通过独立宿主配置启用，支持 stdio、Streamable HTTP 和显式覆盖，见[外部工具](docs/api/external-tools.md)；工具凭据与模型凭据分离。工作区文件任务还需要有效的 Linux 隔离配置；只提供普通对话服务时，不展示为可执行文件环境。SQLite 按单进程单写端运行；无访问策略的本机模式只供回环访问。
 
 ## 工作流
 
