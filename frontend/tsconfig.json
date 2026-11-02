@@ -59,6 +59,9 @@
     "e2e/installed-package-readonly.spec.ts",
     "e2e/workbench-redesign.spec.ts",
     "e2e/legacy-access.spec.ts",
-    "e2e/compact-composer.spec.ts"
+    "e2e/compact-composer.spec.ts",
+    "vite.prototype.config.ts",
+    "playwright.prototype.config.ts",
+    "e2e/prototype.spec.ts"
   ]
 }
