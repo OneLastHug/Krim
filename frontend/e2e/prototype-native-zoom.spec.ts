@@ -56,6 +56,10 @@ type BrowserObservations = {
 };
 
 async function measureLayout(page: Page): Promise<EmptyLayout> {
+  await page.evaluate(async () => {
+    document.body.getBoundingClientRect();
+    await document.fonts.ready;
+  });
   return page.evaluate(() => {
     const rect = (selector: string): Rectangle | null => {
       const element = document.querySelector<HTMLElement>(selector);
