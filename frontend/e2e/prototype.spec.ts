@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
 const baseURL = "http://127.0.0.1:5182";
-const screenshotDirectory = resolve(import.meta.dirname, "..", "..", ".cache", "ui-prototype", "linux-fidelity");
+const screenshotDirectory = resolve(import.meta.dirname, "..", "..", ".cache", "ui-prototype", "typography-20261103");
 
 type BrowserObservations = {
   pageErrors: string[];
@@ -21,6 +21,32 @@ async function saveScreenshot(page: Page, name: string) {
 async function openPrototype(page: Page) {
   await page.goto("/prototype.html", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".p-app")).toBeVisible();
+}
+
+async function waitForPrototypeFonts(page: Page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all([
+      document.fonts.load('14px "Geist Variable"', "Krim Agent Latin"),
+      document.fonts.load('14px "Noto Sans SC Variable"', "中文字体检查"),
+      document.fonts.load('14px "Geist Mono Variable"', "const value = 1;"),
+    ]);
+    await document.fonts.ready;
+  });
+}
+
+async function getRenderedFontFamilies(page: Page, selector: string) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("DOM.enable");
+    await session.send("CSS.enable");
+    const { root } = await session.send("DOM.getDocument");
+    const { nodeId } = await session.send("DOM.querySelector", { nodeId: root.nodeId, selector });
+    const { fonts } = await session.send("CSS.getPlatformFontsForNode", { nodeId });
+    return fonts.filter(font => font.glyphCount > 0).map(font => font.familyName);
+  } finally {
+    await session.detach();
+  }
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -43,6 +69,7 @@ async function selectSession(page: Page, title: string) {
   const session = page.locator(".p-session-button").filter({ hasText: title }).first();
   if (!(await session.count())) await openExamples(page);
   await page.locator(".p-session-button").filter({ hasText: title }).first().click();
+  await waitForPrototypeFonts(page);
 }
 
 async function openSidebar(page: Page) {
@@ -219,6 +246,7 @@ test("representative viewports and zoom-equivalent layouts stay aligned", async 
     await prompt.focus();
     await expect(prompt).toBeFocused();
     await prompt.fill("本地布局检查");
+    await waitForPrototypeFonts(page);
     await expect(prompt).toHaveValue("本地布局检查");
     await prompt.fill("");
 
@@ -268,7 +296,10 @@ test("Markdown formatting and timeout.py preview open and close", async ({ page 
   await expect(page.locator(".p-markdown table th")).toHaveCount(2);
   await expect(page.locator(".p-markdown table tbody tr")).toHaveCount(3);
   await expect(page.locator(".p-code-block pre code")).toContainText("run_tool(timeout=30)");
+  await expect(page.locator(".p-code-block pre")).toHaveAttribute("tabindex", "0");
+  await expect(page.locator(".p-code-block pre")).toHaveAttribute("aria-label", "代码片段");
   await expect(page.locator(".p-code-bar")).toHaveCount(0);
+  await waitForPrototypeFonts(page);
   const session = await page.context().newCDPSession(page);
   const renderedFonts: Record<string, string[]> = {};
   try {
@@ -288,6 +319,8 @@ test("Markdown formatting and timeout.py preview open and close", async ({ page 
   } finally {
     await session.detach();
   }
+  expect(renderedFonts.body).toContain("Geist");
+  expect(renderedFonts.code).toContain("Geist Mono");
   const markdownGeometry = await page.locator(".p-markdown").evaluate(element => {
     const table = element.querySelector("table")!;
     const header = table.querySelector("th")!;
@@ -333,6 +366,182 @@ test("Markdown formatting and timeout.py preview open and close", async ({ page 
   await expect(preview).toHaveCount(0);
 });
 
+test("complex Markdown keeps safe structure and copies fixed code text", async ({ page, context }, testInfo) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPrototype(page);
+  await openExamples(page);
+  await selectSession(page, "请求超时后的安全重试");
+  const markdown = page.locator(".p-markdown");
+  await expect(markdown.locator("h1")).toHaveText("请求超时后的安全重试");
+  await expect(markdown.locator("ol > li > ul > li")).toHaveCount(2);
+  await expect(markdown.locator("blockquote blockquote")).toHaveCount(1);
+  await expect(markdown.locator("table th").nth(0)).toHaveCSS("text-align", "left");
+  await expect(markdown.locator("table th").nth(1)).toHaveCSS("text-align", "center");
+  await expect(markdown.locator("table th").nth(2)).toHaveCSS("text-align", "right");
+  await expect(markdown.locator("img, script")).toHaveCount(0);
+  const htmlExecution = await page.evaluate(() => ({
+    image: (window as Window & { __markdownHtmlRan?: boolean }).__markdownHtmlRan,
+    script: (window as Window & { __markdownScriptRan?: boolean }).__markdownScriptRan,
+  }));
+  expect(htmlExecution).toEqual({ image: undefined, script: undefined });
+  const requestId = "req_20261103_7f2a9c0d4e138b6a90c4e51f83d2a7b6f0c19e48a6d2f5b1c7039a4d8e62f0c1b9a5d3e7f6142c8b0a6d9e3f1c5b7a2d8e4f690c1a3b5d7e9f20468c1a5b3d7e9f0124";
+  const longLink = markdown.locator("a").filter({ hasText: requestId });
+  await expect(longLink).toHaveText(requestId);
+  const longHref = await longLink.getAttribute("href");
+  expect(longHref).toBe(`/prototype.html?request_id=${requestId}`);
+  expect(new URL(longHref!, baseURL).origin).toBe(new URL(baseURL).origin);
+  const legacyText = markdown.getByText("旧版接口说明", { exact: true });
+  await expect(legacyText).toHaveCount(1);
+  expect(await legacyText.evaluate(element => element.tagName.toLowerCase())).toBe("span");
+  expect(await legacyText.evaluate(element => element.closest("a"))).toBeNull();
+  await expect(markdown.locator("a").filter({ hasText: "旧版接口说明" })).toHaveCount(0);
+  await page.locator(".p-scroll").evaluate(element => { element.scrollTop = 0; });
+  await saveScreenshot(page, "markdown-top-1440.png");
+  await page.locator(".p-scroll").evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await saveScreenshot(page, "markdown-precision-1440.png");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  const longLinkBounds = await longLink.boundingBox();
+  expect(longLinkBounds).not.toBeNull();
+  expect(longLinkBounds!.height).toBeGreaterThan(20);
+  expect(longLinkBounds!.x + longLinkBounds!.width).toBeLessThanOrEqual(390);
+  await saveScreenshot(page, "markdown-precision-390.png");
+
+  const codeBlocks = page.locator(".p-code-block");
+  await expect(codeBlocks).toHaveCount(2);
+  const unknownCode = codeBlocks.nth(0).locator("pre code");
+  await expect(unknownCode).toHaveAttribute("class", /language-request-log-unregistered/);
+  await expect(unknownCode.locator("span[class*='hljs-']")).toHaveCount(0);
+  const unclosedCode = codeBlocks.nth(1).locator("pre code");
+  await expect(unclosedCode).toContainText(`2026-11-03T10:14:33Z request_id=${requestId} retry_start=accepted`);
+  await expect(unclosedCode).not.toHaveAttribute("class", /language-/);
+  await waitForPrototypeFonts(page);
+  expect(await getRenderedFontFamilies(page, ".p-markdown p")).toContain("Noto Sans SC Thin");
+  expect(await getRenderedFontFamilies(page, ".p-code-block pre code")).toContain("Geist Mono");
+  await testInfo.attach("complex-markdown-fonts.json", {
+    body: Buffer.from(JSON.stringify({
+      paragraph: await getRenderedFontFamilies(page, ".p-markdown p"),
+      code: await getRenderedFontFamilies(page, ".p-code-block pre code"),
+    })),
+    contentType: "application/json",
+  });
+
+  const expectedUnknownSource = [
+    `    GET /v1/runs/trace?request_id="${requestId}" status=504 message="<gateway timeout>" retries=1 & source="api"`,
+    `\tattempt=2 outcome="confirmed-not-applied" elapsed_ms=281`,
+    `\tresponse="Retry-After: 2s"; note="same request id"`,
+    "",
+  ].join("\n");
+  const expectedUnclosedSource = [
+    `2026-11-03T10:14:31Z request_id=${requestId} retry_check=status_not_applied`,
+    `2026-11-03T10:14:33Z request_id=${requestId} retry_start=accepted`,
+    "",
+  ].join("\n");
+  const normalizeCrlf = (value: string) => value.replace(/\r\n/g, "\n");
+  const copyButtons = page.getByRole("button", { name: "复制代码" });
+  await copyButtons.nth(0).click();
+  await expect(page.locator(".p-toast")).toContainText("已复制");
+  expect(normalizeCrlf(await page.evaluate(() => navigator.clipboard.readText()))).toBe(normalizeCrlf(expectedUnknownSource));
+  await copyButtons.nth(1).click();
+  await expect(page.locator(".p-toast")).toContainText("已复制");
+  expect(normalizeCrlf(await page.evaluate(() => navigator.clipboard.readText()))).toBe(normalizeCrlf(expectedUnclosedSource));
+});
+
+test("stopping a partial code fence leaves it readable and copyable", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openPrototype(page);
+  const prompt = page.getByRole("textbox", { name: "发送消息" });
+  await prompt.fill("Explain a safe tool timeout retry in detail.");
+  await prompt.press("Enter");
+  const codeBlock = page.locator(".p-code-block").first();
+  const code = codeBlock.locator("pre code");
+  await expect(codeBlock).toBeVisible({ timeout: 10_000 });
+  await expect(code).toContainText("try:", { timeout: 10_000 });
+  await page.getByRole("button", { name: "停止生成" }).click();
+  await expect(page.locator(".p-stopped")).toContainText("已停止");
+  const partialSource = await code.textContent();
+  expect(partialSource).toContain("try:");
+  await codeBlock.getByRole("button", { name: "复制代码" }).click();
+  await expect(page.locator(".p-toast")).toContainText("已复制");
+  const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboardText.replace(/\r\n/g, "\n")).toBe(partialSource!.replace(/\r\n/g, "\n"));
+});
+
+test("code copy failure stays visible and is announced", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPrototype(page);
+  await openExamples(page);
+  await selectSession(page, "请求超时后的安全重试");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new DOMException("Clipboard denied", "NotAllowedError")) },
+    });
+  });
+  const button = page.getByRole("button", { name: "复制代码" }).first();
+  await button.click();
+  await expect(page.locator(".p-toast")).toBeVisible();
+  await expect(page.locator(".p-toast")).toContainText("复制失败，请选择文字后复制");
+  await expect(page.locator(".p-toast")).toHaveAttribute("data-tone", "error");
+  await expect(page.locator(".p-toast")).toHaveAttribute("aria-live", "polite");
+  await expect(button).toHaveAttribute("aria-label", "复制代码");
+  await expect(button).toHaveAttribute("title", "复制失败");
+  await expect(button.locator("svg.lucide-check")).toHaveCount(0);
+  await expect(page.locator(".p-toast")).toHaveCSS("opacity", "1");
+  await saveScreenshot(page, "copy-failed-1440.png");
+});
+
+test("code copy works with Enter, Space, and a narrow touch target", async ({ browser, context, page }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openPrototype(page);
+  await openExamples(page);
+  await selectSession(page, "请求超时后的安全重试");
+  const copyButtons = page.getByRole("button", { name: "复制代码" });
+  await copyButtons.nth(0).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".p-toast")).toContainText("已复制");
+  await copyButtons.nth(1).focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".p-toast")).toContainText("已复制");
+
+  const mobileContext = await browser.newContext({
+    baseURL,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const mobilePage = await mobileContext.newPage();
+  observePage(mobilePage);
+  try {
+    await mobileContext.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPrototype(mobilePage);
+    await openSidebar(mobilePage);
+    await openExamples(mobilePage);
+    await selectSession(mobilePage, "请求超时后的安全重试");
+    const touchButton = mobilePage.getByRole("button", { name: "复制代码" }).first();
+    const bounds = await touchButton.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.width).toBeGreaterThanOrEqual(40);
+    expect(bounds!.height).toBeGreaterThanOrEqual(40);
+    const scrollport = mobilePage.locator(".p-code-block pre").first();
+    const scrollBounds = await scrollport.boundingBox();
+    expect(scrollBounds).not.toBeNull();
+    expect(scrollBounds!.x + scrollBounds!.width).toBeLessThanOrEqual(bounds!.x);
+    expect(await scrollport.evaluate(element => element.scrollWidth)).toBeGreaterThan(scrollBounds!.width);
+    await touchButton.tap();
+    await expect(mobilePage.locator(".p-toast")).toContainText("已复制");
+    const state = observations.get(mobilePage)!;
+    expect(state.pageErrors).toEqual([]);
+    expect(state.apiRequests).toEqual([]);
+    expect(state.crossOriginRequests).toEqual([]);
+    expect(state.crossOriginWebSockets).toEqual([]);
+  } finally {
+    await mobileContext.close();
+  }
+});
+
 test("drafts stay per conversation and Enter honors newline and composition", async ({ page }) => {
   await openPrototype(page);
   const prompt = page.getByRole("textbox", { name: "发送消息" });
@@ -349,6 +558,7 @@ test("drafts stay per conversation and Enter honors newline and composition", as
   await newSessionButtons.nth(1).click();
 
   await prompt.fill("换行第一行");
+  await waitForPrototypeFonts(page);
   await prompt.press("Shift+Enter");
   await expect(prompt).toHaveValue("换行第一行\n");
   await expect.poll(() => page.locator(".p-composer").evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(46);
@@ -369,6 +579,7 @@ test("existing drafts reflow on resize, sidebar collapse, and file preview", asy
   const prompt = page.getByRole("textbox", { name: "发送消息" });
   const draft = "请核对工具调用的超时处理，保留草稿并重新计算自动换行。".repeat(5);
   await prompt.fill(draft);
+  await waitForPrototypeFonts(page);
   const initialHeight = await prompt.evaluate(element => element.clientHeight);
   await page.setViewportSize({ width: 768, height: 1024 });
   await expect.poll(() => prompt.evaluate(element => element.clientHeight)).toBeGreaterThan(initialHeight);
@@ -408,6 +619,7 @@ test("short viewports keep long drafts and menus inside the window", async ({ pa
   await page.setViewportSize({ width: 640, height: 360 });
   await openPrototype(page);
   await page.getByRole("textbox", { name: "发送消息" }).fill("多行草稿\n".repeat(30));
+  await waitForPrototypeFonts(page);
   const composer = await page.locator(".p-composer").boundingBox();
   expect(composer!.y).toBeGreaterThanOrEqual(36);
   expect(composer!.y + composer!.height).toBeLessThan(360);
@@ -422,6 +634,7 @@ test("stopping freezes generated text and regeneration completes", async ({ page
   await openPrototype(page);
   const prompt = page.getByRole("textbox", { name: "发送消息" });
   await prompt.fill("继续展开取消后如何处理已经产生的结果");
+  await waitForPrototypeFonts(page);
   await prompt.press("Enter");
   await expect(page.locator(".p-stream-cursor")).toBeVisible();
   await page.getByRole("button", { name: "停止生成" }).click();
@@ -491,6 +704,7 @@ test("code copy keeps its text and streaming respects reading position", async (
 
   await selectSession(page, "工具调用与超时处理");
   await page.getByRole("textbox", { name: "发送消息" }).fill("继续解释超时");
+  await waitForPrototypeFonts(page);
   await page.getByRole("button", { name: "发送消息", exact: true }).click();
   await expect(page.locator(".p-stream-cursor")).toBeVisible();
   const scroll = page.locator(".p-scroll");
@@ -516,8 +730,11 @@ test("1280px conversation renders and reading font can be changed", async ({ pag
   await page.locator(".p-font-options label").filter({ hasText: "16 px" }).click();
   await expect(page.getByRole("radio", { name: "16 px" })).toBeChecked();
   await expect(page.locator(".p-markdown")).toHaveCSS("font-size", "16px");
+  await expect(page.locator(".p-code-block pre code")).toHaveCSS("font-size", "15px");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  await selectSession(page, "工具调用与超时处理");
+  await expect(page.locator(".p-markdown table")).toHaveCSS("font-size", "16px");
 });
 
 test("390px sidebar, session menu, conversation, and file preview fit viewport", async ({ page }) => {

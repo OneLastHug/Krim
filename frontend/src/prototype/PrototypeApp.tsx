@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { Tooltip } from "@base-ui/react/tooltip";
 import { Menu } from "@base-ui/react/menu";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, ChevronDown,
-  ChevronRight, Code2, Copy, CornerDownLeft, FileCode2, FileText, Folder, FolderPlus,
+  ChevronRight, CircleAlert, Code2, Copy, CornerDownLeft, FileCode2, FileText, Folder, FolderPlus,
   Menu as MenuIcon, MoreHorizontal, PanelLeft, PanelRight, Pencil, Pin, Plus, RotateCcw,
   Search, Settings2, Square, X,
 } from "lucide-react";
@@ -100,12 +100,12 @@ function FilePreview({ file, onSelect, onClose }: { file: PreviewFile; onSelect:
   </aside>;
 }
 
-function MessageTurn({ turn, busy, onRetry, onFile, onReuse, onCopy }: { turn: PrototypeTurn; busy: boolean; onRetry: () => void; onFile: (name: string) => void; onReuse: () => void; onCopy: (text: string) => void }) {
+function MessageTurn({ turn, busy, onRetry, onFile, onReuse, onCopy }: { turn: PrototypeTurn; busy: boolean; onRetry: () => void; onFile: (name: string) => void; onReuse: () => void; onCopy: (text: string) => Promise<boolean> }) {
   return <article className="p-turn" data-turn-id={turn.id} aria-label="一轮对话">
     <div className="p-user-message"><div className="p-user-text">{turn.prompt}</div><div className="p-user-actions"><IconButton label="复制用户消息" onClick={() => onCopy(turn.prompt)}><Copy /></IconButton><IconButton label="复用这条消息" onClick={onReuse}><Pencil /></IconButton></div></div>
     <div className="p-assistant-message">
       {turn.files.length > 0 && <div className="p-reference-files">{turn.files.map(name => <button key={name} onClick={() => onFile(name)}><FileText /><span>{name}</span><ChevronRight /></button>)}</div>}
-      {turn.answer ? <MarkdownMessage text={turn.answer} /> : <div className="p-thinking" role="status"><KrimMark /><span>正在整理思路</span><span className="p-thinking-dots">···</span></div>}
+      {turn.answer ? <MarkdownMessage text={turn.answer} onCopy={onCopy} /> : <div className="p-thinking" role="status"><KrimMark /><span>正在整理思路</span><span className="p-thinking-dots">···</span></div>}
       {turn.status === "streaming" && turn.answer && <span className="p-stream-cursor" aria-label="正在生成" />}
       {turn.status === "stopped" && <div className="p-stopped" role="status"><Square />已停止<Button variant="ghost" size="xs" onClick={onRetry} disabled={busy}>重新生成</Button></div>}
       {turn.status === "complete" && <div className="p-answer-actions"><IconButton label="复制回答" onClick={() => onCopy(turn.answer)}><Copy /></IconButton><IconButton label="重新生成回答" onClick={onRetry} disabled={busy}><RotateCcw /></IconButton><ActionMenu label="回答选项" trigger={<MoreHorizontal />}><MenuAction onClick={() => onCopy(turn.answer)}><Copy />复制 Markdown</MenuAction><MenuAction onClick={onReuse}><Pencil />复用提问</MenuAction></ActionMenu></div>}
@@ -128,6 +128,7 @@ export function PrototypeApp() {
   const [renameTarget, setRenameTarget] = useState<PrototypeConversation | null>(null);
   const [renameText, setRenameText] = useState("");
   const [toast, setToast] = useState("");
+  const [toastError, setToastError] = useState(false);
   const [showJump, setShowJump] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 700px)").matches);
   const [overlayPreview, setOverlayPreview] = useState(() => window.matchMedia("(max-width: 1100px)").matches);
@@ -152,12 +153,14 @@ export function PrototypeApp() {
     if (composing.current || chat.busy || !current.draft.trim()) return;
     stickToBottom.current = true; chat.send(); focusInput();
   }
-  async function copy(text: string) {
-    try { await navigator.clipboard.writeText(text); setToast("已复制"); }
-    catch { setToast("复制失败，请选择文字后复制"); }
+  const copy = useCallback(async (text: string): Promise<boolean> => {
+    let succeeded = false;
+    try { await navigator.clipboard.writeText(text); setToast("已复制"); setToastError(false); succeeded = true; }
+    catch { setToast("复制失败，请选择文字后复制"); setToastError(true); }
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(""), 2200);
-  }
+    toastTimer.current = window.setTimeout(() => setToast(""), succeeded ? 2200 : 5000);
+    return succeeded;
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
@@ -191,7 +194,15 @@ export function PrototypeApp() {
       resize();
     });
     observer.observe(element);
-    return () => observer.disconnect();
+    let active = true;
+    const resizeAfterFontLoad = () => { if (active) resize(); };
+    document.fonts.addEventListener("loadingdone", resizeAfterFontLoad);
+    void document.fonts.ready.then(resizeAfterFontLoad);
+    return () => {
+      active = false;
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", resizeAfterFontLoad);
+    };
   }, [current.id, current.draft]);
 
   useLayoutEffect(() => {
@@ -226,7 +237,7 @@ export function PrototypeApp() {
       <div className="p-content">
         <section className="p-chat" aria-label="对话" inert={overlayPreview && !!previewFile}>
           <div className="p-scroll" ref={scrollArea} onScroll={() => { const element = scrollArea.current; if (!element) return; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48; stickToBottom.current = atBottom; setShowJump(!atBottom); }}>
-            {current.turns.length ? <div className="p-thread">{current.turns.map(turn => <MessageTurn key={turn.id} turn={turn} busy={chat.busy} onRetry={() => { stickToBottom.current = true; chat.retry(turn.id); }} onFile={showFile} onReuse={() => { chat.editDraft(turn.prompt); focusInput(); }} onCopy={text => void copy(text)} />)}</div> : <HomeOverview conversations={chat.visible} />}
+            {current.turns.length ? <div className="p-thread">{current.turns.map(turn => <MessageTurn key={turn.id} turn={turn} busy={chat.busy} onRetry={() => { stickToBottom.current = true; chat.retry(turn.id); }} onFile={showFile} onReuse={() => { chat.editDraft(turn.prompt); focusInput(); }} onCopy={copy} />)}</div> : <HomeOverview conversations={chat.visible} />}
           </div>
           {showJump && <Button variant="outline" size="icon-sm" className="p-jump" aria-label="回到底部" onClick={goToBottom}><ArrowDown /></Button>}
           <div className="p-composer-wrap">
@@ -293,6 +304,6 @@ export function PrototypeApp() {
     <Dialog open={!!renameTarget} onOpenChange={open => { if (!open) setRenameTarget(null); }}><DialogContent className="p-small-dialog"><DialogTitle>重命名会话</DialogTitle><form onSubmit={event => { event.preventDefault(); if (renameTarget && renameText.trim()) { chat.rename(renameTarget.id, renameText); setRenameTarget(null); } }}><label htmlFor="conversation-name">会话名称</label><input id="conversation-name" value={renameText} maxLength={80} onChange={event => setRenameText(event.target.value)} /><div className="p-dialog-actions"><Button variant="ghost" onClick={() => setRenameTarget(null)} type="button">取消</Button><Button type="submit" disabled={!renameText.trim()}>保存</Button></div></form></DialogContent></Dialog>
 
     <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}><DialogContent className="p-small-dialog p-settings-dialog"><DialogTitle>阅读设置</DialogTitle><fieldset><legend>消息字号</legend><div className="p-font-options">{[12, 14, 16].map(size => <label key={size} className={fontSize === size ? "is-selected" : ""}><input type="radio" name="reading-size" value={size} checked={fontSize === size} onChange={() => setFontSize(size)} /><span>{size} px</span>{fontSize === size && <Check />}</label>)}</div></fieldset><p className="p-setting-note">调整消息正文，导航保持紧凑。</p><div className="p-settings-divider" /><div className="p-settings-info"><span>工作区</span><strong>本地样例</strong></div><div className="p-settings-info"><span>模型请求</span><strong>未启用</strong></div></DialogContent></Dialog>
-    <div className={`p-toast ${toast ? "is-visible" : ""}`} role="status" aria-live="polite">{toast && <><Check />{toast}</>}</div>
+    <div className={`p-toast ${toast ? "is-visible" : ""}`} data-tone={toastError ? "error" : undefined} role="status" aria-live="polite">{toast && <>{toastError ? <CircleAlert /> : <Check />}{toast}</>}</div>
   </div></Tooltip.Provider>;
 }
