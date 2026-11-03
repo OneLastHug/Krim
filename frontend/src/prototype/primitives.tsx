@@ -15,6 +15,12 @@ export function ActionMenu({ label, children, trigger, className = "" }: { label
   </Menu.Root>;
 }
 
+export function TextMenu({ label, children, trigger, className = "" }: { label: string; children: ReactNode; trigger: ReactNode; className?: string }) {
+  return <Menu.Root><Menu.Trigger render={<Button variant="ghost" className={`p-text-menu ${className}`} aria-label={label} />}>{trigger}</Menu.Trigger>
+    <Menu.Portal><Menu.Positioner sideOffset={5} align="start" className="p-menu-positioner"><Menu.Popup className="p-menu">{children}</Menu.Popup></Menu.Positioner></Menu.Portal>
+  </Menu.Root>;
+}
+
 export function MenuAction({ children, ...props }: ComponentProps<typeof Menu.Item>) {
   return <Menu.Item className="p-menu-item" {...props}>{children}</Menu.Item>;
 }

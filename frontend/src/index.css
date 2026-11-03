@@ -4,6 +4,7 @@
 @import "shadcn/tailwind.css" ;
 @source not "./prototype";
 @source not "../e2e/prototype.spec.ts";
+@source not "../e2e/prototype-native-zoom.spec.ts";
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

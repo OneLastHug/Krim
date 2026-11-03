@@ -62,6 +62,7 @@
     "e2e/compact-composer.spec.ts",
     "vite.prototype.config.ts",
     "playwright.prototype.config.ts",
-    "e2e/prototype.spec.ts"
+    "e2e/prototype.spec.ts",
+    "e2e/prototype-native-zoom.spec.ts"
   ]
 }

@@ -5,7 +5,7 @@ const artifactRoot = resolve(import.meta.dirname, "..", ".cache", "ui-prototype"
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: ["prototype.spec.ts"],
+  testMatch: ["prototype.spec.ts", "prototype-native-zoom.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: 0,

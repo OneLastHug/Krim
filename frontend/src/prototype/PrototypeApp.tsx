@@ -3,40 +3,39 @@ import { Tooltip } from "@base-ui/react/tooltip";
 import { Menu } from "@base-ui/react/menu";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, ChevronDown,
-  ChevronRight, Code2, Copy, FileCode2, FileText, Folder, GitBranch,
-  MoreHorizontal, PanelLeft, PanelRight, Pencil, Pin, Plus, RotateCcw,
+  ChevronRight, Code2, Copy, CornerDownLeft, FileCode2, FileText, Folder, FolderPlus,
+  Menu as MenuIcon, MoreHorizontal, PanelLeft, PanelRight, Pencil, Pin, Plus, RotateCcw,
   Search, Settings2, Square, X,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog";
 import { files, type PreviewFile, type PrototypeConversation, type PrototypeTurn } from "./fixtures";
 import { MarkdownMessage } from "./MarkdownMessage";
-import { ActionMenu, IconButton, KrimMark, MenuAction } from "./primitives";
+import { ActionMenu, IconButton, KrimMark, MenuAction, TextMenu } from "./primitives";
 import { usePrototype, type PrototypeState } from "./use-prototype";
 
 interface SidebarProps {
   chat: PrototypeState;
   open: boolean;
   mobileOpen: boolean;
-  onClose: () => void;
-  onSearch: () => void;
   onSettings: () => void;
   onSelect: (id: string) => void;
   onNew: (project?: string) => void;
   onRename: (conversation: PrototypeConversation) => void;
 }
 
-function Sidebar({ chat, open, mobileOpen, onClose, onSearch, onSettings, onSelect, onNew, onRename }: SidebarProps) {
+function Sidebar({ chat, open, mobileOpen, onSettings, onSelect, onNew, onRename }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<string[]>([]);
+  const sessions = chat.visible.filter(item => item.id !== "new" || item.turns.length > 0 || item.draft.trim().length > 0);
   const groups = [
-    { name: "置顶", entries: chat.visible.filter(item => item.pinned), pinned: true },
-    ...["Krim", "Notes"].map(name => ({ name, entries: chat.visible.filter(item => !item.pinned && item.project === name), pinned: false })),
+    { name: "置顶", entries: sessions.filter(item => item.pinned), pinned: true },
+    ...["Krim", "Notes"].map(name => ({ name, entries: sessions.filter(item => !item.pinned && item.project === name), pinned: false })),
   ];
   return <aside className={`p-sidebar ${open ? "" : "is-collapsed"} ${mobileOpen ? "is-mobile-open" : ""}`} aria-label="会话导航">
-    <div className="p-sidebar-top"><a className="p-brand" href="#" onClick={event => { event.preventDefault(); onNew(); }} aria-label="Krim Agent 新会话"><KrimMark /><span>Krim Agent</span></a><IconButton label="收起侧栏" onClick={onClose}><PanelLeft /></IconButton></div>
+    <div className="p-sidebar-top"><div className="p-workspace-switch"><span className="p-brand"><KrimMark /><span>Krim Agent</span></span><span className="p-code-mode"><Code2 />Code</span></div></div>
     <nav className="p-primary-nav" aria-label="主要操作">
       <Button variant="ghost" className="p-nav-button p-new-button" onClick={() => onNew()}><Plus /><span>新会话</span><kbd>Ctrl ⇧ N</kbd></Button>
-      <Button variant="ghost" className="p-nav-button" onClick={onSearch}><Search /><span>搜索会话</span><kbd>Ctrl K</kbd></Button>
+      <Button variant="ghost" className="p-nav-button" onClick={onSettings}><Settings2 /><span>自定义</span></Button>
     </nav>
     <div className="p-sidebar-scroll">
       {groups.filter(group => group.entries.length).map(group => <section className="p-session-group" key={group.name}>
@@ -51,14 +50,49 @@ function Sidebar({ chat, open, mobileOpen, onClose, onSearch, onSettings, onSele
           </ActionMenu>
         </li>)}</ul>}
       </section>)}
+      {!groups.some(group => group.entries.length) && <div className="p-sidebar-empty">会话会显示在这里</div>}
     </div>
-    <div className="p-sidebar-footer"><Button variant="ghost" className="p-workspace-button" onClick={onSettings}><span className="p-workspace-avatar">K</span><span>本地工作区</span><Settings2 /></Button></div>
+    <div className="p-sidebar-footer"><span className="p-workspace-avatar">K</span><span>本地样例</span><span className="p-footer-spacer" /><span className="p-sidebar-status" aria-label="不会发送模型请求" /></div>
   </aside>;
+}
+
+function MenuChoice({ label, selected, shortcut, onSelect }: { label: string; selected: boolean; shortcut?: string; onSelect: () => void }) {
+  return <Menu.Item className="p-menu-item p-choice-item" onClick={onSelect}>
+    <span className={`p-choice-check ${selected ? "is-selected" : ""}`}>{selected && <Check />}</span><span>{label}</span>{shortcut && <kbd>{shortcut}</kbd>}
+  </Menu.Item>;
+}
+
+function HomeOverview({ conversations }: { conversations: PrototypeConversation[] }) {
+  const [tab, setTab] = useState<"overview" | "models">("overview");
+  const [range, setRange] = useState("all");
+  const recorded = conversations.filter(conversation => !conversation.archived && conversation.turns.length > 0);
+  const messages = recorded.reduce((total, conversation) => total + conversation.turns.length, 0);
+  const metrics = [
+    ["Sessions", String(recorded.length)], ["Messages", String(messages)], ["Total tokens", "0"], ["Active days", "0"],
+    ["Current streak", "0d"], ["Longest streak", "0d"], ["Peak hour", "—"], ["Favorite model", "—"],
+  ];
+  return <section className="p-empty-home" aria-label="本地工作区概览">
+    <h1><KrimMark /><span>What's up next?</span></h1>
+    <section className="p-dashboard" aria-label="本地活动概览">
+      <div className="p-dashboard-head">
+        <div className="p-dashboard-tabs" role="tablist" aria-label="概览分类">
+          <button type="button" role="tab" aria-selected={tab === "overview"} onClick={() => setTab("overview")}>Overview</button>
+          <button type="button" role="tab" aria-selected={tab === "models"} onClick={() => setTab("models")}>Models</button>
+        </div>
+        {tab === "overview" && <div className="p-range-tabs" aria-label="活动时段">{[["all", "All"], ["30d", "30d"], ["7d", "7d"]].map(([key, label]) => <button type="button" key={key} aria-pressed={range === key} onClick={() => setRange(key!)}>{label}</button>)}</div>}
+      </div>
+      {tab === "overview" ? <>
+        <dl className="p-dashboard-metrics">{metrics.map(([label, value]) => <div className="p-metric" key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+        <div className="p-activity-grid" role="img" aria-label="暂无本地活动时间记录">{Array.from({ length: 196 }, (_, index) => <span key={index} title="没有本地活动记录" />)}</div>
+        <p className="sr-only">活动方格仅反映本地记录；当前样例没有活动时间或模型令牌数据。</p>
+      </> : <div className="p-model-overview"><span>本地样例</span><strong>0 次模型请求</strong><small>模型选项仅作界面预览，不会发送请求</small></div>}
+    </section>
+  </section>;
 }
 
 function FilePreview({ file, onSelect, onClose }: { file: PreviewFile; onSelect: (file: PreviewFile) => void; onClose: () => void }) {
   return <aside className="p-preview" aria-label="文件预览">
-    <div className="p-preview-title"><span>文件</span><IconButton label="关闭文件预览" onClick={onClose}><X /></IconButton></div>
+    <div className="p-preview-title"><span>文件</span><IconButton label="关闭文件预览" autoFocus onClick={onClose}><X /></IconButton></div>
     <div className="p-file-list" aria-label="参考文件">{files.map(item => <button key={item.path} className={`p-file-row ${file.path === item.path ? "is-active" : ""}`} onClick={() => onSelect(item)} aria-pressed={file.path === item.path}>{item.language === "Python" ? <FileCode2 /> : <FileText />}<span>{item.name}</span></button>)}</div>
     <div className="p-file-breadcrumb"><Folder /><span>{file.path}</span></div>
     <div className="p-file-body" tabIndex={0} aria-label={`${file.name} 内容`}><pre>{file.content.split("\n").map((line, index) => <span className="p-code-line" key={index}><span className="p-line-number" aria-hidden="true">{index + 1}</span><span>{line || " "}</span></span>)}</pre></div>
@@ -89,12 +123,14 @@ export function PrototypeApp() {
   const [searchIndex, setSearchIndex] = useState(0);
   const [showArchived, setShowArchived] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [fontSize, setFontSize] = useState(12);
+  const [fontSize, setFontSize] = useState(14);
+  const [mode, setMode] = useState("Accept edits");
   const [renameTarget, setRenameTarget] = useState<PrototypeConversation | null>(null);
   const [renameText, setRenameText] = useState("");
   const [toast, setToast] = useState("");
   const [showJump, setShowJump] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 700px)").matches);
+  const [overlayPreview, setOverlayPreview] = useState(() => window.matchMedia("(max-width: 1100px)").matches);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const scrollArea = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -125,13 +161,16 @@ export function PrototypeApp() {
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
-    const change = () => setNarrow(media.matches);
+    const previewMedia = window.matchMedia("(max-width: 1100px)");
+    const change = () => { setNarrow(media.matches); setOverlayPreview(previewMedia.matches); };
     media.addEventListener("change", change);
-    return () => { media.removeEventListener("change", change); window.clearTimeout(toastTimer.current); };
+    previewMedia.addEventListener("change", change);
+    return () => { media.removeEventListener("change", change); previewMedia.removeEventListener("change", change); window.clearTimeout(toastTimer.current); };
   }, []);
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); newConversation(); }
       if (event.key === "Escape" && !searchOpen && !settingsOpen && !renameTarget) { setMobileOpen(false); setPreviewFile(null); }
@@ -142,7 +181,17 @@ export function PrototypeApp() {
 
   useLayoutEffect(() => {
     const element = textarea.current;
-    if (element) { element.style.height = "0px"; element.style.height = `${Math.max(24, Math.min(element.scrollHeight, 220))}px`; }
+    if (!element) return;
+    const resize = () => { element.style.height = "0px"; element.style.height = `${Math.max(20, Math.min(element.scrollHeight, 220))}px`; };
+    resize();
+    let width = element.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (element.clientWidth === width) return;
+      width = element.clientWidth;
+      resize();
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [current.id, current.draft]);
 
   useLayoutEffect(() => {
@@ -155,34 +204,79 @@ export function PrototypeApp() {
 
   return <Tooltip.Provider delay={350}><div className="p-app" data-sidebar={sidebarOpen} style={{ "--reading-size": `${fontSize}px` } as CSSProperties}>
     {mobileOpen && <button className="p-mobile-backdrop" aria-label="关闭导航背景" onClick={() => setMobileOpen(false)} />}
-    <Sidebar chat={chat} open={sidebarOpen} mobileOpen={mobileOpen} onClose={() => narrow ? setMobileOpen(false) : setSidebarOpen(false)} onSearch={openSearch} onSettings={() => { setSettingsOpen(true); setMobileOpen(false); }} onSelect={select} onNew={newConversation} onRename={rename} />
-    <main className="p-main" inert={narrow && mobileOpen}>
-      <header className="p-topbar">
-        {(!sidebarOpen || narrow) && <IconButton label="展开侧栏" onClick={() => narrow ? setMobileOpen(true) : setSidebarOpen(true)}><PanelLeft /></IconButton>}
-        <div className="p-history-navigation"><IconButton label="上一个会话" disabled={!chat.canBack} onClick={chat.back}><ArrowLeft /></IconButton><IconButton label="下一个会话" disabled={!chat.canForward} onClick={chat.forward}><ArrowRight /></IconButton></div>
-        <h1 className="p-conversation-title" title={current.title}>{current.title}</h1>
-        <div className="p-topbar-actions"><IconButton label="阅读设置" onClick={() => setSettingsOpen(true)}><Settings2 /></IconButton><IconButton label={previewFile ? "收起文件面板" : "打开文件面板"} aria-pressed={!!previewFile} onClick={() => setPreviewFile(value => value ? null : files[0]!)}><PanelRight /></IconButton><ActionMenu label="会话选项" trigger={<MoreHorizontal />}><MenuAction onClick={() => rename(current)}><Pencil />重命名</MenuAction><MenuAction onClick={() => chat.togglePinned(current.id)}><Pin />{current.pinned ? "取消置顶" : "置顶"}</MenuAction><Menu.Separator className="p-menu-separator" /><MenuAction disabled={chat.runningId === current.id} onClick={() => chat.archive(current.id)}><Archive />归档会话</MenuAction></ActionMenu></div>
-      </header>
+    <header className="p-topbar" aria-label="全局导航">
+      <TextMenu label="应用菜单" trigger={<MenuIcon />} className="p-app-menu-trigger">
+        <div className="p-menu-label">Krim Agent</div>
+        <MenuAction onClick={() => newConversation()}><Plus />新会话<kbd>Ctrl ⇧ N</kbd></MenuAction>
+        <MenuAction onClick={openSearch}><Search />搜索会话<kbd>Ctrl K</kbd></MenuAction>
+        <Menu.Separator className="p-menu-separator" />
+        <MenuAction onClick={chat.loadExamples}><Code2 />打开示例</MenuAction>
+      </TextMenu>
+      <IconButton label={(narrow ? mobileOpen : sidebarOpen) ? "收起侧栏" : "展开侧栏"} aria-expanded={narrow ? mobileOpen : sidebarOpen} onClick={() => narrow ? setMobileOpen(value => !value) : setSidebarOpen(value => !value)}><PanelLeft /></IconButton>
+      <IconButton label="搜索会话" onClick={openSearch}><Search /></IconButton>
+      <div className="p-history-navigation" aria-label="会话历史">
+        <IconButton label="上一个会话" disabled={!chat.canBack} onClick={chat.back}><ArrowLeft /></IconButton>
+        <IconButton label="下一个会话" disabled={!chat.canForward} onClick={chat.forward}><ArrowRight /></IconButton>
+      </div>
+    </header>
+    <div className="p-workspace">
+      <Sidebar chat={chat} open={sidebarOpen} mobileOpen={mobileOpen} onSettings={() => { setSettingsOpen(true); setMobileOpen(false); }} onSelect={select} onNew={newConversation} onRename={rename} />
+      <main className="p-main" inert={narrow && mobileOpen}>
+      {current.turns.length > 0 && <header className="p-conversation-header"><h1 title={current.title}>{current.title}</h1><span className="p-header-project">{current.project === "Krim" ? "project" : current.project}</span><div className="p-header-actions"><IconButton label={previewFile ? "关闭文件预览" : "打开文件预览"} aria-pressed={!!previewFile} onClick={() => setPreviewFile(value => value ? null : files[0]!)}><PanelRight /></IconButton></div></header>}
       <div className="p-content">
-        <section className="p-chat" aria-label="对话" inert={narrow && !!previewFile}>
+        <section className="p-chat" aria-label="对话" inert={overlayPreview && !!previewFile}>
           <div className="p-scroll" ref={scrollArea} onScroll={() => { const element = scrollArea.current; if (!element) return; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48; stickToBottom.current = atBottom; setShowJump(!atBottom); }}>
-            {current.turns.length ? <div className="p-thread">{current.turns.map(turn => <MessageTurn key={turn.id} turn={turn} busy={chat.busy} onRetry={() => { stickToBottom.current = true; chat.retry(turn.id); }} onFile={showFile} onReuse={() => { chat.editDraft(turn.prompt); focusInput(); }} onCopy={text => void copy(text)} />)}</div> : <div className="p-empty"><KrimMark className="p-empty-mark" /></div>}
+            {current.turns.length ? <div className="p-thread">{current.turns.map(turn => <MessageTurn key={turn.id} turn={turn} busy={chat.busy} onRetry={() => { stickToBottom.current = true; chat.retry(turn.id); }} onFile={showFile} onReuse={() => { chat.editDraft(turn.prompt); focusInput(); }} onCopy={text => void copy(text)} />)}</div> : <HomeOverview conversations={chat.visible} />}
           </div>
           {showJump && <Button variant="outline" size="icon-sm" className="p-jump" aria-label="回到底部" onClick={goToBottom}><ArrowDown /></Button>}
           <div className="p-composer-wrap">
+            {current.turns.length === 0 && <div className="p-composer-context">
+              <span className="p-context-chip" title="固定本地样例，不发送模型请求"><span className="p-context-dot" />Local</span>
+              <span className="p-context-chip"><Folder />{current.project === "Krim" ? "project" : current.project}</span>
+              <IconButton label={previewFile ? "关闭文件预览" : "打开文件预览"} aria-pressed={!!previewFile} onClick={() => setPreviewFile(value => value ? null : files[0]!)}><FolderPlus /></IconButton>
+              <span className="p-context-spacer" />
+            </div>}
             <form className="p-composer" onSubmit={send}>
               <label className="sr-only" htmlFor="prototype-prompt">发送消息</label>
               <textarea id="prototype-prompt" ref={textarea} rows={1} placeholder="给 Krim 一个任务…" value={current.draft} maxLength={12000} onChange={event => chat.editDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
                 if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.nativeEvent.keyCode !== 229) { event.preventDefault(); send(); }
               }} />
-              <div className="p-composer-tools"><ActionMenu label="引用文件" trigger={<Plus />}><div className="p-menu-label">参考文件</div>{files.map(file => <MenuAction key={file.name} onClick={() => { chat.editDraft(`${current.draft}${current.draft ? " " : ""}@${file.name}`); focusInput(); }}><FileText />{file.name}</MenuAction>)}</ActionMenu><span className="p-composer-spacer" />{chat.runningId === current.id ? <Button className="p-send p-stop" size="icon-sm" type="button" aria-label="停止生成" onClick={chat.stop}><Square /></Button> : <Button className="p-send" size="icon-sm" type="submit" aria-label="发送消息" disabled={chat.busy || !current.draft.trim()}><ArrowUp /></Button>}</div>
+              {chat.runningId === current.id ? <Button className="p-send p-stop" size="icon-sm" type="button" aria-label="停止生成" onClick={chat.stop}><Square /></Button> : <Button className="p-send" size="icon-sm" type="submit" aria-label="发送消息" disabled={chat.busy || !current.draft.trim()}><CornerDownLeft /></Button>}
             </form>
-            <div className="p-composer-context"><span className="p-project-context"><Folder />{current.project}</span>{current.project === "Krim" && <span className="p-branch-context"><GitBranch />agent-core</span>}<span className="p-context-spacer" /><span className="p-model-context" title="固定样例内容，不发起模型请求">{chat.busy ? "样例生成中" : "本地样例"}</span><button className="p-reading-size" onClick={() => setSettingsOpen(true)} aria-label={`阅读字号 ${fontSize} px`}>{fontSize} px<ChevronDown /></button></div>
+            <div className="p-composer-footer">
+              <div className="p-footer-left">
+                <TextMenu label="权限模式" trigger={<><span>{mode}</span><ChevronDown /></>}>
+                  <div className="p-menu-label">Mode</div>
+                  <MenuChoice label="Ask permissions" selected={mode === "Ask permissions"} shortcut="1" onSelect={() => setMode("Ask permissions")} />
+                  <MenuChoice label="Accept edits" selected={mode === "Accept edits"} shortcut="2" onSelect={() => setMode("Accept edits")} />
+                  <MenuChoice label="Plan mode" selected={mode === "Plan mode"} shortcut="3" onSelect={() => setMode("Plan mode")} />
+                  <MenuChoice label="Bypass permissions" selected={mode === "Bypass permissions"} shortcut="Enable" onSelect={() => setMode("Bypass permissions")} />
+                </TextMenu>
+                <ActionMenu label="添加文件上下文" trigger={<Plus />}>
+                  <div className="p-menu-label">添加到上下文</div>
+                  <MenuAction onClick={() => setPreviewFile(value => value ? null : files[0]!)}><PanelRight />打开文件预览</MenuAction>
+                  <Menu.Separator className="p-menu-separator" />
+                  {files.map(file => <MenuAction key={file.name} onClick={() => { chat.editDraft(`${current.draft}${current.draft ? " " : ""}@${file.name}`); focusInput(); }}><FileText />{file.name}</MenuAction>)}
+                </ActionMenu>
+              </div>
+              <div className="p-footer-right">
+                <TextMenu label="选择模型（本地样例，不发起请求）" trigger={<><span>GPT-6 Luna</span><ChevronDown /></>} className="p-model-menu-trigger">
+                  <div className="p-menu-label">Models</div>
+                  <MenuChoice label="GPT-6 Luna" selected shortcut="1" onSelect={() => undefined} />
+                </TextMenu>
+                <TextMenu label="更多模型选项" trigger={<span>Extra</span>} className="p-extra-menu-trigger">
+                  <div className="p-menu-label">本地样例</div>
+                  <MenuAction disabled>不会发起模型请求</MenuAction>
+                </TextMenu>
+                <span className="p-local-label">本地样例</span>
+              </div>
+            </div>
           </div>
         </section>
-        {previewFile && <FilePreview file={previewFile} onSelect={setPreviewFile} onClose={() => setPreviewFile(null)} />}
+        {previewFile && <FilePreview file={previewFile} onSelect={setPreviewFile} onClose={() => { setPreviewFile(null); focusInput(); }} />}
       </div>
     </main>
+    </div>
 
     <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="p-search-dialog" showCloseButton={false}>
       <DialogTitle className="sr-only">搜索会话</DialogTitle>
