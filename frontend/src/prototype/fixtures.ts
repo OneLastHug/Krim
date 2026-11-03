@@ -85,32 +85,23 @@ async def example() -> str:
   },
 ];
 
-export const architectureAnswer = `可以把超时处理拆成三个部分：**调用时限、取消传播、结果归属**。它们需要配合，但不应该混在同一个异常处理分支里。
+export const architectureAnswer = `A tool timeout means the operation did not return before its time limit. It may have been stopped, or it may still be running elsewhere; don’t assume it had no effect. Before retrying, check the operation’s status—especially if repeating it could create duplicate changes.
 
-### 先让时限覆盖完整调用
-
-把超时放在工具执行的外层，排队、网络读取和结果解析都计入同一个时限。Python 可以直接使用原生的异步上下文：
+| Situation | What to do |
+| --- | --- |
+| Read-only request | Retry with more time |
+| Change or submission | Check status before retrying |
+| Repeated timeouts | Reduce scope or investigate the bottleneck |
 
 \`\`\`python
-async def call_with_timeout(operation, timeout_seconds):
-    async with asyncio.timeout(timeout_seconds):
-        return await operation()
+try:
+    result = run_tool(timeout=30)
+except TimeoutError:
+    check_status()
+    retry_if_safe()
 \`\`\`
 
-这里的 \`TimeoutError\` 在上下文退出后处理。不要在工具内部吞掉 \`CancelledError\`，否则用户点击停止后，后台操作可能还会继续。
-
-### 不同结果要分别保留
-
-| 情况 | 运行状态 | 界面反馈 |
-| --- | --- | --- |
-| 正常返回 | 已完成 | 展示结果与工具摘要 |
-| 超过时限 | 失败 | 显示超时原因，允许重试 |
-| 用户停止 | 已停止 | 保留已经生成的内容 |
-| 回程未确认 | 待核实 | 先查原运行，不重复提交 |
-
-> 超时说明这次等待结束了，不一定说明外部操作没有发生。
-
-因此，带副作用的工具还需要稳定的请求标识。重试前查询原结果，避免把一次操作执行两遍。`;
+A longer timeout can help with slow operations, but it won’t fix a persistent bottleneck. For safe retries, use an idempotent operation—one that won’t cause extra effects when repeated.`;
 
 const evaluationAnswer = `比较两次评测时，我会先对齐**数据集版本、模型参数和评分规则**，再看分数变化。
 
@@ -124,6 +115,7 @@ const evaluationAnswer = `比较两次评测时，我会先对齐**数据集版�
 {
   "dataset": "tool-calling-v1",
   "checks": ["answer", "tool_arguments", "completion"],
+  "comparison_dimensions": ["dataset_version", "model_parameters", "scoring_rules", "tool_behavior", "completion_status", "retry_safety"],
   "keep_failed_cases": true
 }
 \`\`\`
@@ -151,7 +143,7 @@ export function createFixtures(): PrototypeConversation[] {
   });
   return [
     { id: "new", title: "新会话", project: "Krim", pinned: false, archived: false, draft: "", turns: [] },
-    { id: "timeouts", title: "工具调用与超时处理", project: "Krim", pinned: true, archived: false, draft: "", turns: [turn("timeout-1", "帮我梳理一下工具调用的超时和取消，怎么做才不会重复执行？", architectureAnswer, ["timeout.py", "README.md"])] },
+    { id: "timeouts", title: "工具调用与超时处理", project: "Krim", pinned: true, archived: false, draft: "", turns: [turn("timeout-1", "Respond in English. Explain tool timeouts in at most 180 words. Use two short paragraphs, a Python code block with 4 lines, and a three-row Markdown table. Do not read, edit, or execute files.", architectureAnswer, [])] },
     { id: "evaluations", title: "评测结果应该怎么看", project: "Krim", pinned: true, archived: false, draft: "", turns: [turn("eval-1", "两次评测的分数差不多，怎么判断具体哪里需要改进？", evaluationAnswer, ["evaluation.md"])] },
     { id: "reading", title: "把 Agent 拆开来看", project: "Krim", pinned: false, archived: false, draft: "", turns: [turn("read-1", "我想从源码理解一个 Agent，先读哪部分比较合适？", readingAnswer, ["README.md"])] },
     { id: "permissions", title: "工具审批的交互细节", project: "Krim", pinned: false, archived: false, draft: "", turns: [turn("permission-1", "工具审批里哪些信息应该直接展示？", "优先展示**要做什么、影响哪个对象、有什么后果**。\n\n原始参数可以展开查看，但不能让用户读完 JSON 才知道自己在批准什么。允许和拒绝应放在同一位置，等待审批时保留当前上下文。", [])] },

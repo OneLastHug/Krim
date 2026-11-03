@@ -7,7 +7,6 @@ import { Button } from "../components/ui/button";
 function CodeBlock({ children }: { children?: ReactNode }) {
   const code = Children.toArray(children)[0];
   const props = isValidElement<{ children?: ReactNode; className?: string }>(code) ? code.props : undefined;
-  const language = props?.className?.replace("language-", "") ?? "text";
   const text = typeof props?.children === "string" ? props.children : "";
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -24,7 +23,10 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   }
 
   return <div className="p-code-block">
-    <div className="p-code-bar"><span>{language}</span><Button variant="ghost" size="xs" className="p-copy-code" aria-label="复制代码" onClick={() => void copy()}>{copied ? <Check /> : <Copy />}<span>{copied ? "已复制" : failed ? "复制失败" : "复制"}</span></Button></div>
+    <Button variant="ghost" size="icon-xs" className="p-copy-code" aria-label="复制代码" title={copied ? "已复制" : failed ? "复制失败" : "复制代码"} onClick={() => void copy()}>
+      {copied ? <Check /> : <Copy />}
+      <span className="sr-only">{copied ? "已复制" : failed ? "复制失败" : "复制代码"}</span>
+    </Button>
     <pre>{children}</pre>
   </div>;
 }

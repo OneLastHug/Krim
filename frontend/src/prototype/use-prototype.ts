@@ -4,7 +4,7 @@ import { createFixtures, responseFor, type PrototypeConversation, type Prototype
 interface StreamJob { conversationId: string; turnId: string; answer: string }
 
 export function usePrototype() {
-  const [conversations, setConversations] = useState(createFixtures);
+  const [conversations, setConversations] = useState(() => [createFixtures()[0]!]);
   const [navigation, setNavigation] = useState({ ids: ["new"], index: 0 });
   const [job, setJob] = useState<StreamJob | null>(null);
   const currentId = navigation.ids[navigation.index] ?? "new";
@@ -41,6 +41,17 @@ export function usePrototype() {
     const id = crypto.randomUUID();
     setConversations(items => [{ id, title: "新会话", project, pinned: false, archived: false, draft: "", turns: [] }, ...items]);
     navigate(id);
+  }
+
+  function loadExamples() {
+    const examples = createFixtures().filter(item => item.id !== "new");
+    setConversations(items => {
+      const exampleIds = new Set(examples.map(item => item.id));
+      const restored = items.map(item => exampleIds.has(item.id) ? { ...item, archived: false } : item);
+      const known = new Set(restored.map(item => item.id));
+      return [...restored, ...examples.filter(item => !known.has(item.id))];
+    });
+    navigate("timeouts");
   }
 
   function send(prompt = current.draft) {
@@ -80,7 +91,7 @@ export function usePrototype() {
   return {
     conversations, current, busy: !!job, runningId: job?.conversationId,
     visible: useMemo(() => conversations.filter(item => !item.archived), [conversations]),
-    navigate, createConversation, send, stop, retry, archive,
+    navigate, createConversation, loadExamples, send, stop, retry, archive,
     editDraft: (draft: string) => update(current.id, item => ({ ...item, draft })),
     rename: (id: string, title: string) => { if (title.trim()) update(id, item => ({ ...item, title: title.trim() })); },
     togglePinned: (id: string) => update(id, item => ({ ...item, pinned: !item.pinned })),
