@@ -62,13 +62,25 @@ class Compactor:
             raise asyncio.CancelledError
 
     def measure(
-        self, messages: list[Message], tools: list[dict[str, JsonValue]],
+        self,
+        messages: list[Message],
+        tools: list[dict[str, JsonValue]],
+        max_group: int | None = None,
+        remaining_tools: int | None = None,
     ) -> tuple[int, bool]:
         builder.validate_groups(messages[1:])
+        effective_group = self.max_group if max_group is None else max_group
+        effective_remaining = (
+            self.remaining_tools if remaining_tools is None else remaining_tools
+        )
+        budget = self.step.request_budget(effective_group, effective_remaining)
+        request_messages = self.step.with_budget_prompt(messages, budget)
+        request_tools = tools if budget.max_tool_calls_this_step > 0 else []
         # 只计量规范JSON UTF-8块；不把完整前史送入受1MiB限制的encoded。
         encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
                                    separators=(",", ":"), allow_nan=False)
-        value = {"messages": [m.model_dump(mode="json") for m in messages], "tools": tools}
+        value = {"messages": [m.model_dump(mode="json") for m in request_messages],
+                 "tools": request_tools}
         size = sum(len(chunk.encode()) for chunk in encoder.iterencode(value))
         cap = min(self.request_limit-1024,
                   self.policy.max_bytes-1024-self.policy.reserved_output_tokens*4)
@@ -106,7 +118,9 @@ class Compactor:
                       if summary else []),
                     *[m for turn in self.history[covered:] for m in turn["messages"]],
                     *self.conversation]
-        size, _ = self.measure(messages, self.tools)
+        size, _ = self.measure(
+            messages, self.tools, self.max_group, self.remaining_tools
+        )
         cap = min(self.request_limit-1024,
                   self.policy.max_bytes-1024-self.policy.reserved_output_tokens*4)
         if size > cap or len(messages) > self.policy.max_messages:
@@ -152,7 +166,7 @@ class Compactor:
             try:
                 prepared = self.snapshot(output, self.candidate_end)
             except ServiceError as error:
-                if error.code != "context_budget":
+                if error.code not in {"context_budget", "step_limit"}:
                     raise
             else:
                 await conn.execute(update(work_turns).where(
@@ -208,8 +222,16 @@ class Compactor:
         if not created:
             raise ServiceError("execution_unknown")
         try:
-            result = await self.step.call(messages, [], purpose="summary",
-                summary_bytes=self.compaction.summary_bytes)
+            result = await self.step.call(
+                messages,
+                [],
+                purpose="summary",
+                summary_bytes=self.compaction.summary_bytes,
+                request_budget=self.step.request_budget(
+                    self.max_group, self.remaining_tools, purpose="summary"
+                ),
+                request_prepared=True,
+            )
             self.guard()
             completed = await self.complete(index, result.text)
             self.guard()
@@ -227,11 +249,19 @@ class Compactor:
             await settled(self.store.work_write(fail, lambda: asyncio.sleep(0, result=None)))
             raise
 
-    async def prepare(self, run_id: str, conversation: list[Message],
-                      tools: list[dict[str, JsonValue]]) -> list[Message]:
+    async def prepare(
+        self,
+        run_id: str,
+        conversation: list[Message],
+        tools: list[dict[str, JsonValue]],
+        *,
+        max_group: int,
+        remaining_tools: int,
+    ) -> list[Message]:
         self.run_id = run_id
         self.conversation = [Message.model_validate_json(m.model_dump_json()) for m in conversation]
         self.tools = tools
+        self.max_group, self.remaining_tools = max_group, remaining_tools
         self.guard()
         await self.store.work_read(self.verify)
         if self.history is None:
@@ -287,8 +317,14 @@ class Compactor:
                 if size > cap:
                     raise ServiceError("context_budget", 422)
                 parts.append(chunk)
-            request = [Message(role="system", content=PROMPT),
-                       Message(role="user", content="".join(parts))]
+            budget = self.step.request_budget(
+                self.max_group, self.remaining_tools, purpose="summary"
+            )
+            request = self.step.with_budget_prompt(
+                [Message(role="system", content=PROMPT),
+                 Message(role="user", content="".join(parts))],
+                budget,
+            )
             try:
                 builder.check_budget(request, [], self.policy, self.request_limit)
             except ValueError:
@@ -303,7 +339,9 @@ class Compactor:
                     *conversation]
         while True:
             messages = compose()
-            size, trigger = self.measure(messages, tools)
+            size, trigger = self.measure(
+                messages, tools, self.max_group, self.remaining_tools
+            )
             remaining = len(history)-self.compaction.keep_turns
             if not trigger or self.covered >= remaining:
                 break
@@ -330,7 +368,10 @@ class Compactor:
         if size > cap or len(messages) > self.policy.max_messages:
             raise ServiceError("context_budget", 422)
         try:
-            builder.check_budget(messages, tools, self.policy, self.request_limit)
+            budget = self.step.request_budget(self.max_group, self.remaining_tools)
+            request_messages = self.step.with_budget_prompt(messages, budget)
+            request_tools = tools if budget.max_tool_calls_this_step > 0 else []
+            builder.check_budget(request_messages, request_tools, self.policy, self.request_limit)
         except ValueError:
             raise ServiceError("context_budget", 422) from None
         prepared = self.snapshot(self.summary, self.covered)

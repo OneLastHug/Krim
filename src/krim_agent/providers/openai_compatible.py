@@ -27,7 +27,7 @@ from krim_agent.contracts import (
 from krim_agent.runtime.contracts import settled
 from krim_agent.usage import TokenUsage
 
-from .types import ModelEvent, ModelText, ModelToolCall, ModelUsage
+from .types import ModelEvent, ModelRequestBudget, ModelText, ModelToolCall, ModelUsage
 
 
 class ProviderError(ServiceError):
@@ -220,7 +220,7 @@ class _ToolBuffer:
     arguments: str = ""
 
     def append(self, delta: dict[str, Any], config: OpenAICompatibleConfig) -> None:
-        if delta.get("type", "function") != "function":
+        if delta.get("type", "function") not in (None, "function"):
             raise ProviderError("provider_protocol")
         function = delta.get("function", {})
         if not isinstance(function, dict):
@@ -370,6 +370,8 @@ class OpenAICompatibleProvider:
             id(self._client._transport),
             id(getattr(self._client.send, "__func__", self._client.send)),
             id(getattr(self._client.build_request, "__func__", self._client.build_request)),
+            id(getattr(self.stream, "__func__", self.stream)),
+            id(getattr(self.stream_with_budget, "__func__", self.stream_with_budget)),
             getattr(getattr(self._client._transport, "_pool", None), "_max_connections", None),
             getattr(
                 getattr(self._client._transport, "_pool", None), "_max_keepalive_connections", None
@@ -412,10 +414,26 @@ class OpenAICompatibleProvider:
     async def stream(
         self, messages: Sequence[Message], tools: list[dict[str, JsonValue]]
     ) -> AsyncIterator[ModelEvent]:
+        source = self.stream_with_budget(messages, tools, None)
+        try:
+            async for event in source:
+                yield event
+        finally:
+            await settled(source.aclose())
+
+    async def stream_with_budget(
+        self,
+        messages: Sequence[Message],
+        tools: list[dict[str, JsonValue]],
+        budget: ModelRequestBudget | None,
+    ) -> AsyncIterator[ModelEvent]:
         if self.closed:
             raise ProviderError("closed", 503)
         if self.binding_token() != self._sealed:
             raise ServiceError("target_binding_changed")
+        max_tool_calls = self.config.max_tool_calls
+        if budget is not None:
+            max_tool_calls = min(max_tool_calls, budget.max_tool_calls_this_step)
         body: dict[str, JsonValue] = {
             "model": self.config.model,
             "messages": cast(JsonValue, _messages(messages)),
@@ -428,7 +446,7 @@ class OpenAICompatibleProvider:
             body["reasoning_effort"] = self.config.reasoning_effort
         if self.config.thinking is not None:
             body["thinking"] = {"type": self.config.thinking}
-        if tools:
+        if tools and max_tool_calls > 0:
             body["tools"] = [
                 {
                     "type": "function",
@@ -437,6 +455,8 @@ class OpenAICompatibleProvider:
                 }
                 for tool in tools
             ]
+            if max_tool_calls == 1:
+                body["parallel_tool_calls"] = False
         try:
             wire = encoded(body).encode()
         except (ValueError, RecursionError):
@@ -536,7 +556,7 @@ class OpenAICompatibleProvider:
                     if not isinstance(raw, dict):
                         raise ProviderError("provider_protocol")
                     index = raw.get("index")
-                    if type(index) is not int or not 0 <= index < self.config.max_tool_calls:
+                    if type(index) is not int or not 0 <= index < self.config.max_response_bytes:
                         raise ProviderError("provider_protocol")
                     calls.setdefault(index, _ToolBuffer()).append(raw, self.config)
                 reason = choice.get("finish_reason")
@@ -546,15 +566,17 @@ class OpenAICompatibleProvider:
                     if reason not in ("stop", "tool_calls"):
                         raise ProviderError("provider_protocol")
                     finish = reason
+            if sorted(calls) != list(range(len(calls))):
+                raise ProviderError("provider_protocol")
             if not done or finish is None:
                 raise ProviderError("provider_incomplete_stream")
             if bool(calls) != (finish == "tool_calls"):
                 raise ProviderError("provider_protocol")
-            if sorted(calls) != list(range(len(calls))):
-                raise ProviderError("provider_protocol")
             complete = [calls[index].collect() for index in sorted(calls)]
             if len({call.id for call in complete}) != len(complete):
                 raise ProviderError("provider_protocol")
+            if len(complete) > max_tool_calls:
+                raise ProviderError("tool_limit")
             await settled(response.aclose())
             response = None
             for call in complete:
