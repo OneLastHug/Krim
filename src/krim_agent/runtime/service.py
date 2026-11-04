@@ -508,12 +508,15 @@ class RunService:
         declared = snapshot.target.get("tools")
         if isinstance(declared, list):
             for spec in declared:
-                if (isinstance(spec, dict) and spec.get("name") == invocation.name
-                    and isinstance(spec.get("source"), dict)):
-                    if fingerprint(spec) != invocation.tool_hash:
-                        raise ServiceError("target_binding_changed")
-                    provenance = {"source": spec["source"], "risk": spec.get("risk")}
-                    break
+                if not isinstance(spec, dict) or spec.get("name") != invocation.name:
+                    continue
+                if fingerprint(spec) != invocation.tool_hash:
+                    raise ServiceError("target_binding_changed")
+                if "risk" in spec:
+                    provenance["risk"] = spec["risk"]
+                if isinstance(spec.get("source"), dict):
+                    provenance["source"] = spec["source"]
+                break
         if snapshot.request.target == "target-workspace":
             binding = self.bindings.get("target-workspace")
             if snapshot.work is None or binding is None or binding.loop.work is None:
