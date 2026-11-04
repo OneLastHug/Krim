@@ -1,7 +1,8 @@
 """运行事实写口；不依赖 SDK、ORM 或具体工具后端。"""
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -54,6 +55,75 @@ class RunStore(Protocol):
     async def child_request(
         self, eval_id: str, case_id: str, repetition: int
     ) -> tuple[RunRequest, str]: ...
+
+
+class ExecutionBudget:
+    """当前run或工具的可暂停执行时间；仅持有单轮运行期状态。"""
+
+    def __init__(self, deadline: float) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._deadline = deadline
+        self._timeout: asyncio.Timeout | None = None
+        self._remaining: float | None = None
+        self._pause_count = 0
+        self._finished = False
+
+    @property
+    def deadline(self) -> float:
+        if self._pause_count and self._remaining is not None:
+            return self._loop.time() + self._remaining
+        return self._deadline
+
+    @property
+    def remaining(self) -> float:
+        if self._pause_count and self._remaining is not None:
+            return self._remaining
+        return max(0.0, self._deadline - self._loop.time())
+
+    @property
+    def paused(self) -> bool:
+        return self._pause_count > 0
+
+    def bind(self, timeout: asyncio.Timeout) -> None:
+        if self._timeout is not None:
+            raise RuntimeError("execution budget already has a timeout")
+        self._timeout = timeout
+        deadline = timeout.when()
+        if deadline is not None:
+            self._deadline = deadline
+        if self._pause_count:
+            timeout.reschedule(None)
+
+    @contextmanager
+    def pause(self) -> Iterator[None]:
+        timeout = self._timeout
+        counted = False
+        if not self._finished and timeout is not None:
+            if self._pause_count:
+                self._pause_count += 1
+                counted = True
+            else:
+                remaining = self._deadline - self._loop.time()
+                if remaining > 0:
+                    self._remaining = remaining
+                    self._pause_count = 1
+                    timeout.reschedule(None)
+                    counted = True
+        try:
+            yield
+        finally:
+            if counted:
+                self._pause_count -= 1
+                if self._pause_count == 0:
+                    remaining = self._remaining
+                    self._remaining = None
+                    if not self._finished and remaining is not None:
+                        self._deadline = self._loop.time() + remaining
+                        if not timeout.expired():
+                            timeout.reschedule(self._deadline)
+
+    def finish(self) -> None:
+        self._finished = True
 
 
 async def settled[T](operation: Awaitable[T]) -> T:

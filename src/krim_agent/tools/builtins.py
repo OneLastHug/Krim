@@ -39,7 +39,9 @@ async def lookup_note(arguments: BaseModel) -> JsonValue:
         "welcome": "这是需要本次批准的合成演示资料。",
         "agent": "Agent 在有限循环中调用受控工具。",
     }
-    return notes[cast(NoteInput, arguments).key]
+    key = cast(NoteInput, arguments).key
+    note = notes.get(key)
+    return note if note is not None else {"found": False, "key": key}
 
 
 async def demo_policy(invocation: Invocation) -> Decision:
@@ -66,6 +68,19 @@ def builtin_registry() -> ToolRegistry:
                 digest,
             ),
             ToolSpec("echo", EchoInput, echo, {"type": "string"}, "1", digest),
-            ToolSpec("lookup_note", NoteInput, lookup_note, {"type": "string"}, "1", digest),
+            ToolSpec(
+                "lookup_note", NoteInput, lookup_note,
+                {"anyOf": [
+                    {"type": "string"},
+                    {"type": "object", "required": ["found", "key"],
+                     "properties": {"found": {"const": False}, "key": {"type": "string"}},
+                     "additionalProperties": False},
+                ]},
+                "2", digest,
+                description=(
+                    "查询内置示例笔记，现有 key 为 welcome、agent；"
+                    "未找到时返回 found=false。"
+                ),
+            ),
         )
     )

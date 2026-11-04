@@ -35,9 +35,10 @@ class ApprovalStore:
 def service_with(specs):
     service = object.__new__(RunService)
     service.store = ApprovalStore({"tools": specs})
-    service.settings = SimpleNamespace(approval_timeout=30, run_timeout=60)
+    service.settings = SimpleNamespace(approval_timeout=1, run_timeout=60)
     service._pending = {}
-    service.bindings = {}
+    service.bindings = {"demo": SimpleNamespace(
+        settings=SimpleNamespace(approval_timeout=30))}
     return service
 
 
@@ -87,6 +88,23 @@ async def test_approval_request_adds_only_frozen_matching_risk_and_source(spec, 
         assert ("risk" in record) is ("risk" in expected)
         assert ("source" in record) is ("source" in expected)
         service._pending[record["request_id"]].set_result(True)
+        assert await task is True
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_approval_window_uses_frozen_binding_over_service_settings():
+    spec = {"name": "lookup_note", "risk": "read", "parameters": {"type": "object"}}
+    service = service_with([spec])
+    call = invocation(fingerprint(spec))
+    task = asyncio.create_task(service._approve(call, 20))
+    try:
+        await asyncio.wait_for(service.store.requested.wait(), timeout=1)
+        expires_in = service.store.appended[0]["expires_at"] - time.time()
+        assert 19 < expires_in <= 20
+        service._pending[service.store.appended[0]["request_id"]].set_result(True)
         assert await task is True
     finally:
         if not task.done():

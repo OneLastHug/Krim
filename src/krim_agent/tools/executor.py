@@ -17,7 +17,7 @@ from krim_agent.contracts import (
     fingerprint,
     parse_json,
 )
-from krim_agent.runtime.contracts import settled
+from krim_agent.runtime.contracts import ExecutionBudget, settled
 
 from .core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
 from .mcp_schema import MCPContract
@@ -36,6 +36,7 @@ class ToolContext:
     timeout: float
     assert_target_current: Callable[[], None] = lambda: None
     scope: Scope | None = None
+    approval_timeout: float = 300
 
 
 class ToolExecutor:
@@ -74,8 +75,8 @@ class ToolExecutor:
             fields["arguments"] = parse_json(invocation.arguments_json)
             outcome = ToolObservation.model_validate(fields)
             clock = asyncio.get_running_loop().time
-            deadline = min(clock() + context.timeout,
-                context.scope.deadline) if context.scope else None
+            deadline = clock() + context.timeout if context.scope is not None else None
+            tool_budget: ExecutionBudget | None = None
             decision = "deny"
             entering = returned = available = cancelled = False
             value: JsonValue = None
@@ -109,10 +110,14 @@ class ToolExecutor:
 
             try:
                 if context.scope is None:
-                    # legacy的tool_start仍在原工具timeout之外；workspace从入口开始计时。
+                    # legacy的tool_start仍在原工具timeout之外。
                     await context.emit("tool_start", outcome.model_dump(mode="json"))
                     deadline = clock() + context.timeout
-                async with asyncio.timeout_at(deadline):
+                assert deadline is not None
+                tool_budget = ExecutionBudget(deadline)
+                tool_timeout = asyncio.timeout_at(deadline)
+                tool_budget.bind(tool_timeout)
+                async with tool_timeout:
                     if context.scope is not None:
                         await context.emit("tool_start", outcome.model_dump(mode="json"))
                     check()
@@ -138,10 +143,10 @@ class ToolExecutor:
                         if decision not in {"allow", "deny", "ask"}:
                             decision = "deny"
                         if decision == "ask":
-                            remaining = max(0, cast(float,
-                                deadline) - clock(
-                                )) if context.scope is not None else context.timeout
-                            approved = await context.approve(invocation, remaining)
+                            assert tool_budget is not None
+                            with tool_budget.pause():
+                                approved = await context.approve(
+                                    invocation, context.approval_timeout)
                             check()
                             if not approved:
                                 raise ServiceError("approval_denied")

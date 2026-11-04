@@ -32,7 +32,7 @@ OPERATOR_KEY = "formal-workbench-operator-browser-key"
 VIEWER_KEY = "formal-workbench-viewer-browser-key"
 MEMBER_KEY = "formal-workbench-member-browser-key"
 VIEWER_SESSION_TITLE = "formal-workbench viewer seed"
-IMPLEMENTATION_DIGEST = hashlib.sha256(b"formal-workbench-counting-fixture/1").hexdigest()
+IMPLEMENTATION_DIGEST = hashlib.sha256(b"formal-workbench-counting-fixture/2").hexdigest()
 MARKDOWN_RESPONSE = """# 正式工作台 Markdown 验证
 
 正文支持 **强调**、表格、代码高亮与安全链接。
@@ -123,6 +123,8 @@ class FormalWorkbenchProvider(FakeProvider):
                         "arguments": cast(dict[str, JsonValue], arguments.model_dump(mode="json")),
                     }
                 )
+                if name == "echo" and getattr(arguments, "text", None) == "synthetic-tool-error":
+                    raise RuntimeError("Synthetic tool executor failure")
                 return await original(arguments)
 
             values.append(
@@ -178,8 +180,8 @@ async def serve(args: argparse.Namespace) -> None:
         settings = Settings(
             database=database,
             max_active_runs=1,
-            run_timeout=60,
-            tool_timeout=30,
+            run_timeout=args.run_timeout,
+            tool_timeout=args.tool_timeout,
             approval_timeout=args.approval_timeout,
             session_queue_timeout=120,
         )
@@ -221,6 +223,8 @@ async def serve(args: argparse.Namespace) -> None:
                 "active": provider.active,
                 "executions": cast(list[JsonValue], list(provider.executions)),
                 "by_name": by_name,
+                "limits": {"run": settings.run_timeout, "tool": settings.tool_timeout,
+                           "approval": settings.approval_timeout},
             }
 
         # 该诊断路由仍经过 create_app 的 LocalBoundary 和 AccessPolicy 鉴权。
@@ -260,6 +264,8 @@ async def serve(args: argparse.Namespace) -> None:
                 "version": __version__,
                 "provider": type(provider).__name__,
                 "approval_timeout": args.approval_timeout,
+                "run_timeout": args.run_timeout,
+                "tool_timeout": args.tool_timeout,
                 "viewer_seed_session_id": viewer_session_id,
                 "viewer_seed_session_title": VIEWER_SESSION_TITLE,
             },
@@ -306,6 +312,8 @@ def main() -> None:
         "--approval-timeout", type=float, default=20,
         help="工具审批等待秒数，可用于有限时长的过期用例",
     )
+    parser.add_argument("--run-timeout", type=float, default=60)
+    parser.add_argument("--tool-timeout", type=float, default=30)
     asyncio.run(serve(parser.parse_args()))
 
 

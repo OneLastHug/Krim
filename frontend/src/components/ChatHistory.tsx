@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
 import { Button } from "./ui/button";
-import { chatCopy as c, chatReason, turnLabels } from "../lib/copy";
+import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 import { useCopyFeedback } from "../hooks/use-copy-feedback";
 import { projectTurn } from "../lib/session-presentation";
@@ -108,7 +108,7 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
               return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={allow => { if (approval) void chat.control(turn, "approval", approval, allow); }} />;
             })}
             {turn.status === "running" && !items.length && <p className="chat-waiting" role="status">正在处理</p>}
-            {turn.code && <p className="notice chat-turn-notice" data-ui-data>{chatReason({ code: turn.code })}<code>{turn.code}</code></p>}
+            {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">
               {lastAnswer && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制回答" title="复制回答" onClick={() => void feedback.copy(lastAnswer.text)}><Copy aria-hidden="true" /></Button>}
               {turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="更多操作" title="运行详情" aria-expanded={moreOpen} onClick={() => {

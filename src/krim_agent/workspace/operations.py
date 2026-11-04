@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import ServiceError, encoded, fingerprint
 from krim_agent.execution.linux import SandboxRunner
-from krim_agent.runtime.contracts import settled
+from krim_agent.runtime.contracts import ExecutionBudget, settled
 from krim_agent.security import LOCAL, AccessPolicy, PrincipalContext
 from krim_agent.storage import work
 from krim_agent.storage.models import work_turns
@@ -74,7 +74,8 @@ class WorkspaceOperations:
             raise ServiceError("target_binding_changed")
         return frame
 
-    def scope(self, frame: WorkFrame, check: Callable[[], None], deadline: float) -> Scope:
+    def scope(self, frame: WorkFrame, check: Callable[[], None], deadline: float,
+              execution_budget: ExecutionBudget | None = None) -> Scope:
         access = ExecutionAccess(self.principal(frame), frame.grant.workspace_id, frame.session_id)
 
         def fence() -> None:
@@ -83,10 +84,12 @@ class WorkspaceOperations:
                 self.profile.model_dump(
                 mode="json")) != self._profile_hash or access.grant() != frame.grant:
                 raise ServiceError("target_binding_changed")
-            if time.monotonic() >= deadline:
+            current_deadline = (execution_budget.deadline if execution_budget is not None
+                                else deadline)
+            if time.monotonic() >= current_deadline:
                 raise ServiceError("run_timeout")
 
-        return Scope(frame, access, self, fence, deadline)
+        return Scope(frame, access, self, fence, deadline, execution_budget)
 
     async def policy(self, invocation: Invocation) -> Literal["allow", "deny", "ask"]:
         scope = CURRENT.get()
