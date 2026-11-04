@@ -386,14 +386,20 @@ class SessionService:
     ) -> TurnView:
         async with asyncio.timeout(
             self.settings.session_queue_timeout + self.settings.run_timeout + 30
-        ):
+        ) as reader_timeout:
             while True:
                 value = await self.turn(principal, workspace, session_id, turn_id)
                 if value.status not in {"queued", "running"}:
                     return value
-                if value.run_id is not None:
-                    producer = self.runs.tasks.get(value.run_id)
-                    if producer is not None and producer.done():
+                producer = self.runs.tasks.get(value.run_id) if value.run_id is not None else None
+                if producer is not None and not producer.done():
+                    # 运行与审批有自己的预算，读者不再用旧墙钟期限提前退出。
+                    if reader_timeout.when() is not None:
+                        reader_timeout.reschedule(None)
+                else:
+                    if reader_timeout.when() is None:
+                        reader_timeout.reschedule(asyncio.get_running_loop().time() + 30)
+                    if producer is not None and value.run_id is not None:
                         await self.runs.wait(value.run_id)
                 await asyncio.sleep(0.02)
 

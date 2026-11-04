@@ -69,6 +69,7 @@
 .chat-approval .approval-title svg { width: 16px; height: 16px; color: var(--muted-foreground); }
 .chat-approval .approval-title strong { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
 .chat-approval .approval-title > span { margin-left: auto; white-space: nowrap; color: var(--muted-foreground); font-size: 12px; }
+.chat-approval .approval-expiry { color: var(--muted-foreground); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
 .chat-approval .approval-arguments { padding: 10px; border-radius: 6px; background: var(--muted); }
 .chat-approval .approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .chat-approval .approval-actions span { color: var(--muted-foreground); font-size: 12px; }

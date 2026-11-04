@@ -34,7 +34,8 @@ from krim_agent.source_fingerprints import source_digest
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.pipeline import _owns, _producing
 
-from .contracts import RunStore, settled
+from . import model_step as model_step_module
+from .contracts import ExecutionBudget, RunStore, settled
 from .engine import AgentLoop
 from .facts import project_facts
 
@@ -114,6 +115,40 @@ class RunBinding:
                 for token in (id(method), id(getattr(method, "__code__", None)))
             )
             result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        from krim_agent import config as config_module
+        from krim_agent.tools import executor as executor_module
+        from krim_agent.tools import pipeline as pipeline_module
+        from krim_agent.workspace import operations as operations_module
+        from krim_agent.workspace import types as workspace_types
+
+        from . import contracts as contracts_module
+        from . import engine as engine_module
+        from .contracts import ExecutionBudget
+
+        result += tuple(map(id, (
+            ExecutionBudget,
+            ExecutionBudget.bind,
+            ExecutionBudget.pause,
+            ExecutionBudget.finish,
+            ExecutionBudget.deadline.fget,
+            engine_module.AgentLoop.run,
+            model_step_module.ModelStep.call,
+            executor_module.ToolExecutor.execute,
+            pipeline_module.Scope.deadline.fget,
+            operations_module.WorkspaceOperations.scope,
+            RunService._drive,
+            RunService._approve,
+        )))
+        result += tuple(source_digest(module.__file__) for module in (
+            config_module,
+            contracts_module,
+            engine_module,
+            model_step_module,
+            executor_module,
+            pipeline_module,
+            operations_module,
+            workspace_types,
+        )) + (source_digest(__file__),)
         return result
 
     @staticmethod
@@ -279,6 +314,7 @@ class RunService:
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[bool]] = {}
+        self._execution_budgets: dict[str, ExecutionBudget] = {}
         self._cancelled: set[str] = set()
         self._finalizing: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
@@ -406,15 +442,22 @@ class RunService:
         with _producing(self, run.id, cast(asyncio.Task[None], producer)):
             status: RunStatus = "completed"
             code: str | None = None
+            budget: ExecutionBudget | None = None
             try:
                 timeout = (
                     binding.loop.work.profile.runtime.run_timeout_seconds
                     if binding.loop.work is not None else binding.settings.run_timeout
                 )
-                remaining = max(0, run.created_at + timeout - time.time())
-                async with asyncio.timeout(remaining):
+                deadline = asyncio.get_running_loop().time() + max(
+                    0, run.created_at + timeout - time.time())
+                budget = ExecutionBudget(deadline)
+                self._execution_budgets[run.id] = budget
+                timeout_context = asyncio.timeout_at(deadline)
+                budget.bind(timeout_context)
+                async with timeout_context:
                     await self.store.set_running(run.id)
-                    await binding.loop.run(run.id, self._approve, binding.assert_current)
+                    await binding.loop.run(run.id, self._approve, binding.assert_current,
+                                           execution_budget=budget)
             except asyncio.CancelledError:
                 status, code = "aborted", "cancelled"
             except TimeoutError:
@@ -424,6 +467,9 @@ class RunService:
             except Exception:
                 status, code = "failed", "execution_error"
             finally:
+                if budget is not None:
+                    budget.finish()
+                    self._execution_budgets.pop(run.id, None)
                 self._finalizing.add(run.id)
                 try:
                     await self.store.finish(run.id, status, code)
@@ -500,8 +546,7 @@ class RunService:
             raise error
         return await self.get(run_id)
 
-    async def _approve(self, invocation: Invocation, remaining_seconds: float) -> bool:
-        tool_deadline = time.monotonic() + remaining_seconds
+    async def _approve(self, invocation: Invocation, approval_window_seconds: float) -> bool:
         snapshot = await self.store.snapshot(invocation.run_id)
         request_id = secrets.token_hex(16)
         provenance: dict[str, JsonValue] = {}
@@ -537,18 +582,17 @@ class RunService:
                 raise ServiceError("target_binding_changed") from None
             if selected != reference:
                 raise ServiceError("target_binding_changed")
-            now, monotonic = time.time(), time.monotonic()
-            expires = min(snapshot.run.created_at + selected.run_timeout_seconds,
-                          now + selected.approval_timeout_seconds, now + max(0,
-                tool_deadline-monotonic))
+            now = time.time()
+            expires = now + max(0, min(
+                approval_window_seconds, selected.approval_timeout_seconds))
             if expires <= now:
                 raise ServiceError("approval_expired")
         else:
-            expires = min(
-                time.time() + remaining_seconds,
-                time.time() + self.settings.approval_timeout,
-                snapshot.run.created_at + self.settings.run_timeout,
-            )
+            binding = self.bindings.get(snapshot.request.target)
+            if binding is None:
+                raise ServiceError("target_binding_changed")
+            expires = time.time() + min(
+                approval_window_seconds, binding.settings.approval_timeout)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
@@ -568,7 +612,11 @@ class RunService:
                 },
             )
             try:
-                return await asyncio.wait_for(future, max(0, expires - time.time()))
+                budget = getattr(self, "_execution_budgets", {}).get(invocation.run_id)
+                if budget is None:
+                    return await asyncio.wait_for(future, max(0, expires - time.time()))
+                with budget.pause():
+                    return await asyncio.wait_for(future, max(0, expires - time.time()))
             except TimeoutError:
                 raise ServiceError("approval_expired") from None
         finally:

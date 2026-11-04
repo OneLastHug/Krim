@@ -11,6 +11,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, JsonValue
 
+from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.tools.core import Invocation
 from krim_agent.workspace.types import ExecutionAccess, WorkFrame
 
@@ -32,8 +33,14 @@ class Scope:
     access: ExecutionAccess
     operations: Operations
     check: Callable[[], None]
-    deadline: float
+    initial_deadline: float
+    execution_budget: ExecutionBudget | None = None
     invocation: Invocation | None = None
+
+    @property
+    def deadline(self) -> float:
+        return (self.execution_budget.deadline if self.execution_budget is not None
+                else self.initial_deadline)
 
 
 CURRENT: ContextVar[Scope | None] = ContextVar("krim-workspace-invocation", default=None)

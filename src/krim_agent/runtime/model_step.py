@@ -16,7 +16,7 @@ from krim_agent.providers.types import (
     ModelToolCall,
     ModelUsage,
 )
-from krim_agent.runtime.contracts import settled
+from krim_agent.runtime.contracts import ExecutionBudget, settled
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.usage import TokenUsage
 
@@ -38,10 +38,12 @@ class ModelStep:
     def __init__(self, provider: ModelProvider,
                  emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
                  check: Callable[[], None], *, max_steps: int, max_output: int,
-                 deadline: float | None, workspace: bool) -> None:
+                 deadline: float | None, workspace: bool,
+                 execution_budget: ExecutionBudget | None = None) -> None:
         self.provider, self.emit, self.check = provider, emit, check
         self.max_steps, self.max_output = max_steps, max_output
         self.deadline, self.workspace = deadline, workspace
+        self.execution_budget = execution_budget
         self.index = self.output_bytes = 0
         self.seen: set[str] = set()
 
@@ -98,7 +100,9 @@ class ModelStep:
             raise ServiceError("step_limit")
         index, self.index = self.index, self.index+1
         clock = asyncio.get_running_loop().time
-        end = min(self.deadline, clock()+20) if self.deadline is not None else None
+        run_deadline = (self.execution_budget.deadline if self.execution_budget is not None
+                        else self.deadline)
+        end = min(run_deadline, clock()+20) if run_deadline is not None else None
         span = secrets.token_hex(8)
         extra: dict[str, JsonValue] = {"purpose": purpose} if self.workspace else {}
         text, calls = "", []

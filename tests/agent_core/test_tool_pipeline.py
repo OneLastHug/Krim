@@ -285,7 +285,7 @@ async def manual_turn(app, notes, monkeypatch, *, age=0):
 
 
 @pytest.mark.parametrize("case", ["after-legacy-run", "run-first", "tool-first"])
-async def test_workspace_approval_uses_frozen_remaining_deadlines(data_case, tmp_path,
+async def test_workspace_approval_uses_frozen_approval_window(data_case, tmp_path,
     monkeypatch, case):
     import time
     import uuid
@@ -299,8 +299,8 @@ async def test_workspace_approval_uses_frozen_remaining_deadlines(data_case, tmp
     frame = await app.work.prepare(run.id)
     assert frame.conditions["runtime"]["run_timeout_seconds"] == 180.0
     assert frame.conditions["runtime"]["tool_timeout_seconds"] == 90.0
-    assert frame.conditions["runtime"]["approval_timeout_seconds"] == 30.0
-    assert app.settings.run_timeout == 30 and app.settings.approval_timeout == 20
+    assert frame.conditions["runtime"]["approval_timeout_seconds"] == 300.0
+    assert app.settings.run_timeout == 30 and app.settings.approval_timeout == 300
     registry = binding.loop.executor.registry
     spec = registry.get("workspace_write")
     args = {"expected_revision": 0, "path": "approved.txt", "expected_file_hash": None,
@@ -345,7 +345,7 @@ async def test_workspace_approval_uses_frozen_remaining_deadlines(data_case, tmp
             await app.store.finish(run.id, "failed", "completion_unverified")
         return
     context = ToolContext(lambda kind, data: app.store.append(run.id, kind, data),
-        app.service._approve, 90, binding.assert_current, scope)
+        app.service._approve, 90, binding.assert_current, scope, 300)
     task = asyncio.create_task(binding.loop.executor.execute(invocation, context))
     waiter = asyncio.create_task(entered.wait())
     try:
@@ -355,8 +355,8 @@ async def test_workspace_approval_uses_frozen_remaining_deadlines(data_case, tmp
             requests = await app.service.approvals(run.id)
             if requests:
                 pending = requests[0]
-                assert 0 < pending["expires_at"]-time.time() <= 30
-                limit = 10 if case == "run-first" else 30
+                assert 0 < pending["expires_at"]-time.time() <= 300
+                limit = 300
                 assert limit - 1 < pending["expires_at"]-time.time() <= limit
                 reply = ApprovalReply(request_key="approve-stable", call_id=invocation.call_id,
                     tool_hash=invocation.tool_hash,

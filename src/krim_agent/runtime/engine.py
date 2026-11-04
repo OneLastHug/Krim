@@ -24,7 +24,7 @@ from krim_agent.workspace.operations import WorkspaceOperations
 from krim_agent.workspace.verification import Verifier, stage_result
 
 from . import model_step
-from .contracts import RunStore, WorkRuntime, settled
+from .contracts import ExecutionBudget, RunStore, WorkRuntime, settled
 
 
 class AgentLoop:
@@ -49,6 +49,7 @@ class AgentLoop:
         run_id: str,
         approve: Approve,
         assert_target_current: Callable[[], None] = lambda: None,
+        execution_budget: ExecutionBudget | None = None,
     ) -> None:
         def check() -> None:
             assert_target_current()
@@ -72,20 +73,28 @@ class AgentLoop:
             frame = await operations.prepare(run_id)
             check()
             runtime = cast(dict[str, JsonValue], frame.conditions["runtime"])
-            deadline = asyncio.get_running_loop().time() + max(0,
-                snapshot.run.created_at + cast(float, runtime["run_timeout_seconds"]) - time.time())
-            scope = operations.scope(frame, check, deadline)
             messages = [Message(role="user", content=snapshot.request.text)]
         elif snapshot.session_context is not None:
             if not isinstance(snapshot.session_context, SessionContext):
                 raise ServiceError("workspace_contract_required")
             messages = list(snapshot.session_context.context.messages)
+        if execution_budget is None:
+            timeout = (
+                cast(float, runtime["run_timeout_seconds"]) if frame else self.settings.run_timeout
+            )
+            deadline = asyncio.get_running_loop().time() + max(
+                0, snapshot.run.created_at + timeout - time.time())
+            execution_budget = ExecutionBudget(deadline)
+        if frame is not None and operations is not None:
+            scope = operations.scope(frame, check, execution_budget.deadline, execution_budget)
         max_steps = cast(int, runtime["model_steps"]) if frame else self.settings.max_steps
         max_group = cast(int,
             runtime["max_tools_per_step"]) if frame else self.settings.max_tools_per_step
         max_calls = cast(int, runtime["tool_calls"]) if frame else self.settings.max_tool_calls
         tool_timeout = cast(float,
             runtime["tool_timeout_seconds"]) if frame else self.settings.tool_timeout
+        approval_timeout = cast(float, runtime["approval_timeout_seconds"]
+            ) if frame else self.settings.approval_timeout
         tool_count = 0
         append_event = partial(self.store.append, run_id)
         compressor: compaction.Compactor | None = None
@@ -99,7 +108,8 @@ class AgentLoop:
             return event
         stepper = model_step.ModelStep(self.provider, emit, check, max_steps=max_steps,
             max_output=self.settings.max_output_bytes, deadline=scope.deadline if scope else None,
-            workspace=frame is not None)
+            workspace=frame is not None,
+            execution_budget=execution_budget if frame is not None else None)
         provider_limit = getattr(getattr(self.provider, "config", None),
                                  "max_request_bytes", self.settings.max_request_bytes)
         request_limit = min(self.settings.max_request_bytes, provider_limit)
@@ -190,7 +200,7 @@ class AgentLoop:
                     provider_call_id=call.id)
                 context = ToolContext(cast(Callable[[str, dict[str, JsonValue]],
                     Awaitable[RunEvent]], emit),
-                                      approve, tool_timeout, check, scope)
+                                      approve, tool_timeout, check, scope, approval_timeout)
                 return await self.executor.execute(invocation, context)
 
             index = 0
