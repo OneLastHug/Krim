@@ -6,7 +6,7 @@ const baseURL = process.env.KRIM_FORMAL_BASE_URL ?? "http://127.0.0.1:8879";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: ["formal-workbench.spec.ts", "formal-workbench-zoom.spec.ts", "model-budget-errors.spec.ts"],
+  testMatch: ["formal-workbench.spec.ts", "formal-workbench-zoom.spec.ts", "model-budget-errors.spec.ts", "session-create-dialog.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: 0,

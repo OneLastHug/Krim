@@ -861,6 +861,26 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .theme-settings { display: flex; flex-wrap: wrap; gap: 8px; }
 .rename-status { margin-top: 12px; color: var(--muted-foreground); font-size: var(--font-size-ui); }
 .rename-recovery { display: flex; justify-content: flex-start; margin-top: 10px; }
+.session-create-dialog[data-slot="dialog-content"] { width: min(420px,calc(100vw - 32px)); max-width: calc(100vw - 32px); gap: 20px; }
+.session-create-dialog [data-slot="dialog-title"] { margin: 0; }
+.session-create-form { display: grid; gap: 18px; min-width: 0; }
+.session-create-field { display: grid; gap: 8px; min-width: 0; }
+.session-create-field > label { min-height: 18px; line-height: 18px; }
+.session-create-field input[data-slot="input"], .session-target-select select { width: 100%; min-width: 0; height: 36px; margin: 0; border: 1px solid var(--input); border-radius: 8px; background: var(--input-surface); color: var(--foreground); font-family: var(--krim-font-sans); font-size: 14px; line-height: 20px; }
+.session-target-select { position: relative; min-width: 0; }
+.session-target-select select { display: block; appearance: none; padding: 0 34px 0 10px; }
+.session-target-select > svg { position: absolute; top: 50%; right: 10px; width: 16px; height: 16px; color: var(--muted-foreground); transform: translateY(-50%); pointer-events: none; }
+.session-target-select select:focus-visible { border-color: var(--ring); outline: 2px solid var(--ring); outline-offset: 2px; }
+.session-target-help { margin: 0; color: var(--muted-foreground); font-size: 12px; line-height: 18px; }
+.session-create-form .dialog-actions { gap: 8px; margin-top: 2px; }
+.session-create-dialog .dialog-actions > button { width: auto; min-height: 36px; }
+@media (max-width: 700px), (pointer: coarse) {
+  .session-create-field input[data-slot="input"], .session-target-select select { height: 40px; }
+  .session-create-dialog .dialog-actions > button { min-height: 40px; }
+}
+@media (max-width: 480px) {
+  .session-create-dialog .dialog-actions > button { width: 100%; }
+}
 .session-rename-dialog form { display: grid; gap: 4px; }
 .session-rename-dialog .dialog-actions { margin-top: 16px; }
 @media (max-width: 1100px) {
