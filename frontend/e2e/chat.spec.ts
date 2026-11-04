@@ -40,14 +40,13 @@ async function startServer(root: string, database: string, generation: number, t
 async function connect(page: Page, token: string) { await page.getByRole("button", { name: "连接", exact: true }).first().click(); await page.locator("#api-key").fill(token); await page.locator("#connect-save").click(); await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled(); }
 async function navigateView(page: Page, view: "chat" | "run") {
   const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
-  let sidebar = page.locator(".desktop-sidebar");
+  let navigation = page.locator(".workbench-globalbar .primary-navigation");
   if (await mobileMenu.isVisible()) {
     await mobileMenu.click();
-    sidebar = page.getByRole("dialog", { name: "主导航", exact: true });
+    navigation = page.locator(".mobile-drawer-content .primary-navigation");
   }
-  const navigation = sidebar.locator(".workspace-navigation");
-  if (await navigation.getAttribute("open") === null) await navigation.locator("summary").click();
-  const button = sidebar.getByRole("button", { name: view === "run" ? "导航到运行记录" : "导航到对话", exact: true });
+  const button = navigation.getByRole("button", { name: view === "run" ? "导航到运行记录" : "导航到对话", exact: true });
+  await expect(button).toBeVisible();
   await button.focus(); await expect(button).toBeFocused(); await page.keyboard.press("Enter");
   await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe(view);
 }
@@ -90,7 +89,7 @@ async function capture(page: Page, root: string, name: string) {
     const luminance = (c: number[]) => c.slice(0,3).map(v => { const n=v/255; return n<=.04045 ? n/12.92 : ((n+.055)/1.055)**2.4; }).reduce((a,v,i) => a+v*[.2126,.7152,.0722][i]!,0);
     const ratio = (a: number[], b: number[]) => { const x=luminance(a), y=luminance(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05); };
     const contrast = [...document.querySelectorAll<HTMLElement>(".chat-workbench button,.topbar-title h1,.chat-turn [role=status],.chat-turn-meta,.chat-answer,.chat-user-text,.chat-pending,.chat-notice")].filter(el => el.getClientRects().length && !el.closest("[hidden]") && getComputedStyle(el).visibility !== "hidden" && !el.matches(":disabled")).map(el => ({tag:el.tagName,text:el.innerText.slice(0,80),color:getComputedStyle(el).color,background:background(el),ratio:ratio(rgb(getComputedStyle(el).color),background(el))}));
-    const targets = [...document.querySelectorAll<HTMLButtonElement>(".chat-workbench button")].filter(el => el.getClientRects().length && !el.disabled && !el.closest("[hidden]")).map(el => ({text:el.innerText,rect:rect(el)}));
+    const targets = [...document.querySelectorAll<HTMLButtonElement>(".chat-workbench button")].filter(el => el.getClientRects().length && !el.disabled && !el.closest("[hidden]")).map(el => ({text:el.innerText,className:el.className,rect:rect(el)}));
     const active = document.activeElement as HTMLElement;
     const focusStyle = active ? getComputedStyle(active) : null;
     const focusEvidence = active?.matches(".chat-workbench :focus-visible") ? {width:parseFloat(focusStyle!.outlineWidth),contrast:ratio(rgb(focusStyle!.outlineColor),background(active.parentElement))} : null;
@@ -99,7 +98,23 @@ async function capture(page: Page, root: string, name: string) {
   await writeFile(resolve(root, name + ".json"), JSON.stringify(data, null, 2));
   expect(data.overflow).toBe(false);
   for (const item of data.contrast) expect(item.ratio, JSON.stringify(item)).toBeGreaterThanOrEqual(4.5);
-  for (const item of data.targets) { expect(item.rect!.height, item.text).toBeGreaterThanOrEqual(44); expect(item.rect!.width, item.text).toBeGreaterThanOrEqual(44); }
+  const mobile = data.viewport.width <= 700;
+  for (const item of data.targets) {
+    const expectedSize = item.className.includes("message-copy-code") ? (mobile ? 40 : 24)
+      : item.className.includes("chat-send") ? (mobile ? 40 : 28)
+      : item.className.includes("chat-message-action") ? (mobile ? 40 : 30)
+      : item.className.includes("chat-jump") ? 32 : null;
+    if (expectedSize !== null) {
+      expect(item.rect!.height, item.text).toBeGreaterThanOrEqual(expectedSize - 1);
+      expect(item.rect!.height, item.text).toBeLessThanOrEqual(expectedSize + 1);
+      expect(item.rect!.width, item.text).toBeGreaterThanOrEqual(expectedSize - 1);
+      expect(item.rect!.width, item.text).toBeLessThanOrEqual(expectedSize + 1);
+    } else {
+      const minimumSize = mobile ? 40 : 24;
+      expect(item.rect!.height, item.text).toBeGreaterThanOrEqual(minimumSize);
+      expect(item.rect!.width, item.text).toBeGreaterThanOrEqual(minimumSize);
+    }
+  }
   if (data.focusEvidence) { expect(data.focusEvidence.width).toBeGreaterThanOrEqual(2); expect(data.focusEvidence.contrast).toBeGreaterThanOrEqual(3); }
   if (data.heading) expect(data.heading.bottom).toBeLessThanOrEqual(data.viewport.height); if (data.stop) expect(data.stop.bottom).toBeLessThanOrEqual(data.viewport.height); for (const item of data.find) if (item) expect(item.bottom).toBeLessThanOrEqual(data.viewport.height);
   await writeFile(resolve(root, name + ".json"), JSON.stringify(data, null, 2));
@@ -135,7 +150,7 @@ for (const viewport of [{ width: 1280, height: 900, name: "desktop" }, { width: 
       const empty = await page.request.get(url + `/v2/workspaces/local/sessions/${a}/turns`, {headers:{Authorization:"Bearer "+token1}}); expect(await empty.json()).toEqual([]);
       expect((await waitFile(resolve(root,"server-generation-1/model-counts.json"))).requests).toHaveLength(0);
       await page.locator(".chat-composer button[type=submit]").click(); await answer(page, "请记住基数17", token1); await send(page, "与3相加"); await answer(page, "20", token1); await bottom(page); await capture(page, root, "complete");
-      const last = page.locator(".chat-turn").last(); await last.getByRole("button", { name: "更多操作", exact: true }).click(); await expect(last.locator(".chat-detail")).toContainText("工具摘要"); await expect(last.locator(".chat-detail")).toContainText("Trace 记录完整"); await expect(last.locator(".chat-detail .tool").first()).toBeVisible(); await page.getByRole("button", { name: "查看 Trace", exact: true }).click(); await expect(page.locator(".topbar-title h1")).toHaveText("Trace"); await expect(page.locator(".trace-span-node").first()).toBeVisible(); await expect(page.locator(".trace-detail-heading h2")).toHaveText("会话 A"); await capture(page, root, "trace"); await page.getByRole("button", { name: "返回对话", exact: true }).click(); await expect(page.locator(".topbar-title h1")).toHaveText("会话 A"); await last.getByRole("button", { name: "更多操作", exact: true }).click();
+      const last = page.locator(".chat-turn").last(); const tool = last.locator(".chat-tool").first(); await expect(tool.locator("summary")).toBeVisible(); await expect(tool.locator("summary strong")).not.toBeEmpty(); await tool.locator("summary").click(); await expect(tool.locator(".chat-tool-section pre").first()).toBeVisible(); await last.getByRole("button", { name: "更多操作", exact: true }).click(); await expect(last.locator(".chat-detail")).toContainText("Trace 记录完整"); await page.getByRole("button", { name: "查看 Trace", exact: true }).click(); await expect(page.locator(".topbar-title h1")).toHaveText("Trace"); await expect(page.locator(".trace-span-node").first()).toBeVisible(); await expect(page.locator(".trace-detail-heading h2")).toHaveText("会话 A"); await capture(page, root, "trace"); await page.getByRole("button", { name: "返回对话", exact: true }).click(); await expect(page.locator(".topbar-title h1")).toHaveText("会话 A"); await last.getByRole("button", { name: "更多操作", exact: true }).click();
       await navigateView(page, "run"); await navigateView(page, "chat"); await expect(page.locator(".topbar-title h1")).toHaveText("会话 A"); expect(posts.filter(p => p.path.endsWith("/turns"))).toHaveLength(3);
       await send(page, "/hold"); await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText("进行中"); await send(page, "/add 8 1"); await expect(page.locator(".chat-turn").last()).toContainText("排队中"); await bottom(page); await capture(page, root, "running-queued"); await page.locator("#chat-stop").click(); await answer(page, "9", token1);
       await send(page, "/note welcome"); await expect(page.locator(".chat-approval")).toBeVisible(); await bottom(page); await capture(page, root, "approval"); await page.getByRole("button", { name: "允许 lookup_note 本次调用" }).click(); await expectTurnStatus(page, token1, "completed");
@@ -191,8 +206,9 @@ for (const viewport of [{ width:1280,height:900,name:"desktop" },{ width:390,hei
       expect(await page.locator(".chat-turn").last().locator(".chat-user-text").textContent()).toBe("/echo "+over);
       // 独立的4050字节有效工具参数低于JSON容量；仍足以产生真正局部横滚。
       const long="LONG_PARAMETER_".repeat(270),input="/echo "+long; await send(page,input); await answer(page,long,"synthetic-long-tools");
-      const last=page.locator(".chat-turn").last(); await last.getByRole("button",{name:"更多操作",exact:true}).click();
-      const argument=last.locator(".tool pre").nth(0),result=last.locator(".tool pre").nth(1);
+      const last=page.locator(".chat-turn").last();
+      const tool=last.locator(".chat-tool").first(); await expect(tool.locator("summary")).toBeVisible(); await tool.locator("summary").click();
+      const argument=tool.locator(".chat-tool-section pre").nth(0),result=tool.locator(".chat-tool-section pre").nth(1);
       await expect(argument).toBeVisible(); expect(JSON.parse((await argument.textContent())!)).toEqual({text:long}); expect(JSON.parse((await result.textContent())!)).toBe(long);
       const read=()=>argument.evaluate(el=>({client:el.clientWidth,scroll:el.scrollWidth,left:el.scrollLeft,text:el.textContent}));
       const before=await read(); expect(before.scroll).toBeGreaterThan(before.client);

@@ -2,10 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 type Theme = "warm" | "bright" | "dark";
-const themes: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+const themes: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
 async function geometry(page: Page) {
-  // 视口与内容变化后等待布局帧，避免把上一个宽度的原生自适应高度记入证据。
-  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  // 字体就绪后再取样，并等待连续布局帧，避免字体替换或视口变化污染几何证据。
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
   return page.evaluate(() => {
     const input = document.querySelector<HTMLTextAreaElement>("#chat-prompt")!;
     const composer = document.querySelector<HTMLElement>(".chat-composer")!;
@@ -23,21 +26,31 @@ async function geometry(page: Page) {
       const last = elements.item(elements.length - 1);
       return last ? getComputedStyle(last).fontSize : null;
     };
+    const px = (value: string) => Number.parseFloat(value);
     const inputStyle = getComputedStyle(input);
+    const composerStyle = getComputedStyle(composer);
     const sendStyle = getComputedStyle(send);
+    const inputPaddingBorder = px(inputStyle.paddingTop) + px(inputStyle.paddingBottom)
+      + px(inputStyle.borderTopWidth) + px(inputStyle.borderBottomWidth);
+    const composerPaddingBorder = px(composerStyle.paddingTop) + px(composerStyle.paddingBottom)
+      + px(composerStyle.borderTopWidth) + px(composerStyle.borderBottomWidth);
+    const fourLineInputCssHeight = Math.max(
+      4 * px(inputStyle.lineHeight) + inputPaddingBorder,
+      px(inputStyle.minHeight) + (inputStyle.boxSizing === "content-box" ? inputPaddingBorder : 0),
+    );
+    const composerMinHeight = px(composerStyle.minHeight)
+      + (composerStyle.boxSizing === "content-box" ? composerPaddingBorder : 0);
+    const fourLineComposerCssHeight = Math.max(composerMinHeight, fourLineInputCssHeight + composerPaddingBorder);
     return { composer: box(composer), input: box(input), send: box(send),
       rows: input.rows, value: input.value, scrollHeight: input.scrollHeight, clientHeight: input.clientHeight,
       resize: inputStyle.resize, fieldSizing: inputStyle.getPropertyValue("field-sizing"),
+      inputMaxHeight: inputStyle.maxHeight,
+      fourLineCssDerived: { input: fourLineInputCssHeight, composer: fourLineComposerCssHeight },
       typography: {
-        body: getComputedStyle(document.body).fontSize,
         input: { fontSize: inputStyle.fontSize, lineHeight: inputStyle.lineHeight, minHeight: inputStyle.minHeight, padding: padding(input) },
-        composerPadding: padding(composer),
-        send: { fontSize: sendStyle.fontSize, minHeight: sendStyle.minHeight },
-        buttons: Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-          .filter(button => button.getClientRects().length > 0 && getComputedStyle(button).fontSize !== "0px")
-          .map(button => ({ label: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "", fontSize: getComputedStyle(button).fontSize })),
-        userMessage: lastFontSize(".chat-user-text"),
-        answer: lastFontSize(".chat-answer"),
+        composer: { minHeight: composerStyle.minHeight, padding: padding(composer) },
+        send: { minHeight: sendStyle.minHeight },
+        messageMarkdown: lastFontSize(".message-markdown"),
       },
       viewport: { width: innerWidth, height: innerHeight }, pageOverflow: document.documentElement.scrollWidth > innerWidth };
   });
@@ -68,24 +81,24 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
       const value = await geometry(page);
       empty = value.composer.height;
       expect(value.rows).toBe(1);
-      const expectedComposerHeight = mobile ? 52 : 40;
+      const expectedComposerHeight = mobile ? 52 : 46;
       expect(value.composer.height).toBeGreaterThanOrEqual(expectedComposerHeight - 1);
       expect(value.composer.height).toBeLessThanOrEqual(expectedComposerHeight + 1);
-      expect(value.input.height).toBeLessThanOrEqual(40);
-      const expectedSendSize = mobile ? 44 : 32;
+      expect(value.input.height).toBe(20);
+      const expectedSendSize = mobile ? 40 : 28;
       expect(value.send.width).toBeGreaterThanOrEqual(expectedSendSize - 1);
       expect(value.send.width).toBeLessThanOrEqual(expectedSendSize + 1);
       expect(value.send.height).toBeGreaterThanOrEqual(expectedSendSize - 1);
       expect(value.send.height).toBeLessThanOrEqual(expectedSendSize + 1);
-      expect(value.typography.body).toBe("12px");
-      expect(value.typography.input.fontSize).toBe("12px");
+      expect(value.typography.input.fontSize).toBe("14px");
       expect(value.typography.input.lineHeight).toBe("18px");
-      expect(value.typography.input.minHeight).toBe("26px");
-      expect(value.typography.input.padding).toEqual({ top: "4px", right: "6px", bottom: "4px", left: "6px" });
-      expect(value.typography.composerPadding).toEqual({ top: "3px", right: "6px", bottom: "3px", left: "6px" });
-      if (!mobile) expect(value.typography.send.minHeight).toBe("32px");
-      expect(value.typography.buttons.length).toBeGreaterThan(0);
-      for (const button of value.typography.buttons) expect(button.fontSize).toBe("12px");
+      expect(value.typography.input.minHeight).toBe("20px");
+      expect(value.typography.input.padding).toEqual({ top: "0px", right: "0px", bottom: "0px", left: "0px" });
+      expect(value.typography.composer.minHeight).toBe(mobile ? "52px" : "46px");
+      expect(value.typography.composer.padding).toEqual(mobile
+        ? { top: "14px", right: "56px", bottom: "14px", left: "13px" }
+        : { top: "12px", right: "50px", bottom: "12px", left: "13px" });
+      expect(value.typography.send.minHeight).toBe(mobile ? "40px" : "28px");
       expect(value.resize).toBe("none");
       expect(value.fieldSizing).toBe("content");
       expect(value.pageOverflow).toBe(false);
@@ -103,8 +116,9 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
     await step("多行内容自动长高", async () => {
       await page.locator("#chat-prompt").fill("整理会议内容\n列出需要确认的事项\n保留原始日期和负责人\n输出简明的行动清单");
       const value = await geometry(page);
-      expect(value.composer.height).toBeGreaterThanOrEqual(87);
-      expect(value.composer.height).toBeLessThanOrEqual(89);
+      // CSS推导值与浏览器实际几何分开保存：四行内容高为4×line-height，再加输入框与composer盒模型尺寸。
+      expect(value.input.height).toBeCloseTo(value.fourLineCssDerived.input, 1);
+      expect(value.composer.height).toBeCloseTo(value.fourLineCssDerived.composer, 1);
       expect(value.scrollHeight).toBeLessThanOrEqual(value.clientHeight + 1);
       expect(posts).toHaveLength(0);
       await attachJsonEvidence(info, "多行输入几何", value);
@@ -113,7 +127,7 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
     await step("超过上限仅内部滚动且输入区仍可见", async () => {
       await page.locator("#chat-prompt").fill(Array.from({ length: 40 }, (_, index) => `第${index + 1}行：保留这一条任务说明`).join("\n"));
       const value = await geometry(page);
-      expect(value.input.height).toBeLessThanOrEqual(Math.min(240, viewport.height * 0.32) + 1);
+      expect(value.input.height).toBeCloseTo(Math.min(220, viewport.height * 0.34), 1);
       expect(value.scrollHeight).toBeGreaterThan(value.clientHeight);
       expect(value.composer.y).toBeGreaterThanOrEqual(0);
       expect(value.composer.bottom).toBeLessThanOrEqual(viewport.height);
@@ -148,8 +162,7 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
       const value = await geometry(page);
       expect(value.composer.height).toBeLessThanOrEqual(empty + 1);
       expect(value.composer.bottom).toBeLessThanOrEqual(viewport.height);
-      expect(value.typography.userMessage).toBe("12px");
-      expect(value.typography.answer).toBe("12px");
+      expect(value.typography.messageMarkdown).toBe("14px");
       await attachJsonEvidence(info, "发送后原请求与收缩", { posts, geometry: value, provider: "offline-script" });
     });
   });

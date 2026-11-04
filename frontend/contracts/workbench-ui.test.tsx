@@ -85,6 +85,8 @@ test("首页默认对话，主导航和浏览器回退同步页面", async () =>
   expect(new URL(location.href).searchParams.get("view")).toBeNull();
   await until(() => expect(host.querySelector('[aria-label="已存对话"]')).toBeTruthy());
   expect(host.querySelectorAll(".primary-navigation")).toHaveLength(1);
+  expect(host.querySelectorAll(".workbench-globalbar .navigation-item")).toHaveLength(6);
+  expect(host.querySelector(".desktop-sidebar .app-sidebar")).toBeTruthy();
   expect(host.querySelectorAll(".chat-sidebar")).toHaveLength(1);
   expect(host.querySelector("#chat-heading")).toBeNull();
   expect(button("导航到运行记录")).toBeTruthy();
@@ -111,15 +113,41 @@ test("会话对象选择写入可回退位置并从旧 query 恢复", async () =
   expect(new URL(location.href).searchParams.get("session")).toBe("A");
 });
 
-test("没有历史偏好时默认暖纸并显示完整主题选项", async () => {
+test("快捷查找筛选当前列表并通过原选择入口打开对话", async () => {
   await mount();
-  await until(() => expect(document.documentElement.dataset.theme).toBe("warm"));
-  expect(localStorage.getItem("krim.display.theme/2")).toBe("warm");
+  await until(() => expect(host.querySelector('[aria-label="已存对话"]')).toBeTruthy());
+  await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
+  const input = document.querySelector<HTMLInputElement>('[aria-label="搜索当前列表"]');
+  expect(input).toBeTruthy();
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "会话 B");
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await until(() => expect(document.querySelectorAll(".session-search-results button")).toHaveLength(1));
+  expect(document.querySelector(".session-search-results button")?.textContent).toBe("会话 B");
+  await act(async () => input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("B"));
+  await until(() => expect(document.querySelector(".session-search-dialog")).toBeNull());
+  expect(calls.every(value => value.method === "GET")).toBe(true);
+});
+
+test("其他对话框打开时快捷查找不抢焦点", async () => {
+  await mount();
+  await act(async () => button("选择显示主题").click());
+  await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
+  expect(document.querySelector(".theme-picker-content")).toBeTruthy();
+  expect(document.querySelector(".session-search-dialog")).toBeNull();
+});
+
+test("没有历史偏好时默认浅色并显示完整主题选项", async () => {
+  await mount();
+  await until(() => expect(document.documentElement.dataset.theme).toBe("bright"));
+  expect(localStorage.getItem("krim.display.theme/2")).toBe("bright");
   await act(async () => button("选择显示主题").click());
   expect(document.querySelectorAll(".theme-options button")).toHaveLength(3);
 });
 
-test("三主题选择应用并持久化，旧 light 偏好迁移为亮彩", async () => {
+test("三主题选择应用并持久化，旧 light 偏好迁移为浅色", async () => {
   localStorage.setItem("krim.display.theme/1", "light");
   await mount();
   await until(() => expect(document.documentElement.dataset.theme).toBe("bright"));
@@ -245,4 +273,68 @@ test("非 legacy 身份不挂载旧版运行与评测入口", async () => {
   expect(host.querySelector("#eval-start")).toBeNull();
   expect(calls.some(item => item.path.startsWith("/v1/eval"))).toBe(false);
   expect(calls.some(item => item.path.startsWith("/v1/runs"))).toBe(false);
+});
+
+test("重命名只在会话标题同步后关闭对话框", async () => {
+  vi.stubGlobal("crypto", webcrypto);
+  let serverTitle = "会话 A";
+  override = (path, options) => {
+    if (path === "/v2/workspaces/local/sessions?limit=50") return json([{ ...sampleSession("A"), title: serverTitle }, sampleSession("B")]);
+    if (path === "/v2/workspaces/local/sessions/A") return json({ ...sampleSession("A"), title: serverTitle });
+    if (path === "/v2/workspaces/local/sessions/A/rename" && (options.method ?? "GET") === "POST") {
+      const body = JSON.parse(String(options.body)) as { request_key: string };
+      return json({ session_id: "A", request_key: body.request_key, status: "completed" });
+    }
+    return undefined;
+  };
+  history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
+  await mount();
+  await until(() => expect(button("重命名当前对话")).toBeTruthy());
+  await act(async () => button("重命名当前对话").click());
+  await act(async () => {
+    const input = document.getElementById("rename-session-title") as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "更新后的名称");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => document.querySelector<HTMLButtonElement>(".session-rename-dialog button[type=submit]")!.click());
+  await until(() => expect(calls.filter(value => value.path.endsWith("/sessions/A/rename") && value.method === "POST")).toHaveLength(1));
+  await until(() => expect(document.querySelector(".session-rename-dialog")).toBeTruthy());
+  expect(document.querySelector<HTMLButtonElement>(".session-rename-dialog button[type=submit]")?.disabled).toBe(true);
+  expect(calls.filter(value => value.path.endsWith("/sessions/A/rename") && value.method === "POST")).toHaveLength(1);
+
+  serverTitle = "更新后的名称";
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".session-rename-dialog button")].find(item => item.textContent?.trim() === "重新读取名称")!.click());
+  await until(() => expect(document.querySelector(".session-rename-dialog")).toBeNull());
+  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("更新后的名称"));
+});
+
+test("重命名结果未知时保留查询入口且不重复提交", async () => {
+  vi.stubGlobal("crypto", webcrypto);
+  let requestKey = "";
+  override = (path, options) => {
+    if (path === "/v2/workspaces/local/sessions/A/rename" && (options.method ?? "GET") === "POST") {
+      requestKey = (JSON.parse(String(options.body)) as { request_key: string }).request_key;
+      return json({ error: "temporary failure" }, 503);
+    }
+    if (path.includes("/controls/by-key/")) return json({ session_id: "A", request_key: decodeURIComponent(path.split("/").at(-1) ?? ""), status: "pending" });
+    return undefined;
+  };
+  history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
+  await mount();
+  await until(() => expect(button("重命名当前对话")).toBeTruthy());
+  await act(async () => button("重命名当前对话").click());
+  await act(async () => {
+    const input = document.getElementById("rename-session-title") as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "待确认名称");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => document.querySelector<HTMLButtonElement>(".session-rename-dialog button[type=submit]")!.click());
+  await until(() => expect(document.querySelector(".session-rename-dialog")?.textContent).toContain("结果尚未确认"));
+  expect(requestKey).not.toBe("");
+  const lookup = [...document.querySelectorAll<HTMLButtonElement>(".session-rename-dialog button")].find(item => item.textContent?.trim() === "查找操作结果");
+  expect(lookup).toBeTruthy();
+  await act(async () => lookup!.click());
+  await until(() => expect(calls.some(value => value.path.includes("/controls/by-key/") && value.method === "GET")).toBe(true));
+  expect(calls.filter(value => value.path.endsWith("/sessions/A/rename") && value.method === "POST")).toHaveLength(1);
+  expect(document.querySelector(".session-rename-dialog")).toBeTruthy();
 });

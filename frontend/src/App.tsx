@@ -15,7 +15,8 @@ import { WorkbenchInspector } from "./components/WorkbenchInspector";
 import { parseActor, type Actor } from "./lib/session-contracts";
 import { readWorkbenchView, type WorkbenchView } from "./lib/workbench-route";
 import { useDisplayTheme } from "./lib/use-display-theme";
-import { chatReason, ui } from "./lib/copy";
+import { useReadingSize, type ReadingSize } from "./hooks/use-reading-size";
+import { chatReason } from "./lib/copy";
 import type { SessionState } from "./hooks/use-session";
 
 function UnavailablePage({ title, children }: { title: string; children: ReactNode }) {
@@ -49,6 +50,7 @@ export function App() {
   const [automationOpen, setAutomationOpen] = useState(false);
   const [chatMount, setChatMount] = useState(0);
   const { theme, selectTheme } = useDisplayTheme();
+  const { readingSize, selectReadingSize } = useReadingSize();
   const isLegacyRouteAvailable = !!identity?.legacy && !identityLoading;
   const run = useRun(key, mode === "run", isLegacyRouteAvailable ? JSON.stringify([identity!.principal_id, identity!.generation]) : null);
 
@@ -239,7 +241,6 @@ export function App() {
     window.history.pushState(null, "", url);
   }
 
-  const backendStatus = httpEnabled === false ? ui.offline : ui.agent;
   const currentUrl = new URL(location.href);
   const productWorkspace = identity?.workspaces.find(value => value.workspace_id === currentUrl.searchParams.get("workspace"))?.workspace_id ?? identity?.workspaces[0]?.workspace_id ?? "local";
   const productMembership = identity?.workspaces.find(value => value.workspace_id === productWorkspace);
@@ -253,13 +254,12 @@ export function App() {
   const sidebarChat = identity && navigationState?.actor && navigationState.actor.principal_id === identity.principal_id && navigationState.actor.generation === identity.generation ? navigationState : null;
   const chatTitle = sidebarChat?.session?.title ?? sidebarChat?.list.find(value => value.id === sidebarChat?.id)?.title ?? "";
 
-  return <div className={`app-shell${legacy === false ? " core-member" : ""}`}>
+  return <div className={`app-shell${legacy === false ? " core-member" : ""}`} data-reading-size={readingSize}>
     <WorkbenchLayout
       view={mode}
       identity={identity}
       identityLoading={identityLoading}
       identityError={identityError}
-      backendStatus={backendStatus}
       theme={theme}
       onThemeSelect={selectTheme}
       chatTitle={chatTitle}
@@ -302,7 +302,9 @@ export function App() {
       <section className="page-view" hidden={mode !== "settings"} aria-label="设置页面">
         <section className="settings-page">
           <div className="settings-section"><h3>当前身份与工作区</h3>{identity ? <><p>{identity.principal_id}</p><ul>{identity.workspaces.map(workspace => <li key={workspace.workspace_id}><span>{workspace.workspace_id}</span><span>{workspace.role === "admin" ? "管理员" : workspace.role === "viewer" ? "只读" : "成员"}</span></li>)}</ul><p>{identity.legacy ? "旧版运行与评测能力可用。" : "当前身份提供工作区会话能力。"}</p></> : <p role="status">{identityLoading ? "正在读取身份与工作区能力。" : identityError || "连接后读取身份与工作区能力。"}</p>}</div>
-          <div className="settings-section"><h3>显示</h3><p>当前主题：{theme === "warm" ? "暖纸" : theme === "bright" ? "亮彩" : "深色"}</p><div className="theme-settings" role="group" aria-label="选择显示主题"><Button variant={theme === "warm" ? "secondary" : "outline"} aria-pressed={theme === "warm"} onClick={() => selectTheme("warm")}>暖纸</Button><Button variant={theme === "bright" ? "secondary" : "outline"} aria-pressed={theme === "bright"} onClick={() => selectTheme("bright")}>亮彩</Button><Button variant={theme === "dark" ? "secondary" : "outline"} aria-pressed={theme === "dark"} onClick={() => selectTheme("dark")}>深色</Button></div></div>
+          <div className="settings-section"><h3>服务端能力</h3><p role="status" aria-label="HTTP 目标能力">{httpEnabled === null ? "HTTP 目标配置尚未确认" : httpEnabled ? "已启用 HTTP 目标" : "未启用 HTTP 目标"}</p></div>
+          <div className="settings-section"><h3>消息字号</h3><div className="theme-settings" role="group" aria-label="消息字号">{([12, 14, 16] as ReadingSize[]).map(size => <Button key={size} variant={readingSize === size ? "secondary" : "outline"} aria-pressed={readingSize === size} onClick={() => selectReadingSize(size)}>{size} px</Button>)}</div></div>
+          <div className="settings-section"><h3>显示</h3><p>当前主题：{theme === "warm" ? "暖纸" : theme === "bright" ? "浅色" : "深色"}</p><div className="theme-settings" role="group" aria-label="选择显示主题"><Button variant={theme === "warm" ? "secondary" : "outline"} aria-pressed={theme === "warm"} onClick={() => selectTheme("warm")}>暖纸</Button><Button variant={theme === "bright" ? "secondary" : "outline"} aria-pressed={theme === "bright"} onClick={() => selectTheme("bright")}>浅色</Button><Button variant={theme === "dark" ? "secondary" : "outline"} aria-pressed={theme === "dark"} onClick={() => selectTheme("dark")}>深色</Button></div></div>
         </section>
       </section>
     </WorkbenchLayout>

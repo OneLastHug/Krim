@@ -1,0 +1,6 @@
+.message-copy-feedback { position: fixed; z-index: 100; bottom: 24px; left: 50%; max-width: calc(100vw - 32px); padding: 8px 12px; border: 1px solid var(--message-border, #e1e1df); border-radius: 7px; background: var(--message-code-background, #fff); color: var(--message-foreground, #575754); font-size: 12px; box-shadow: 0 3px 12px rgb(0 0 0 / 7%); opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(5px); transition: opacity 100ms, transform 100ms; }
+.message-copy-feedback > span { display: flex; align-items: center; gap: 7px; }
+.message-copy-feedback.is-visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+.message-copy-feedback[data-tone="error"] { border-color: var(--message-error-border, #d9b4ac); color: var(--message-error, #8f3425); }
+.message-copy-feedback svg { width: 14px; height: 14px; flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) { .message-copy-feedback { transition: none; } }

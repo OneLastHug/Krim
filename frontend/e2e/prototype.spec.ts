@@ -291,13 +291,13 @@ test("representative viewports and zoom-equivalent layouts stay aligned", async 
 test("Markdown formatting and timeout.py preview open and close", async ({ page }, testInfo) => {
   await openPrototype(page);
   await selectSession(page, "工具调用与超时处理");
-  await expect(page.locator(".p-markdown")).toContainText("A tool timeout means the operation did not return before its time limit");
+  await expect(page.locator(".message-markdown")).toContainText("A tool timeout means the operation did not return before its time limit");
   await expect(page.getByRole("region", { name: "表格" })).toBeVisible();
-  await expect(page.locator(".p-markdown table th")).toHaveCount(2);
-  await expect(page.locator(".p-markdown table tbody tr")).toHaveCount(3);
-  await expect(page.locator(".p-code-block pre code")).toContainText("run_tool(timeout=30)");
-  await expect(page.locator(".p-code-block pre")).toHaveAttribute("tabindex", "0");
-  await expect(page.locator(".p-code-block pre")).toHaveAttribute("aria-label", "代码片段");
+  await expect(page.locator(".message-markdown table th")).toHaveCount(2);
+  await expect(page.locator(".message-markdown table tbody tr")).toHaveCount(3);
+  await expect(page.locator(".message-code-block pre code")).toContainText("run_tool(timeout=30)");
+  await expect(page.locator(".message-code-block pre")).toHaveAttribute("tabindex", "0");
+  await expect(page.locator(".message-code-block pre")).toHaveAttribute("aria-label", "代码片段");
   await expect(page.locator(".p-code-bar")).toHaveCount(0);
   await waitForPrototypeFonts(page);
   const session = await page.context().newCDPSession(page);
@@ -306,7 +306,7 @@ test("Markdown formatting and timeout.py preview open and close", async ({ page 
     await session.send("DOM.enable");
     await session.send("CSS.enable");
     const { root } = await session.send("DOM.getDocument");
-    for (const [label, selector] of Object.entries({ navigation: ".p-session-button span", body: ".p-markdown p", code: ".p-code-block pre code" })) {
+    for (const [label, selector] of Object.entries({ navigation: ".p-session-button span", body: ".message-markdown p", code: ".message-code-block pre code" })) {
       const { nodeId } = await session.send("DOM.querySelector", { nodeId: root.nodeId, selector });
       const { fonts } = await session.send("CSS.getPlatformFontsForNode", { nodeId });
       renderedFonts[label] = fonts.filter(font => font.glyphCount > 0).map(font => font.familyName);
@@ -321,11 +321,11 @@ test("Markdown formatting and timeout.py preview open and close", async ({ page 
   }
   expect(renderedFonts.body).toContain("Geist");
   expect(renderedFonts.code).toContain("Geist Mono");
-  const markdownGeometry = await page.locator(".p-markdown").evaluate(element => {
+  const markdownGeometry = await page.locator(".message-markdown").evaluate(element => {
     const table = element.querySelector("table")!;
     const header = table.querySelector("th")!;
     const cell = table.querySelector("td")!;
-    const codeBlock = element.querySelector(".p-code-block")!;
+    const codeBlock = element.querySelector(".message-code-block")!;
     const markdownStyle = getComputedStyle(element);
     const codeBox = codeBlock.getBoundingClientRect();
     return {
@@ -372,7 +372,7 @@ test("complex Markdown keeps safe structure and copies fixed code text", async (
   await openPrototype(page);
   await openExamples(page);
   await selectSession(page, "请求超时后的安全重试");
-  const markdown = page.locator(".p-markdown");
+  const markdown = page.locator(".message-markdown");
   await expect(markdown.locator("h1")).toHaveText("请求超时后的安全重试");
   await expect(markdown.locator("ol > li > ul > li")).toHaveCount(2);
   await expect(markdown.locator("blockquote blockquote")).toHaveCount(1);
@@ -409,7 +409,7 @@ test("complex Markdown keeps safe structure and copies fixed code text", async (
   expect(longLinkBounds!.x + longLinkBounds!.width).toBeLessThanOrEqual(390);
   await saveScreenshot(page, "markdown-precision-390.png");
 
-  const codeBlocks = page.locator(".p-code-block");
+  const codeBlocks = page.locator(".message-code-block");
   await expect(codeBlocks).toHaveCount(2);
   const unknownCode = codeBlocks.nth(0).locator("pre code");
   await expect(unknownCode).toHaveAttribute("class", /language-request-log-unregistered/);
@@ -418,12 +418,12 @@ test("complex Markdown keeps safe structure and copies fixed code text", async (
   await expect(unclosedCode).toContainText(`2026-11-03T10:14:33Z request_id=${requestId} retry_start=accepted`);
   await expect(unclosedCode).not.toHaveAttribute("class", /language-/);
   await waitForPrototypeFonts(page);
-  expect(await getRenderedFontFamilies(page, ".p-markdown p")).toContain("Noto Sans SC Thin");
-  expect(await getRenderedFontFamilies(page, ".p-code-block pre code")).toContain("Geist Mono");
+  expect(await getRenderedFontFamilies(page, ".message-markdown p")).toContain("Noto Sans SC Thin");
+  expect(await getRenderedFontFamilies(page, ".message-code-block pre code")).toContain("Geist Mono");
   await testInfo.attach("complex-markdown-fonts.json", {
     body: Buffer.from(JSON.stringify({
-      paragraph: await getRenderedFontFamilies(page, ".p-markdown p"),
-      code: await getRenderedFontFamilies(page, ".p-code-block pre code"),
+      paragraph: await getRenderedFontFamilies(page, ".message-markdown p"),
+      code: await getRenderedFontFamilies(page, ".message-code-block pre code"),
     })),
     contentType: "application/json",
   });
@@ -455,7 +455,7 @@ test("stopping a partial code fence leaves it readable and copyable", async ({ p
   const prompt = page.getByRole("textbox", { name: "发送消息" });
   await prompt.fill("Explain a safe tool timeout retry in detail.");
   await prompt.press("Enter");
-  const codeBlock = page.locator(".p-code-block").first();
+  const codeBlock = page.locator(".message-code-block").first();
   const code = codeBlock.locator("pre code");
   await expect(codeBlock).toBeVisible({ timeout: 10_000 });
   await expect(code).toContainText("try:", { timeout: 10_000 });
@@ -525,7 +525,7 @@ test("code copy works with Enter, Space, and a narrow touch target", async ({ br
     expect(bounds).not.toBeNull();
     expect(bounds!.width).toBeGreaterThanOrEqual(40);
     expect(bounds!.height).toBeGreaterThanOrEqual(40);
-    const scrollport = mobilePage.locator(".p-code-block pre").first();
+    const scrollport = mobilePage.locator(".message-code-block pre").first();
     const scrollBounds = await scrollport.boundingBox();
     expect(scrollBounds).not.toBeNull();
     expect(scrollBounds!.x + scrollBounds!.width).toBeLessThanOrEqual(bounds!.x);
@@ -639,9 +639,9 @@ test("stopping freezes generated text and regeneration completes", async ({ page
   await expect(page.locator(".p-stream-cursor")).toBeVisible();
   await page.getByRole("button", { name: "停止生成" }).click();
   await expect(page.locator(".p-stopped")).toContainText("已停止");
-  const stoppedText = await page.locator(".p-markdown").innerText();
+  const stoppedText = await page.locator(".message-markdown").innerText();
   await page.waitForTimeout(300);
-  await expect(page.locator(".p-markdown")).toHaveText(stoppedText);
+  await expect(page.locator(".message-markdown")).toHaveText(stoppedText);
   await expect(page.locator(".p-stream-cursor")).toHaveCount(0);
   await saveScreenshot(page, "1440-stopped-generation.png");
 
@@ -696,7 +696,7 @@ test("code copy keeps its text and streaming respects reading position", async (
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await openPrototype(page);
   await selectSession(page, "评测结果应该怎么看");
-  const code = await page.locator(".p-code-block pre code").innerText();
+  const code = await page.locator(".message-code-block pre code").innerText();
   await page.getByRole("button", { name: "复制代码" }).click();
   await expect(page.getByRole("button", { name: "复制代码" })).toContainText("已复制");
   const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
@@ -722,19 +722,19 @@ test("1280px conversation renders and reading font can be changed", async ({ pag
   await page.setViewportSize({ width: 1280, height: 900 });
   await openPrototype(page);
   await selectSession(page, "评测结果应该怎么看");
-  await expect(page.locator(".p-markdown")).toBeVisible();
+  await expect(page.locator(".message-markdown")).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await saveScreenshot(page, "1280-conversation.png");
 
   await page.getByRole("button", { name: "自定义" }).click();
   await page.locator(".p-font-options label").filter({ hasText: "16 px" }).click();
   await expect(page.getByRole("radio", { name: "16 px" })).toBeChecked();
-  await expect(page.locator(".p-markdown")).toHaveCSS("font-size", "16px");
-  await expect(page.locator(".p-code-block pre code")).toHaveCSS("font-size", "15px");
+  await expect(page.locator(".message-markdown")).toHaveCSS("font-size", "16px");
+  await expect(page.locator(".message-code-block pre code")).toHaveCSS("font-size", "15px");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await selectSession(page, "工具调用与超时处理");
-  await expect(page.locator(".p-markdown table")).toHaveCSS("font-size", "16px");
+  await expect(page.locator(".message-markdown table")).toHaveCSS("font-size", "16px");
 });
 
 test("390px sidebar, session menu, conversation, and file preview fit viewport", async ({ page }) => {
@@ -747,15 +747,15 @@ test("390px sidebar, session menu, conversation, and file preview fit viewport",
 
   await openSidebar(page);
   await selectSession(page, "评测结果应该怎么看");
-  await expect(page.locator(".p-markdown")).toBeVisible();
-  const codeScroller = page.locator(".p-code-block pre");
+  await expect(page.locator(".message-markdown")).toBeVisible();
+  const codeScroller = page.locator(".message-code-block pre");
   await expect.poll(() => codeScroller.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
   await expectNoHorizontalOverflow(page);
   await saveScreenshot(page, "390-conversation.png");
 
   await openSidebar(page);
   await selectSession(page, "工具调用与超时处理");
-  const tableScroller = page.locator(".p-table-scroll");
+  const tableScroller = page.locator(".message-table-scroll");
   await expect.poll(() => tableScroller.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
   await expectNoHorizontalOverflow(page);
 

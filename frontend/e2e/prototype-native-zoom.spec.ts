@@ -101,7 +101,7 @@ async function measureLayout(page: Page): Promise<EmptyLayout> {
         sidebar: rect(".p-sidebar"),
         main: rect(".p-main"),
         composer: rect(".p-composer"),
-        markdown: rect(".p-markdown"),
+        markdown: rect(".message-markdown"),
         preview: rect(".p-preview"),
       },
       sessionCount: document.querySelectorAll(".p-session-button").length,
@@ -215,10 +215,10 @@ async function verifyNativeZoom(percent: number, factor: number, testInfo: TestI
     const example = page.locator(".p-session-button").filter({ hasText: "工具调用与超时处理" }).first();
     await expect(example).toBeVisible();
     await example.click();
-    await expect(page.locator(".p-markdown").first()).toContainText("A tool timeout means the operation did not return before its time limit");
+    await expect(page.locator(".message-markdown").first()).toContainText("A tool timeout means the operation did not return before its time limit");
     const conversationLayout = await measureLayout(page);
     observations.conversationLayout = conversationLayout;
-    const markdownBox = await page.locator(".p-markdown").first().boundingBox();
+    const markdownBox = await page.locator(".message-markdown").first().boundingBox();
     const threadBox = await page.locator(".p-thread").boundingBox();
     expect(markdownBox, `${percent}% markdown bounds`).not.toBeNull();
     expect(threadBox, `${percent}% thread bounds`).not.toBeNull();

@@ -38,6 +38,9 @@
     "contracts/run-ui.test.tsx",
     "contracts/eval-ui.test.tsx",
     "contracts/session-ui.test.tsx",
+    "contracts/session-adapter-ui.test.tsx",
+    "contracts/session-presentation.test.ts",
+    "contracts/message-ui.test.tsx",
     "contracts/agent-workspace-ui.test.tsx",
     "contracts/workbench-ui.test.tsx",
     "contracts/legacy-gate-ui.test.tsx",
@@ -63,6 +66,9 @@
     "vite.prototype.config.ts",
     "playwright.prototype.config.ts",
     "e2e/prototype.spec.ts",
-    "e2e/prototype-native-zoom.spec.ts"
+    "e2e/prototype-native-zoom.spec.ts",
+    "playwright.formal-workbench.config.ts",
+    "e2e/formal-workbench.spec.ts",
+    "e2e/formal-workbench-zoom.spec.ts"
   ]
 }

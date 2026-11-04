@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useCopyFeedback } from "../hooks/use-copy-feedback";
+import { CopyFeedback } from "../components/messages/CopyFeedback";
 import { Tooltip } from "@base-ui/react/tooltip";
 import { Menu } from "@base-ui/react/menu";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, ChevronDown,
-  ChevronRight, CircleAlert, Code2, Copy, CornerDownLeft, FileCode2, FileText, Folder, FolderPlus,
+  ChevronRight, Code2, Copy, CornerDownLeft, FileCode2, FileText, Folder, FolderPlus,
   Menu as MenuIcon, MoreHorizontal, PanelLeft, PanelRight, Pencil, Pin, Plus, RotateCcw,
   Search, Settings2, Square, X,
 } from "lucide-react";
@@ -127,8 +129,8 @@ export function PrototypeApp() {
   const [mode, setMode] = useState("Accept edits");
   const [renameTarget, setRenameTarget] = useState<PrototypeConversation | null>(null);
   const [renameText, setRenameText] = useState("");
-  const [toast, setToast] = useState("");
-  const [toastError, setToastError] = useState(false);
+  const copyFeedback = useCopyFeedback();
+  const { copy } = copyFeedback;
   const [showJump, setShowJump] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 700px)").matches);
   const [overlayPreview, setOverlayPreview] = useState(() => window.matchMedia("(max-width: 1100px)").matches);
@@ -136,7 +138,6 @@ export function PrototypeApp() {
   const scrollArea = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const composing = useRef(false);
-  const toastTimer = useRef<number | undefined>(undefined);
   const lastConversation = useRef(chat.current.id);
   const current = chat.current;
   const results = chat.conversations.filter(item => (showArchived || !item.archived) && `${item.title} ${item.turns.map(turn => turn.prompt).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
@@ -153,14 +154,6 @@ export function PrototypeApp() {
     if (composing.current || chat.busy || !current.draft.trim()) return;
     stickToBottom.current = true; chat.send(); focusInput();
   }
-  const copy = useCallback(async (text: string): Promise<boolean> => {
-    let succeeded = false;
-    try { await navigator.clipboard.writeText(text); setToast("已复制"); setToastError(false); succeeded = true; }
-    catch { setToast("复制失败，请选择文字后复制"); setToastError(true); }
-    window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(""), succeeded ? 2200 : 5000);
-    return succeeded;
-  }, []);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
@@ -168,7 +161,7 @@ export function PrototypeApp() {
     const change = () => { setNarrow(media.matches); setOverlayPreview(previewMedia.matches); };
     media.addEventListener("change", change);
     previewMedia.addEventListener("change", change);
-    return () => { media.removeEventListener("change", change); previewMedia.removeEventListener("change", change); window.clearTimeout(toastTimer.current); };
+    return () => { media.removeEventListener("change", change); previewMedia.removeEventListener("change", change); };
   }, []);
 
   useEffect(() => {
@@ -304,6 +297,6 @@ export function PrototypeApp() {
     <Dialog open={!!renameTarget} onOpenChange={open => { if (!open) setRenameTarget(null); }}><DialogContent className="p-small-dialog"><DialogTitle>重命名会话</DialogTitle><form onSubmit={event => { event.preventDefault(); if (renameTarget && renameText.trim()) { chat.rename(renameTarget.id, renameText); setRenameTarget(null); } }}><label htmlFor="conversation-name">会话名称</label><input id="conversation-name" value={renameText} maxLength={80} onChange={event => setRenameText(event.target.value)} /><div className="p-dialog-actions"><Button variant="ghost" onClick={() => setRenameTarget(null)} type="button">取消</Button><Button type="submit" disabled={!renameText.trim()}>保存</Button></div></form></DialogContent></Dialog>
 
     <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}><DialogContent className="p-small-dialog p-settings-dialog"><DialogTitle>阅读设置</DialogTitle><fieldset><legend>消息字号</legend><div className="p-font-options">{[12, 14, 16].map(size => <label key={size} className={fontSize === size ? "is-selected" : ""}><input type="radio" name="reading-size" value={size} checked={fontSize === size} onChange={() => setFontSize(size)} /><span>{size} px</span>{fontSize === size && <Check />}</label>)}</div></fieldset><p className="p-setting-note">调整消息正文，导航保持紧凑。</p><div className="p-settings-divider" /><div className="p-settings-info"><span>工作区</span><strong>本地样例</strong></div><div className="p-settings-info"><span>模型请求</span><strong>未启用</strong></div></DialogContent></Dialog>
-    <div className={`p-toast ${toast ? "is-visible" : ""}`} data-tone={toastError ? "error" : undefined} role="status" aria-live="polite">{toast && <>{toastError ? <CircleAlert /> : <Check />}{toast}</>}</div>
+    <CopyFeedback {...copyFeedback} className="p-toast" />
   </div></Tooltip.Provider>;
 }

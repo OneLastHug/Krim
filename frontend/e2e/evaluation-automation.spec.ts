@@ -20,7 +20,7 @@ function step(page: Page, info: TestInfo, caseName: string, theme: Theme = "warm
 }
 
 async function selectTheme(page: Page, theme: Theme) {
-  const labels: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  const labels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -331,7 +331,11 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
     await desktopStep("从对话结果直达来源运行")(async () => {
       const last = page.locator(".chat-turn").last();
       await last.getByRole("button", { name: "更多操作", exact: true }).click();
-      await expect(last.locator(".chat-detail")).toContainText("工具摘要");
+      const tool = last.locator(".chat-tool").first();
+      await expect(tool.locator("summary")).toContainText("add");
+      await tool.locator("summary").click();
+      await expect(tool.locator(".chat-tool-section pre").first()).toContainText("left");
+      await expect(last.locator(".chat-detail")).toBeVisible();
       await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
       await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
       await expect(page.locator(".trace-span-node").first()).toBeVisible();
@@ -745,7 +749,7 @@ test("P4：窄屏深色只读恢复本机持久计划", async ({ page }, info) =
     await selectTheme(page, "dark");
     if (await page.getByRole("button", { name: "打开导航", exact: true }).isVisible().catch(() => false)) {
       await page.getByRole("button", { name: "打开导航", exact: true }).click();
-      await page.getByRole("dialog", { name: "主导航" }).getByRole("button", { name: "导航到评测", exact: true }).click();
+      await page.locator(".mobile-drawer-content .primary-navigation").getByRole("button", { name: "导航到评测", exact: true }).click();
     }
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await openAutomation(page);
