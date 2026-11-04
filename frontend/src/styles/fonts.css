@@ -1,0 +1,10 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist/wght-italic.css";
+@import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/geist-mono/wght-italic.css";
+@import "@fontsource-variable/noto-sans-sc";
+
+:root {
+  --krim-font-sans: "Geist Variable", "Noto Sans SC Variable", system-ui, sans-serif;
+  --krim-font-mono: "Geist Mono Variable", "Noto Sans SC Variable", ui-monospace, Consolas, monospace;
+}

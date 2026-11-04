@@ -242,7 +242,7 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
             const original = JSON.parse(localStorage.getItem(EVAL_INTENT)!);
             const confirmationsBefore = confirmations;
             if (steering === "task")
-                await click("任务");
+                await click("运行记录");
             if (steering === "other") {
                 await type("open-eval-id", "B");
                 await click("打开评测");
@@ -287,11 +287,13 @@ test("HTTP capability is read only and follows the active key epoch", async () =
         return reads(path);
     });
     await mount();
-    expect(host.querySelector(".brand")?.textContent).toContain("Krim Agent");
+    await click("设置");
+    const capability = () => host.querySelector('[aria-label="HTTP 目标能力"]')?.textContent;
+    expect(capability()).toBe("HTTP 目标配置尚未确认");
     await connect("new-key");
-    await until(() => expect(host.querySelector(".brand")?.textContent).toContain("离线演示"));
+    await until(() => expect(capability()).toBe("未启用 HTTP 目标"));
     await act(async () => release(json({ http_enabled: true })));
-    expect(host.querySelector(".brand")?.textContent).toContain("离线演示");
+    expect(capability()).toBe("未启用 HTTP 目标");
     expect(calls.filter(c => c.method === "POST")).toEqual([]);
     expect(calls.filter(c => c.path === "/healthz").length).toBeGreaterThanOrEqual(2);
 });
@@ -300,7 +302,7 @@ test("HTTP target and historical report keep their own identity", async () => {
     intercept(path => path === "/v1/eval-targets" ? json([{ key: "target-http" }]) : path === "/healthz" ? json({ http_enabled: true }) : reads(path));
     await mount();
     await until(() => expect(document.querySelector("#eval-target option")?.textContent).toBe("HTTP目标 · target-http"));
-    expect(host.querySelector(".brand")?.textContent).toContain("Krim Agent");
+    expect(host.querySelector('[aria-label="HTTP 目标能力"]')?.textContent).toBe("已启用 HTTP 目标");
     await type("open-eval-id", "historical-script");
     await click("打开评测");
     await until(() => expect(host.querySelector(".eval-report small")?.textContent).toBe("脚本 · " + realReport.target_descriptor.key));

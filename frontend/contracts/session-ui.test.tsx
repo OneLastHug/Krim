@@ -100,6 +100,7 @@ test("长历史轮询只重读活动页，并合并终态后的新Turn", async (
   const base = "/v2/workspaces/local/sessions", prefix = Array.from({ length: 50 }, (_, index) => historyTurn("old-" + index, index + 1));
   const active = historyTurn("active-50", 51, "running"), added = historyTurn("new-51", 52, "queued");
   const offsets: number[] = []; let activePageReads = 0;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   override = path => {
     if (path === base + "?limit=50") return json([{ ...session("A"), title: "长历史" }]);
     if (path === base + "/A") return json({ ...session("A"), title: "长历史" });
@@ -114,17 +115,20 @@ test("长历史轮询只重读活动页，并合并终态后的新Turn", async (
       }
     }
     if (path.includes("/events?") || path.endsWith("/approvals")) return json([]);
+    if (path.endsWith("/result")) return json({ run: { id: "run-active-50" }, tools: [] });
     return undefined;
   };
   history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
-  await act(async () => root.render(<App />));
-  await until(() => expect(activePageReads).toBe(1));
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
-  await until(() => expect(activePageReads).toBe(2));
-  await until(() => expect(document.querySelector('[data-turn-id="new-51"]')).toBeTruthy());
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
-  await until(() => expect(document.querySelector('[data-turn-id="new-51"]')?.textContent).toContain("已完成"));
-  expect(offsets).toEqual([0, 50, 50, 50]);
+  try {
+    await act(async () => root.render(<App />));
+    expect(activePageReads).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(activePageReads).toBe(2);
+    expect(document.querySelector('[data-turn-id="new-51"]')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(document.querySelector('[data-turn-id="new-51"]')?.textContent).toContain("已完成");
+    expect(offsets).toEqual([0, 50, 50, 50]);
+  } finally { vi.useRealTimers(); }
 });
 
 test("会话切换时丢弃迟到的历史页响应", async () => {
@@ -227,7 +231,7 @@ for (const barrier of ["post", "get"] as const) for (const steering of ["tab", "
     await until(() => expect(fixture.accepted).not.toBeNull());
     const original = JSON.parse(JSON.stringify(readIntents(localStorage)[0])) as unknown;
     if (barrier === "get") { await act(async () => button("查找原请求").click()); await until(() => expect(fixture.findCount).toBe(1)); }
-    if (steering === "tab") await act(async () => button("任务").click());
+    if (steering === "tab") await act(async () => button("运行记录").click());
     if (steering === "other") await act(async () => button("会话 B").click());
     if (steering === "key") { await act(async () => button("连接").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
     if (steering === "refresh") await act(async () => (document.querySelector('[aria-label="刷新对话"]') as HTMLButtonElement).click());

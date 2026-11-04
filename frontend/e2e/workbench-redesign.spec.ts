@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 type Theme = "warm" | "bright" | "dark";
-const themeLabels: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+const themeLabels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
 async function selectTheme(page: Page, theme: Theme) {
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + themeLabels[theme]) }).click();
@@ -10,7 +10,10 @@ async function selectTheme(page: Page, theme: Theme) {
 }
 async function openNavigation(page: Page) {
   const menu = page.getByRole("button", { name: "打开导航", exact: true });
-  if (await menu.isVisible()) await menu.click();
+  if (await menu.isVisible()) {
+    await menu.click();
+    await expect(page.locator(".mobile-drawer-content .primary-navigation")).toBeVisible();
+  }
 }
 for (const theme of ["warm", "bright", "dark"] as const) {
   for (const viewport of [
@@ -39,7 +42,7 @@ for (const theme of ["warm", "bright", "dark"] as const) {
         await page.getByRole("dialog", { name: "新建对话", exact: true }).getByRole("button", { name: "创建对话", exact: true }).click();
         await expect(page.locator("#chat-prompt")).toBeEnabled();
         await expect(page.locator(".topbar-title h1")).toHaveText(title);
-        await expect(page.getByRole("dialog", { name: "主导航", exact: true })).not.toBeVisible();
+        await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
       });
       await step("完成一次实际工具任务而不显示评测内容", async () => {
         await page.locator("#chat-prompt").fill("/add 125 75");
@@ -62,9 +65,13 @@ for (const theme of ["warm", "bright", "dark"] as const) {
         await expect(page.locator(".chat-answer").last()).toHaveText("200");
       });
       await step("按需展开工具摘要", async () => {
-        await page.locator(".chat-turn").last().getByRole("button", { name: "更多操作", exact: true }).click();
-        await expect(page.locator(".chat-detail")).toContainText("工具摘要");
-        await expect(page.locator(".chat-detail .tool").first()).toContainText("add");
+        const turn = page.locator(".chat-turn").last();
+        const tool = turn.locator(".chat-tool").first();
+        await expect(tool).toContainText("add");
+        await tool.locator("summary").click();
+        await expect(tool.locator(".chat-tool-section pre").first()).toContainText("left");
+        await turn.getByRole("button", { name: "更多操作", exact: true }).click();
+        await expect(turn.locator(".chat-detail")).toBeVisible();
       });
       await step("进入独立Trace读取原运行", async () => {
         await page.getByRole("button", { name: "查看 Trace", exact: true }).click();

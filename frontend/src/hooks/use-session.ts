@@ -4,7 +4,7 @@ import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
 
-interface Detail { facts: Record<string, unknown> | null; trace: Record<string, unknown>; events: Record<string, unknown>[] }
+interface Detail { facts: Record<string, unknown> | null; trace: Record<string, unknown>; events: Record<string, unknown>[]; loadedForStatus?: Turn["status"]; traceLoaded?: boolean }
 interface ControlIntent extends Scope { target: string; turn_id: string; body: Record<string, unknown>; rejected: boolean }
 const CONTROL = "krim.agent-core.controls/1";
 function controls(): Record<string, ControlIntent> {
@@ -13,7 +13,7 @@ function controls(): Record<string, ControlIntent> {
     const i = object(item), body = object(i.body);
     if (typeof i.principal_id !== "string" || !Number.isSafeInteger(i.generation) || typeof i.workspace_id !== "string" || typeof i.session_id !== "string" || typeof i.turn_id !== "string" || typeof i.target !== "string" || typeof i.rejected !== "boolean" || typeof body.request_key !== "string") throw new Error("无法读取未确认请求");
     const base = sessionPath(i.workspace_id) + "/" + encodeURIComponent(i.session_id);
-    const allowed = [base + "/close", base + "/resume", turnPath(i.workspace_id, i.session_id, i.turn_id) + "/cancel"];
+    const allowed = [base + "/close", base + "/resume", base + "/rename", turnPath(i.workspace_id, i.session_id, i.turn_id) + "/cancel"];
     if (!allowed.includes(i.target) && !i.target.startsWith(turnPath(i.workspace_id, i.session_id, i.turn_id) + "/approvals/")) throw new Error("无法读取未确认请求");
   }
   return value as unknown as Record<string, ControlIntent>;
@@ -30,10 +30,13 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   const [draft, setDraft] = useState(""), [notice, setNotice] = useState<string | null>(null), [reading, setReading] = useState(false);
   const [pendingState, setPending] = useState(pending), [details, setDetails] = useState<Record<string, Detail>>({});
   const [approvals, setApprovals] = useState<Record<string, unknown>[]>([]), [events, setEvents] = useState<Record<string, unknown>[]>([]);
+  const [turnEvents, setTurnEvents] = useState<Record<string, Record<string, unknown>[]>>({}), [turnFacts, setTurnFacts] = useState<Record<string, Record<string, unknown> | null>>({});
   const [version, setVersion] = useState(0), [identityVersion, setIdentityVersion] = useState(0), [, setFlights] = useState(0);
   const fenceGeneration = fence.current;
   const mounted = useRef(false), epoch = useRef(0), reader = useRef<AbortController | null>(null), flights = useRef(new Set<string>());
+  const detailFlights = useRef(new Map<string, { status: Turn["status"]; promise: Promise<void> }>());
   const selected = useRef({ workspace, id }); selected.current = { workspace, id };
+  const historyRef = useRef(history); historyRef.current = history;
   const keyRef = useRef(apiKey), activeRef = useRef(active), actorRef = useRef(actor); keyRef.current = apiKey; activeRef.current = active; actorRef.current = actor;
   const ready = actor !== null && actor.key === apiKey;
   const membership = ready ? actor.value.workspaces.find(w => w.workspace_id === workspace) : undefined;
@@ -43,7 +46,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     return { principal_id: value.value.principal_id, generation: value.value.generation, workspace_id: ws, session_id: sessionId };
   };
   function invalidate() { epoch.current++; reader.current?.abort(); }
-  function capture() { const e = epoch.current, f = fence.current, key = apiKey, view = { ...selected.current }; return () => mounted.current && activeRef.current && e === epoch.current && f === fence.current && key === keyRef.current && view.id === selected.current.id && view.workspace === selected.current.workspace; }
+  function capture() { const e = epoch.current, f = fence.current, key = apiKey, view = { ...selected.current }, identity = actorRef.current ? `${actorRef.current.value.principal_id}:${actorRef.current.value.generation}` : null; return () => mounted.current && activeRef.current && e === epoch.current && f === fence.current && key === keyRef.current && view.id === selected.current.id && view.workspace === selected.current.workspace && identity !== null && identity === (actorRef.current ? `${actorRef.current.value.principal_id}:${actorRef.current.value.generation}` : null); }
   function refreshPending() { if (mounted.current) setPending(pending()); }
   function flight(key: string, value: boolean) { if (value) flights.current.add(key); else flights.current.delete(key); if (mounted.current) setFlights(v => v + 1); }
   function select(ws: string, sessionId: string, turnId: string | null = null) {
@@ -55,14 +58,14 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     if (turnId) url.searchParams.set("turn", turnId); else url.searchParams.delete("turn");
     historyReplace(url);
     if (selected.current.workspace !== ws) setList([]);
-    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setSession(null); setHistory([]); setDetails({}); setEvents([]); setApprovals([]); setNotice(null);
+    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setEvents([]); setApprovals([]); setNotice(null);
     setDraft(readDraft(localStorage, target)); setVersion(v => v + 1);
   }
   function historyReplace(url: URL) { window.history.replaceState(null, "", url); }
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); }; }, []);
   useEffect(() => {
     if (!active) return;
-    setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setApprovals([]); setEvents([]);
+    setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
     const controller = new AbortController(), f = fence.current, key = apiKey;
     const current = () => mounted.current && activeRef.current && !controller.signal.aborted && key === keyRef.current && f === fence.current;
     void request("/v2/me", key, undefined, controller.signal).then(raw => {
@@ -84,13 +87,54 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     const check = capture(), current = () => check() && !controller.signal.aborted;
     setReading(true);
     async function load() {
+      let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
+      let activeRun: { turn: Turn; cursor: number; events: Record<string, unknown>[] } | null = null;
+      let turns: Turn[] = [], historyLoaded = false, recoveredPartial = false;
+      async function readEvents(turn: Turn, start: number, target: Record<string, unknown>[]) {
+        let next = start, raw: unknown;
+        do {
+          raw = await request(turnPath(workspace, id, turn.id) + "/events?from_seq=" + next, apiKey, undefined, controller.signal);
+          if (!current()) return null;
+          if (!Array.isArray(raw)) throw new Error("事件无效");
+          for (const item of raw) { const event = object(item); if (event.run_id !== turn.run_id || event.seq !== next) throw new Error("事件身份不匹配"); target.push(event); next++; }
+        } while ((raw as unknown[]).length === 64);
+        return next;
+      }
+      async function readFacts(turn: Turn) {
+        const value = object(await request(turnPath(workspace, id, turn.id) + "/result", apiKey, undefined, controller.signal));
+        if (!current()) return null;
+        if (object(value.run).id !== turn.run_id) throw new Error("结果身份不匹配");
+        return value;
+      }
+      function keepRunData(turn: Turn, runEvents: Record<string, unknown>[], facts?: Record<string, unknown>) {
+        const capturedEvents = [...runEvents];
+        setTurnEvents(previous => ({ ...previous, [turn.id]: capturedEvents }));
+        if (facts) setTurnFacts(previous => ({ ...previous, [turn.id]: facts }));
+        setDetails(previous => {
+          const prior = previous[turn.id];
+          return prior ? { ...previous, [turn.id]: { ...prior, events: capturedEvents, traceLoaded: prior.loadedForStatus === turn.status && prior.traceLoaded === true, ...(facts ? { facts, loadedForStatus: turn.status } : {}) } } : previous;
+        });
+      }
+      async function hydrateFinished(turn: Turn, runEvents: Record<string, unknown>[], start: number) {
+        try {
+          const end = await readEvents(turn, start, runEvents);
+          if (end === null) return false;
+          const facts = await readFacts(turn);
+          if (facts === null) return false;
+          keepRunData(turn, runEvents, facts);
+        } catch (error) {
+          if (!current()) return false;
+          if (error instanceof RequestError && (error.status === 401 || error.status === 403)) throw error;
+          keepRunData(turn, runEvents);
+          setNotice("部分运行记录暂时无法读取，可展开运行详情重试");
+        }
+        return true;
+      }
       try {
         const rows = await request(sessionPath(workspace) + "?limit=50", apiKey, undefined, controller.signal);
         if (!current()) return; if (!Array.isArray(rows)) throw new Error("对话列表无效");
         const sessions = rows.map(parseSession); if (sessions.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配"); setList(sessions);
         if (!id) { setSession(null); setHistory([]); return; }
-        let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
-        let turns: Turn[] = [], historyLoaded = false;
         while (current()) {
           const value = parseSession(await request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal));
           if (!current()) return; if (value.id !== id || value.workspace_id !== workspace) throw new Error("对话身份不匹配");
@@ -109,18 +153,40 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
           turns = refreshed; historyLoaded = true;
           setSession(value); setHistory(turns); setReading(false);
           const running = turns.find(t => t.status === "running");
+          if (!recoveredPartial) {
+            const recentPartial = [...turns].reverse().find(t => ["failed", "cancelled", "interrupted"].includes(t.status) && !!t.run_id);
+            if (recentPartial && recentPartial.id !== running?.id) {
+              const partialEvents: Record<string, unknown>[] = [];
+              if (!await hydrateFinished(recentPartial, partialEvents, 0)) return;
+              recoveredPartial = true;
+              if (!running) setEvents([...partialEvents]);
+            }
+          }
+          if (activeRun) {
+            const finished = turns.find(t => t.id === activeRun!.turn.id && t.run_id === activeRun!.turn.run_id && t.status !== "running" && t.status !== "queued");
+            if (finished) {
+              if (!await hydrateFinished(finished, activeRun.events, activeRun.cursor)) return;
+              setEvents([...activeRun.events]); setApprovals([]); activeRun = null; recoveredPartial = true;
+            }
+          }
           if (running?.run_id) {
-            if (runId !== running.run_id) { runId = running.run_id; cursor = 0; timeline.length = 0; }
-            let raw: unknown;
-            do {
-              raw = await request(turnPath(workspace, id, running.id) + "/events?from_seq=" + cursor, apiKey, undefined, controller.signal);
-              if (!current()) return; if (!Array.isArray(raw)) throw new Error("事件无效");
-              for (const item of raw) { const event = object(item); if (event.run_id !== runId || event.seq !== cursor) throw new Error("事件身份不匹配"); timeline.push(event); cursor++; }
-            } while ((raw as unknown[]).length === 64);
-            const pending = await request(turnPath(workspace, id, running.id) + "/approvals", apiKey, undefined, controller.signal);
-            if (!current()) return; if (!Array.isArray(pending)) throw new Error("审批无效");
-            setEvents([...timeline]); setApprovals(pending.map(object));
-          } else { setEvents([]); setApprovals([]); }
+            if (!activeRun || activeRun.turn.id !== running.id || activeRun.turn.run_id !== running.run_id) {
+              runId = running.run_id; cursor = 0; timeline.length = 0;
+              activeRun = { turn: running, cursor: 0, events: timeline };
+            } else { activeRun.turn = running; runId = running.run_id; cursor = activeRun.cursor; }
+            const end = await readEvents(running, cursor, timeline);
+            if (end === null) return;
+            cursor = end; activeRun.cursor = end;
+            const pendingRaw = await request(turnPath(workspace, id, running.id) + "/approvals", apiKey, undefined, controller.signal);
+            if (!current()) return; if (!Array.isArray(pendingRaw)) throw new Error("审批无效");
+            const pendingApprovals = pendingRaw.map(object);
+            if (pendingApprovals.some(item => item.run_id !== runId)) throw new Error("审批身份不匹配");
+            const capturedEvents = [...timeline];
+            setEvents(capturedEvents); setTurnEvents(previous => ({ ...previous, [running.id]: capturedEvents })); setApprovals(pendingApprovals);
+          } else if (!activeRun) {
+            setApprovals([]);
+            if (!turns.some(t => t.status === "failed" || t.status === "cancelled" || t.status === "interrupted") && !turns.some(t => t.status === "running")) setEvents([]);
+          }
           if (!turns.some(t => t.status === "running" || t.status === "queued") || value.dispatch_paused && !running) break;
           await delay(controller.signal);
         }
@@ -162,20 +228,33 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); refreshPending(); }
   }
-  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval", approval?: Record<string, unknown>, allow?: boolean) {
+  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string) {
+    const who = actorRef.current, member = who?.value.workspaces.find(w => w.workspace_id === workspace);
+    if (!activeRef.current || !who || who.key !== keyRef.current || !session || session.id !== id || session.workspace_id !== workspace || selected.current.id !== id || selected.current.workspace !== workspace) return;
+    const canWriteNow = !!member && member.role !== "viewer";
+    const canApproveNow = canWriteNow && member.approve;
+    if (action === "rename") {
+      if (!canWriteNow || typeof title !== "string" || !title.trim() || title.trim().length > 128 || session.status !== "open") return;
+    } else if (action === "approval") {
+      if (!canApproveNow || !turn || !turn.run_id || typeof allow !== "boolean" || turn.status !== "running" || turn.session_id !== id || turn.workspace_id !== workspace || !history.some(item => item.id === turn.id && item.run_id === turn.run_id && item.status === "running") || !approval) return;
+      const stillPending = approvals.some(item => item.request_id === approval.request_id && item.run_id === turn.run_id && item.call_id === approval.call_id && item.arguments_hash === approval.arguments_hash && item.tool_hash === approval.tool_hash);
+      if (!stillPending) return;
+    } else if (!canWriteNow) return;
+    if (action === "cancel" && (!turn || turn.session_id !== id || turn.workspace_id !== workspace || !["queued", "running"].includes(turn.status) || !history.some(item => item.id === turn.id && item.status === turn.status))) return;
+    if (action === "close" && session.status !== "open" || action === "resume" && session.status !== "closed") return;
     const marker = action + ":" + (approval?.request_id ?? turn?.id ?? id); if (flights.current.has(marker)) return;
     let current = () => false;
     try {
-      if (!session) return; const targetScope = scope(id); let cacheKey = JSON.stringify({ ...targetScope, marker });
+      const targetScope = scope(id); let cacheKey = JSON.stringify({ ...targetScope, marker });
       flight(marker, true); invalidate(); current = capture(); setVersion(v => v + 1);
-      const values = controls();
-      const expectedTarget = action === "approval" ? turnPath(workspace, id, turn!.id) + "/approvals/" + encodeURIComponent(String(approval!.request_id)) : action === "cancel" ? turnPath(workspace, id, turn!.id) + "/cancel" : sessionPath(workspace) + "/" + encodeURIComponent(id) + "/" + action;
-      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.workspace_id === workspace && value.session_id === id && value.target === expectedTarget);
+      const values = controls(), sessionTarget = sessionPath(workspace) + "/" + encodeURIComponent(id);
+      const expectedTarget = action === "approval" ? turnPath(workspace, id, turn!.id) + "/approvals/" + encodeURIComponent(String(approval!.request_id)) : action === "cancel" ? turnPath(workspace, id, turn!.id) + "/cancel" : sessionTarget + "/" + action;
+      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.generation === targetScope.generation && value.workspace_id === workspace && value.session_id === id && value.target === expectedTarget);
       if (previous) cacheKey = previous[0];
       let saved = previous?.[1] ?? values[cacheKey], first = saved === undefined;
       if (!saved) {
-        const path = action === "approval" ? turnPath(workspace, id, turn!.id) + "/approvals/" + encodeURIComponent(String(approval!.request_id)) : action === "cancel" ? turnPath(workspace, id, turn!.id) + "/cancel" : sessionPath(workspace) + "/" + encodeURIComponent(id) + "/" + action;
-        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: session.revision };
+        const path = expectedTarget;
+        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: session.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
         saved = { ...targetScope, target: path, turn_id: turn?.id ?? "", body, rejected: false }; values[cacheKey] = saved; saveControls(values);
       }
       first = first || saved.rejected;
@@ -197,15 +276,50 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); }
   }
-  async function loadDetails(turn: Turn) {
-    const current = capture();
-    try {
-      const path = turnPath(workspace, id, turn.id); const raw = object(await request(path + "/trace", apiKey));
-      if (!current()) return; if (raw.turn_id !== turn.id || raw.session_id !== id || object(raw.trace).run_id !== turn.run_id) throw new Error("Trace身份不匹配");
-      let facts: Record<string, unknown> | null = null;
-      if (!["queued", "running"].includes(turn.status)) { facts = object(await request(path + "/result", apiKey)); if (!current()) return; if (object(facts.run).id !== turn.run_id) throw new Error("结果身份不匹配"); }
-      setDetails(value => ({ ...value, [turn.id]: { facts, trace: object(raw.trace), events: [] } }));
-    } catch (error) { if (current()) setNotice(chatReason(error)); }
+  async function rename(title: string) { await control(null, "rename", undefined, undefined, title); }
+  function loadDetails(turn: Turn): Promise<void> {
+    const identity = actorRef.current?.value;
+    if (!identity || identity.principal_id !== actor?.value.principal_id || turn.session_id !== id || turn.workspace_id !== workspace || !turn.run_id) return Promise.resolve();
+    const stamp = JSON.stringify([identity.principal_id, identity.generation, workspace, id, turn.id, turn.run_id]);
+    const cached = details[turn.id];
+    if (cached?.loadedForStatus === turn.status && cached.traceLoaded === true) return Promise.resolve();
+    const active = detailFlights.current.get(stamp);
+    if (active?.status === turn.status) return active.promise;
+    const sameScope = capture();
+    const current = () => sameScope() && historyRef.current.some(value => value.id === turn.id && value.run_id === turn.run_id && value.status === turn.status);
+    let promise!: Promise<void>;
+    promise = (async () => {
+      try {
+        const path = turnPath(workspace, id, turn.id);
+        const [rawTrace] = await Promise.all([request(path + "/trace", apiKey)]);
+        if (!current()) return;
+        const traceEnvelope = object(rawTrace), trace = object(traceEnvelope.trace);
+        if (traceEnvelope.turn_id !== turn.id || traceEnvelope.session_id !== id || trace.run_id !== turn.run_id) throw new Error("Trace身份不匹配");
+        const runEvents = [...(turnEvents[turn.id] ?? cached?.events ?? [])];
+        let cursor = runEvents.length, raw: unknown;
+        do {
+          raw = await request(path + "/events?from_seq=" + cursor, apiKey);
+          if (!current()) return;
+          if (!Array.isArray(raw)) throw new Error("事件无效");
+          for (const item of raw) { const event = object(item); if (event.run_id !== turn.run_id || event.seq !== cursor) throw new Error("事件身份不匹配"); runEvents.push(event); cursor++; }
+        } while ((raw as unknown[]).length === 64);
+        let facts = turnFacts[turn.id] ?? cached?.facts ?? null;
+        if (facts && (facts.run === null || typeof facts.run !== "object" || Array.isArray(facts.run) || object(facts.run).id !== turn.run_id)) facts = null;
+        if (!["queued", "running"].includes(turn.status) && !facts) {
+          facts = object(await request(path + "/result", apiKey));
+          if (!current()) return;
+          if (object(facts.run).id !== turn.run_id) throw new Error("结果身份不匹配");
+        }
+        if (!current()) return;
+        setTurnEvents(previous => ({ ...previous, [turn.id]: [...runEvents!] }));
+        if (facts) setTurnFacts(previous => ({ ...previous, [turn.id]: facts }));
+        setDetails(previous => ({ ...previous, [turn.id]: { facts, trace, events: [...runEvents!], loadedForStatus: turn.status, traceLoaded: true } }));
+      } catch (error) { if (current()) setNotice(chatReason(error)); }
+    })().finally(() => {
+      if (detailFlights.current.get(stamp)?.promise === promise) detailFlights.current.delete(stamp);
+    });
+    detailFlights.current.set(stamp, { status: turn.status, promise });
+    return promise;
   }
   async function recoverControl(saved: ControlIntent) {
     const marker = "control-find:" + String(saved.body.request_key); if (flights.current.has(marker)) return;
@@ -224,8 +338,8 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   const newPending = visiblePending.find(i => i.kind === "session" && i.workspace_id === workspace);
   const currentTurn = history.find(t => t.status === "running") ?? history.find(t => t.status === "queued") ?? history.at(-1) ?? null;
   let pendingControls: ControlIntent[] = []; try { pendingControls = ready ? Object.values(controls()).filter(i => i.principal_id === actor.value.principal_id && i.workspace_id === workspace) : []; } catch { /* 控制事件会明确报告损坏，不能重新POST。 */ }
-  const controlling = flights.current.has("close:" + id) || flights.current.has("resume:" + id) || history.some(t => flights.current.has("cancel:" + t.id)) || approvals.some(a => flights.current.has("approval:" + String(a.request_id)));
+  const controlling = flights.current.has("close:" + id) || flights.current.has("resume:" + id) || flights.current.has("rename:" + id) || history.some(t => flights.current.has("cancel:" + t.id)) || approvals.some(a => flights.current.has("approval:" + String(a.request_id)));
   const posting = (i: Intent) => flights.current.has("post:" + JSON.stringify({ principal_id: i.principal_id, generation: i.generation, workspace_id: i.workspace_id, session_id: i.session_id }));
-  return { actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership?.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
+  return { actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
 }
 export type SessionState = ReturnType<typeof useSession>;

@@ -35,7 +35,7 @@ function v1Gets(records: RequestEvidence[]): RequestEvidence[] {
 }
 
 async function selectTheme(page: Page, theme: Theme) {
-  const labels = { bright: "亮彩", dark: "深色" };
+  const labels = { bright: "浅色", dark: "深色" };
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -43,14 +43,13 @@ async function selectTheme(page: Page, theme: Theme) {
 
 async function navigateWorkspace(page: Page, buttonName: string, view: string) {
   const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
-  let sidebar = page.locator(".desktop-sidebar");
+  let navigation = page.locator(".workbench-globalbar .primary-navigation");
   if (await mobileMenu.isVisible()) {
     await mobileMenu.click();
-    sidebar = page.getByRole("dialog", { name: "主导航", exact: true });
+    navigation = page.locator(".mobile-drawer-content .primary-navigation");
   }
-  const navigation = sidebar.locator(".workspace-navigation");
-  if (await navigation.getAttribute("open") === null) await navigation.locator("summary").click();
-  const button = sidebar.getByRole("button", { name: buttonName, exact: true });
+  const button = navigation.getByRole("button", { name: buttonName, exact: true });
+  await expect(button).toBeVisible();
   await button.focus();
   await expect(button).toBeFocused();
   await page.keyboard.press("Enter");
@@ -176,7 +175,7 @@ test("旧版门禁：真实 legacy 运行、离页只读与返回重读", async 
   let runId = "";
   let actualMe: MeEnvelope;
 
-  await step("真实 legacy 身份进入亮彩运行页", async () => {
+  await step("真实 legacy 身份进入浅色运行页", async () => {
     await page.goto("/ui/?view=run");
     const response = await identityResponse;
     expect(response.ok()).toBe(true);
@@ -229,10 +228,13 @@ test("旧版门禁：真实 legacy 运行、离页只读与返回重读", async 
     const postsBefore = v1Posts(requests).length;
     await navigateWorkspace(page, "导航到设置", "settings");
     await expect(page.getByRole("heading", { name: "设置", level: 1 })).toBeVisible();
+    const httpTargetCapability = page.getByRole("status", { name: "HTTP 目标能力", exact: true });
+    await expect(httpTargetCapability).toHaveText("未启用 HTTP 目标");
     await page.waitForTimeout(250);
     expect(v1Requests(requests)).toHaveLength(before);
     expect(v1Posts(requests)).toHaveLength(postsBefore);
     await attachJsonEvidence(info, "设置页 v1 请求增量.json", {
+      httpTargetCapability: await httpTargetCapability.textContent(),
       before,
       after: v1Requests(requests).length,
       postsBefore,

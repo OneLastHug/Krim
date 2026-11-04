@@ -7,7 +7,7 @@ const headers = { Authorization: "Bearer " + token };
 test.skip(process.env.KRIM_PREPARED_WORKSPACE !== "1", "需要当前已资格的独立 Workspace 服务");
 
 async function selectTheme(page: Page, theme: "warm" | "bright" | "dark") {
-  const labels = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  const labels = { warm: "暖纸", bright: "浅色", dark: "深色" };
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -269,10 +269,10 @@ test("P2/P5：桌面拒绝command_run审批后不启动执行器且不生成answ
     await expect(page.locator(".chat-turn").last().locator("[role=status]")).toHaveText(
       /^(已完成|失败|已停止|已中断)$/);
     await page.locator(".chat-turn").last().getByRole("button", { name: "更多操作", exact: true }).click();
-    const visibleTool = page.locator(".chat-turn").last().locator(".tool");
+    const visibleTool = page.locator(".chat-turn").last().locator(".chat-tool");
     await expect(visibleTool).toHaveCount(1);
-    await expect(visibleTool).toContainText("command_run");
-    await expect(visibleTool).toContainText("denied");
+    await expect(visibleTool.locator("summary")).toContainText("command_run");
+    await expect(visibleTool.locator("summary")).toContainText("已拒绝");
 
     const finalTurnResponse = await page.request.get(turnPath, { headers });
     expect(finalTurnResponse.ok()).toBe(true);

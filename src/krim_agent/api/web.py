@@ -6,6 +6,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 
+from krim_agent.font_assets import load_font_assets
+
 FILES = ("index.html", "assets/app.js", "assets/styles.css", "THIRD-PARTY-NOTICES.txt")
 PUBLIC_UI_PATHS = frozenset({"/", "/ui/", *("/ui/" + name for name in FILES)})
 HEADERS = {
@@ -20,16 +22,19 @@ HEADERS = {
 }
 
 
-def mount_browser_ui(app: FastAPI) -> None:
-    root = Path(__file__).resolve().parents[1] / "web"
+def mount_browser_ui(app: FastAPI, *, root: Path | None = None) -> None:
+    root = root or (Path(__file__).resolve().parents[1] / "web")
+    fonts = load_font_assets(root)
+    font_paths = frozenset("/ui/" + asset.path for asset in fonts)
+    app.state.public_ui_paths = PUBLIC_UI_PATHS | font_paths
 
     @app.get("/", include_in_schema=False)
     async def home() -> RedirectResponse:
         return RedirectResponse("/ui/", headers=HEADERS)
 
-    def endpoint(name: str) -> Callable[[], Awaitable[FileResponse]]:
+    def endpoint(name: str, media_type: str | None = None) -> Callable[[], Awaitable[FileResponse]]:
         async def serve() -> FileResponse:
-            return FileResponse(root / name, headers=HEADERS)
+            return FileResponse(root / name, headers=HEADERS, media_type=media_type)
 
         return serve
 
@@ -39,4 +44,11 @@ def mount_browser_ui(app: FastAPI) -> None:
     for name in FILES:
         app.add_api_route(
             "/ui/" + name, endpoint(name), methods=["GET", "HEAD"], include_in_schema=False
+        )
+    for asset in fonts:
+        app.add_api_route(
+            "/ui/" + asset.path,
+            endpoint(asset.path, media_type="font/woff2"),
+            methods=["GET", "HEAD"],
+            include_in_schema=False,
         )

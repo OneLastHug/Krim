@@ -32,6 +32,7 @@ def test_sdist_whitelist_matches_wheel_sources_and_preserves_notices() -> None:
 
     assert contract["name"] == "krim-agent"
     assert contract["version"] == "0.4.0a1"
+    assert 'mcp==1.30.0; extra == "mcp"' in contract["project_dependencies"]
     assert contract["wheel_payload_files"] == [
         path.removeprefix("src/") for path in contract["wheel_files"]
     ]
@@ -110,7 +111,8 @@ def test_release_metadata_does_not_invent_a_project_license() -> None:
 def test_release_metadata_normalizes_project_dependencies() -> None:
     metadata = (
         b"Name: krim-agent\nVersion: 0.4.0a1\n"
-        b"Requires-Dist: FASTAPI < 1, >= 0.115\n\n"
+        b"Requires-Dist: FASTAPI < 1, >= 0.115\n"
+        b'Requires-Dist: mcp == 1.30.0; extra == "mcp"\n\n'
     )
 
     _metadata_version(
@@ -118,7 +120,7 @@ def test_release_metadata_normalizes_project_dependencies() -> None:
         "krim-agent",
         "0.4.0a1",
         "wheel",
-        ["fastapi>=0.115, <1"],
+        ["fastapi>=0.115, <1", 'mcp==1.30.0; extra == "mcp"'],
     )
 
 

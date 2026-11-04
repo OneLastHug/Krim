@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 async function selectTheme(page: import("@playwright/test").Page, theme: "warm" | "bright" | "dark") {
-  const labels = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  const labels = { warm: "暖纸", bright: "浅色", dark: "深色" };
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -56,9 +56,7 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
     await page.goto("/ui/");
     await selectTheme(page, "warm");
     await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
-    await expect(page.locator(".workspace-navigation > summary")).toBeVisible();
-    await page.locator(".workspace-navigation > summary").click();
-    await expect(page.locator(".primary-navigation")).toBeVisible();
+    await expect(page.locator(".workbench-globalbar .primary-navigation")).toBeVisible();
     expect(await page.locator(".desktop-sidebar").count()).toBe(1);
     await expect(page.locator(".chat-main .chat-heading")).toHaveCount(0);
   });
@@ -116,21 +114,22 @@ test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) =
   });
   await step("展开导航抽屉", async () => {
     await page.getByRole("button", { name: "打开导航", exact: true }).click();
-    const drawer = page.getByRole("dialog", { name: "主导航", exact: true });
+    const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
     await expect(drawer).toBeVisible();
-    await drawer.locator(".workspace-navigation > summary").click();
+    const navigation = drawer.locator(".primary-navigation");
+    await expect(navigation).toBeVisible();
     const bounds = await drawer.boundingBox();
     expect(bounds).toBeTruthy();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.y).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
-    await expect(drawer.getByRole("button", { name: "导航到设置", exact: true })).toBeInViewport();
+    await expect(navigation.getByRole("button", { name: "导航到设置", exact: true })).toBeInViewport();
   });
   await step("通过抽屉进入设置", async () => {
-    await page.getByRole("dialog", { name: "主导航", exact: true }).getByRole("button", { name: "导航到设置", exact: true }).click();
+    await page.getByRole("dialog", { name: "主导航与对话", exact: true }).locator(".primary-navigation").getByRole("button", { name: "导航到设置", exact: true }).click();
     await expect(page.getByRole("heading", { name: "设置", level: 1 })).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "主导航", exact: true })).not.toBeVisible();
+    await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
   });
   await step("展开窄屏对象详情", async () => {
     await page.getByRole("button", { name: "打开详情面板", exact: true }).click();

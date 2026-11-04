@@ -3,7 +3,7 @@ import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 type Theme = "warm" | "bright" | "dark";
 async function selectTheme(page: Page, theme: Theme) {
-  const labels: Record<Theme, string> = { warm: "暖纸", bright: "亮彩", dark: "深色" };
+  const labels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
   await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
   await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -193,7 +193,11 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
   await step("直接进入来源候选而不复制标识", async () => {
     const last = page.locator(".chat-turn").last();
     await last.getByRole("button", { name: "更多操作", exact: true }).click();
-    await expect(last.locator(".chat-detail")).toContainText("工具摘要");
+    const tool = last.locator(".chat-tool").first();
+    await expect(tool.locator("summary")).toContainText("add");
+    await tool.locator("summary").click();
+    await expect(tool.locator(".chat-tool-section pre").first()).toContainText("left");
+    await expect(last.locator(".chat-detail")).toBeVisible();
     await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
     await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
     await expect(page.locator(".trace-span-node").first()).toBeVisible();

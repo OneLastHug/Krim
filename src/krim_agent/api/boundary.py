@@ -59,8 +59,11 @@ class LocalBoundary:
         if origin is not None and origin != scope["scheme"] + "://" + headers.get("host", ""):
             await reject("origin_denied", 403)
             return
+        public_paths = getattr(
+            getattr(scope.get("app"), "state", None), "public_ui_paths", PUBLIC_UI_PATHS
+        )
         public = scope["method"] in {"GET", "HEAD"} and (
-            scope["path"] in PUBLIC_UI_PATHS or scope["path"] == "/healthz"
+            scope["path"] in public_paths or scope["path"] == "/healthz"
         )
         if (
             key

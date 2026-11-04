@@ -28,7 +28,18 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from krim_agent.font_assets import (  # noqa: E402
+    FONT_MANIFEST_FILENAME,
+    FontAsset,
+    FontManifestError,
+    load_font_assets,
+)
+
 EXPECTED_PYTHON_VERSION = "0.4.0a1"
+FONT_MANIFEST_SOURCE = f"src/krim_agent/web/{FONT_MANIFEST_FILENAME}"
+FONT_DIRECTORY_SOURCE = "src/krim_agent/web/assets/fonts"
 EXPECTED_SDIST_INCLUDE = [
     "pyproject.toml",
     "README.md",
@@ -110,6 +121,24 @@ def _normalize_requirement(
     )
 
 
+def _requirement_for_extra(value: str, extra: str) -> str:
+    """为可选依赖附加其PEP 508 extra标记。"""
+    try:
+        requirement = Requirement(value)
+    except InvalidRequirement as error:
+        raise DistributionError(f"无法解析可选依赖声明：{value!r}：{error}") from error
+    extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
+    base = f"{requirement.name}{extras}"
+    if requirement.url:
+        base += f" @ {requirement.url}"
+    else:
+        base += str(requirement.specifier)
+    marker = f"extra == {json.dumps(extra)}"
+    if requirement.marker is not None:
+        marker = f"({requirement.marker}) and ({marker})"
+    return f"{base}; {marker}"
+
+
 def _normalize_requirements(
     values: list[str], label: str
 ) -> tuple[tuple[str, tuple[str, ...], str, str, str], ...]:
@@ -134,8 +163,25 @@ def _npm_alpha_version(python_version: str) -> str:
     return f"{match.group(1)}-alpha.{int(match.group(2))}"
 
 
+def _expand_wheel_files(
+    root: Path,
+    wheel_paths: list[str],
+    font_assets: tuple[FontAsset, ...],
+) -> list[str]:
+    """只展开已校验字体清单明确列出的受管理目录内容。"""
+    files = [
+        item for item in wheel_paths
+        if item not in {FONT_DIRECTORY_SOURCE, FONT_MANIFEST_SOURCE}
+        and (root / item).is_file()
+    ]
+    if (root / FONT_MANIFEST_SOURCE).is_file():
+        files.append(FONT_MANIFEST_SOURCE)
+    files.extend(f"src/krim_agent/web/{asset.path}" for asset in font_assets)
+    return sorted(files)
+
+
 def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
-    """加载并核对静态包清单；sdist目录树不得偏离wheel精确清单。"""
+    """加载并校验静态发行清单；sdist源码与wheel保持一致。"""
     root = root.resolve()
     try:
         project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -148,6 +194,7 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
     name = project_meta.get("name")
     version = project_meta.get("version")
     project_dependencies = project_meta.get("dependencies", [])
+    optional_dependencies = project_meta.get("optional-dependencies", {})
     build_config = project.get("tool", {}).get("hatch", {}).get("build", {})
     targets = build_config.get("targets", {})
     wheel_config = targets.get("wheel", {})
@@ -157,17 +204,41 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
     sdist_include = sdist_config.get("only-include")
     sdist_exclude = sdist_config.get("exclude")
     errors: list[str] = []
+    metadata_dependencies: list[str] = []
 
     if not isinstance(project_dependencies, list) or not all(
         isinstance(item, str) for item in project_dependencies
     ):
         errors.append("project.dependencies必须是PEP 508依赖字符串列表")
-        project_dependencies = []
     else:
+        metadata_dependencies.extend(project_dependencies)
         try:
             _normalize_requirements(project_dependencies, "pyproject.toml")
         except DistributionError as error:
             errors.append(str(error))
+
+    if not isinstance(optional_dependencies, dict):
+        errors.append("project.optional-dependencies必须是extra到PEP 508依赖列表的映射")
+    else:
+        for extra, requirements in optional_dependencies.items():
+            if not isinstance(extra, str) or re.fullmatch(
+                r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*", extra
+            ) is None:
+                errors.append(f"可选依赖extra名称无效：{extra!r}")
+                continue
+            if not isinstance(requirements, list) or not all(
+                isinstance(item, str) for item in requirements
+            ):
+                errors.append(f"project.optional-dependencies[{extra!r}]必须是PEP 508依赖列表")
+                continue
+            for requirement in requirements:
+                try:
+                    marked = _requirement_for_extra(requirement, extra)
+                    _normalize_requirements([marked], f"pyproject.optional-dependencies[{extra}]")
+                except DistributionError as error:
+                    errors.append(str(error))
+                else:
+                    metadata_dependencies.append(marked)
 
     if name != "krim-agent":
         errors.append(f"Python发行名应为krim-agent，实际为{name!r}")
@@ -175,11 +246,26 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
         errors.append(f"Python版本应保持{EXPECTED_PYTHON_VERSION}，实际为{version!r}")
     if "license" in project_meta:
         errors.append("项目尚未声明自有许可；不得在发行配置中推定或新增license")
+    font_manifest_path = root / FONT_MANIFEST_SOURCE
+    font_manifest_configured = (
+        FONT_MANIFEST_SOURCE in wheel_paths if isinstance(wheel_paths, list) else False
+    )
+    font_directory_configured = (
+        FONT_DIRECTORY_SOURCE in wheel_paths if isinstance(wheel_paths, list) else False
+    )
+    try:
+        font_assets = load_font_assets(root / "src/krim_agent/web")
+    except FontManifestError as error:
+        errors.append(f"正式字体资产清单无效：{error}")
+        font_assets = ()
+
     if not isinstance(wheel_paths, list) or not all(isinstance(item, str) for item in wheel_paths):
         errors.append("wheel only-include必须是显式路径白名单")
         wheel_paths = []
     if len(wheel_paths) != len(set(wheel_paths)):
         errors.append("wheel only-include存在重复路径")
+    if not font_manifest_configured or not font_directory_configured:
+        errors.append("wheel必须显式列出字体清单文件及唯一受管理字体目录")
     if sdist_include != EXPECTED_SDIST_INCLUDE:
         errors.append(f"sdist白名单应为{EXPECTED_SDIST_INCLUDE!r}，实际为{sdist_include!r}")
     if sdist_exclude != EXPECTED_SDIST_EXCLUDE:
@@ -217,16 +303,34 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
             _validate_member_path(item)
         except DistributionError as error:
             errors.append(f"wheel清单路径无效：{item!r}：{error}")
-        if not (root / item).is_file():
+            continue
+        target = root / item
+        if item == FONT_DIRECTORY_SOURCE:
+            if target.exists() or target.is_symlink():
+                if target.is_symlink() or not target.is_dir():
+                    errors.append(f"wheel受管理字体路径必须是实际目录：{item}")
+            elif font_assets:
+                errors.append(f"字体清单存在时受管理字体目录不得缺失：{item}")
+        elif item == FONT_MANIFEST_SOURCE:
+            if target.exists() or target.is_symlink():
+                if target.is_symlink() or not target.is_file():
+                    errors.append(f"wheel字体清单必须是普通文件：{item}")
+            elif font_manifest_path.exists() or font_manifest_path.is_symlink() or font_assets:
+                errors.append(f"wheel字体清单文件不存在：{item}")
+        elif not target.is_file():
             errors.append(f"wheel清单文件不存在：{item}")
 
     if wheel_sources != ["src"]:
         errors.append(f"wheel sources应保持现有src映射，实际为{wheel_sources!r}")
-    wheel_payload_paths = [
-        item.removeprefix("src/") for item in wheel_paths if item.startswith("src/")
-    ]
-    if len(wheel_payload_paths) != len(wheel_paths):
+    if len(wheel_paths) != len([item for item in wheel_paths if item.startswith("src/")]):
         errors.append("wheel白名单中存在src/之外的路径，无法按现有sources映射重建")
+
+    wheel_expanded_paths = _expand_wheel_files(root, wheel_paths, font_assets)
+    if len(wheel_expanded_paths) != len(set(wheel_expanded_paths)):
+        errors.append("展开wheel字体清单后出现重复成员")
+    wheel_payload_paths = [item.removeprefix("src/") for item in wheel_expanded_paths]
+    if len(wheel_payload_paths) != len(wheel_expanded_paths):
+        errors.append("wheel白名单展开后存在src/之外的路径，无法按现有sources映射重建")
 
     package_root = root / "src/krim_agent"
     package_files = {
@@ -234,16 +338,16 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
         for path in package_root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
     }
-    listed = set(wheel_paths)
-    if package_files != listed:
-        missing = sorted(package_files - listed)
-        absent = sorted(listed - package_files)
+    listed_files = set(wheel_expanded_paths)
+    if package_files != listed_files:
+        missing = sorted(package_files - listed_files)
+        absent = sorted(listed_files - package_files)
         if missing:
             errors.append(f"运行时目录含未列入wheel/sdist的文件：{missing}")
         if absent:
             errors.append(f"wheel路径不在src/krim_agent内：{absent}")
-    if not listed <= sdist_files:
-        errors.append(f"sdist未包含wheel重建所需源码：{sorted(listed - sdist_files)}")
+    if not listed_files <= sdist_files:
+        errors.append(f"sdist未包含wheel重建所需源码：{sorted(listed_files - sdist_files)}")
     required_frontend = {
         "frontend/scripts/build.mjs",
         "frontend/package.json",
@@ -276,7 +380,7 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
 
     notices = "src/krim_agent/web/THIRD-PARTY-NOTICES.txt"
     frontend_notices = "frontend/THIRD-PARTY-NOTICES.txt"
-    if notices not in listed:
+    if notices not in listed_files:
         errors.append("wheel必须包含Python UI使用的第三方许可告知文件")
     if notices not in sdist_files or frontend_notices not in sdist_files:
         errors.append("sdist必须包含Python UI与前端源代码的第三方许可告知文件")
@@ -286,17 +390,22 @@ def distribution_contract(root: Path = ROOT) -> dict[str, Any]:
     return {
         "name": name,
         "version": version,
-        "project_dependencies": project_dependencies,
+        "project_dependencies": metadata_dependencies,
         "frontend_version": expected_frontend,
-        "wheel_files": sorted(wheel_paths),
+        "wheel_files": sorted(wheel_expanded_paths),
+        "wheel_include_paths": sorted(wheel_paths),
         "wheel_payload_files": sorted(wheel_payload_paths),
+        "font_assets": [
+            {"path": asset.path, "size_bytes": asset.size_bytes, "sha256": asset.sha256}
+            for asset in font_assets
+        ],
         "sdist_source_files": sorted(sdist_files),
         "sdist_source_hashes": {
             name: _sha256((root / name).read_bytes()) for name in sorted(sdist_files)
         },
         "sdist_include": sdist_include,
         "sdist_exclude": sdist_exclude,
-        "python_file_count": sum(path.endswith(".py") for path in wheel_paths),
+        "python_file_count": sum(path.endswith(".py") for path in wheel_expanded_paths),
         "third_party_notice": notices,
     }
 
