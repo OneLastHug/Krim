@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Pencil, Plus } from "lucide-react";
+import { ChevronDown, Pencil, Plus } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -18,6 +18,7 @@ export function SessionList({ chat, httpEnabled, beforeSelect }: { chat: Session
   const scopeKey = JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id]);
   const renameControl = chat.pendingControls.find(value => value.session_id === chat.id && value.target.endsWith("/rename"));
   const canRename = chat.ready && chat.canWrite && chat.session?.id === chat.id && chat.session.status === "open";
+  const workspaceConfigured = chat.actor?.target_keys?.includes("target-workspace") === true;
 
   useEffect(() => {
     setRenameOpen(false);
@@ -61,10 +62,25 @@ export function SessionList({ chat, httpEnabled, beforeSelect }: { chat: Session
     <div className="chat-session-heading">
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger render={<Button variant="outline" className="new-conversation-button" aria-label={c.create} title={c.create} disabled={!chat.ready || !chat.canWrite} />}><Plus aria-hidden="true" />{c.create}</DialogTrigger>
-        <DialogContent aria-describedby={undefined}><DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
-          <form onSubmit={e => { e.preventDefault(); beforeSelect?.(chat.workspace, ""); void chat.create(title, target).then(() => setOpen(false)); }}>
-            <Label htmlFor="session-title">{c.title}</Label><Input id="session-title" value={title} onChange={e => setTitle(e.target.value)} maxLength={128} required autoComplete="off" />
-            <div className="chat-target"><Label htmlFor="chat-target">{c.target}</Label><select id="chat-target" value={target} onChange={e => setTarget(e.target.value)}><option value="demo">{c.defaultTarget}</option>{httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}<option value="target-workspace" disabled={!chat.actor?.target_keys?.includes("target-workspace")}>工作区</option></select>{!chat.actor?.target_keys?.includes("target-workspace") && <span role="status">工作区未配置</span>}</div>
+        <DialogContent className="session-create-dialog" aria-describedby={undefined}>
+          <DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
+          <form className="session-create-form" onSubmit={e => { e.preventDefault(); beforeSelect?.(chat.workspace, ""); void chat.create(title, target).then(() => setOpen(false)); }}>
+            <div className="session-create-field">
+              <Label htmlFor="session-title">{c.title}</Label>
+              <Input id="session-title" value={title} onChange={e => setTitle(e.target.value)} maxLength={128} required autoComplete="off" />
+            </div>
+            <div className="session-create-field chat-target">
+              <Label htmlFor="chat-target">{c.target}</Label>
+              <div className="session-target-select">
+                <select id="chat-target" aria-describedby={workspaceConfigured ? undefined : "session-target-help"} value={target} onChange={e => setTarget(e.target.value)}>
+                  <option value="demo">{c.defaultTarget}</option>
+                  {httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}
+                  <option value="target-workspace" disabled={!workspaceConfigured}>工作区</option>
+                </select>
+                <ChevronDown aria-hidden="true" />
+              </div>
+              {!workspaceConfigured && <p className="session-target-help" id="session-target-help" role="status">工作区未配置</p>}
+            </div>
             <div className="dialog-actions"><Button type="submit" disabled={chat.creating || !!chat.newPending || !title.trim()}>{chat.creating ? "提交中" : c.createSubmit}</Button></div>
           </form>
         </DialogContent>
