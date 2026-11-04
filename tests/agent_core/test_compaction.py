@@ -965,26 +965,45 @@ async def test_incremental_measure_matches_wire_bytes(
     async with app.store.engine.connect() as conn:
         prepared = await conn.scalar(select(work_turns.c.prepared_context).where(
             work_turns.c.run_id == ended.run_id))
-    payload = {"messages": prepared["messages"], "tools": selected.tools}
-    canonical = len(encoded(payload).encode())
+    prepared_messages = [Message.model_validate(message) for message in prepared["messages"]]
+    actual = wire.requests[-1]["body"]["messages"]
+    actual_messages = [Message.model_validate(message) for message in actual]
+    assert len(actual_messages) == len(prepared_messages)
+    base_system, marker, _budget_tail = actual_messages[0].content.partition(
+        "\n\nKrim request budget/1:"
+    )
+    assert marker and base_system == prepared_messages[0].content
+    assert [message.model_dump(mode="json") for message in actual_messages[1:]] == [
+        message.model_dump(mode="json") for message in prepared_messages[1:]
+    ]
+    prepared_tools = selected.tools if wire.requests[-1]["body"].get("tools") else []
+    canonical = len(encoded({
+        "messages": [message.model_dump(mode="json") for message in actual_messages],
+        "tools": prepared_tools,
+    }).encode())
     assert prepared["input_bytes"] == canonical
     assert prepared["estimated_tokens"] == (canonical+3)//4
-    actual = wire.requests[-1]["body"]["messages"]
-    assert ([Message.model_validate(v).model_dump(mode="json") for v in actual]
-            == prepared["messages"])
-    messages = [Message.model_validate(v) for v in actual]
+    messages = list(prepared_messages)
     if kind == "tool-group":
         messages += [Message(role="assistant", content="组", tool_calls=[
             {"id": "measure-call", "name": "synthetic", "arguments": {"text": "汉🙂\\\""}}]),
             Message(role="tool", call_id="measure-call", content="结果\n")]
     content = "汉🙂" if kind == "utf8" else "\n\\\"\t"
     messages += [Message(role="user", content=content*100)]
-    expected = len(encoded({"messages": [m.model_dump(mode="json") for m in messages],
-                            "tools": selected.tools}).encode())
+    budget = selected.step.request_budget(selected.max_group, selected.remaining_tools)
+    request_messages = selected.step.with_budget_prompt(messages, budget)
+    request_tools = selected.tools if budget.max_tool_calls_this_step > 0 else []
+    expected = len(encoded({
+        "messages": [message.model_dump(mode="json") for message in request_messages],
+        "tools": request_tools,
+    }).encode())
     assert selected.measure(messages, selected.tools)[0] == expected
     huge = [messages[0], *[Message(role="user", content=content*1000) for _ in range(240)]]
-    large = len(json.dumps({"messages": [m.model_dump(mode="json") for m in huge],
-        "tools": selected.tools}, ensure_ascii=False, sort_keys=True,
+    huge_request = selected.step.with_budget_prompt(huge, budget)
+    large = len(json.dumps({
+        "messages": [message.model_dump(mode="json") for message in huge_request],
+        "tools": request_tools,
+    }, ensure_ascii=False, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode())
     assert large > 1048576
     data_case[1]["measure"] = {"kind": kind, "run_id": ended.run_id,

@@ -1,6 +1,7 @@
 """Provider 只产模型事件，不持有工具实现或执行器。"""
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import Field, JsonValue, model_validator
@@ -33,6 +34,26 @@ class ModelUsage(StrictModel):
 
 
 type ModelEvent = ModelText | ModelToolCall | ModelUsage
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestBudget:
+    """单次请求的剩余执行预算；不进入持久会话历史。"""
+
+    remaining_steps: int
+    remaining_tool_calls: int
+    max_tool_calls_this_step: int
+
+    def __post_init__(self) -> None:
+        values = (self.remaining_steps, self.remaining_tool_calls, self.max_tool_calls_this_step)
+        if any(type(value) is not int for value in values):
+            raise TypeError("model request budgets must be integers")
+        if (
+            self.remaining_steps < 1
+            or self.remaining_tool_calls < 0
+            or not 0 <= self.max_tool_calls_this_step <= self.remaining_tool_calls
+        ):
+            raise ValueError("model request budget is out of range")
 
 
 class ModelProvider(Protocol):

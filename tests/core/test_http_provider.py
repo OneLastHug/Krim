@@ -100,7 +100,9 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
                 "max_tokens",
                 "stream_options",
                 "tools",
+                "parallel_tool_calls",
             }
+            assert body["parallel_tool_calls"] is False
             function = body["tools"][0]["function"]
             assert set(function) == {"name", "parameters"}
             assert "implementation_digest" not in str(body["tools"])

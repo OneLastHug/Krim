@@ -15,12 +15,11 @@ import uvicorn
 from fastapi import Request
 from pydantic import BaseModel, JsonValue, SecretStr
 
-from krim_agent.contracts import Message
-
 from krim_agent import __version__
 from krim_agent.api.server import create_app
 from krim_agent.composition import Application, open_application
 from krim_agent.config import Settings
+from krim_agent.contracts import Message, ServiceError
 from krim_agent.providers.fake import FakeProvider
 from krim_agent.providers.types import ModelEvent, ModelText, ModelToolCall
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
@@ -72,7 +71,12 @@ class FormalWorkbenchProvider(FakeProvider):
             return
 
         prompt = messages[-1].content.strip()
-        if prompt not in {"/markdown", "/two-notes", "/partial"}:
+        errors = {
+            "/protocol": "provider_protocol",
+            "/tool-limit": "tool_limit",
+            "/step-limit": "step_limit",
+        }
+        if prompt not in {"/markdown", "/two-notes", "/partial", *errors}:
             async for event in super().stream(messages, tools):
                 yield event
             return
@@ -82,6 +86,9 @@ class FormalWorkbenchProvider(FakeProvider):
         self.entered.set()
         try:
             await asyncio.sleep(self.delay)
+            if prompt in errors:
+                yield ModelText(text="已收到请求，正在处理工具调用。")
+                raise ServiceError(errors[prompt])
             if prompt == "/markdown":
                 yield ModelText(text=MARKDOWN_RESPONSE)
             elif prompt == "/two-notes":

@@ -100,12 +100,13 @@ class AgentLoop:
         stepper = model_step.ModelStep(self.provider, emit, check, max_steps=max_steps,
             max_output=self.settings.max_output_bytes, deadline=scope.deadline if scope else None,
             workspace=frame is not None)
+        provider_limit = getattr(getattr(self.provider, "config", None),
+                                 "max_request_bytes", self.settings.max_request_bytes)
+        request_limit = min(self.settings.max_request_bytes, provider_limit)
         if frame is not None and scope is not None:
-            provider_limit = getattr(getattr(self.provider, "config", None),
-                                     "max_request_bytes", self.settings.max_request_bytes)
             compressor = compaction.Compactor(cast(SQLiteStore, self.store), frame, scope.access,
                 stepper, check, self.settings.system_prompt,
-                min(self.settings.max_request_bytes, provider_limit),
+                request_limit,
                 cast(dict[str, JsonValue], snapshot.target["provider"]),
                 source_anchor=cast(str, getattr(
                     snapshot.session_context, "source_fingerprint", None)))
@@ -114,18 +115,40 @@ class AgentLoop:
             check()
             self.executor.registry.assert_current()
             schemas = self.executor.registry.schemas()
+            remaining_tools = max_calls-tool_count
             if compressor is not None:
-                messages = await compressor.prepare(run_id, conversation, schemas)
+                messages = await compressor.prepare(
+                    run_id,
+                    conversation,
+                    schemas,
+                    max_group=max_group,
+                    remaining_tools=remaining_tools,
+                )
                 check()
-            else:
-                if len(encoded({"messages": [m.model_dump(mode="json") for m in messages],
-                                "tools": schemas}).encode()) > self.settings.max_request_bytes:
+            request_budget = stepper.request_budget(max_group, remaining_tools)
+            request_messages = stepper.with_budget_prompt(messages, request_budget)
+            request_tools = schemas if request_budget.max_tool_calls_this_step > 0 else []
+            if compressor is None:
+                if len(encoded({
+                    "messages": [m.model_dump(mode="json") for m in request_messages],
+                    "tools": request_tools,
+                }).encode()) > request_limit:
                     raise ServiceError("input_limit")
                 if isinstance(snapshot.session_context, SessionContext):
-                    builder.check_budget(messages, schemas, snapshot.session_context.context.policy,
-                                         self.settings.max_request_bytes)
-            response = await stepper.call(messages, schemas, max_group=max_group,
-                                          remaining_tools=max_calls-tool_count)
+                    builder.check_budget(
+                        request_messages,
+                        request_tools,
+                        snapshot.session_context.context.policy,
+                        request_limit,
+                    )
+            response = await stepper.call(
+                request_messages,
+                request_tools,
+                max_group=max_group,
+                remaining_tools=remaining_tools,
+                request_budget=request_budget,
+                request_prepared=True,
+            )
             check()
             text, calls, step = response.text, list(response.calls), response.index
             if not calls:

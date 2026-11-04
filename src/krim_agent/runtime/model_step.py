@@ -9,10 +9,22 @@ from dataclasses import dataclass
 from pydantic import JsonValue, ValidationError
 
 from krim_agent.contracts import Message, RunEvent, ServiceError
-from krim_agent.providers.types import ModelProvider, ModelText, ModelToolCall, ModelUsage
+from krim_agent.providers.types import (
+    ModelProvider,
+    ModelRequestBudget,
+    ModelText,
+    ModelToolCall,
+    ModelUsage,
+)
 from krim_agent.runtime.contracts import settled
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.usage import TokenUsage
+
+_BUDGET_PROMPT = (
+    "Krim request budget/1: Remaining model steps including this request: {steps}; "
+    "remaining tool calls for this run: {tools}; tool calls allowed in this request: {step_tools}. "
+    "Stay within these limits. If no tools are allowed, answer without requesting tools."
+)
 
 
 @dataclass(frozen=True)
@@ -33,10 +45,55 @@ class ModelStep:
         self.index = self.output_bytes = 0
         self.seen: set[str] = set()
 
+    def request_budget(
+        self,
+        max_group: int,
+        remaining_tools: int,
+        *,
+        purpose: str = "task",
+    ) -> ModelRequestBudget:
+        remaining_steps = self.max_steps - self.index
+        if remaining_steps <= 0:
+            raise ServiceError("step_limit")
+        provider_cap = getattr(getattr(self.provider, "config", None), "max_tool_calls", None)
+        limits = [max_group, remaining_tools]
+        if type(provider_cap) is int:
+            limits.append(provider_cap)
+        max_this_step = 0 if purpose == "summary" else min(limits)
+        return ModelRequestBudget(
+            remaining_steps=remaining_steps,
+            remaining_tool_calls=remaining_tools,
+            max_tool_calls_this_step=max_this_step,
+        )
+
+    @staticmethod
+    def with_budget_prompt(
+        messages: list[Message], budget: ModelRequestBudget
+    ) -> list[Message]:
+        result = list(messages)
+        prompt = _BUDGET_PROMPT.format(
+            steps=budget.remaining_steps,
+            tools=budget.remaining_tool_calls,
+            step_tools=budget.max_tool_calls_this_step,
+        )
+        if result and result[0].role == "system":
+            system = result[0]
+            result[0] = system.model_copy(
+                update={"content": system.content + "\n\n" + prompt}
+            )
+        else:
+            result.insert(0, Message(role="system", content=prompt))
+        return result
+
     async def call(self, messages: list[Message], tools: list[dict[str, JsonValue]], *,
                    purpose: str = "task", max_group: int = 1,
-                   remaining_tools: int = 1, summary_bytes: int = 2048) -> StepResult:
+                   remaining_tools: int = 1, summary_bytes: int = 2048,
+                   request_budget: ModelRequestBudget | None = None,
+                   request_prepared: bool = False) -> StepResult:
         self.check()
+        budget = request_budget or self.request_budget(
+            max_group, remaining_tools, purpose=purpose
+        )
         if self.index >= self.max_steps:
             raise ServiceError("step_limit")
         index, self.index = self.index, self.index+1
@@ -47,10 +104,18 @@ class ModelStep:
         text, calls = "", []
         usage: TokenUsage | None = None
         final_usage = False
+        request_messages = (
+            messages if request_prepared else self.with_budget_prompt(messages, budget)
+        )
+        request_tools = tools if budget.max_tool_calls_this_step > 0 else []
         async with asyncio.timeout_at(end):
             await self.emit("model_start", {"span_id": span, "step_index": index, **extra})
             self.check()
-            stream = self.provider.stream(messages, tools)
+            stream_with_budget = getattr(self.provider, "stream_with_budget", None)
+            if callable(stream_with_budget):
+                stream = stream_with_budget(request_messages, request_tools, budget)
+            else:
+                stream = self.provider.stream(request_messages, request_tools)
             try:
                 async for delta in stream:
                     self.check()
@@ -75,7 +140,7 @@ class ModelStep:
                                 raise ServiceError("duplicate_tool_call")
                             self.seen.add(call.id)
                             calls.append(call)
-                            if len(calls) > max_group or len(calls) > remaining_tools:
+                            if len(calls) > budget.max_tool_calls_this_step:
                                 raise ServiceError("tool_limit")
                         elif type(delta) is ModelUsage:
                             measured = ModelUsage.model_validate(delta.model_dump(mode="json"))
@@ -106,5 +171,13 @@ class ModelStep:
 
 
 def binding_token() -> tuple[object, ...]:
-    return (id(ModelStep), id(ModelStep.call), id(ModelStep.__init__),
-            source_digest(__file__))
+    return (
+        id(ModelStep),
+        id(ModelStep.call),
+        id(ModelStep.__init__),
+        id(ModelStep.request_budget),
+        id(ModelStep.with_budget_prompt),
+        id(ModelRequestBudget),
+        id(ModelRequestBudget.__post_init__),
+        source_digest(__file__),
+    )
