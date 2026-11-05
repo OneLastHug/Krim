@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import JsonValue
 
@@ -46,6 +46,13 @@ class RunStore(Protocol):
     ) -> RunEvent: ...
     async def finish(self, run_id: str, status: RunStatus, code: str | None = None) -> RunView: ...
     async def set_running(self, run_id: str) -> None: ...
+    async def set_awaiting(self, run_id: str) -> None: ...  # 停靠等待审批（ADR-0015）
+    async def write_checkpoint(
+        self, run_id: str, checkpoint: dict[str, Any], fingerprint_value: str
+    ) -> None: ...  # 写停靠恢复点
+    async def read_checkpoint(self, run_id: str) -> tuple[dict[str, Any], str] | None: ...
+    # 读停靠恢复点（内容, 指纹）；没有返回 None
+
     async def request_stop(self, run_id: str) -> None: ...
     async def snapshot(self, run_id: str) -> RunSnapshot: ...
     async def event_page(

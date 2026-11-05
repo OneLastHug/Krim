@@ -93,8 +93,16 @@ async def start_echo_session(app, text):
                     return session, turn, current.run_id, requests[0]
                 task = app.service.tasks.get(current.run_id)
                 if task is not None and task.done():
+                    # 停靠（ADR-0015）：任务结束与 awaiting 落库之间存在竞态，复查一次；
+                    # 短审批窗口下请求可能已过期，直接认 awaiting 状态下的请求事件。
                     result = await app.service.get(current.run_id)
                     events = await app.service.events(current.run_id)
+                    if result.status == "awaiting":
+                        request_event = next(
+                            (e for e in events if e.kind == "approval_request"), None
+                        )
+                        if request_event is not None:
+                            return session, turn, current.run_id, request_event.data
                     raise AssertionError(
                         f"run ended before approval: {result.status}/{result.code}; "
                         f"events={[event.kind for event in events]}"
@@ -352,11 +360,10 @@ async def test_workspace_terminal_handoff_keeps_finite_deadline_after_timer_exit
     [
         (3.0, 1.0, 0.0, 4.2, "completed", None),
         (5.0, 1.0, 1.5, 1.2, "failed", "tool_timeout"),
-        (3.0, 5.0, 3.5, 3.2, "failed", "run_timeout"),
     ],
-    ids=["approval-outlasts-both", "tool-still-times-out", "run-still-times-out"],
+    ids=["park-outlasts-run-budget", "tool-still-times-out-after-resume"],
 )
-async def test_real_session_pauses_only_approval_wait(
+async def test_real_session_park_does_not_consume_execution_budget(
     wire,
     tmp_path,
     run_timeout,
@@ -366,6 +373,8 @@ async def test_real_session_pauses_only_approval_wait(
     expected_status,
     code,
 ):
+    # ADR-0015：停靠不占并发名额、不挂协程、等待不消耗执行预算——
+    # 等待超过 run_timeout 后批准仍能完成；恢复后的执行仍受工具超时约束。
     settings = Settings(run_timeout=run_timeout, tool_timeout=tool_timeout)
     async with approval_application(
         wire, tmp_path, settings=settings, tool_delay=tool_delay
@@ -374,8 +383,8 @@ async def test_real_session_pauses_only_approval_wait(
         _session, _turn, run_id, request = await start_echo_session(app, "/echo wait for approval")
         assert request["expires_at"] > time.time()
         await asyncio.sleep(wait_seconds)
-        budget = app.service._execution_budgets[run_id]
-        assert budget.paused and budget.remaining > 0.25
+        assert (await app.service.get(run_id)).status == "awaiting"  # 停靠持久状态
+        assert run_id not in app.service._execution_budgets  # 等待期无活预算
         reply = approval_reply(request, allow=True)
         await app.service.reply_approval(run_id, request["request_id"], reply)
         result = await app.service.wait(run_id)
@@ -386,9 +395,7 @@ async def test_real_session_pauses_only_approval_wait(
             assert len(wire.executions) == 1
         else:
             assert not wire.executions
-        assert app.service._pending == {}
         assert app.service._execution_budgets == {}
-        assert not budget.paused
 
 
 @pytest.mark.asyncio
@@ -407,7 +414,6 @@ async def test_real_session_approval_replay_and_conflict_do_not_repeat_tool(wire
         result = await app.service.wait(run_id)
         assert result.status == "completed"
         assert len(wire.executions) == 1
-        assert app.service._pending == {}
         assert app.service._execution_budgets == {}
 
 
@@ -438,24 +444,33 @@ async def test_real_session_unapproved_call_has_no_execution_or_timer_leak(
             await app.service.reply_approval(run_id, request["request_id"],
                                              approval_reply(request, allow=False))
             result = await app.service.wait(run_id)
-            assert result.status == "failed" and result.code == "approval_denied"
+            # ADR-0015：拒绝回传模型收尾——运行完成，工具从未进入执行器
+            assert result.status == "completed" and result.code is None
+            events = await app.service.events(run_id)
+            denial = [e for e in events if e.kind == "tool_end"]
+            assert denial and denial[-1].data["code"] == "approval_denied"
+            assert denial[-1].data["executor_started"] is False
         elif action == "expire":
+            # 过期惰性定稿：无人等待超时；答复触发整批评废
             await asyncio.sleep(0.07)
+            assert (await app.service.get(run_id)).status == "awaiting"
+            with pytest.raises(ServiceError, match="approval_expired"):
+                await app.service.reply_approval(
+                    run_id, request["request_id"], approval_reply(request, allow=True)
+                )
             result = await app.service.wait(run_id)
             assert result.status == "failed" and result.code == "approval_expired"
         elif action == "late":
             assert finish_started is not None and finish_release is not None
+            await asyncio.sleep(0.07)
+            caller = asyncio.ensure_future(app.service.reply_approval(
+                run_id, request["request_id"], approval_reply(request, allow=True)))
             async with asyncio.timeout(5):
                 await finish_started.wait()
-            assert app.service._pending == {}
             assert app.service._execution_budgets == {}
-            try:
-                with pytest.raises(ServiceError, match="approval_expired"):
-                    await app.service.reply_approval(
-                        run_id, request["request_id"], approval_reply(request, allow=True)
-                    )
-            finally:
-                finish_release.set()
+            finish_release.set()
+            with pytest.raises(ServiceError, match="approval_expired"):
+                await caller
             result = await app.service.wait(run_id)
             assert result.status == "failed" and result.code == "approval_expired"
         else:
@@ -463,5 +478,4 @@ async def test_real_session_unapproved_call_has_no_execution_or_timer_leak(
             assert result.status == "aborted" and result.code == "cancelled"
         assert not entered.is_set()
         assert not wire.executions
-        assert app.service._pending == {}
         assert app.service._execution_budgets == {}

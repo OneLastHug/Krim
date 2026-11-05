@@ -248,9 +248,13 @@ async def test_approval_uses_original_decision_and_scope(tmp_path, allow):
         )
         assert duplicate.id == result.id
         finished = await app.sessions.wait(LOCAL, "local", session.id, turn.id)
-        assert finished.status == ("completed" if allow else "failed")
+        # ADR-0015：拒绝回传模型收尾——两种批复下轮次均完成，工具事实区分
+        assert finished.status == "completed"
         facts = await app.service.result(turn.run_id)
         assert facts.tools[0].executor_started is allow
+        if not allow:
+            assert facts.tools[0].status == "denied"
+            assert facts.tools[0].code == "approval_denied"
         with pytest.raises(ServiceError, match="key_conflict"):
             await app.sessions.control(
                 LOCAL,

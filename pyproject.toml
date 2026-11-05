@@ -65,6 +65,7 @@ only-include = [
   "src/krim_agent/runtime/engine.py",
   "src/krim_agent/runtime/facts.py",
   "src/krim_agent/runtime/model_step.py",
+  "src/krim_agent/runtime/recovery.py",
   "src/krim_agent/runtime/service.py",
   "src/krim_agent/sdk/__init__.py",
   "src/krim_agent/sdk/sessions.py",

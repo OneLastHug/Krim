@@ -53,6 +53,7 @@ class Admission:
     decision: Decision
     code: str | None = None
     start_emitted: bool = False
+    approved: bool = False  # ask 已经人工批准（停靠恢复执行时置位，不再等待）
 
 
 class ToolExecutor:
@@ -197,7 +198,7 @@ class ToolExecutor:
                         check()
                         if decision == "deny":
                             raise ServiceError(admission.code or "permission_denied")
-                        if decision == "ask":
+                        if decision == "ask" and not admission.approved:
                             assert tool_budget is not None
                             with tool_budget.pause():
                                 approved = await context.approve(

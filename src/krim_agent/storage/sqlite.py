@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from pydantic import JsonValue
-from sqlalchemy import UniqueConstraint, event, func, insert, select, update
+from sqlalchemy import UniqueConstraint, delete, event, func, insert, select, update
 from sqlalchemy.engine import URL, RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
@@ -41,6 +41,7 @@ from .models import (
     eval_items,
     evaluations,
     metadata,
+    park_checkpoints,
     run_events,
     runs,
     session_controls,
@@ -49,7 +50,7 @@ from .models import (
 )
 
 APPLICATION_ID = 0x4B4C4331
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6  # 6：新增 park_checkpoints（ADR-0015 审批停靠恢复点）
 T = TypeVar("T")
 
 
@@ -122,6 +123,7 @@ class SQLiteStore:
                             "compactions",
                             "tool_effects",
                             "artifact_revisions",
+                            "park_checkpoints",
                         )
                     ],
                 ],
@@ -221,12 +223,13 @@ class SQLiteStore:
                             "turns",
                             "session_controls",
                         },
-                        4: set(metadata.tables),
-                        5: set(metadata.tables) | set(TABLES),
+                        4: set(metadata.tables) - {"park_checkpoints"},
+                        5: (set(metadata.tables) | set(TABLES)) - {"park_checkpoints"},
+                        6: set(metadata.tables) | set(TABLES),
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4, 5}
+                        or version not in {1, 2, 3, 4, 5, 6}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
@@ -431,7 +434,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, status, code)
-                    if self.schema_version == 5
+                    if self.schema_version in {5, 6}
                     else None
                 )
                 terminal_data: dict[str, JsonValue] = {
@@ -456,7 +459,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4, 5}:
+                if self.schema_version in {3, 4, 5, 6}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -500,7 +503,7 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
-            if self.schema_version == 5:
+            if self.schema_version in {5, 6}:
                 from . import observation_outbox as hot_sql
 
                 try:
@@ -521,13 +524,67 @@ class SQLiteStore:
                 clear(attempt)
 
     async def set_running(self, run_id: str) -> None:
+        """queued 或停靠（awaiting）中的运行标记为运行中（恢复续跑，ADR-0015）。"""
+
         async def operation(conn: AsyncConnection) -> None:
             row = await self._row(conn, run_id)
-            if row["status"] != "queued":
+            if row["status"] not in ("queued", "awaiting"):
                 raise ServiceError("run_closed")
             await conn.execute(update(runs).where(runs.c.id == run_id).values(status="running"))
 
         await settled(self._write(operation))
+
+    async def set_awaiting(self, run_id: str) -> None:
+        """运行中的运行标记为停靠等待人工审批（ADR-0015）。"""
+
+        async def operation(conn: AsyncConnection) -> None:
+            row = await self._row(conn, run_id)
+            if row["status"] != "running":
+                raise ServiceError("run_closed")
+            await conn.execute(update(runs).where(runs.c.id == run_id).values(status="awaiting"))
+
+        await settled(self._write(operation))
+
+    async def write_checkpoint(
+        self, run_id: str, checkpoint: dict[str, object], fingerprint_value: str
+    ) -> None:
+        """写入停靠恢复点（幂等覆盖：同 run 只保留最新停靠点）。"""
+
+        async def operation(conn: AsyncConnection) -> None:
+            await self._row(conn, run_id)
+            await conn.execute(
+                delete(park_checkpoints).where(park_checkpoints.c.run_id == run_id)
+            )
+            await conn.execute(
+                insert(park_checkpoints).values(
+                    run_id=run_id,
+                    checkpoint=checkpoint,
+                    fingerprint=fingerprint_value,
+                    created_at=time.time(),
+                )
+            )
+
+        await settled(self._write(operation))
+
+    async def read_checkpoint(self, run_id: str) -> tuple[dict[str, object], str] | None:
+        """读取停靠恢复点，返回（内容, 指纹）；没有返回 None。"""
+
+        async with self.lock, self.engine.begin() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        select(park_checkpoints).where(park_checkpoints.c.run_id == run_id)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            return (
+                cast(dict[str, object], row["checkpoint"]),
+                cast(str, row["fingerprint"]),
+            )
 
     async def request_stop(self, run_id: str) -> None:
         async def operation(conn: AsyncConnection) -> None:
@@ -643,7 +700,7 @@ class SQLiteStore:
                 self.schema_version,
                 cast(dict[str, JsonValue], row["target"]),
             ),
-            await work_sql.load(conn, run_id) if self.schema_version in {4, 5} else None,
+            await work_sql.load(conn, run_id) if self.schema_version in {4, 5, 6} else None,
         )
 
     async def by_key(self, key: str) -> RunView | None:
@@ -658,7 +715,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4, 5}:
+        if self.schema_version not in {2, 3, 4, 5, 6}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1125,14 +1182,49 @@ class SQLiteStore:
             for run_id in ids:
                 from . import observation_outbox as hot_sql
 
+                row = await self._row(conn, run_id)
+                if row["status"] == "awaiting":
+                    # 停靠是合法持久状态（ADR-0015）：仍有未过期待批请求的保持
+                    # awaiting 等人答复；全部过期才惰性定稿 approval_expired。
+                    events = (
+                        (
+                            await conn.execute(
+                                select(run_events.c.kind, run_events.c.data)
+                                .where(run_events.c.run_id == run_id)
+                                .order_by(run_events.c.seq)
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                    answered = {
+                        str(e["data"]["request_id"])
+                        for e in events
+                        if e["kind"] == "approval_reply"
+                    }
+                    expires = [
+                        float(e["data"]["expires_at"])
+                        for e in events
+                        if e["kind"] == "approval_request"
+                        and str(e["data"]["request_id"]) not in answered
+                    ]
+                    if expires and max(expires) > time.time():
+                        continue  # 跨重启存活：保持 awaiting
+                    if not expires:
+                        continue  # 无待批事件的停靠（异常态）：保持，交答复路径处理
+
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
-                    if self.schema_version == 5
+                    if self.schema_version in {5, 6}
                     else None
                 )
+                recovered_code = "approval_expired" if row["status"] == "awaiting" \
+                    else "interrupted"
+                recovered_status = "failed" if recovered_code == "approval_expired" \
+                    else "interrupted"
                 terminal_data: dict[str, JsonValue] = {
-                    "status": "interrupted",
-                    "code": "interrupted",
+                    "status": recovered_status,
+                    "code": recovered_code,
                     **(
                         {"observation_capture": capture["disposition"]}
                         if capture is not None
@@ -1150,9 +1242,12 @@ class SQLiteStore:
                 await conn.execute(
                     update(runs)
                     .where(runs.c.id == run_id)
-                    .values(status="interrupted", code="interrupted", finished_at=time.time())
+                    .values(
+                        status=recovered_status, code=recovered_code,
+                        finished_at=time.time(),
+                    )
                 )
-                if self.schema_version in {3, 4, 5}:
+                if self.schema_version in {3, 4, 5, 6}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -1204,7 +1299,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4, 5}:
+            if self.schema_version in {3, 4, 5, 6}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 
