@@ -34,7 +34,7 @@ Id = Annotated[
 class WorkLimits(StrictModel):
     run_timeout_seconds: float = Field(default=180, gt=0, le=300)
     tool_timeout_seconds: float = Field(default=90, gt=0, le=90)
-    approval_timeout_seconds: float = Field(default=300, gt=0, le=300)
+    approval_timeout_seconds: float = Field(default=300, gt=0, le=86400)
     model_steps: int = Field(default=12, ge=1, le=12)
     tool_calls: int = Field(default=32, ge=1, le=32)
     read_parallelism: int = Field(default=4, ge=1, le=4)
