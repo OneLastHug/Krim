@@ -143,12 +143,15 @@ async def test_policy_deny_feeds_back_and_run_completes(wire, tmp_path):
     async def deny_policy(_invocation):
         return "deny"
 
+    from pathlib import Path as P
+
+    from krim_agent.composition import open_application as open_app
     from krim_agent.providers.openai_compatible import (
         OpenAICompatibleConfig as Cfg,
+    )
+    from krim_agent.providers.openai_compatible import (
         OpenAICompatibleProvider as Prv,
     )
-    from krim_agent.composition import open_application as open_app
-    from pathlib import Path as P
 
     provider = Prv(Cfg(base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture"))
     async with await open_app(
