@@ -45,11 +45,25 @@ function button(label: string) {
   const value = [...document.querySelectorAll("button")].find(item => item.getAttribute("aria-label") === label || item.textContent?.trim() === label);
   expect(value).toBeTruthy(); return value!;
 }
+// 侧栏「新建对话」按钮：aria-label 与聊天工具栏同名按钮重复，需容器限定。
+function createButton() {
+  const item = document.querySelector<HTMLButtonElement>(".sidebar-buttons [aria-label='新建对话']");
+  expect(item, "新建对话").toBeTruthy(); return item!;
+}
+function menuItem(label: string) {
+  const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(value => value.textContent?.trim() === label);
+  expect(item, label).toBeTruthy(); return item!;
+}
+// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
+async function openAccountMenu() {
+  await act(async () => (document.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector(".popover-menu[aria-label='密钥身份']")).toBeTruthy());
+}
 
 test("workspace_unavailable_is_truthful_and_zero_effect", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
-  await until(() => expect(button("新建对话").disabled).toBe(false));
-  await act(async () => button("新建对话").click());
+  await until(() => expect(createButton().disabled).toBe(false));
+  await act(async () => createButton().click());
   await until(() => expect(document.body.textContent).toContain("工作区未配置"));
   const option = document.querySelector('option[value="target-workspace"]') as HTMLOptionElement;
   expect(option?.disabled).toBe(true);
@@ -189,7 +203,7 @@ for (const kind of ["turn", "input"] as const) for (const barrier of ["post", "g
         await until(() => expect(new URL(location.href).searchParams.get("session")).toBe(B));
         await act(async () => button("工作 A").click());
       } else if (steering === "credential") {
-        await act(async () => button("连接").click()); await type("api-key", "rotated-synthetic");
+        await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "rotated-synthetic");
         await act(async () => document.getElementById("connect-save")!.click());
       } else {
         await act(async () => root.unmount()); root = createRoot(container);
@@ -339,7 +353,7 @@ for (const steering of ["other-return", "credential", "unmount"] as const)
       expect(document.querySelector(".workspace-artifact")).toBeNull();
       await act(async () => button("工作 A").click());
     } else if (steering === "credential") {
-      await act(async () => button("连接").click()); await type("api-key", "rotated-synthetic");
+      await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "rotated-synthetic");
       await act(async () => document.getElementById("connect-save")!.click());
     } else {
       await act(async () => root.unmount()); root = createRoot(container);

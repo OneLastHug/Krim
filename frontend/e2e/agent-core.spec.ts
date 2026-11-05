@@ -9,8 +9,8 @@ mkdirSync(evidence, { recursive: true });
 const file = (name: string) => resolve(evidence, name);
 const entries = () => existsSync(file("provider-calls.jsonl")) ? readFileSync(file("provider-calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).length : 0;
 
-async function connect(page:Page,key:string){await page.getByRole("button",{name:"连接",exact:true}).click();await page.locator("#api-key").fill(key);await page.getByRole("button",{name:"应用",exact:true}).click();await expect(page.getByRole("dialog")).toHaveCount(0);}
-async function openRun(page:Page,id:string){expect(id).not.toBe("");await page.getByRole("button",{name:"打开任务",exact:true}).click();await page.locator("#history-id").fill(id);await page.getByRole("button",{name:"打开",exact:true}).click();await expect(page.getByRole("dialog")).toHaveCount(0);}
+async function connect(page:Page,key:string){await page.getByRole("button",{name:"密钥身份",exact:true}).click();await page.getByRole("menuitem",{name:"连接 / 切换密钥"}).click();await page.locator("#api-key").fill(key);await page.getByRole("button",{name:"应用",exact:true}).click();await expect(page.getByRole("dialog")).toHaveCount(0);}
+async function openRun(page:Page,id:string){expect(id).not.toBe("");await page.getByRole("button",{name:"更多操作",exact:true}).click();await page.getByRole("menuitem",{name:"打开任务",exact:true}).click();await page.locator("#history-id").fill(id);await page.getByRole("button",{name:"打开",exact:true}).click();await expect(page.getByRole("dialog")).toHaveCount(0);}
 
 if (["capacity", "auth"].includes(process.env.KRIM_GUIDE_PHASE ?? "")) {
   test("认证或容量明确拒绝后修正条件并显式创建", async ({ page, request }) => {

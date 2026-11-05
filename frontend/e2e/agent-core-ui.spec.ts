@@ -67,7 +67,7 @@ async function accessibility(page:Page,path:string,state:string,keyboardFocus=tr
   function ratio(a:number[],b:number[]){const x=luminance(a),y=luminance(b);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);}
   function background(element:Element){let p:Element|null=element;while(p){const color=getComputedStyle(p).backgroundColor;if(color!=="rgba(0, 0, 0, 0)"&&color!=="transparent")return rgb(color);p=p.parentElement;}return [255,255,255];}
   const text=[];
-  for(const element of document.querySelectorAll("h1,h2,p,label,button,[role=tab],summary,pre,code,[role=status],.brand>span,[data-slot=dialog-title]")){
+  for(const element of document.querySelectorAll("h1,h2,p,label,button,[role=tab],summary,pre,code,[role=status],.chat-toolbar .toolbar-title h1,[data-slot=dialog-title]")){
    if(!element.getClientRects().length||element.closest(".sr-only,[hidden]")||element instanceof HTMLButtonElement&&element.disabled)continue;
    if(!element.textContent?.trim())continue;
    const s=getComputedStyle(element);text.push({name:element.textContent.trim().slice(0,100),color:s.color,background:background(element),contrast:ratio(rgb(s.color),background(element)),size:s.fontSize});
@@ -97,8 +97,12 @@ for(const size of [{name:"desktop",width:1280,height:900},{name:"narrow",width:3
   await page.addInitScript(()=>document.addEventListener("securitypolicyviolation",event=>{(window as unknown as {__csp:string[]}).__csp??=[];(window as unknown as {__csp:string[]}).__csp.push(event.violatedDirective+":"+event.blockedURI);}));
   try{
    await page.goto(process.env.KRIM_GUIDE_BASE_URL+"/ui/");await expect(page.locator("#result")).toHaveText("暂无任务");await capture(page,path,"default");
-   const connection=page.getByRole("button",{name:"连接",exact:true});await connection.focus();await page.keyboard.press("Enter");await expect(page.locator("#api-key")).toBeFocused();await capture(page,path,"connection");await accessibility(page,path,"connection");
-   await page.keyboard.press("Tab");await expect(page.getByRole("button",{name:"应用",exact:true})).toBeFocused();await page.keyboard.press("Shift+Tab");await expect(page.locator("#api-key")).toBeFocused();await page.keyboard.press("Escape");await expect(connection).toBeFocused();
+   const account=page.getByRole("button",{name:"密钥身份",exact:true});
+   const drawer=page.getByRole("dialog",{name:"主导航与对话",exact:true});
+   if(!await drawer.isVisible()){const mobileMenu=page.getByRole("button",{name:"打开导航",exact:true});if(await mobileMenu.isVisible()){await mobileMenu.click();await expect(drawer).toBeVisible();}}
+   await account.click();await page.getByRole("menuitem",{name:"连接 / 切换密钥"}).click();await expect(page.locator("#api-key")).toBeFocused();await capture(page,path,"connection");await accessibility(page,path,"connection");
+   await page.keyboard.press("Tab");await expect(page.getByRole("button",{name:"应用",exact:true})).toBeFocused();await page.keyboard.press("Shift+Tab");await expect(page.locator("#api-key")).toBeFocused();await page.keyboard.press("Escape");await expect(page.getByRole("dialog")).toHaveCount(0);await account.click();await page.keyboard.press("Escape");await expect(account).toBeFocused();
+   if(await drawer.isVisible()){await page.keyboard.press("Escape");await expect(drawer).not.toBeVisible();}
    await create(page,"/add 2 3");await expect(page.locator("#result")).toHaveText("5");await capture(page,path,"completed");
    await page.locator(".run-identity > summary").click();await expect(page.locator("#run-id")).toBeVisible();await expect(page.locator("#run-id")).toHaveText(new URL(page.url()).hash.slice(1));await capture(page,path,"identity-expanded");await page.locator(".run-identity > summary").click();
    const resultTab=page.getByRole("tab",{name:"结果",exact:true});await resultTab.focus();await page.keyboard.press("ArrowRight");await expect(page.getByRole("tab",{name:"工具",exact:true})).toBeFocused();await page.keyboard.press("Enter");await expect(page.getByRole("tab",{name:"工具",exact:true})).toHaveAttribute("aria-selected","true");await page.keyboard.press("ArrowRight");await expect(page.getByRole("tab",{name:"Trace",exact:true})).toBeFocused();await page.keyboard.press("Enter");await expect(page.getByRole("tab",{name:"Trace",exact:true})).toHaveAttribute("aria-selected","true");await capture(page,path,"trace");await accessibility(page,path,"trace");

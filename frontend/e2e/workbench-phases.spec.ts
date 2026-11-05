@@ -3,9 +3,17 @@ import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 
 async function selectTheme(page: import("@playwright/test").Page, theme: "warm" | "bright" | "dark") {
   const labels = { warm: "暖纸", bright: "浅色", dark: "深色" };
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 
 // 阶段用例使用真实本机服务，不拦截或替换业务接口。
@@ -55,20 +63,20 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
   await step("默认进入对话工作台", async () => {
     await page.goto("/ui/");
     await selectTheme(page, "warm");
-    await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
-    await expect(page.locator(".workbench-globalbar .primary-navigation")).toBeVisible();
+    await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+    await expect(page.locator(".desktop-sidebar .sidebar-buttons").getByRole("button", { name: "导航到对话", exact: true })).toBeVisible();
     expect(await page.locator(".desktop-sidebar").count()).toBe(1);
     await expect(page.locator(".chat-main .chat-heading")).toHaveCount(0);
   });
   await step("填写新建对话", async () => {
-    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
     await page.locator("#session-title").fill("工作台阶段演示");
     await expect(page.getByRole("dialog")).toBeVisible();
   });
   await step("创建并选中对话", async () => {
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
     await expect(page.locator("#chat-prompt")).toBeEnabled();
-    await expect(page.locator(".topbar-title h1")).toHaveText("工作台阶段演示");
+    await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("工作台阶段演示");
   });
   await step("发送消息并读取真实答复", async () => {
     await page.locator("#chat-prompt").fill("/echo 工作台已连通");
@@ -86,7 +94,8 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
     await expect(page.locator(".chat-answer").last()).toHaveText("工作台已连通");
   });
   await step("打开右侧对象详情", async () => {
-    await page.getByRole("button", { name: "打开详情面板", exact: true }).click();
+    await page.locator(".chat-toolbar").getByRole("button", { name: "更多操作", exact: true }).click();
+    await page.getByRole("menuitem", { name: "打开详情面板", exact: true }).click();
     await expect(page.locator(".inspector-desktop")).toBeVisible();
     await expect(page.locator(".inspector-object-id")).not.toBeEmpty();
   });
@@ -98,7 +107,7 @@ test("P1：桌面对话、详情与明暗主题持久化", async ({ page }, info
   await step("刷新后保留主题和对话", async () => {
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-    await expect(page.locator(".topbar-title h1")).toHaveText("工作台阶段演示");
+    await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("工作台阶段演示");
     await expect(page.locator(".chat-answer").last()).toHaveText("工作台已连通");
   });
 });
@@ -116,7 +125,7 @@ test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) =
     await page.getByRole("button", { name: "打开导航", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
     await expect(drawer).toBeVisible();
-    const navigation = drawer.locator(".primary-navigation");
+    const navigation = drawer.locator(".sidebar-buttons");
     await expect(navigation).toBeVisible();
     const bounds = await drawer.boundingBox();
     expect(bounds).toBeTruthy();
@@ -124,15 +133,17 @@ test("P1：窄屏导航、详情抽屉与键盘退出", async ({ page }, info) =
     expect(bounds!.y).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
-    await expect(navigation.getByRole("button", { name: "导航到设置", exact: true })).toBeInViewport();
+    await expect(navigation.getByRole("button", { name: "导航到对话", exact: true })).toBeInViewport();
   });
   await step("通过抽屉进入设置", async () => {
-    await page.getByRole("dialog", { name: "主导航与对话", exact: true }).locator(".primary-navigation").getByRole("button", { name: "导航到设置", exact: true }).click();
+    await page.getByRole("dialog", { name: "主导航与对话", exact: true }).locator(".sidebar-buttons").getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("menuitem", { name: "全部设置…", exact: true }).click();
     await expect(page.getByRole("heading", { name: "设置", level: 1 })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
   });
   await step("展开窄屏对象详情", async () => {
-    await page.getByRole("button", { name: "打开详情面板", exact: true }).click();
+    await page.locator(".chat-toolbar").getByRole("button", { name: "更多操作", exact: true }).click();
+    await page.getByRole("menuitem", { name: "打开详情面板", exact: true }).click();
     const inspector = page.getByRole("dialog", { name: "对象详情", exact: true });
     await expect(inspector).toBeVisible();
     const bounds = await inspector.boundingBox();

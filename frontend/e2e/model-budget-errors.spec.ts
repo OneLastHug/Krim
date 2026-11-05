@@ -5,10 +5,11 @@ test("正式聊天区区分模型协议、工具和步骤预算失败", async ({
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.goto("/ui/");
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill("formal-workbench-admin-browser-key");
   await page.locator("#connect-save").click();
-  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
   await page.locator("#session-title").fill("模型响应与调用预算");
   await page.getByRole("dialog").locator("button[type=submit]").click();
   for (const [prompt, message, code] of [

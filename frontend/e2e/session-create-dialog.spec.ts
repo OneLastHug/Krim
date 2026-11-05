@@ -31,26 +31,41 @@ type DialogGeometry = {
   coarsePointer: boolean;
 };
 
+async function openNavigationSurface(page: Page) {
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  return drawer;
+}
+
 async function selectTheme(page: Page, theme: Theme) {
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp(`^${themes[theme]}`) }).click();
+  const drawer = await openNavigationSurface(page);
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp(`^${themes[theme]}`) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 
 async function connect(page: Page) {
-  await page.locator(".access-connect").click();
+  const drawer = await openNavigationSurface(page);
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(ADMIN_KEY);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
+  return drawer;
 }
 
 async function openCreateDialog(page: Page, theme: Theme) {
   await page.goto("/ui/", { waitUntil: "domcontentloaded" });
   await selectTheme(page, theme);
+  // 连接会按需打开移动端抽屉；随后从侧栏按钮新建对话（移动端抽屉仍开着）。
   await connect(page);
-  const navigation = page.getByRole("button", { name: "打开导航", exact: true });
-  if (await navigation.isVisible()) await navigation.click();
-  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
   await expect(page.locator(".session-create-dialog")).toBeVisible();
   await expect(page.locator(".session-create-form")).toBeVisible();
 }
@@ -206,7 +221,7 @@ async function createConversation(page: Page, title: string) {
   expect(created).toMatchObject({ title, target_key: "demo" });
   await expect(page.locator("#chat-prompt")).toBeVisible();
   await expect(page.locator("#chat-prompt")).toBeEnabled();
-  await expect(page.locator(".topbar-title h1")).toHaveText(title);
+  await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText(title);
   await expect.poll(() => new URL(page.url()).searchParams.get("session")).toBe(created.id);
 }
 

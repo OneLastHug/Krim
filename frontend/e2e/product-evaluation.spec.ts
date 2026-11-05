@@ -4,9 +4,17 @@ import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 type Theme = "warm" | "bright" | "dark";
 async function selectTheme(page: Page, theme: Theme) {
   const labels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 async function openDisclosure(page: Page, label: string): Promise<Locator> {
   const details = page.locator("details.product-eval-editor").filter({ hasText: label });
@@ -168,7 +176,7 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
   await step("创建来源对话", async () => {
     await page.goto("/ui/");
     await selectTheme(page, "warm");
-    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
     await page.locator("#session-title").fill("人工参考来源");
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
     await expect(page.locator("#chat-prompt")).toBeEnabled();
@@ -199,7 +207,7 @@ test("P3：对话结果直达候选、人工确认与连续报告", async ({ pag
     await expect(tool.locator(".chat-tool-section pre").first()).toContainText("left");
     await expect(last.locator(".chat-detail")).toBeVisible();
     await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
-    await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
+    await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("Trace");
     await expect(page.locator(".trace-span-node").first()).toBeVisible();
     await page.getByRole("button", { name: "加入数据集", exact: true }).click();
     runId = new URL(page.url()).searchParams.get("source_run") ?? "";

@@ -1,9 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { ChevronDown, Pencil, Plus } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "./ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { chatCopy as c } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 
@@ -12,13 +12,11 @@ function createdLabel(value: number) {
   return Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "时间未记录";
 }
 
-export function SessionList({ chat, httpEnabled, beforeSelect }: { chat: SessionState; httpEnabled: boolean; beforeSelect?: (workspace: string, sessionId: string) => void }) {
-  const [open, setOpen] = useState(false), [title, setTitle] = useState("新对话"), [target, setTarget] = useState("demo");
+export function SessionList({ chat, beforeSelect }: { chat: SessionState; beforeSelect?: (workspace: string, sessionId: string) => void }) {
   const [renameOpen, setRenameOpen] = useState(false), [renameText, setRenameText] = useState(""), [submittedTitle, setSubmittedTitle] = useState<string | null>(null);
   const scopeKey = JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id]);
   const renameControl = chat.pendingControls.find(value => value.session_id === chat.id && value.target.endsWith("/rename"));
   const canRename = chat.ready && chat.canWrite && chat.session?.id === chat.id && chat.session.status === "open";
-  const workspaceConfigured = chat.actor?.target_keys?.includes("target-workspace") === true;
 
   useEffect(() => {
     setRenameOpen(false);
@@ -59,34 +57,6 @@ export function SessionList({ chat, httpEnabled, beforeSelect }: { chat: Session
   }
 
   return <section className="chat-sidebar" aria-label="对话列表">
-    <div className="chat-session-heading">
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogTrigger render={<Button variant="outline" className="new-conversation-button" aria-label={c.create} title={c.create} disabled={!chat.ready || !chat.canWrite} />}><Plus aria-hidden="true" />{c.create}</DialogTrigger>
-        <DialogContent className="session-create-dialog" aria-describedby={undefined}>
-          <DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
-          <form className="session-create-form" onSubmit={e => { e.preventDefault(); beforeSelect?.(chat.workspace, ""); void chat.create(title, target).then(() => setOpen(false)); }}>
-            <div className="session-create-field">
-              <Label htmlFor="session-title">{c.title}</Label>
-              <Input id="session-title" value={title} onChange={e => setTitle(e.target.value)} maxLength={128} required autoComplete="off" />
-            </div>
-            <div className="session-create-field chat-target">
-              <Label htmlFor="chat-target">{c.target}</Label>
-              <div className="session-target-select">
-                <select id="chat-target" aria-describedby={workspaceConfigured ? undefined : "session-target-help"} value={target} onChange={e => setTarget(e.target.value)}>
-                  <option value="demo">{c.defaultTarget}</option>
-                  {httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}
-                  <option value="target-workspace" disabled={!workspaceConfigured}>工作区</option>
-                </select>
-                <ChevronDown aria-hidden="true" />
-              </div>
-              {!workspaceConfigured && <p className="session-target-help" id="session-target-help" role="status">工作区未配置</p>}
-            </div>
-            <div className="dialog-actions"><Button type="submit" disabled={chat.creating || !!chat.newPending || !title.trim()}>{chat.creating ? "提交中" : c.createSubmit}</Button></div>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <h2>最近对话</h2>
-    </div>
     {chat.actor && chat.actor.workspaces.length > 1 && <div className="chat-workspace-select"><Label htmlFor="chat-workspace">{c.workspace}</Label><select id="chat-workspace" value={chat.workspace} onChange={e => { beforeSelect?.(e.target.value, ""); chat.select(e.target.value, ""); }}>{chat.actor.workspaces.map(w => <option key={w.workspace_id} value={w.workspace_id}>{w.workspace_id}</option>)}</select></div>}
     <nav className="chat-session-list" aria-label="已存对话">
       {!chat.list.length && <p className="chat-list-empty">{chat.ready ? c.empty : "连接后显示对话"}</p>}

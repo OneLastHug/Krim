@@ -4,15 +4,23 @@ import { attachJsonEvidence, screenshotStep } from "./step-screenshot.js";
 type Theme = "warm" | "bright" | "dark";
 const themeLabels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
 async function selectTheme(page: Page, theme: Theme) {
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + themeLabels[theme]) }).click();
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + themeLabels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 async function openNavigation(page: Page) {
   const menu = page.getByRole("button", { name: "打开导航", exact: true });
   if (await menu.isVisible()) {
     await menu.click();
-    await expect(page.locator(".mobile-drawer-content .primary-navigation")).toBeVisible();
+    await expect(page.locator(".mobile-drawer-content .sidebar-buttons")).toBeVisible();
   }
 }
 for (const theme of ["warm", "bright", "dark"] as const) {
@@ -37,11 +45,14 @@ for (const theme of ["warm", "bright", "dark"] as const) {
       });
       await step("新建会话后返回消息区", async () => {
         await openNavigation(page);
-        await page.getByRole("button", { name: "新建对话", exact: true }).click();
+        // 关闭抽屉恢复主区交互，再从聊天工具栏新建对话。
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
+        await page.locator(".toolbar-actions").getByRole("button", { name: "新建对话", exact: true }).click();
         await page.locator("#session-title").fill(title);
         await page.getByRole("dialog", { name: "新建对话", exact: true }).getByRole("button", { name: "创建对话", exact: true }).click();
         await expect(page.locator("#chat-prompt")).toBeEnabled();
-        await expect(page.locator(".topbar-title h1")).toHaveText(title);
+        await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText(title);
         await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
       });
       await step("完成一次实际工具任务而不显示评测内容", async () => {
@@ -61,7 +72,7 @@ for (const theme of ["warm", "bright", "dark"] as const) {
       await step("刷新保留主题和原会话", async () => {
         await page.reload();
         await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-        await expect(page.locator(".topbar-title h1")).toHaveText(title);
+        await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText(title);
         await expect(page.locator(".chat-answer").last()).toHaveText("200");
       });
       await step("按需展开工具摘要", async () => {
@@ -75,7 +86,7 @@ for (const theme of ["warm", "bright", "dark"] as const) {
       });
       await step("进入独立Trace读取原运行", async () => {
         await page.getByRole("button", { name: "查看 Trace", exact: true }).click();
-        await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
+        await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("Trace");
         await expect(page.locator(".trace-detail-heading h2")).toHaveText(title);
         await expect(page.locator(".trace-span-node").first()).toBeVisible();
         const url = new URL(page.url());
@@ -93,7 +104,7 @@ for (const theme of ["warm", "bright", "dark"] as const) {
         const observe = (request: import("@playwright/test").Request) => { if (/\/v[1-4]\//.test(request.url())) methods.push(request.method()); };
         page.on("request", observe);
         await page.getByRole("button", { name: "返回对话", exact: true }).click();
-        await expect(page.locator(".topbar-title h1")).toHaveText(title);
+        await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText(title);
         await expect(page.locator(".chat-answer").last()).toHaveText("200");
         expect(methods.every(method => method === "GET")).toBe(true);
         page.off("request", observe);

@@ -6,11 +6,29 @@ const token = "p5-prepared-smoke-local-only";
 const headers = { Authorization: "Bearer " + token };
 test.skip(process.env.KRIM_PREPARED_WORKSPACE !== "1", "需要当前已资格的独立 Workspace 服务");
 
+async function openNavigationSurface(page: Page) {
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  return drawer;
+}
+
+async function closeMobileDrawer(page: Page) {
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
+}
+
 async function selectTheme(page: Page, theme: "warm" | "bright" | "dark") {
   const labels = { warm: "暖纸", bright: "浅色", dark: "深色" };
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  const drawer = await openNavigationSurface(page);
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  await closeMobileDrawer(page);
 }
 
 for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "warm" as const },
@@ -23,17 +41,24 @@ for (const viewport of [{ name: "桌面", width: 1440, height: 1000, theme: "war
       { caseName: `P2-P5-${viewport.name}文件任务`, stepName: name, theme: viewport.theme }, action);
     await step("连接实际隔离工作区", async () => {
       await page.goto("/ui/");
-      await page.getByRole("button", { name: "连接", exact: true }).first().click();
+      await openNavigationSurface(page);
+      await page.getByRole("button", { name: "密钥身份" }).click();
+      await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
       await page.locator("#api-key").fill(token);
       await page.locator("#connect-save").click();
-      await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+      await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
+      await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
       await selectTheme(page, viewport.theme);
+      // 主题选择会关闭移动端抽屉；重新打开，便于下一步从侧栏新建会话。
+      await openNavigationSurface(page);
     });
     await step("新建文件任务会话", async () => {
-      await page.getByRole("button", { name: "新建对话", exact: true }).click();
+      await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
       await page.locator("#session-title").fill(`${viewport.name}文件验收`);
       await page.locator("#chat-target").selectOption("target-workspace");
       await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();
+      await expect(page.locator(".session-create-dialog")).not.toBeVisible();
+      await closeMobileDrawer(page);
       await page.locator(".workspace-task-area > summary").click();
       await expect(page.locator("#workspace-text")).toBeVisible();
       await expect(page.locator("#workspace-text")).toBeEnabled();
@@ -147,14 +172,16 @@ test("P2/P5：桌面拒绝command_run审批后不启动执行器且不生成answ
 
   await step("连接实际隔离工作区", async () => {
     await page.goto("/ui/");
-    await page.getByRole("button", { name: "连接", exact: true }).first().click();
+    await page.getByRole("button", { name: "密钥身份" }).click();
+    await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
     await page.locator("#api-key").fill(token);
     await page.locator("#connect-save").click();
-    await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+    await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
+    await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
     await selectTheme(page, "warm");
   });
   await step("新建独立Workspace会话", async () => {
-    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
     await page.locator("#session-title").fill("桌面拒绝审批验收");
     await page.locator("#chat-target").selectOption("target-workspace");
     await page.getByRole("dialog").getByRole("button", { name: "创建对话", exact: true }).click();

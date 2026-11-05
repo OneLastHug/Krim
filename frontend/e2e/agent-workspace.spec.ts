@@ -66,20 +66,26 @@ async function state(request: APIRequestContext, owner: State): Promise<State> {
   expect(result.ok()).toBe(true); return await result.json() as State;
 }
 async function connect(page: Page, token = "final-api-token") {
-  await page.getByRole("button", { name: "连接", exact: true }).first().click();
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  await page.getByRole("button", { name: "密钥身份", exact: true }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(token); await page.locator("#connect-save").click();
-  await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+  await expect(page.locator(".toolbar-actions").getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+  // 连接完成后恢复抽屉开合状态，避免遮挡主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 async function navigateView(page: Page, view: "chat" | "run") {
   const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
   let sidebar = page.locator(".desktop-sidebar");
   if (await mobileMenu.isVisible()) {
     await mobileMenu.click();
-    sidebar = page.getByRole("dialog", { name: "主导航", exact: true });
+    sidebar = page.getByRole("dialog", { name: "主导航与对话", exact: true });
   }
-  const navigation = sidebar.locator(".workspace-navigation");
-  if (await navigation.getAttribute("open") === null) await navigation.locator("summary").click();
-  const button = sidebar.getByRole("button", { name: view === "run" ? "导航到运行记录" : "导航到对话", exact: true });
+  const button = sidebar.locator(".sidebar-buttons").getByRole("button", { name: view === "run" ? "导航到运行记录" : "导航到对话", exact: true });
   await button.focus(); await expect(button).toBeFocused(); await page.keyboard.press("Enter");
   await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe(view);
 }
@@ -87,7 +93,7 @@ async function selectSession(page: Page, title: string) {
   const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
   if (await mobileMenu.isVisible()) {
     await mobileMenu.click();
-    await page.getByRole("dialog", { name: "主导航", exact: true }).getByRole("button", { name: title, exact: true }).click();
+    await page.getByRole("dialog", { name: "主导航与对话", exact: true }).getByRole("button", { name: title, exact: true }).click();
   } else {
     await page.getByRole("button", { name: title, exact: true }).click();
   }
@@ -101,7 +107,7 @@ async function openWorkspaceTaskArea(page: Page) {
 async function open(page: Page, owner: State) {
   await page.goto(owner.url+"/ui/?view=chat&workspace=local&session="+owner.session_id);
   await connect(page);
-  await expect(page.locator(".topbar-title h1")).toHaveText("FINAL工作A");
+  await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("FINAL工作A");
   await openWorkspaceTaskArea(page);
   await expect(page.locator("#workspace-text")).toBeEnabled();
 }
@@ -191,7 +197,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
     };
     const lum=(c:number[])=>c.slice(0,3).map(v=>{ const n=v/255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4; })
       .reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i]!,0);
-    const contrast=[...document.querySelectorAll<HTMLElement>(".chat-workbench button,.workspace-panel p,.topbar-title h1,.chat-turn [role=status]")]
+    const contrast=[...document.querySelectorAll<HTMLElement>(".chat-workbench button,.workspace-panel p,.chat-toolbar .toolbar-title h1,.chat-turn [role=status]")]
       .filter(el=>el.getClientRects().length&&!el.closest("[hidden]")&&!el.matches(":disabled")&&getComputedStyle(el).visibility!=="hidden")
       .map(el=>{ const a=lum(rgb(getComputedStyle(el).color)),b=lum(background(el));return {
         text:el.innerText.slice(0,100),ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05) }; });
@@ -200,7 +206,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
       .map(el=>({text:el.innerText,rect:rect(el)}));
     const active=document.activeElement as HTMLElement;
     return { viewport:{width:innerWidth,height:innerHeight},
-      overflow:document.documentElement.scrollWidth>innerWidth,heading:rect(document.querySelector(".topbar-title h1")),
+      overflow:document.documentElement.scrollWidth>innerWidth,heading:rect(document.querySelector(".chat-toolbar .toolbar-title h1")),
       session:new URL(location.href).searchParams.get("session"),turn:new URL(location.href).searchParams.get("turn"),
       stop:rect(document.querySelector("#chat-stop")),find:[...document.querySelectorAll(".workspace-pending button,.workspace-known button")].map(rect),
       buttons,contrast,focus:{tag:active?.tagName,id:active?.id,outline:getComputedStyle(active).outlineWidth},
@@ -360,7 +366,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
     const owner=await prepare(request,"unavailable"),errors=observe(page);
     try {
       await page.goto(owner.url+"/ui/?view=chat");await connect(page);
-      await page.getByRole("button",{name:"新建对话",exact:true}).click();
+      await page.locator(".toolbar-actions").getByRole("button",{name:"新建对话",exact:true}).click();
       await expect(page.locator('option[value="target-workspace"]')).toBeDisabled();
       await expect(page.getByText("工作区未配置",{exact:true})).toBeVisible();
       const denied=await request.post(owner.url+"/v2/workspaces/local/sessions",{headers:AUTH,
@@ -462,7 +468,7 @@ for(const viewport of [{width:1280,height:900},{width:390,height:844}]) test.des
         await entered.promise;
         if(steering==="session-return") {
           await selectSession(page,"FINAL工作B");
-          await expect(page.locator(".topbar-title h1")).toHaveText("FINAL工作B");
+          await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("FINAL工作B");
           await selectSession(page,"FINAL工作A");
         } else if(steering==="credential") {await connect(page,"final-peer-token");await connect(page);}
         else {await navigateView(page,"run");await navigateView(page,"chat");}

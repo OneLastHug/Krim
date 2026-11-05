@@ -28,7 +28,7 @@ function UnavailablePage({ title, children }: { title: string; children: ReactNo
 }
 
 export function App() {
-  const [key, setKey] = useState(""), [keyOpen, setKeyOpen] = useState(false);
+  const [key, setKey] = useState(""), [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
   const chatFence = useRef(0);
   const [mode, setMode] = useState<WorkbenchView>(() => readWorkbenchView(new URL(location.href)));
   const [sourceRun, setSourceRun] = useState(() => new URL(location.href).searchParams.get("source_run") ?? "");
@@ -262,16 +262,21 @@ export function App() {
       identityError={identityError}
       theme={theme}
       onThemeSelect={selectTheme}
+      readingSize={readingSize}
+      onReadingSizeSelect={selectReadingSize}
       chatTitle={chatTitle}
       chat={sidebarChat}
       httpEnabled={httpEnabled === true}
       beforeSessionSelect={recordChatSelection}
       onNavigate={choose}
+      onConnect={() => setKeyOpen(true)}
+      onOpenTask={() => setTaskOpen(true)}
+      canOpenTask={isLegacyRouteAvailable}
       actions={<>
         {mode !== "chat" && identity && identity.workspaces.length > 1 && <select className="workbench-workspace-select" aria-label="当前工作区" value={productWorkspace} onChange={event => chooseWorkspace(event.target.value)}>
           {identity.workspaces.map(value => <option key={value.workspace_id} value={value.workspace_id}>{value.workspace_id}</option>)}
         </select>}
-        <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} isLegacy={isLegacyRouteAvailable}/>
+        <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
       </>}
       inspector={<WorkbenchInspector view={mode} objectId={objectId} identity={identity}/>}
     >
