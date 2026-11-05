@@ -19,6 +19,7 @@ class Settings(BaseModel):
     target_version: str = "demo-v1"
     max_steps: int = Field(default=8, ge=1, le=32)
     max_tools_per_step: int = Field(default=4, ge=1, le=16)
+    read_parallelism: int = Field(default=4, ge=1, le=16)  # 相邻只读调用并发上限
     max_tool_calls: int = Field(default=32, ge=1, le=128)
     max_active_runs: int = Field(default=4, ge=1, le=16)
     max_events: int = Field(default=2048, ge=4, le=8192)

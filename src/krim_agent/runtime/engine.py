@@ -7,19 +7,27 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import partial
-from typing import cast
+from typing import Any, cast
 
 from pydantic import JsonValue
 
 from krim_agent.config import Settings
 from krim_agent.context import builder, compaction
 from krim_agent.context.types import SessionContext
-from krim_agent.contracts import Message, RunEvent, ServiceError, ToolObservation, encoded
+from krim_agent.contracts import (
+    Message,
+    RunEvent,
+    ServiceError,
+    ToolObservation,
+    encoded,
+    parse_json,
+)
 from krim_agent.providers.types import ModelProvider, ModelToolCall
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.core import Invocation
-from krim_agent.tools.executor import Approve, ToolContext, ToolExecutor
+from krim_agent.tools.executor import Admission, Approve, ToolContext, ToolExecutor
 from krim_agent.workspace.operations import WorkspaceOperations
 from krim_agent.workspace.verification import Verifier, stage_result
 
@@ -185,7 +193,14 @@ class AgentLoop:
                     tool_calls=[call.model_dump(mode="json") for call in calls],
                 )
             )
-            async def execute(call: ModelToolCall, step: int = step) -> ToolObservation:
+            # 入场判定与集中受理（ADR-0015）：全批按声明序先判定、后发射 tool_start；
+            # 非 ask 调用按相邻连读分组执行（read 并发、read/write 不并发），
+            # workspace 与非 workspace 线统一适用。
+            context = ToolContext(cast(Callable[[str, dict[str, JsonValue]],
+                Awaitable[RunEvent]], emit),
+                                  approve, tool_timeout, check, scope, approval_timeout)
+
+            def build(call: ModelToolCall, step: int = step) -> Invocation:
                 check()
                 try:
                     spec = self.executor.registry.get(call.name)
@@ -194,37 +209,63 @@ class AgentLoop:
                     if error.code != "unknown_tool":
                         raise
                     digest = ""
-                invocation = Invocation(run_id,
+                return Invocation(run_id,
                     str(uuid.uuid4()) if frame else secrets.token_hex(16),
                     secrets.token_hex(8), step, call.name, encoded(call.arguments), digest,
                     provider_call_id=call.id)
-                context = ToolContext(cast(Callable[[str, dict[str, JsonValue]],
-                    Awaitable[RunEvent]], emit),
-                                      approve, tool_timeout, check, scope, approval_timeout)
-                return await self.executor.execute(invocation, context)
 
+            def observation(invocation: Invocation, *, status: str,
+                            code: str | None) -> dict[str, JsonValue]:
+                return ToolObservation(
+                    call_id=invocation.call_id,
+                    provider_call_id=invocation.provider_call_id,
+                    arguments=cast(dict[str, JsonValue], parse_json(
+                        invocation.arguments_json)),
+                    span_id=invocation.span_id, step_index=invocation.step_index,
+                    name=invocation.name, status=cast(Any, status),
+                    executor_started=False, result_available=False, code=code,
+                    decision="deny").model_dump(mode="json")
+
+            invocations = [build(call) for call in calls]
+            admissions: list[Admission] = []
+            for invocation in invocations:  # 声明序：先受理、再判定，全部通过后统一执行
+                await emit("tool_start", observation(invocation, status="unknown", code=None))
+                try:
+                    admission = await self.executor.admit(
+                        invocation, context, timeout_seconds=tool_timeout)
+                except ServiceError as error:
+                    # 入场硬失败：如实补失败观察（保持既有事实形状），整次运行失败。
+                    await emit("tool_end", observation(
+                        invocation, status="failed", code=error.code))
+                    raise
+                admissions.append(replace(admission, start_emitted=True))
+            for invocation, admission in zip(invocations, admissions, strict=True):
+                if admission.decision == "deny":
+                    await emit("tool_end", observation(
+                        invocation, status="denied",
+                        code=admission.code or "permission_denied"))
+                    raise ServiceError(admission.code or "permission_denied")
             index = 0
-            while index < len(calls):
-                group = [calls[index]]
-                if frame is not None:
-                    parallel = cast(int, runtime["read_parallelism"])
-                    while len(group) < parallel and index+len(group) < len(calls):
-                        try:
-                            risks = [
-                                self.executor.registry.get(
-                                call.name).risk for call in group+[calls[index+len(group)]]]
-                        except ServiceError:
-                            break
-                        if any(risk != "read" for risk in risks):
-                            break
-                        group.append(calls[index+len(group)])
+            while index < len(admissions):
+                group: list[tuple[Invocation, Admission]] = [
+                    (invocations[index], admissions[index])]
+                parallel = cast(int, runtime["read_parallelism"]) if frame \
+                    else self.settings.read_parallelism
+                while len(group) < parallel and index+len(group) < len(admissions):
+                    candidate = admissions[index+len(group)]
+                    if candidate.spec.risk != "read" or group[-1][1].spec.risk != "read":
+                        break
+                    group.append((invocations[index+len(group)], candidate))
                 tool_count += len(group)
                 results: list[ToolObservation | BaseException]
                 if len(group) == 1:
-                    # legacy与串行写沿原producer Task；只有真实并行读创建有界子Task。
-                    results = [await execute(group[0])]
+                    # 串行写与单调用沿原producer Task；只有真实并行读创建有界子Task。
+                    results = [await self.executor.execute(
+                        group[0][0], context, group[0][1])]
                 else:
-                    tasks = [asyncio.create_task(execute(call)) for call in group]
+                    tasks = [asyncio.create_task(
+                        self.executor.execute(invocation, context, admission))
+                        for invocation, admission in group]
                     try:
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                     finally:
@@ -233,13 +274,13 @@ class AgentLoop:
                                 task.cancel()
                         await settled(asyncio.gather(*tasks, return_exceptions=True))
                 assert_target_current()
-                for call, result in zip(group, results, strict=True):
+                for (invocation, _), result in zip(group, results, strict=True):
                     if isinstance(result, BaseException):
                         raise result
                     if result.status != "ok":
                         raise ServiceError(result.code or "tool_error")
                     conversation.append(Message(role="tool", content=encoded(result.value),
-                        call_id=call.id))
+                        call_id=invocation.provider_call_id))
                 index += len(group)
             if compressor is None:
                 messages = conversation

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from typing import cast
 
-from pydantic import JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from krim_agent.contracts import (
     RunEvent,
@@ -39,6 +39,22 @@ class ToolContext:
     approval_timeout: float = 300
 
 
+@dataclass(frozen=True)
+class Admission:
+    """入场判定结果（ADR-0015）：工具档案、已校验参数、策略判定。
+
+    deny 时 code 给出稳定错误码；ask 表示需要人工批准（当前版本仍在
+    执行核内等待，停靠化后由引擎接管）。start_emitted 表示引擎已按
+    声明序集中发射过 tool_start，执行段不再重复发射。
+    """
+
+    spec: ToolSpec
+    parsed: BaseModel
+    decision: Decision
+    code: str | None = None
+    start_emitted: bool = False
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -65,7 +81,67 @@ class ToolExecutor:
             return "deny"
         return "ask" if "ask" in decisions else "allow"
 
-    async def execute(self, invocation: Invocation, context: ToolContext) -> ToolObservation:
+    async def admit(
+        self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float
+    ) -> Admission:
+        """入场判定（ADR-0015）：指纹核对、严格入参校验、pre 钩子、middleware、策略判定。
+
+        workspace 策略依赖 pipeline 的 CURRENT 上下文（无 scope 即拒绝），
+        因此这里同样设置 CURRENT。硬失败抛 ServiceError；策略 deny 是软
+        结论，返回带 code 的判定（由调用方决定终止或回传）。
+        """
+        with _calling(invocation):
+            token = CURRENT.set(replace(context.scope,
+                invocation=invocation) if context.scope is not None else None)
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    self.registry.assert_current()
+                    context.assert_target_current()
+                    if context.scope is not None:
+                        context.scope.check()
+                    spec = self.registry.get(invocation.name)
+                    if spec.fingerprint != invocation.tool_hash:
+                        raise ServiceError("tool_binding_changed")
+                    try:
+                        parsed = spec.parameters.model_validate(
+                            parse_json(invocation.arguments_json), strict=True)
+                    except (ValidationError, ValueError):
+                        raise ServiceError("invalid_input") from None
+
+                    async def inspected(hook: PreHook, *, middleware: bool = False) -> str | None:
+                        snapshot = replace(invocation)
+                        before = asdict(snapshot)
+                        try:
+                            verdict = await hook(snapshot)
+                            if asdict(snapshot) != before or (verdict is not None
+                                and not isinstance(verdict, str)):
+                                raise ValueError("Hook不得修改参数或伪造结果")
+                        except Exception:
+                            raise ServiceError(
+                                "middleware_error" if middleware else "pre_hook_error") from None
+                        self.registry.assert_current()
+                        context.assert_target_current()
+                        if context.scope is not None:
+                            context.scope.check()
+                        return verdict
+
+                    if self.pre is not None and await inspected(self.pre) is not None:
+                        raise ServiceError("hook_denied")
+                    for middleware in self.middleware:
+                        if await inspected(middleware, middleware=True) is not None:
+                            raise ServiceError("middleware_error")
+                    decision = await self._decision(invocation, spec)
+                    if decision not in {"allow", "deny", "ask"}:
+                        decision = "deny"
+                    return Admission(
+                        spec, parsed, decision,
+                        "permission_denied" if decision == "deny" else None)
+            finally:
+                CURRENT.reset(token)
+
+    async def execute(
+        self, invocation: Invocation, context: ToolContext, admission: Admission | None = None
+    ) -> ToolObservation:
         with _calling(invocation):
             fields = {
                 key: value
@@ -94,54 +170,33 @@ class ToolExecutor:
                 if first is not None and repeated:
                     raise ServiceError("wrap_reentry")
 
-            async def inspected(hook: PreHook, *, middleware: bool = False) -> str | None:
-                snapshot = replace(invocation)
-                before = asdict(snapshot)
-                try:
-                    verdict = await hook(snapshot)
-                    if asdict(snapshot) != before or (verdict is not None
-                        and not isinstance(verdict, str)):
-                        raise ValueError("Hook不得修改参数或伪造结果")
-                except Exception:
-                    raise ServiceError(
-                        "middleware_error" if middleware else "pre_hook_error") from None
-                check()
-                return verdict
-
             try:
-                if context.scope is None:
+                if admission is None:
+                    # 直接调用路径：入场判定内联完成（引擎路径先 admit 再 execute）。
+                    admission = await self.admit(
+                        invocation, context, timeout_seconds=context.timeout)
+                spec = admission.spec
+                parsed = admission.parsed
+                decision = admission.decision
+                if not admission.start_emitted and context.scope is None:
                     # legacy的tool_start仍在原工具timeout之外。
                     await context.emit("tool_start", outcome.model_dump(mode="json"))
+                if context.scope is None:
                     deadline = clock() + context.timeout
                 assert deadline is not None
                 tool_budget = ExecutionBudget(deadline)
                 tool_timeout = asyncio.timeout_at(deadline)
                 tool_budget.bind(tool_timeout)
                 async with tool_timeout:
-                    if context.scope is not None:
+                    if not admission.start_emitted and context.scope is not None:
                         await context.emit("tool_start", outcome.model_dump(mode="json"))
                     check()
-                    spec = self.registry.get(invocation.name)
-                    if spec.fingerprint != invocation.tool_hash:
-                        raise ServiceError("tool_binding_changed")
-                    try:
-                        parsed = spec.parameters.model_validate(
-                            parse_json(invocation.arguments_json), strict=True)
-                    except (ValidationError, ValueError):
-                        raise ServiceError("invalid_input") from None
-                    if self.pre is not None and await inspected(self.pre) is not None:
-                        raise ServiceError("hook_denied")
-                    for middleware in self.middleware:
-                        if await inspected(middleware, middleware=True) is not None:
-                            raise ServiceError("middleware_error")
 
                     async def security() -> JsonValue:
-                        nonlocal decision, entering, returned, available, value
+                        nonlocal entering, returned, available, value
                         check()
-                        decision = await self._decision(invocation, spec)
-                        check()
-                        if decision not in {"allow", "deny", "ask"}:
-                            decision = "deny"
+                        if decision == "deny":
+                            raise ServiceError(admission.code or "permission_denied")
                         if decision == "ask":
                             assert tool_budget is not None
                             with tool_budget.pause():
@@ -150,8 +205,6 @@ class ToolExecutor:
                             check()
                             if not approved:
                                 raise ServiceError("approval_denied")
-                        elif decision == "deny":
-                            raise ServiceError("permission_denied")
                         check()
                         await context.emit("tool_intent", {
                             "call_id": invocation.call_id, "span_id": invocation.span_id,
