@@ -132,3 +132,48 @@ async def test_park_checkpoint_tamper_refuses_resume(wire, tmp_path):
         await app.service.reply_approval(run_id, request["request_id"], allow_reply(request))
         result = await app.service.wait(run_id)
         assert result.status == "failed" and result.code == "facts_corrupt"
+
+
+@pytest.mark.asyncio
+async def test_policy_deny_feeds_back_and_run_completes(wire, tmp_path):
+    """策略拒绝回传继续（ADR-0015 §7）：运行完成，工具从未进入执行器。"""
+    from krim_agent.config import Settings as AppSettings
+    from krim_agent.tools.registry import ToolRegistry as Registry
+
+    async def deny_policy(_invocation):
+        return "deny"
+
+    from krim_agent.providers.openai_compatible import (
+        OpenAICompatibleConfig as Cfg,
+        OpenAICompatibleProvider as Prv,
+    )
+    from krim_agent.composition import open_application as open_app
+    from pathlib import Path as P
+
+    provider = Prv(Cfg(base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture"))
+    async with await open_app(
+        P(tmp_path) / "deny-soft.sqlite",
+        settings=AppSettings(run_timeout=5, tool_timeout=2),
+        provider=provider,
+        registry=Registry(tuple(spec for spec, _ in wire.registry()._frozen)),
+        policy=deny_policy,
+    ) as app:
+        session = await app.sessions.create(
+            LOCAL, "local", SessionCreate(request_key="deny-soft")
+        )
+        turn = await app.sessions.submit(
+            LOCAL,
+            "local",
+            session.id,
+            TurnRequest(text="/echo denied", request_key="deny-turn", expected_revision=0),
+        )
+        finished = await app.sessions.wait(LOCAL, "local", session.id, turn.id)
+        assert finished.status == "completed"
+        final = await app.sessions.turn(LOCAL, "local", session.id, turn.id)
+        assert final.run_id is not None
+        facts = await app.service.result(final.run_id)
+        assert facts.tools[0].status == "denied"
+        assert facts.tools[0].code == "permission_denied"
+        assert facts.tools[0].executor_started is False
+        assert not wire.executions
+    await provider.close()

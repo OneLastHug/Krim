@@ -274,12 +274,14 @@ class AgentLoop:
                     raise
                 admissions.append(replace(admission, start_emitted=True))
             pending_asks: list[tuple[Invocation, Admission]] = []
+            denied: list[tuple[Invocation, Admission]] = []
             for invocation, admission in zip(invocations, admissions, strict=True):
                 if admission.decision == "deny":
+                    # 软拒绝（ADR-0015 §7）：记录观察并以固定模板回传模型，运行继续
+                    code = admission.code or "permission_denied"
                     await emit("tool_end", observation(
-                        invocation, status="denied",
-                        code=admission.code or "permission_denied"))
-                    raise ServiceError(admission.code or "permission_denied")
+                        invocation, status="denied", code=code))
+                    denied.append((invocation, admission))
                 if admission.decision == "ask":
                     pending_asks.append((invocation, admission))
             tool_count += len(admissions)  # 声明即计入总量预算（含待批）
@@ -323,6 +325,13 @@ class AgentLoop:
                     conversation.append(Message(role="tool", content=encoded(result.value),
                         call_id=invocation.provider_call_id))
                 index += len(group)
+            for invocation, admission in denied:  # 拒绝按声明序回传（ADR-0015 §7）
+                conversation.append(Message(
+                    role="tool",
+                    content=encoded({"call_id": invocation.call_id,
+                        "name": invocation.name, "status": "denied",
+                        "code": admission.code or "permission_denied"}),
+                    call_id=invocation.provider_call_id))
             if pending_asks:
                 # 剩余 ask：落审批请求（同批同刻到期）、写恢复点、停靠（ADR-0015）。
                 budget_remaining = (
