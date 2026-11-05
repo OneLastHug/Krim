@@ -22,6 +22,7 @@ from krim_agent.contracts import (
     ServiceError,
     ToolObservation,
     encoded,
+    fingerprint,
     parse_json,
 )
 from krim_agent.providers.types import ModelProvider, ModelToolCall
@@ -33,6 +34,20 @@ from krim_agent.workspace.verification import Verifier, stage_result
 
 from . import model_step
 from .contracts import ExecutionBudget, RunStore, WorkRuntime, settled
+from .recovery import PendingAsk, RecoveryState, build_checkpoint
+
+type ApprovalRequest = Callable[[Invocation, float | None], Awaitable[dict[str, JsonValue]]]
+# 停靠回调：引擎用它构造 approval_request 事件内容（服务侧负责溯源、
+# WorkLimits 校验与期限计算；第二个参数是执行预算剩余，ADR-0015 §4）。
+
+
+async def _no_inprocess_wait(invocation: Invocation, timeout_seconds: float) -> bool:
+    """引擎路径不再有进程内审批等待：ask 一律停靠，由恢复执行。"""
+    raise ServiceError("approval_unavailable")
+
+
+class Parked(Exception):
+    """本步存在待人工审批的调用：恢复点已写入，运行停靠为 awaiting。"""
 
 
 class AgentLoop:
@@ -55,9 +70,10 @@ class AgentLoop:
     async def run(
         self,
         run_id: str,
-        approve: Approve,
+        approval_request: ApprovalRequest | Approve,
         assert_target_current: Callable[[], None] = lambda: None,
         execution_budget: ExecutionBudget | None = None,
+        resume: RecoveryState | None = None,
     ) -> None:
         def check() -> None:
             assert_target_current()
@@ -129,6 +145,23 @@ class AgentLoop:
                 source_anchor=cast(str, getattr(
                     snapshot.session_context, "source_fingerprint", None)))
         conversation = list(messages)
+        if resume is not None:
+            # 停靠恢复（ADR-0015）：对话/计数/步号从恢复点读回；先收尾停靠批。
+            conversation = list(resume.conversation)
+            messages = conversation
+            stepper.index = resume.step
+            stepper.output_bytes = resume.output_bytes
+            stepper.seen = set(resume.seen)
+            tool_count = resume.tool_count
+            await self._finish_pending(
+                resume.pending,
+                conversation,
+                ToolContext(cast(Callable[[str, dict[str, JsonValue]],
+                    Awaitable[RunEvent]], emit),
+                    _no_inprocess_wait, tool_timeout, check, scope, approval_timeout),
+                check,
+                emit,
+            )
         while stepper.index < max_steps:
             check()
             self.executor.registry.assert_current()
@@ -198,7 +231,8 @@ class AgentLoop:
             # workspace 与非 workspace 线统一适用。
             context = ToolContext(cast(Callable[[str, dict[str, JsonValue]],
                 Awaitable[RunEvent]], emit),
-                                  approve, tool_timeout, check, scope, approval_timeout)
+                                  _no_inprocess_wait, tool_timeout, check, scope,
+                                  approval_timeout)
 
             def build(call: ModelToolCall, step: int = step) -> Invocation:
                 check()
@@ -239,24 +273,31 @@ class AgentLoop:
                         invocation, status="failed", code=error.code))
                     raise
                 admissions.append(replace(admission, start_emitted=True))
+            pending_asks: list[tuple[Invocation, Admission]] = []
             for invocation, admission in zip(invocations, admissions, strict=True):
                 if admission.decision == "deny":
                     await emit("tool_end", observation(
                         invocation, status="denied",
                         code=admission.code or "permission_denied"))
                     raise ServiceError(admission.code or "permission_denied")
+                if admission.decision == "ask":
+                    pending_asks.append((invocation, admission))
+            tool_count += len(admissions)  # 声明即计入总量预算（含待批）
+            executable = [
+                (invocation, admission)
+                for invocation, admission in zip(invocations, admissions, strict=True)
+                if admission.decision == "allow"
+            ]
             index = 0
-            while index < len(admissions):
-                group: list[tuple[Invocation, Admission]] = [
-                    (invocations[index], admissions[index])]
+            while index < len(executable):
+                group: list[tuple[Invocation, Admission]] = [executable[index]]
                 parallel = cast(int, runtime["read_parallelism"]) if frame \
                     else self.settings.read_parallelism
-                while len(group) < parallel and index+len(group) < len(admissions):
-                    candidate = admissions[index+len(group)]
+                while len(group) < parallel and index+len(group) < len(executable):
+                    candidate = executable[index+len(group)][1]
                     if candidate.spec.risk != "read" or group[-1][1].spec.risk != "read":
                         break
-                    group.append((invocations[index+len(group)], candidate))
-                tool_count += len(group)
+                    group.append(executable[index+len(group)])
                 results: list[ToolObservation | BaseException]
                 if len(group) == 1:
                     # 串行写与单调用沿原producer Task；只有真实并行读创建有界子Task。
@@ -282,6 +323,81 @@ class AgentLoop:
                     conversation.append(Message(role="tool", content=encoded(result.value),
                         call_id=invocation.provider_call_id))
                 index += len(group)
+            if pending_asks:
+                # 剩余 ask：落审批请求（同批同刻到期）、写恢复点、停靠（ADR-0015）。
+                budget_remaining = (
+                    execution_budget.remaining if execution_budget is not None else None)
+                batch_expires = time.time() + approval_timeout
+                for invocation, _ in pending_asks:
+                    data = await approval_request(invocation, budget_remaining)
+                    if not isinstance(data, dict) or "expires_at" not in data:
+                        raise ServiceError("execution_error")  # 停靠回调契约破裂
+                    data["expires_at"] = min(
+                        cast(float, data["expires_at"]), batch_expires
+                    )
+                    await emit("approval_request", data)
+                checkpoint = build_checkpoint(
+                    conversation=conversation,
+                    step=stepper.index,
+                    output_bytes=stepper.output_bytes,
+                    tool_count=tool_count,
+                    seen=set(stepper.seen),
+                    budget_remaining=budget_remaining,
+                    pending=[invocation for invocation, _ in pending_asks],
+                )
+                await self.store.write_checkpoint(
+                    run_id, checkpoint, fingerprint(checkpoint)
+                )
+                raise Parked()
             if compressor is None:
                 messages = conversation
         raise ServiceError("step_limit")
+
+    async def _finish_pending(
+        self,
+        pending: tuple[PendingAsk, ...],
+        conversation: list[Message],
+        context: ToolContext,
+        check: Callable[[], None],
+        emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
+    ) -> None:
+        """恢复时收尾停靠批：指纹漂移拒绝续跑；批准的执行、拒绝的记观察回传。"""
+        from pydantic import ValidationError
+
+        for item in pending:
+            check()
+            self.executor.registry.assert_current()
+            spec = self.executor.registry.get(item.invocation.name)
+            if spec.fingerprint != item.invocation.tool_hash:
+                raise ServiceError("tool_binding_changed")  # 停靠期间工具被换
+            if not item.allow:
+                observation = ToolObservation(
+                    call_id=item.invocation.call_id,
+                    provider_call_id=item.invocation.provider_call_id,
+                    arguments=cast(dict[str, JsonValue],
+                        parse_json(item.invocation.arguments_json)),
+                    span_id=item.invocation.span_id,
+                    step_index=item.invocation.step_index,
+                    name=item.invocation.name, status="denied",
+                    executor_started=False, result_available=False,
+                    code="approval_denied", decision="ask")
+                await emit("tool_end", observation.model_dump(mode="json"))
+                conversation.append(Message(
+                    role="tool",
+                    content=encoded({"call_id": observation.call_id,
+                        "name": observation.name, "status": "denied",
+                        "code": "approval_denied"}),
+                    call_id=item.invocation.provider_call_id))
+                continue
+            try:
+                parsed = spec.parameters.model_validate(
+                    parse_json(item.invocation.arguments_json), strict=True)
+            except (ValidationError, ValueError):
+                raise ServiceError("invalid_input") from None
+            admission = replace(
+                Admission(spec, parsed, "ask"), start_emitted=True, approved=True)
+            result = await self.executor.execute(item.invocation, context, admission)
+            if result.status != "ok":
+                raise ServiceError(result.code or "tool_error")
+            conversation.append(Message(role="tool", content=encoded(result.value),
+                call_id=item.invocation.provider_call_id))

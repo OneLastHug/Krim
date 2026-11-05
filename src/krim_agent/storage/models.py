@@ -160,6 +160,17 @@ session_controls = Table(
     UniqueConstraint("session_id", "request_key"),
 )
 
+# ADR-0015：审批停靠恢复点——一次 awaiting 的跨进程恢复事实（对话快照、
+# 计数、预算剩余、待批调用清单），答复全部到达后据此续跑，不多付模型调用。
+park_checkpoints = Table(
+    "park_checkpoints",
+    metadata,
+    Column("run_id", String(36), ForeignKey("runs.id"), primary_key=True),
+    Column("checkpoint", JSON, nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("created_at", Float, nullable=False),
+)
+
 # AC-M2 / D1_DATA：只追加五表，旧八表定义与原行保持。
 work_sessions = Table(
     "work_sessions",

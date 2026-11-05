@@ -18,7 +18,7 @@ from krim_agent.storage.sqlite import SQLiteStore
 async def test_eval_consumers_use_actual_validated_schema(tmp_path):
     store = await SQLiteStore.open(tmp_path / "schema.sqlite")
     try:
-        assert store.schema_version == 5
+        assert store.schema_version == 6
         with pytest.raises(ServiceError, match="not_found"):
             await store.dataset("not-created", "1")
     finally:
@@ -29,6 +29,7 @@ def downgrade(path, version):
     conn = sqlite3.connect(path)
     try:
         for name in [
+            "park_checkpoints",
             "observation_outbox",
             "capture_policies",
             "capture_meta",
@@ -93,7 +94,7 @@ async def test_v3_migration_atomic_and_old_rows_unchanged(tmp_path, version):
     assert database.read_bytes() == before
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == 5
+        assert writer.schema_version == 6
         from krim_agent.runtime.facts import project_facts
 
         assert project_facts(await writer.snapshot(run.id)).model_dump(mode="json") == expected
@@ -370,7 +371,7 @@ async def test_real_schema2_ac_turn_keys_migrate_without_replay(tmp_path, mode):
         database, ["runs", "run_events", "dataset_revisions", "evaluations", "eval_items"]
     )
     migrated = await SQLiteStore.open(database)
-    assert migrated.schema_version == 5
+    assert migrated.schema_version == 6
     await migrated.close()
     assert table_rows(database, list(legacy_rows)) == legacy_rows
     record = {"mode": mode, "parent": seed["module"], "source_version": seed["version"]}

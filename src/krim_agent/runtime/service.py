@@ -35,9 +35,10 @@ from krim_agent.tools.core import Invocation
 from krim_agent.tools.pipeline import _owns, _producing
 
 from . import model_step as model_step_module
-from .contracts import ExecutionBudget, RunStore, settled
-from .engine import AgentLoop
+from .contracts import ExecutionBudget, RunSnapshot, RunStore, settled
+from .engine import AgentLoop, Parked
 from .facts import project_facts
+from .recovery import load_checkpoint
 
 
 def implementation(value: object | None) -> dict[str, JsonValue]:
@@ -137,7 +138,7 @@ class RunBinding:
             pipeline_module.Scope.deadline.fget,
             operations_module.WorkspaceOperations.scope,
             RunService._drive,
-            RunService._approve,
+            RunService._approval_request,
         )))
         result += tuple(source_digest(module.__file__) for module in (
             config_module,
@@ -313,7 +314,6 @@ class RunService:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
-        self._pending: dict[str, asyncio.Future[bool]] = {}
         self._execution_budgets: dict[str, ExecutionBudget] = {}
         self._cancelled: set[str] = set()
         self._finalizing: set[str] = set()
@@ -435,7 +435,9 @@ class RunService:
         if not task.cancelled():
             task.exception()  # 读取异常，避免未消费 Task 把私有异常写入事件循环日志。
 
-    async def _drive(self, run: RunView, binding: RunBinding | TurnBinding) -> None:
+    async def _drive(
+        self, run: RunView, binding: RunBinding | TurnBinding, *, resume: bool = False
+    ) -> None:
         producer = self.tasks.get(run.id)
         if producer is None or producer is not asyncio.current_task():
             raise ServiceError("self_wait")
@@ -443,21 +445,61 @@ class RunService:
             status: RunStatus = "completed"
             code: str | None = None
             budget: ExecutionBudget | None = None
+            parked = False
+            recovery_checkpoint = None
+            executing: RunBinding | TurnBinding = binding
+            base = binding.base if isinstance(binding, TurnBinding) else binding
             try:
-                timeout = (
-                    binding.loop.work.profile.runtime.run_timeout_seconds
-                    if binding.loop.work is not None else binding.settings.run_timeout
-                )
-                deadline = asyncio.get_running_loop().time() + max(
-                    0, run.created_at + timeout - time.time())
+                if resume:
+                    # 停靠恢复（ADR-0015）：预算从恢复点剩余量重建，等待期不消耗
+                    recovery_checkpoint = await self.store.read_checkpoint(run.id)
+                    if recovery_checkpoint is None:
+                        raise ServiceError("facts_corrupt")
+                    data, _stored = recovery_checkpoint
+                    deadline = asyncio.get_running_loop().time() + max(
+                        0.0, float(data.get("budget_remaining") or 0.0))
+                else:
+                    timeout = (
+                        binding.loop.work.profile.runtime.run_timeout_seconds
+                        if binding.loop.work is not None else binding.settings.run_timeout
+                    )
+                    deadline = asyncio.get_running_loop().time() + max(
+                        0, run.created_at + timeout - time.time())
                 budget = ExecutionBudget(deadline)
                 self._execution_budgets[run.id] = budget
                 timeout_context = asyncio.timeout_at(deadline)
                 budget.bind(timeout_context)
                 async with timeout_context:
                     await self.store.set_running(run.id)
-                    await binding.loop.run(run.id, self._approve, binding.assert_current,
-                                           execution_budget=budget)
+                    recovery = None
+                    if resume:
+                        assert recovery_checkpoint is not None
+                        snapshot = await self.store.snapshot(run.id)
+                        # turn 运行的 target 带会话 context 字段：按既有约定排除后比对
+                        if fingerprint(parse_json(base.descriptor_json)) != fingerprint({
+                            key: value
+                            for key, value in snapshot.target.items()
+                            if key != "context"
+                        }):
+                            # 停靠后环境（目标档案）变了：不静默续跑（ADR-0015 硬门）
+                            raise ServiceError("target_binding_changed")
+                        if snapshot.session_context is not None:
+                            from krim_agent.context import builder as context_builder
+
+                            executing = TurnBinding(base, context_builder.binding_token())
+                        replies = {
+                            str(cast(dict[str, JsonValue], event.data["reply"])["call_id"]):
+                            bool(cast(dict[str, JsonValue], event.data["reply"])["allow"])
+                            for event in snapshot.events
+                            if event.kind == "approval_reply"
+                        }
+                        data, stored = recovery_checkpoint
+                        recovery = load_checkpoint(run.id, data, stored, replies)
+                    await executing.loop.run(run.id, self._approval_request,
+                                             executing.assert_current,
+                                             execution_budget=budget, resume=recovery)
+            except Parked:
+                parked = True  # 停靠：恢复点已由引擎写入，状态转 awaiting
             except asyncio.CancelledError:
                 status, code = "aborted", "cancelled"
             except TimeoutError:
@@ -472,7 +514,10 @@ class RunService:
                     self._execution_budgets.pop(run.id, None)
                 self._finalizing.add(run.id)
                 try:
-                    await self.store.finish(run.id, status, code)
+                    if parked:
+                        await self.store.set_awaiting(run.id)
+                    else:
+                        await self.store.finish(run.id, status, code)
                 finally:
                     self._finalizing.discard(run.id)
                     self._cancelled.discard(run.id)
@@ -528,27 +573,42 @@ class RunService:
 
     async def _cancel(self, run_id: str) -> RunView:
         task = self.tasks.get(run_id)
-        if task is None:
-            return await self.get(run_id)
         error: ServiceError | None = None
         try:
             # 内存 producer 的所有权不依赖读库成功；失败也必须进入清理。
-            await self.get(run_id)
+            view = await self.get(run_id)
+            if view.status == "awaiting":
+                # 停靠定稿与任务收尾之间存在窗口：状态已停靠即直接定稿，
+                # 未决调用保留受理事实（ADR-0015）。
+                await self.store.request_stop(run_id)
+                return await self.store.finish(run_id, "aborted", "cancelled")
             await self.store.request_stop(run_id)
         except ServiceError as failure:
             error = failure
         finally:
-            if not task.done() and run_id not in self._cancelled and run_id not in self._finalizing:
-                self._cancelled.add(run_id)
-                task.cancel()
-            await settled(task)
+            if task is not None:
+                if (
+                    not task.done()
+                    and run_id not in self._cancelled
+                    and run_id not in self._finalizing
+                ):
+                    self._cancelled.add(run_id)
+                    task.cancel()
+                await settled(task)
         if error is not None:
             raise error
         return await self.get(run_id)
 
-    async def _approve(self, invocation: Invocation, approval_window_seconds: float) -> bool:
+    async def _approval_request(
+        self, invocation: Invocation, budget_remaining: float | None
+    ) -> dict[str, JsonValue]:
+        """构造 approval_request 事件内容（ADR-0015 停靠回调，不再进程内等待）。
+
+        溯源与 workspace WorkLimits 校验沿用 ADR-0014 语义；expires_at 由
+        引擎按整批同刻原则收紧（取 min）。budget_remaining 为停靠时刻的
+        执行预算剩余，随事件落库供恢复核对。
+        """
         snapshot = await self.store.snapshot(invocation.run_id)
-        request_id = secrets.token_hex(16)
         provenance: dict[str, JsonValue] = {}
         declared = snapshot.target.get("tools")
         if isinstance(declared, list):
@@ -582,47 +642,54 @@ class RunService:
                 raise ServiceError("target_binding_changed") from None
             if selected != reference:
                 raise ServiceError("target_binding_changed")
-            now = time.time()
-            expires = now + max(0, min(
-                approval_window_seconds, selected.approval_timeout_seconds))
-            if expires <= now:
-                raise ServiceError("approval_expired")
+            expires = time.time() + selected.approval_timeout_seconds
         else:
             binding = self.bindings.get(snapshot.request.target)
             if binding is None:
                 raise ServiceError("target_binding_changed")
-            expires = time.time() + min(
-                approval_window_seconds, binding.settings.approval_timeout)
-        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending[request_id] = future
-        try:
-            await self.store.append(
-                invocation.run_id,
-                "approval_request",
-                {
-                    "request_id": request_id,
-                    "run_id": invocation.run_id,
-                    "call_id": invocation.call_id,
-                    "arguments_hash": fingerprint(parse_json(invocation.arguments_json)),
-                    "tool_hash": invocation.tool_hash,
-                    "arguments": parse_json(invocation.arguments_json),
-                    "name": invocation.name,
-                    "expires_at": expires,
-                    **provenance,
-                },
-            )
-            try:
-                budget = getattr(self, "_execution_budgets", {}).get(invocation.run_id)
-                if budget is None:
-                    return await asyncio.wait_for(future, max(0, expires - time.time()))
-                with budget.pause():
-                    return await asyncio.wait_for(future, max(0, expires - time.time()))
-            except TimeoutError:
-                raise ServiceError("approval_expired") from None
-        finally:
-            self._pending.pop(request_id, None)
-            if not future.done():
-                future.cancel()
+            expires = time.time() + binding.settings.approval_timeout
+        return {
+            "request_id": secrets.token_hex(16),
+            "run_id": invocation.run_id,
+            "call_id": invocation.call_id,
+            "step_index": invocation.step_index,
+            "arguments_hash": fingerprint(parse_json(invocation.arguments_json)),
+            "tool_hash": invocation.tool_hash,
+            "arguments": parse_json(invocation.arguments_json),
+            "name": invocation.name,
+            "expires_at": expires,
+            "budget_remaining": budget_remaining,
+            **provenance,
+        }
+
+    def _unanswered_requests(self, snapshot: RunSnapshot) -> list[dict[str, JsonValue]]:
+        """快照里尚未答复的审批请求（不做过期判断，过期由答复路径处理）。"""
+        answered = {
+            str(event.data["request_id"])
+            for event in snapshot.events
+            if event.kind == "approval_reply"
+        }
+        return [
+            dict(event.data)
+            for event in snapshot.events
+            if event.kind == "approval_request"
+            and str(event.data["request_id"]) not in answered
+        ]
+
+    def _trigger_resume(self, run_id: str, snapshot: RunSnapshot) -> bool:
+        """停靠批全部答复后启动恢复驱动；已有驱动在跑则不动（幂等）。"""
+        task = self.tasks.get(run_id)
+        if task is not None and not task.done():
+            return False
+        binding = self.bindings.get(snapshot.request.target)
+        if binding is None:
+            return False  # 存储的目标键已不存在：留给 recover 定稿，不猜着续跑
+        resumed = asyncio.create_task(
+            self._drive(snapshot.run, binding, resume=True), name="krim-run-" + run_id
+        )
+        self.tasks[run_id] = resumed
+        resumed.add_done_callback(self._task_done)
+        return True
 
     async def approvals(self, run_id: str) -> list[dict[str, JsonValue]]:
         snapshot = await self.store.snapshot(run_id)
@@ -675,11 +742,18 @@ class RunService:
             if previous is not None:
                 if previous.get("reply") != body:
                     raise ServiceError("approval_conflict")
+                if snapshot.run.status == "awaiting" and not self._unanswered_requests(snapshot):
+                    # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
+                    self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
             if snapshot.run.status in TERMINAL:
                 raise ServiceError("approval_unavailable")
-            future = self._pending.get(request_id)
-            if cast(float, request["expires_at"]) <= time.time() or future is None or future.done():
+            if snapshot.run.status != "awaiting":
+                # 事件已写但状态未及转停靠（进程在两者之间崩溃）：不猜着续跑
+                raise ServiceError("approval_unavailable")
+            if cast(float, request["expires_at"]) <= time.time():
+                # 过期惰性定稿：同停靠批同刻到期，过期即整批不可再批复（ADR-0015）
+                await self.store.finish(run_id, "failed", "approval_expired")
                 raise ServiceError("approval_expired")
             await self.store.append(
                 run_id,
@@ -687,9 +761,9 @@ class RunService:
                 {"request_id": request_id, "reply": body},
                 event_id="approval:" + request_id,
             )
-            if future.done() or cast(float, request["expires_at"]) <= time.time():
-                raise ServiceError("approval_expired")
-            future.set_result(reply.allow)
+            snapshot = await self.store.snapshot(run_id)
+            if not self._unanswered_requests(snapshot):  # 停靠批全部答复 → 恢复驱动
+                self._trigger_resume(run_id, snapshot)
             return {"request_id": request_id, "allow": reply.allow, "replayed": False}
 
     async def close(self) -> None:

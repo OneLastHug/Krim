@@ -9,8 +9,12 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-RunStatus = Literal["queued", "running", "completed", "failed", "aborted", "interrupted"]
+RunStatus = Literal[
+    "queued", "running", "awaiting", "completed", "failed", "aborted", "interrupted"
+]
 TERMINAL = frozenset({"completed", "failed", "aborted", "interrupted"})
+# awaiting（ADR-0015）：停靠等待人工审批——非终态；不挂协程、不占并发名额，
+# 答复到达后由停靠恢复点续跑（见 runtime/recovery.py 与 ADR-0015 §3）。
 ERROR_CODES = frozenset(
     {
         "mcp_unavailable",
