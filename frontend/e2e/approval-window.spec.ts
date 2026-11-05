@@ -6,14 +6,15 @@ const keys = new WeakMap<Page, { session: string; turn: string }>();
 
 async function openSession(page: Page) {
   await page.goto("/ui/");
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill("formal-workbench-admin-browser-key");
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
   const limits = await page.request.get("/test/tool-counts", { headers });
   expect(limits.ok()).toBe(true);
   expect((await limits.json()).limits).toEqual({ run: 3, tool: 1, approval: 300 });
-  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
   await page.locator("#session-title").fill(`审批与工具结果-${randomUUID().slice(0, 8)}`);
   await page.getByRole("dialog").locator("button[type=submit]").click();
   await expect(page.locator("#chat-prompt")).toBeEnabled();

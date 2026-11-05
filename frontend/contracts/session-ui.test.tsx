@@ -31,14 +31,21 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); await act(async () => { for (const release of releases.splice(0)) release(); await Promise.resolve(); }); container.remove(); vi.unstubAllGlobals(); });
 async function until(check: () => void) { let error: unknown; for (let i = 0; i < 60; i++) { try { check(); return; } catch (value) { error = value; await act(async () => { await new Promise(r => setTimeout(r, 0)); }); } } throw error; }
 function button(label: string) { const item = [...document.querySelectorAll("button")].find(b => b.getAttribute("aria-label") === label || b.textContent?.trim() === label); expect(item, label).toBeTruthy(); return item!; }
+// 侧栏「新建对话」按钮：aria-label 与聊天工具栏同名按钮重复，需容器限定。
+function createButton() { const item = document.querySelector<HTMLButtonElement>(".sidebar-buttons [aria-label='新建对话']"); expect(item, "新建对话").toBeTruthy(); return item!; }
+function menuItem(label: string) { const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(b => b.textContent?.trim() === label); expect(item, label).toBeTruthy(); return item!; }
+// 顶栏「更多操作」菜单：刷新对话/关闭对话等由常驻按钮改为菜单项，须先弹出菜单。
+async function openMorePopover() { await act(async () => (document.querySelector("header.chat-toolbar [aria-label='更多操作']") as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='更多操作']")).toBeTruthy()); }
+// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
+async function openAccountMenu() { await act(async () => (document.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='密钥身份']")).toBeTruthy()); }
 
 test("真实App StrictMode对话入口零自动POST，新建仅由显式操作", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   expect(calls.filter(c => c.method === "POST")).toEqual([]);
-  await act(async () => button("对话").click());
-  await until(() => expect(button("新建对话")).toBeTruthy());
+  await act(async () => button("导航到对话").click());
+  await until(() => expect(createButton()).toBeTruthy());
   expect(calls.filter(c => c.method === "POST")).toEqual([]);
-  await act(async () => button("新建对话").click());
+  await act(async () => createButton().click());
   await act(async () => button("创建对话").click());
   await until(() => expect(calls.filter(c => c.method === "POST")).toHaveLength(1));
   await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("A"));
@@ -51,7 +58,7 @@ test("身份GET失败后刷新只读恢复且零POST", async () => {
   await until(() => expect(container.textContent).toContain("读取失败，请刷新"));
   reject = false;
   await act(async () => (document.querySelector('[aria-label="刷新对话"]') as HTMLButtonElement).click());
-  await until(() => expect(button("新建对话").disabled).toBe(false));
+  await until(() => expect(createButton().disabled).toBe(false));
   expect(calls.filter(c => c.method === "POST")).toHaveLength(0);
 });
 
@@ -194,16 +201,21 @@ for (const action of ["close", "cancel"] as const) {
   test(`首次${action}遇明确revision_conflict后刷新并显式新操作`, async () => {
     const fixture = controlServer(action); await mountExisting();
     const label = action === "close" ? "关闭对话" : "停止";
-    await until(() => expect(button(label)).toBeTruthy());
-    await act(async () => button(label).click());
+    // 「关闭对话」改为顶栏更多操作菜单项（会话已载入时渲染）；「停止」仍是发送区常驻按钮。
+    async function trigger() {
+      if (action === "close") { await openMorePopover(); await act(async () => menuItem(label).click()); }
+      else { await until(() => expect(button(label)).toBeTruthy()); await act(async () => button(label).click()); }
+    }
+    await trigger();
     await until(() => expect(container.textContent).toContain("请刷新检查状态后重新操作"));
     expect(fixture.posts).toHaveLength(1); expect(controlLedger()).toEqual({});
     expect([...document.querySelectorAll("button")].some(item => item.textContent?.trim() === "查找操作结果")).toBe(false);
 
-    await act(async () => (document.querySelector('[aria-label="刷新对话"]') as HTMLButtonElement).click());
+    await openMorePopover();
+    await act(async () => menuItem("刷新对话").click());
     await until(() => expect(fixture.freshRevisionReads).toBeGreaterThan(0));
     expect(fixture.posts).toHaveLength(1);
-    await act(async () => button(label).click());
+    await trigger();
     await until(() => expect(fixture.posts).toHaveLength(2));
     expect(fixture.posts.map(item => item.expected_revision)).toEqual([0, 1]);
     expect(fixture.posts[1]!.request_key).not.toBe(fixture.posts[0]!.request_key);
@@ -214,7 +226,8 @@ for (const action of ["close", "cancel"] as const) {
 
 test("未知控制POST只GET查询原key，404仍保留待确认账本", async () => {
   const fixture = controlServer("close", "unknown"); await mountExisting();
-  await act(async () => button("关闭对话").click());
+  await openMorePopover();
+  await act(async () => menuItem("关闭对话").click());
   await until(() => expect(button("查找操作结果")).toBeTruthy());
   const original = controlLedger(), key = Object.values(original)[0]!.body.request_key;
   await act(async () => button("查找操作结果").click());
@@ -231,17 +244,17 @@ for (const barrier of ["post", "get"] as const) for (const steering of ["tab", "
     await until(() => expect(fixture.accepted).not.toBeNull());
     const original = JSON.parse(JSON.stringify(readIntents(localStorage)[0])) as unknown;
     if (barrier === "get") { await act(async () => button("查找原请求").click()); await until(() => expect(fixture.findCount).toBe(1)); }
-    if (steering === "tab") await act(async () => button("运行记录").click());
+    if (steering === "tab") await act(async () => button("导航到运行记录").click());
     if (steering === "other") await act(async () => button("会话 B").click());
-    if (steering === "key") { await act(async () => button("连接").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
-    if (steering === "refresh") await act(async () => (document.querySelector('[aria-label="刷新对话"]') as HTMLButtonElement).click());
+    if (steering === "key") { await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
+    if (steering === "refresh") { await openMorePopover(); await act(async () => menuItem("刷新对话").click()); }
     if (steering === "remount") { await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<StrictMode><App /></StrictMode>)); }
     await act(async () => { fixture.hold.release(); await new Promise(r => setTimeout(r, 5)); });
     expect(readIntents(localStorage)).toEqual([original]);
     expect(localStorage.getItem(KNOWN)).toBeNull();
     if (steering === "other") expect(new URL(location.href).searchParams.get("session")).toBe("B");
     expect(calls.filter(c => c.method === "POST")).toHaveLength(1);
-    if (steering === "tab") await act(async () => button("对话").click());
+    if (steering === "tab") await act(async () => button("导航到对话").click());
     await until(() => expect(button("查找原请求")).toBeTruthy());
     await act(async () => button("查找原请求").click());
     await until(() => expect(readIntents(localStorage)).toEqual([]));
@@ -287,8 +300,10 @@ test("消息更多操作提供可导航Trace路由且保持只读", async () => 
     return fallback(path, options);
   };
   await mountExisting();
-  await until(() => expect(button("更多操作")).toBeTruthy());
-  await act(async () => button("更多操作").click());
+  // 消息级「更多操作」与顶栏同名按钮重名，限定到回答区操作条；展开后「查看 Trace」入口不变。
+  const messageMore = () => document.querySelector<HTMLButtonElement>('.chat-answer-actions [aria-label="更多操作"]');
+  await until(() => expect(messageMore()).toBeTruthy());
+  await act(async () => messageMore()!.click());
   await until(() => expect(button("查看 Trace")).toBeTruthy());
   await act(async () => button("查看 Trace").click());
   await until(() => expect(container.querySelector('section[aria-label="Trace 页面"]')?.hasAttribute("hidden")).toBe(false));

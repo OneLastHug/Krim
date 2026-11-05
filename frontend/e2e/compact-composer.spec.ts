@@ -68,11 +68,18 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
     let empty = 0;
     await step("新建对话并选择主题", async () => {
       await page.goto("/ui/");
-      await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-      await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + themes[theme]) }).click();
-      const navigation = page.getByRole("button", { name: "打开导航", exact: true });
-      if (await navigation.isVisible()) await navigation.click();
-      await page.getByRole("button", { name: "新建对话", exact: true }).click();
+      const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+      if (!await drawer.isVisible()) {
+        const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+        if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+      }
+      const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+      await surface.getByRole("button", { name: "设置", exact: true }).click();
+      await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + themes[theme]) }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+      if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
+      await page.locator(".toolbar-actions").getByRole("button", { name: "新建对话", exact: true }).click();
       await page.locator("#session-title").fill(mobile ? "消息草稿" : "任务说明");
       await page.getByRole("dialog", { name: "新建对话", exact: true }).getByRole("button", { name: "创建对话", exact: true }).click();
       await expect(page.locator("#chat-prompt")).toBeEnabled();
@@ -95,10 +102,19 @@ for (const theme of ["warm", "bright", "dark"] as const) for (const mobile of [f
       expect(value.typography.input.minHeight).toBe("20px");
       expect(value.typography.input.padding).toEqual({ top: "0px", right: "0px", bottom: "0px", left: "0px" });
       expect(value.typography.composer.minHeight).toBe(mobile ? "52px" : "46px");
+      // 左内边距为行内加号按钮预留（绝对定位、28px），其余紧凑契约不变。
       expect(value.typography.composer.padding).toEqual(mobile
-        ? { top: "14px", right: "56px", bottom: "14px", left: "13px" }
-        : { top: "12px", right: "50px", bottom: "12px", left: "13px" });
+        ? { top: "14px", right: "56px", bottom: "14px", left: "46px" }
+        : { top: "12px", right: "50px", bottom: "12px", left: "46px" });
       expect(value.typography.send.minHeight).toBe(mobile ? "40px" : "28px");
+      const addBox = await page.locator(".chat-composer .composer-add").boundingBox();
+      expect(addBox).toBeTruthy();
+      expect(addBox!.width).toBeGreaterThanOrEqual(27);
+      expect(addBox!.width).toBeLessThanOrEqual(29);
+      expect(addBox!.height).toBeGreaterThanOrEqual(27);
+      expect(addBox!.height).toBeLessThanOrEqual(29);
+      expect(addBox!.x).toBeGreaterThanOrEqual(value.composer.x + 8);
+      expect(addBox!.x + addBox!.width).toBeLessThanOrEqual(value.composer.x + 38);
       expect(value.resize).toBe("none");
       expect(value.fieldSizing).toBe("content");
       expect(value.pageOverflow).toBe(false);

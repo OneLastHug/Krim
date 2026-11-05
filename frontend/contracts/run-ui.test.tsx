@@ -59,6 +59,16 @@ async function until(check: () => void) { let error: unknown; for (let i = 0; i 
     await act(async () => { await new Promise(r => setTimeout(r, 10)); });
 } throw error; }
 function button(label: string) { const found = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
+function ariaButton(label: string) { const found = document.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null; expect(found, label).toBeTruthy(); return found!; }
+function menuItem(label: string) { const found = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(b => b.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
+// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog（保存按钮仍为「应用」）。
+async function connectKey(key: string) {
+    await act(async () => ariaButton("密钥身份").click());
+    await until(() => expect(menuItem("连接 / 切换密钥")).toBeTruthy());
+    await act(async () => menuItem("连接 / 切换密钥").click());
+    await type("api-key", key);
+    await click("应用");
+}
 async function click(label: string) { await act(async () => button(label).click()); }
 async function type(id: string, value: string) { await act(async () => { const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement; expect(input).toBeTruthy(); Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }
 beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=run"); calls = []; container = document.createElement("div"); document.body.append(container); root = createRoot(container); intercept((p) => read(p)); });
@@ -114,9 +124,7 @@ test("换密钥中止旧读取，晚回程不覆盖新认证视图，Tab不写�
     history.replaceState(null, "", "/ui/?view=run#A");
     await mount();
     await until(() => expect(calls.some(c => c.path === "/v1/runs/A")).toBe(true));
-    await click("连接");
-    await type("api-key", "new-key");
-    await click("应用");
+    await connectKey("new-key");
     await until(() => expect(document.getElementById("result")?.textContent).toBe("A"));
     expect(calls.some(c => c.path === "/v1/runs/A" && c.key === "Bearer new-key")).toBe(true);
     await act(async () => release(json({ ...view("A"), status: "running", finished_at: null })));
@@ -203,7 +211,7 @@ test("创建等待中换密钥后未知回程仍锁定原输入并显示查找",
  let reject!:(e:Error)=>void;const held=new Promise<Response>((_resolve,r)=>{reject=r;});
  intercept((_path,options)=>options.method==="POST"?held:json({error:{code:"not_found"}},404));
  await mount();await type("prompt","/echo original");await click("创建任务");const original=localStorage.getItem("krim-agent-intent");
- await click("连接");await type("api-key","changed-key");await click("应用");
+ await connectKey("changed-key");
  await act(async()=>reject(new TypeError("lost return")));
  await until(()=>expect([...container.querySelectorAll("button")].some(b=>b.textContent?.trim()==="查找任务")).toBe(true));
  expect(localStorage.getItem("krim-agent-intent")).toBe(original);
@@ -217,7 +225,7 @@ test("创建等待中换密钥后未知回程仍锁定原输入并显示查找",
 test("修正读取密钥后只读成功，不保留旧认证错误",async()=>{
  intercept((path,options)=>!new Headers(options.headers).get("Authorization")?json({error:{code:"unauthorized"}},401):read(path));
  history.replaceState(null,"","/ui/?view=run#A");await mount();await until(()=>expect(container.textContent).toContain("密钥无效"));
- await click("连接");await type("api-key","correct-key");await click("应用");
+ await connectKey("correct-key");
  await until(()=>expect(document.getElementById("result")?.textContent).toBe("A"));
  expect(container.textContent).not.toContain("密钥无效");expect(calls.filter(c=>c.method==="POST")).toEqual([]);
 });

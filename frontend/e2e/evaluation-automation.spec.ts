@@ -21,9 +21,17 @@ function step(page: Page, info: TestInfo, caseName: string, theme: Theme = "warm
 
 async function selectTheme(page: Page, theme: Theme) {
   const labels: Record<Theme, string> = { warm: "暖纸", bright: "浅色", dark: "深色" };
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (!await drawer.isVisible()) {
+    const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  }
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 
 async function readJson(page: Page, info: TestInfo, path: string, name: string): Promise<any> {
@@ -273,8 +281,8 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
     let session: any;
     await desktopStep("切换对话并新建本机来源会话")(async () => {
       await page.getByRole("button", { name: "导航到对话", exact: true }).click();
-      await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
-      await page.getByRole("button", { name: "新建对话", exact: true }).click();
+      await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true })).toBeEnabled();
+      await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
       const dialog = page.getByRole("dialog");
       await dialog.locator("#session-title").fill(sessionTitle);
       const requestPromise = page.waitForRequest(request =>
@@ -337,7 +345,7 @@ test("P4：本机来源反馈、人工确认与持久回归自动化", async ({ 
       await expect(tool.locator(".chat-tool-section pre").first()).toContainText("left");
       await expect(last.locator(".chat-detail")).toBeVisible();
       await last.getByRole("button", { name: "查看 Trace", exact: true }).click();
-      await expect(page.locator(".topbar-title h1")).toHaveText("Trace");
+      await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText("Trace");
       await expect(page.locator(".trace-span-node").first()).toBeVisible();
       await page.getByRole("button", { name: "加入数据集", exact: true }).click();
       await expect.poll(() => new URL(page.url()).searchParams.get("source_run")).toBe(acceptedTurn.run_id);
@@ -749,7 +757,7 @@ test("P4：窄屏深色只读恢复本机持久计划", async ({ page }, info) =
     await selectTheme(page, "dark");
     if (await page.getByRole("button", { name: "打开导航", exact: true }).isVisible().catch(() => false)) {
       await page.getByRole("button", { name: "打开导航", exact: true }).click();
-      await page.locator(".mobile-drawer-content .primary-navigation").getByRole("button", { name: "导航到评测", exact: true }).click();
+      await page.locator(".mobile-drawer-content .sidebar-buttons").getByRole("button", { name: "导航到评测", exact: true }).click();
     }
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await openAutomation(page);

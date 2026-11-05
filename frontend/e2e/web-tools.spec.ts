@@ -21,15 +21,19 @@ test("HTTP/MCP实际来源、真实审批与结果", async ({ page }, info) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(String(error)));
   await page.goto("/ui/?view=chat");
-  await page.locator("button.access-connect").click();
-  await page.locator("#api-key").fill("browser-test-key");
-  await page.locator("#connect-save").click();
   const mobile = page.getByRole("button", { name: "打开导航", exact: true });
   if (await mobile.isVisible()) await mobile.click();
-  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
+  await page.locator("#api-key").fill("browser-test-key");
+  await page.locator("#connect-save").click();
+  await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话", exact: true }).click();
   await page.locator("#session-title").fill("来源验证 " + info.project.name);
   await page.getByRole("button", { name: "创建对话", exact: true }).click();
-  await expect(page.locator(".topbar-title h1")).toContainText("来源验证");
+  await expect(page.locator(".chat-toolbar .toolbar-title h1")).toContainText("来源验证");
+  // 移动端从抽屉内新建会话后，先关闭抽屉恢复主区交互，再保持无 Dialog 断言。
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "主导航与对话", exact: true })).not.toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const catalog = page.locator(".tool-catalog");
   await expect(catalog).toBeVisible();

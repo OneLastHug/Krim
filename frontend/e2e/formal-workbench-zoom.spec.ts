@@ -77,11 +77,12 @@ async function runNativeZoom(percent: number, factor: number, testInfo: TestInfo
     expect(viewport.innerWidth * factor, `${percent}% layout viewport width`).toBeCloseTo(defaultLayoutViewportWidth, 0);
     expect(viewport.visualViewportScale).toBe(1);
 
-    await page.locator(".access-connect").click();
+    await page.getByRole("button", { name: "密钥身份" }).click();
+    await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
     await page.locator("#api-key").fill(ADMIN_KEY);
     await page.locator("#connect-save").click();
-    await expect(page.locator(".topbar-status")).toContainText("已连接");
-    await page.getByRole("button", { name: "新建对话" }).click();
+    await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
+    await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话" }).click();
     const title = `formal-zoom-${percent}-${Date.now()}`;
     await page.locator("#session-title").fill(title);
     await page.getByRole("button", { name: "创建对话" }).click();

@@ -54,15 +54,22 @@ async function until(check: () => void) {
   throw error;
 }
 async function connect(key: string) {
-  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find(value => value.textContent?.trim() === "连接");
-  expect(button).toBeTruthy();
-  await act(async () => button!.click());
+  // 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
+  await act(async () => (host.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click());
+  await until(() => expect([...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].some(item => item.textContent?.trim() === "连接 / 切换密钥")).toBe(true));
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === "连接 / 切换密钥")!.click());
   await act(async () => {
     const input = document.getElementById("api-key") as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, key);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await act(async () => document.getElementById("connect-save")!.click());
+}
+async function openSettingsView() {
+  // 「设置」不再是导航项：经侧栏齿轮弹出设置 popover，点「全部设置…」进入设置视图。
+  await act(async () => (host.querySelector('[aria-label="设置"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector(".popover-menu.settings-popover")).toBeTruthy());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === "全部设置…")!.click());
 }
 
 test("保留旧run时等待明确legacy能力才读取v1，零自动POST", async () => {
@@ -115,7 +122,7 @@ test("运行中的轮询离开运行页即停止，旧结果不进入设置页",
   handler = path => path === "/v1/runs/saved-run" ? json({ ...run, status: "running", finished_at: null }) : response(path);
   await mount();
   await until(() => expect(host.querySelector("#status")?.textContent).toBe("执行中"));
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="导航到设置"]')!.click());
+  await act(async () => openSettingsView());
   const count = calls.filter(value => value.path.startsWith("/v1/runs/")).length;
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
   expect(calls.filter(value => value.path.startsWith("/v1/runs/"))).toHaveLength(count);
@@ -142,7 +149,7 @@ test("离页后创建回程保留原intent且不再自动GET确认", async () =>
   await act(async () => host.querySelector<HTMLButtonElement>("#send")!.click());
   await until(() => expect(submitted).toBeTruthy());
   const original = localStorage.getItem(INTENT);
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="导航到设置"]')!.click());
+  await act(async () => openSettingsView());
   const count = calls.filter(value => value.path.startsWith("/v1/")).length;
   await act(async () => { accepted.release(); await Promise.resolve(); });
   expect(calls.filter(value => value.path.startsWith("/v1/"))).toHaveLength(count);

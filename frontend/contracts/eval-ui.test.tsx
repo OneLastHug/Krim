@@ -60,7 +60,22 @@ async function until(check: () => void) {
     throw error;
 }
 async function oneCase() { await type("dataset-name", "unit"); await type("case-input", "/add 2 3"); await type("case-expected", '"5"'); await type("case-reason", "人工核算"); await click("加入样本"); }
-async function connect(key: string) { await click("连接"); await type("api-key", key); await click("应用"); }
+function ariaButton(label: string) { const value = document.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null; expect(value, label).toBeTruthy(); return value!; }
+function menuItem(label: string) { const value = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === label); expect(value, label).toBeTruthy(); return value!; }
+// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog（保存按钮仍为「应用」）。
+async function connect(key: string) {
+    await act(async () => ariaButton("密钥身份").click());
+    await until(() => expect(menuItem("连接 / 切换密钥")).toBeTruthy());
+    await act(async () => menuItem("连接 / 切换密钥").click());
+    await type("api-key", key);
+    await click("应用");
+}
+// 「设置」不再是导航项：经侧栏齿轮弹出设置 popover，点「全部设置…」进入设置视图。
+async function openSettingsView() {
+    await act(async () => ariaButton("设置").click());
+    await until(() => expect(document.querySelector(".popover-menu.settings-popover")).toBeTruthy());
+    await act(async () => menuItem("全部设置…").click());
+}
 beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=eval"); calls = []; host = document.createElement("div"); document.body.append(host); root = createRoot(host); vi.stubGlobal("crypto", webcrypto); intercept(path => reads(path)); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 test("zero automatic writes", async () => { await mount(); expect(calls.filter(c => c.method === "POST")).toEqual([]); });
@@ -242,7 +257,7 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
             const original = JSON.parse(localStorage.getItem(EVAL_INTENT)!);
             const confirmationsBefore = confirmations;
             if (steering === "task")
-                await click("运行记录");
+                await act(async () => ariaButton("导航到运行记录").click());
             if (steering === "other") {
                 await type("open-eval-id", "B");
                 await click("打开评测");
@@ -263,7 +278,7 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
             expect(localStorage.getItem(EVAL_CURRENT)).toBe(steering === "other" ? "B" : "A");
             expect(document.getElementById("eval-id")?.textContent).not.toBe("accepted");
             if (steering === "task")
-                await click("评测");
+                await act(async () => ariaButton("导航到评测").click());
             await click("查找评测");
             await until(() => expect(document.getElementById("eval-id")?.textContent).toBe("accepted"));
             expect(localStorage.getItem(EVAL_CURRENT)).toBe("accepted");
@@ -287,7 +302,7 @@ test("HTTP capability is read only and follows the active key epoch", async () =
         return reads(path);
     });
     await mount();
-    await click("设置");
+    await openSettingsView();
     const capability = () => host.querySelector('[aria-label="HTTP 目标能力"]')?.textContent;
     expect(capability()).toBe("HTTP 目标配置尚未确认");
     await connect("new-key");

@@ -34,21 +34,29 @@ function v1Gets(records: RequestEvidence[]): RequestEvidence[] {
   return v1Requests(records).filter(record => record.method === "GET");
 }
 
+async function openNavigationSurface(page: Page) {
+  const drawer = page.getByRole("dialog", { name: "主导航与对话", exact: true });
+  if (await drawer.isVisible()) return drawer;
+  const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
+  if (await mobileMenu.isVisible()) { await mobileMenu.click(); await expect(drawer).toBeVisible(); }
+  return drawer;
+}
+
 async function selectTheme(page: Page, theme: Theme) {
   const labels = { bright: "浅色", dark: "深色" };
-  await page.getByRole("button", { name: "选择显示主题", exact: true }).click();
-  await page.locator(".theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
+  const drawer = await openNavigationSurface(page);
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  await surface.getByRole("button", { name: "设置", exact: true }).click();
+  await page.locator(".settings-popover .theme-options").getByRole("button", { name: new RegExp("^" + labels[theme]) }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // 主题选择后恢复抽屉开合状态，避免遮挡后续主区操作。
+  if (await drawer.isVisible()) { await page.keyboard.press("Escape"); await expect(drawer).not.toBeVisible(); }
 }
 
 async function navigateWorkspace(page: Page, buttonName: string, view: string) {
-  const mobileMenu = page.getByRole("button", { name: "打开导航", exact: true });
-  let navigation = page.locator(".workbench-globalbar .primary-navigation");
-  if (await mobileMenu.isVisible()) {
-    await mobileMenu.click();
-    navigation = page.locator(".mobile-drawer-content .primary-navigation");
-  }
-  const button = navigation.getByRole("button", { name: buttonName, exact: true });
+  const drawer = await openNavigationSurface(page);
+  const surface = await drawer.isVisible() ? drawer : page.locator(".desktop-sidebar");
+  const button = surface.locator(".sidebar-buttons").getByRole("button", { name: buttonName, exact: true });
   await expect(button).toBeVisible();
   await button.focus();
   await expect(button).toBeFocused();
@@ -90,7 +98,7 @@ test("旧版门禁：身份等待与明确非 legacy 不降级", async ({ page }
     await page.goto("/ui/?view=run", { waitUntil: "domcontentloaded" });
     await arrived;
     await selectTheme(page, "bright");
-    await expect(page.locator(".topbar-status")).toContainText("读取身份");
+    await expect(page.locator(".sidebar-account .account-sub")).toContainText("读取身份");
     await expect(page.locator("#prompt")).toHaveCount(0);
     expect(v1Requests(requests)).toHaveLength(0);
   });
@@ -226,7 +234,9 @@ test("旧版门禁：真实 legacy 运行、离页只读与返回重读", async 
   await step("进入设置期间没有新增 v1 请求", async () => {
     const before = v1Requests(requests).length;
     const postsBefore = v1Posts(requests).length;
-    await navigateWorkspace(page, "导航到设置", "settings");
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("menuitem", { name: "全部设置…", exact: true }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe("settings");
     await expect(page.getByRole("heading", { name: "设置", level: 1 })).toBeVisible();
     const httpTargetCapability = page.getByRole("status", { name: "HTTP 目标能力", exact: true });
     await expect(httpTargetCapability).toHaveText("未启用 HTTP 目标");

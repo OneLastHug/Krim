@@ -79,11 +79,12 @@ async function apiRequest(
 async function connect(page: Page, key: string) {
   await page.goto("/ui/", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".workbench-shell")).toBeVisible();
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(key);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
-  await expect(page.locator(".new-conversation-button")).toBeEnabled();
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
+  await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话" })).toBeEnabled();
 }
 
 async function openUnconnected(page: Page) {
@@ -93,13 +94,13 @@ async function openUnconnected(page: Page) {
 
 async function createConversation(page: Page, prefix: string) {
   const title = `${prefix}-${randomUUID().slice(0, 8)}`;
-  await page.getByRole("button", { name: "新建对话" }).click();
+  await page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话" }).click();
   await page.locator("#session-title").fill(title);
   await expect(page.locator("#chat-target")).toHaveValue("demo");
   await page.getByRole("button", { name: "创建对话" }).click();
   await expect(page.locator("#chat-prompt")).toBeVisible();
   await expect(page.locator("#chat-prompt")).toBeEnabled();
-  await expect(page.locator(".topbar-title h1")).toHaveText(title);
+  await expect(page.locator(".chat-toolbar .toolbar-title h1")).toHaveText(title);
   return title;
 }
 
@@ -197,23 +198,24 @@ async function expectFormalDesktopGeometry(page: Page) {
     };
     return {
       viewportWidth: window.innerWidth,
-      globalbar: rect(".workbench-globalbar"),
+      viewportHeight: window.innerHeight,
       sidebar: rect(".desktop-sidebar"),
       main: rect(".workbench-main"),
+      toolbar: rect(".chat-toolbar"),
     };
   });
   const withinOnePixel = (actual: number, expected: number, label: string) => {
     expect(Math.abs(actual - expected), label).toBeLessThanOrEqual(1);
   };
-  withinOnePixel(geometry.globalbar.x, 0, "全局横栏 x");
-  withinOnePixel(geometry.globalbar.y, 0, "全局横栏 y");
-  withinOnePixel(geometry.globalbar.width, geometry.viewportWidth, "全局横栏宽度");
-  withinOnePixel(geometry.globalbar.height, 36, "全局横栏高度");
-  withinOnePixel(geometry.sidebar.x, 8, "桌面侧栏 x");
-  withinOnePixel(geometry.sidebar.y, 48, "桌面侧栏 y");
-  withinOnePixel(geometry.sidebar.width, 288, "桌面侧栏宽度");
-  withinOnePixel(geometry.main.x, 304, "工作区主栏 x");
-  withinOnePixel(geometry.main.y, 36, "工作区主栏 y");
+  await expect(page.locator(".chat-toolbar button").first(), "顶栏首个按钮为收起侧栏").toHaveAttribute("aria-label", "收起侧栏");
+  withinOnePixel(geometry.sidebar.x, 0, "桌面侧栏 x");
+  withinOnePixel(geometry.sidebar.y, 0, "桌面侧栏 y");
+  withinOnePixel(geometry.sidebar.width, 272, "桌面侧栏宽度");
+  withinOnePixel(geometry.sidebar.height, geometry.viewportHeight, "桌面侧栏高度");
+  withinOnePixel(geometry.main.x, 272, "工作区主栏 x");
+  withinOnePixel(geometry.main.y, 0, "工作区主栏 y");
+  withinOnePixel(geometry.toolbar.y, 0, "会话标题栏 y");
+  withinOnePixel(geometry.toolbar.height, 44, "会话标题栏高度");
 }
 
 async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
@@ -228,10 +230,11 @@ test("正式对话使用共享字体与 Markdown，并把图片降为安全链�
   const unauthenticated = await apiRequest(page, "", "/test/tool-counts");
   expect(unauthenticated.status).toBe(401);
 
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(ADMIN_KEY);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
   await expectFormalDesktopGeometry(page);
   await createConversation(page, "formal-markdown");
   await send(page, "/markdown");
@@ -289,6 +292,9 @@ test("正式对话使用共享字体与 Markdown，并把图片降为安全链�
   const collapse = page.getByRole("button", { name: "收起侧栏" });
   await collapse.click();
   await expect(page.locator(".workbench-shell")).toHaveClass(/sidebar-collapsed/);
+  await expect(page.locator(".desktop-sidebar")).toBeHidden();
+  const collapsedMainX = await page.locator(".workbench-main").evaluate(element => element.getBoundingClientRect().x);
+  expect(collapsedMainX, "收起侧栏后主栏从窗口左缘开始").toBeLessThanOrEqual(1);
   await expect(page.getByRole("button", { name: "展开侧栏" })).toBeVisible();
   await attachScreenshot(page, testInfo, "formal-desktop-collapsed-1440.png");
 
@@ -417,10 +423,11 @@ test("响应丢失后刷新重连可按原 request_key 查找并幂等重放", a
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.locator(".workbench-shell")).toBeVisible();
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(ADMIN_KEY);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
   const recover = page.getByRole("button", { name: "查找操作结果" });
   await expect(recover).toBeVisible();
   const lookupPath = `/controls/by-key/${encodeURIComponent(String(committedRequest.body.request_key))}`;
@@ -542,10 +549,11 @@ test("viewer 与无审批权限 member 被 UI/API 门禁拦截", async ({ page }
   expect(memberPost.status).toBe(403);
 
   await page.goto("/ui/?view=chat&workspace=local", { waitUntil: "domcontentloaded" });
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(VIEWER_KEY);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
   const viewerMe = await apiRequest(page, VIEWER_KEY, "/v2/me");
   expect(viewerMe.status).toBe(200);
   expect((viewerMe.body as { workspaces: { role: string; approve: boolean }[] }).workspaces).toEqual([
@@ -553,19 +561,20 @@ test("viewer 与无审批权限 member 被 UI/API 门禁拦截", async ({ page }
   ]);
   await page.getByRole("button", { name: VIEWER_SESSION_TITLE }).click();
   await expect(page.locator("#chat-prompt")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "新建对话" })).toBeDisabled();
+  await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话" })).toBeDisabled();
   await expect(page.locator(".chat-approval")).toHaveCount(0);
 
   await page.goto("/ui/?view=chat&workspace=local", { waitUntil: "domcontentloaded" });
-  await page.locator(".access-connect").click();
+  await page.getByRole("button", { name: "密钥身份" }).click();
+  await page.getByRole("menuitem", { name: "连接 / 切换密钥" }).click();
   await page.locator("#api-key").fill(MEMBER_KEY);
   await page.locator("#connect-save").click();
-  await expect(page.locator(".topbar-status")).toContainText("已连接");
+  await expect(page.locator(".sidebar-account .account-sub")).toContainText("已连接");
   const memberMe = await apiRequest(page, MEMBER_KEY, "/v2/me");
   expect((memberMe.body as { workspaces: { role: string; approve: boolean }[] }).workspaces).toEqual([
     { workspace_id: "local", role: "member", approve: false },
   ]);
-  await expect(page.getByRole("button", { name: "新建对话" })).toBeEnabled();
+  await expect(page.locator(".sidebar-buttons").getByRole("button", { name: "新建对话" })).toBeEnabled();
   await createConversation(page, "formal-member-write");
 
   const adminDecision = await apiRequest(

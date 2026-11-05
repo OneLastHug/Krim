@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { RefreshCw, Square } from "lucide-react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { useSession } from "../hooks/use-session";
@@ -23,8 +23,6 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, onConnect, onId
     if (active) onChatState?.(chat, apiKey);
   }, [active, apiKey, chat.actor, chat.workspace, chat.id, navigationSessions, navigationControls, chat.controlling, chat.session?.title, chat.session?.revision, chat.session?.status, chat.session?.dispatch_paused, chat.currentTurn?.status, chat.ready, chat.canWrite, chat.canApprove, chat.creating, chat.newPending, chat.notice, onChatState]);
   const workspaceMode = chat.session?.target_key === "target-workspace";
-  const target = chat.session?.target_key;
-  const targetLabel = target === "demo" ? "本地脚本" : target === "target-http" ? "HTTP 配置" : target === "target-workspace" ? "工作区" : target;
   return <section hidden={!active} className="chat-workbench" aria-label="对话工作台">
     <section className="chat-main" aria-label="对话">
       {(chat.notice || chat.pending.length > 0 || chat.pendingControls.length > 0) && <div className="chat-feedback-region">
@@ -39,12 +37,17 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, onConnect, onId
         <WorkspacePanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} />
       </details> : <ChatComposer chat={chat} />}
       {chat.session && <footer className="chat-controls">
-        <span className="chat-target-label" title={chat.session.target_key}>{targetLabel}{!chat.canWrite && " · 只读"}</span>
-        <div className="chat-current-actions">
-          <Button variant="ghost" size="icon-sm" aria-label="刷新对话" title="刷新对话" onClick={chat.refresh}><RefreshCw aria-hidden="true" /></Button>
-          {chat.currentTurn && ["queued", "running"].includes(chat.currentTurn.status) && <Button id="chat-stop" variant="ghost" size="sm" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(chat.currentTurn, "cancel")}><Square aria-hidden="true" />停止</Button>}
-          {chat.session.dispatch_paused && <Button variant="outline" size="sm" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(null, "resume")}>{c.resume}</Button>}
-          {chat.session.status === "open" && <Button variant="ghost" size="sm" disabled={!chat.canWrite || chat.controlling} onClick={() => void chat.control(null, "close")}>{c.close}</Button>}
+        <button type="button" className="control-chip" disabled title="Agent 模式选择规划中">自动<ChevronDown aria-hidden="true" /></button>
+        <div className="chat-controls-right">
+          <button type="button" className="control-chip is-strong" disabled title="模型选择规划中">模型</button>
+          <button type="button" className="control-chip" disabled title="思考强度选择规划中">思考强度</button>
+          <span className="context-meter" title="上下文用量规划中">
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" opacity=".3"/>
+              <path d="M8 2a6 6 0 0 1 5.2 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            —
+          </span>
         </div>
       </footer>}
     </section>

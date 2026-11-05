@@ -59,6 +59,24 @@ function button(label: string) {
   expect(found, label).toBeTruthy();
   return found!;
 }
+function menuItem(label: string) {
+  const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(value => value.textContent?.trim() === label);
+  expect(item, label).toBeTruthy();
+  return item!;
+}
+async function clickMenuItem(label: string) {
+  await until(() => expect(menuItem(label)).toBeTruthy());
+  await act(async () => menuItem(label).click());
+}
+// 新布局：主题/全部设置都在侧栏齿轮弹出的设置 popover 中，顶栏操作收进「更多操作」菜单。
+async function openSettingsPopover() {
+  await act(async () => button("设置").click());
+  await until(() => expect(document.querySelector(".popover-menu.settings-popover")).toBeTruthy());
+}
+async function openMorePopover() {
+  await act(async () => (host.querySelector("header.chat-toolbar [aria-label='更多操作']") as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector(".popover-menu[aria-label='更多操作']")).toBeTruthy());
+}
 
 test("评测与自动化共存时切换页面不复制工作台或复用组件身份", async () => {
   productEnabled = true;
@@ -84,13 +102,14 @@ test("首页默认对话，主导航和浏览器回退同步页面", async () =>
   await until(() => expect(host.querySelector('[aria-label="对话工作台"]')).toBeTruthy());
   expect(new URL(location.href).searchParams.get("view")).toBeNull();
   await until(() => expect(host.querySelector('[aria-label="已存对话"]')).toBeTruthy());
-  expect(host.querySelectorAll(".primary-navigation")).toHaveLength(1);
-  expect(host.querySelectorAll(".workbench-globalbar .navigation-item")).toHaveLength(6);
+  expect(host.querySelectorAll(".desktop-sidebar .sidebar-buttons")).toHaveLength(1);
+  expect(host.querySelectorAll(".sidebar-buttons [aria-label^='导航到']")).toHaveLength(5);
   expect(host.querySelector(".desktop-sidebar .app-sidebar")).toBeTruthy();
   expect(host.querySelectorAll(".chat-sidebar")).toHaveLength(1);
   expect(host.querySelector("#chat-heading")).toBeNull();
   expect(button("导航到运行记录")).toBeTruthy();
-  await act(async () => button("导航到设置").click());
+  await openSettingsPopover();
+  await clickMenuItem("全部设置…");
   expect(new URL(location.href).searchParams.get("view")).toBe("settings");
   await until(() => expect(host.textContent).toContain("当前身份与工作区"));
   history.replaceState(null, "", "/ui/");
@@ -109,7 +128,7 @@ test("会话对象选择写入可回退位置并从旧 query 恢复", async () =
   expect(new URL(location.href).searchParams.get("session")).toBe("B");
   history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
   await act(async () => window.dispatchEvent(new PopStateEvent("popstate")));
-  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("会话 A"));
+  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("会话 A"));
   expect(new URL(location.href).searchParams.get("session")).toBe("A");
 });
 
@@ -133,17 +152,26 @@ test("快捷查找筛选当前列表并通过原选择入口打开对话", async
 
 test("其他对话框打开时快捷查找不抢焦点", async () => {
   await mount();
-  await act(async () => button("选择显示主题").click());
+  // 新建对话 Dialog（真实 role=dialog）打开时 Ctrl+K 不得抢焦点。
+  await until(() => expect((host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement)?.disabled).toBe(false));
+  await act(async () => (host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector(".session-create-dialog")).toBeTruthy());
   await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
-  expect(document.querySelector(".theme-picker-content")).toBeTruthy();
+  expect(document.querySelector(".session-create-dialog")).toBeTruthy();
   expect(document.querySelector(".session-search-dialog")).toBeNull();
+  // 行为变化：旧主题 Dialog 已改为 role=menu 的设置 popover；popover 不再触发对话框守卫，Ctrl+K 仍可打开查找。
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".session-create-dialog button")].find(item => item.textContent?.trim() === "关闭")!.click());
+  await until(() => expect(document.querySelector(".session-create-dialog")).toBeNull());
+  await openSettingsPopover();
+  await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
+  await until(() => expect(document.querySelector(".session-search-dialog")).toBeTruthy());
 });
 
 test("没有历史偏好时默认浅色并显示完整主题选项", async () => {
   await mount();
   await until(() => expect(document.documentElement.dataset.theme).toBe("bright"));
   expect(localStorage.getItem("krim.display.theme/2")).toBe("bright");
-  await act(async () => button("选择显示主题").click());
+  await openSettingsPopover();
   expect(document.querySelectorAll(".theme-options button")).toHaveLength(3);
 });
 
@@ -152,8 +180,8 @@ test("三主题选择应用并持久化，旧 light 偏好迁移为浅色", asyn
   await mount();
   await until(() => expect(document.documentElement.dataset.theme).toBe("bright"));
   expect(localStorage.getItem("krim.display.theme/2")).toBe("bright");
-  expect(button("选择显示主题")).toBeTruthy();
-  await act(async () => button("选择显示主题").click());
+  await openSettingsPopover();
+  expect(document.querySelector(".theme-options")).toBeTruthy();
   const dark = [...document.querySelectorAll<HTMLButtonElement>(".theme-options button")].find(item => item.textContent?.includes("深色"));
   expect(dark).toBeTruthy();
   await act(async () => dark!.click());
@@ -165,7 +193,8 @@ test("三主题选择应用并持久化，旧 light 偏好迁移为浅色", asyn
   root = createRoot(host);
   await mount();
   expect(document.documentElement.dataset.theme).toBe("dark");
-  expect(button("选择显示主题")).toBeTruthy();
+  await openSettingsPopover();
+  expect(document.querySelector(".theme-options")).toBeTruthy();
 });
 
 test("手机导航抽屉可打开并导航后关闭", async () => {
@@ -173,12 +202,17 @@ test("手机导航抽屉可打开并导航后关闭", async () => {
   await mount();
   await act(async () => button("打开导航").click());
   await until(() => expect(document.querySelector(".mobile-drawer-content")).toBeTruthy());
-  const setting = document.querySelector<HTMLButtonElement>(".mobile-drawer-content [aria-label='导航到设置']");
+  // 抽屉内是同一个 AppSidebar：导航到设置改为齿轮弹出设置 popover 后点「全部设置…」。
+  const setting = document.querySelector<HTMLButtonElement>(".mobile-drawer-content [aria-label='设置']");
   expect(setting).toBeTruthy();
   await act(async () => setting!.click());
+  await until(() => expect(document.querySelector(".mobile-drawer-content .popover-menu.settings-popover")).toBeTruthy());
+  await act(async () => menuItem("全部设置…").click());
   expect(new URL(location.href).searchParams.get("view")).toBe("settings");
   await until(() => expect(document.querySelector(".mobile-drawer-content")).toBeNull());
-  await act(async () => button("打开详情面板").click());
+  // 「打开详情面板」从常驻按钮改为顶栏「更多操作」菜单项。
+  await openMorePopover();
+  await clickMenuItem("打开详情面板");
   await until(() => expect(document.querySelector(".mobile-inspector-content")).toBeTruthy());
 });
 
@@ -186,7 +220,7 @@ test("侧栏Trace入口打开独立运行索引路由", async () => {
   await mount();
   await act(async () => button("导航到Trace").click());
   expect(new URL(location.href).searchParams.get("view")).toBe("trace");
-  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("Trace"));
+  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("Trace"));
 });
 
 test("Trace加入数据集入口导航传递原始run且不创建请求", async () => {
@@ -244,10 +278,10 @@ test("更换凭据后旧侧栏与标题不穿透新身份等待期", async () =>
   };
   history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
   await mount();
-  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("会话 A"));
-  const connect = [...host.querySelectorAll<HTMLButtonElement>("button")].find(value => value.textContent?.trim() === "连接");
-  expect(connect).toBeTruthy();
-  await act(async () => connect!.click());
+  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("会话 A"));
+  // 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」。
+  await act(async () => button("密钥身份").click());
+  await clickMenuItem("连接 / 切换密钥");
   await act(async () => {
     const input = document.getElementById("api-key") as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "next-synthetic");
@@ -255,11 +289,11 @@ test("更换凭据后旧侧栏与标题不穿透新身份等待期", async () =>
   });
   await act(async () => document.getElementById("connect-save")!.click());
   await until(() => expect(identityReads).toBeGreaterThan(0));
-  expect(host.querySelector(".topbar-title h1")?.textContent).toBe("对话");
+  expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("对话");
   expect(host.querySelector('[aria-label="会话 A"]')).toBeNull();
   expect(host.querySelector('[aria-label="会话 B"]')).toBeNull();
   await act(async () => release());
-  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("新凭据对话"));
+  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("新凭据对话"));
   expect(host.querySelector('[aria-label="会话 B"]')).toBeNull();
   expect(calls.every(value => value.method === "GET")).toBe(true);
 });
@@ -305,7 +339,7 @@ test("重命名只在会话标题同步后关闭对话框", async () => {
   serverTitle = "更新后的名称";
   await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".session-rename-dialog button")].find(item => item.textContent?.trim() === "重新读取名称")!.click());
   await until(() => expect(document.querySelector(".session-rename-dialog")).toBeNull());
-  await until(() => expect(host.querySelector(".topbar-title h1")?.textContent).toBe("更新后的名称"));
+  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("更新后的名称"));
 });
 
 test("重命名结果未知时保留查询入口且不重复提交", async () => {
