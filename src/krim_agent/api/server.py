@@ -1,6 +1,6 @@
 """薄 HTTP/SSE：所有业务操作调用同一 RunService。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -36,6 +36,40 @@ from krim_agent.tools.runtime import ToolRuntimeConfig
 
 from .boundary import LocalBoundary
 from .web import mount_browser_ui
+
+
+def stream_recheck(request: Request, run_id: str) -> Callable[[], Awaitable[bool]] | None:
+    """legacy stream的托管身份复核；每次发送/心跳前执行，其余返回None。
+
+    覆盖密钥轮换/吊销、账号停用与workspace会话访问撤销；存储类故障不
+    伪装成认证失败，交给既有storage_unavailable出口。
+    """
+    current = cast(Application, request.app.state.application)
+    identities = getattr(current, "identities", None)
+    if identities is None or not getattr(identities, "managed", False):
+        return None
+    authorization = getattr(request.state, "authorization", "")
+
+    async def recheck() -> bool:
+        try:
+            principal = identities.authenticate(authorization)
+        except ServiceError:
+            return False
+        if not principal.legacy:
+            return False
+        try:
+            source = (await current.store.snapshot(run_id)).session_context
+            if source is not None:
+                session = current.sessions
+                assert session is not None
+                await session.get(principal, source.workspace_id, source.session_id)
+        except ServiceError as error:
+            if error.code in {"not_found", "permission_denied"}:
+                return False
+            raise
+        return True
+
+    return recheck
 
 
 def create_app(
@@ -205,10 +239,15 @@ def create_app(
     ) -> StreamingResponse:
         service = active(request).service
         await service.events(run_id, from_seq, 1)
+        recheck = stream_recheck(request, run_id)
 
         async def frames() -> AsyncIterator[str]:
             try:
                 async for event in service.stream(run_id, from_seq):
+                    if recheck is not None and not await recheck():
+                        # 权限撤销/密钥失效：终止流，让客户端以新凭据重连。
+                        yield 'event: error\ndata: {"code":"unauthorized"}\n\n'
+                        return
                     yield (
                         ": heartbeat\n\n"
                         if event is None
@@ -273,6 +312,10 @@ def create_app(
         return automation
 
     mount_evaluation_automation(app, evaluation_automation)
+
+    from .accounts import mount_accounts
+
+    mount_accounts(app)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:

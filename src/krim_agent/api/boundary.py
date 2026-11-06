@@ -2,6 +2,8 @@
 
 import ipaddress
 import secrets
+import time
+from collections import OrderedDict, deque
 from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers
@@ -24,9 +26,47 @@ def local(value: str | None) -> bool:
         return False
 
 
+class _FailGate:
+    """按client address的有界认证失败节流：最多256个地址桶。
+
+    单一坏客户端不能锁死其他地址的合法认证；桶容量固定，写入满时先
+    清理窗口外过期桶，仍满则按LRU逐出。不按token建桶。
+    """
+
+    _LIMIT = 64
+    _WINDOW = 60.0
+    _BUCKETS = 256
+
+    def __init__(self) -> None:
+        self._buckets: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def throttled(self, address: str, now: float) -> bool:
+        bucket = self._buckets.get(address)
+        return (
+            bucket is not None
+            and len(bucket) == bucket.maxlen
+            and now - bucket[0] < self._WINDOW
+        )
+
+    def record(self, address: str, now: float) -> None:
+        bucket = self._buckets.get(address)
+        if bucket is None:
+            if len(self._buckets) >= self._BUCKETS:
+                for key, old in list(self._buckets.items()):
+                    if now - old[-1] >= self._WINDOW:
+                        del self._buckets[key]
+                while len(self._buckets) >= self._BUCKETS:
+                    self._buckets.popitem(last=False)
+            bucket = deque(maxlen=self._LIMIT)
+            self._buckets[address] = bucket
+        self._buckets.move_to_end(address)
+        bucket.append(now)
+
+
 class LocalBoundary:
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
         self.app, self.settings = app, settings
+        self._gate = _FailGate()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -46,11 +86,14 @@ class LocalBoundary:
             host = None
         application = getattr(getattr(scope.get("app"), "state", None), "application", None)
         access = getattr(application, "access_policy", None)
+        identities = getattr(application, "identities", None)
+        managed = identities is not None and bool(getattr(identities, "managed", False))
         key = self.settings.api_key.get_secret_value()
         client = scope.get("client")
         if (
             not key
             and access is None
+            and not managed
             and (not local(host) or client is None or not local(client[0]))
         ):
             await reject("local_only", 403)
@@ -67,6 +110,7 @@ class LocalBoundary:
         )
         if (
             key
+            and not managed
             and not public
             and not secrets.compare_digest(
                 headers.get("authorization", "").encode(), ("Bearer " + key).encode()
@@ -75,15 +119,34 @@ class LocalBoundary:
             await reject("unauthorized", 401)
             return
         if not public:
-            if isinstance(access, AccessPolicy):
+            if managed:
+                # 托管身份只认IdentityService；认证失败不回落LOCAL或旧全局key。
+                # 节流按来源地址分桶：坏客户端不阻其他地址的合法认证。
+                address = str(client[0]) if client is not None else ""
+                now = time.monotonic()
+                if self._gate.throttled(address, now):
+                    await reject("unauthorized", 401)
+                    return
+                authorization = headers.get("authorization", "")
+                try:
+                    principal = identities.authenticate(authorization)
+                except ServiceError:
+                    self._gate.record(address, time.monotonic())
+                    await reject("unauthorized", 401)
+                    return
+                state = scope.setdefault("state", {})
+                state["principal"] = principal
+                # 供SSE发送/心跳复核复用；不写入任何日志或响应。
+                state["authorization"] = authorization
+            elif isinstance(access, AccessPolicy):
                 try:
                     principal = access.authenticate(headers.get("authorization", ""))
                 except ServiceError:
                     await reject("unauthorized", 401)
                     return
+                scope.setdefault("state", {})["principal"] = principal
             else:
-                principal = LOCAL
-            scope.setdefault("state", {})["principal"] = principal
+                scope.setdefault("state", {})["principal"] = LOCAL
         body = bytearray()
         while True:
             part = await receive()

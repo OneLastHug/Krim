@@ -196,13 +196,23 @@ def _validate_control_arguments(
 
 
 class SessionService:
-    def __init__(self, store: SQLiteStore, runs: RunService, settings: Settings) -> None:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        runs: RunService,
+        settings: Settings,
+        *,
+        identities: object | None = None,
+    ) -> None:
         self.store, self.runs, self.settings = store, runs, settings
+        # 稳定身份服务引用；托管模式由composition注入，legacy保持None。
+        self.identities = identities
         self.closed = False
         self.failure: str | None = None
         self.controls: dict[str, asyncio.Task[ControlView]] = {}
         self._control_inputs: dict[str, str] = {}
         self._started: set[str] = set()
+        self._revoked: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
         self._dispatcher = asyncio.create_task(self._dispatch(), name="krim-session-dispatch")
         self._dispatcher.add_done_callback(self._consume_dispatch)
@@ -217,6 +227,16 @@ class SessionService:
         if not self.store.healthy or self.failure:
             raise ServiceError("storage_unavailable", 503)
 
+    def _live_principal(self, principal: PrincipalContext) -> PrincipalContext:
+        """托管模式下对请求主体做当前授权复核；拒绝旧generation/memberships。"""
+        identities = self.identities
+        if identities is None or not getattr(identities, "managed", False):
+            return principal
+        try:
+            return identities.validate(principal)
+        except ServiceError:
+            raise ServiceError("permission_denied", 403) from None
+
     async def get(
         self,
         principal: PrincipalContext,
@@ -226,6 +246,8 @@ class SessionService:
         write: bool = False,
         approve: bool = False,
     ) -> SessionView:
+        # 统一入口当前验证：旧generation/已停用主体的SDK直调在此拒绝。
+        principal = self._live_principal(principal)
         principal.member(workspace, write=write, approve=approve)
         session = await sql.get_session(self.store, session_id)
         if session.workspace_id != workspace:
@@ -234,12 +256,14 @@ class SessionService:
         return session
 
     async def by_key(self, principal: PrincipalContext, workspace: str, key: str) -> SessionView:
+        principal = self._live_principal(principal)
         principal.member(workspace)
         return await sql.by_key(self.store, workspace, principal.principal_id, key)
 
     async def list(
         self, principal: PrincipalContext, workspace: str, offset: int = 0, limit: int = 20
     ) -> list[SessionView]:
+        principal = self._live_principal(principal)
         membership = principal.member(workspace)
         if not 0 <= offset <= 100000 or not 1 <= limit <= 50:
             raise ServiceError("invalid_input", 422)
@@ -259,6 +283,7 @@ class SessionService:
         turn_id: str | None = None,
     ) -> TraceIndexPage:
         self._admitting()
+        principal = self._live_principal(principal)
         return await read_trace_index(
             self.store,
             principal,
@@ -274,6 +299,7 @@ class SessionService:
         self, principal: PrincipalContext, workspace: str, request: SessionCreate
     ) -> SessionView:
         self._admitting()
+        principal = self._live_principal(principal)
         principal.member(workspace, write=True)
         body = SessionCreate.model_validate_json(request.model_dump_json())
         try:
@@ -334,6 +360,8 @@ class SessionService:
             # 工作请求的嵌套expected必须在首await前脱离调用者；legacy顺序不变。
             request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
         await self.get(principal, workspace, session_id, write=True)
+        # 入队前实时复核：边界认证与本次写入之间被停用/降权的主体不再排队。
+        principal = self._live_principal(principal)
         body = (
             WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
             if isinstance(request, WorkspaceTurnRequest)
@@ -403,6 +431,70 @@ class SessionService:
                         await self.runs.wait(value.run_id)
                 await asyncio.sleep(0.02)
 
+    def _dispatch_block(self, turn: TurnView) -> str | None:
+        """派发前对队列owner做实时复核；返回失败码，None表示放行。"""
+        if turn.owner_id in self._revoked:
+            return "permission_denied"
+        identities = self.identities
+        if identities is None or not getattr(identities, "managed", False):
+            return None
+        try:
+            principal = identities.resolve(turn.owner_id)
+            # viewer不能派发demo/http等需要写授权的会话任务；workspace任务
+            # 另由prepare/fence按提交时grant比对generation漂移。
+            principal.member(turn.workspace_id, write=True)
+        except ServiceError:
+            return "permission_denied"
+        return None
+
+    async def revoke_principal(self, principal_id: str) -> dict[str, JsonValue]:
+        """停用/吊销/重签发后的运行时收敛（由on_change发布成功后调用）。
+
+        立即阻止该主体的queued turn派发并请求取消其名下全部活跃Run
+        （含demo/target-http等非workspace session任务）；等待全部收束、
+        结果已知后才返回。撤销门仅在收敛期间生效：收敛完成后重新认证
+        （重新启用/新签发key）的主体正常排队派发，不永久拉黑。幂等；
+        不触碰其他主体。v1直连Run在存储中无主体归属，不在此收敛范围
+        （该缺口由HTTP门禁与legacy主体限制覆盖）。
+        """
+        self._revoked.add(principal_id)
+        try:
+            failed_queued: list[str] = []
+            for turn_id in await sql.queued(self.store):
+                turn = await sql.get_turn(self.store, turn_id)
+                if turn.owner_id != principal_id:
+                    continue
+                await sql.fail_queued(self.store, turn_id, "permission_denied")
+                failed_queued.append(turn_id)
+            cancelled_runs: list[str] = []
+            failures: list[ServiceError] = []
+            for run_id, task in list(self.runs.tasks.items()):
+                if task.done():
+                    continue
+                try:
+                    source = (await self.runs.store.snapshot(run_id)).session_context
+                except ServiceError:
+                    continue  # 快照不可得时无法归属，不猜着取消别人的Run。
+                if source is None:
+                    continue
+                session = await sql.get_session(self.store, source.session_id)
+                if session.owner_id != principal_id:
+                    continue
+                try:
+                    await self.runs.cancel(run_id)
+                    cancelled_runs.append(run_id)
+                except ServiceError as error:
+                    failures.append(error)
+            if failures:
+                raise failures[0]
+            return {
+                "principal_id": principal_id,
+                "failed_queued": failed_queued,
+                "cancelled_runs": cancelled_runs,
+            }
+        finally:
+            self._revoked.discard(principal_id)
+
     async def _dispatch(self) -> None:
         last_session: str | None = None
         while not self.closed:
@@ -419,6 +511,10 @@ class SessionService:
                     if self.closed:
                         break
                     try:
+                        code = self._dispatch_block(turn)
+                        if code is not None:
+                            await sql.fail_queued(self.store, turn.id, code)
+                            continue
                         run = await self.runs.start_turn(turn.id)
                         self._started = {
                             rid

@@ -12,6 +12,7 @@ from typing import cast
 
 from pydantic import JsonValue
 
+from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
 from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
@@ -63,6 +64,7 @@ class Application:
     evaluation_product: EvaluationProduct | None = None
     evaluation_automation: EvaluationAutomation | None = None
     tool_runtime: ToolRuntime | None = None
+    identities: IdentityService | None = field(default=None, repr=False)
 
     async def __aenter__(self) -> Application:
         return self
@@ -134,7 +136,11 @@ class Application:
                             if isinstance(outcome, BaseException):
                                 raise outcome
                 finally:
-                    await self.store.close()
+                    try:
+                        if self.identities is not None:
+                            await self.identities.close()
+                    finally:
+                        await self.store.close()
 
 
 def _evaluation_database_path(database: Path, configured: Path | None) -> Path:
@@ -323,6 +329,14 @@ async def open_application(
     application: Application | None = None
     tool_runtime: ToolRuntime | None = None
     try:
+        identities = await IdentityService.open(store)
+        if identities.managed and (
+            config.identity_mode == "legacy" or active_access is not None
+            or config.api_key.get_secret_value()
+        ):
+            raise ServiceError("identity_mode_conflict", 422)
+        if config.identity_mode == "managed" and not identities.managed:
+            raise ServiceError("accounts_not_initialized", 422)
         if external_config is not None:
             tool_runtime = await ToolRuntime.open(tools, external_config, policy)
             tools, policy = tool_runtime.registry, tool_runtime.policy
@@ -336,7 +350,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6}:
+                if store.schema_version in {3, 4, 5, 6, 7}:
                     queued = await conn.scalar(
                         select(turns.c.id).join(sessions, turns.c.session_id == sessions.c.id)
                         .where(sessions.c.target_key == "target-workspace",
@@ -349,7 +363,7 @@ async def open_application(
                                session_controls.c.status == "pending").limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6}:
+                if store.schema_version in {4, 5, 6, 7}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"])).limit(1)
@@ -360,7 +374,8 @@ async def open_application(
         else:
             artifacts = ArtifactStore(store, workspace.artifact_root)
             operations = WorkspaceOperations(store, artifacts, workspace.profile,
-                access_policy=active_access)
+                access_policy=active_access,
+                identities=identities if identities.managed else None)
             # 构造器用原票据/inode/UID完成真实资源恢复；失败则仅 finally 收已拥有资源。
             runner = SandboxRunner(workspace.execution, hook=operations.runner_hook,
                 fence=operations.runner_fence)
@@ -433,12 +448,14 @@ async def open_application(
             provider is None,
             tuple({id(p): p for p in owned}.values()),
             EvaluationService(store, service),
-            SessionService(store, service, config),
+            SessionService(store, service, config,
+                           identities=identities if identities.managed else None),
             active_access,
             work=operations,
             artifacts=artifacts,
             runner=runner,
             tool_runtime=tool_runtime,
+            identities=identities,
         )
         if evaluation_path is not None:
             adapters = {
@@ -467,9 +484,36 @@ async def open_application(
                     if active_access is not None else (LOCAL,)
                 )
                 application.evaluation_automation = EvaluationAutomation(
-                    application.evaluation_product, principals
+                    application.evaluation_product, principals,
+                    identities=identities if identities.managed else None,
                 )
                 await application.evaluation_automation.start()
+
+        async def identity_changed(principal_id: str, invalidate: bool, action: str) -> None:
+            if not invalidate or action == "enable":
+                return
+            assert application is not None and application.sessions is not None
+            # 身份快照已提交，先阻断后续派发，再等待已有执行按原取消协议收束。
+            await application.sessions.revoke_principal(principal_id)
+            if application.evaluation_automation is not None:
+                await application.evaluation_automation.cancel_principal(principal_id)
+            # 兼容数据只有一个显式legacy主体。无Session关联的v1运行与旧评测
+            # 全部属于该兼容域，不把它们误归平台管理员或普通账号。
+            from krim_agent.storage.account_models import accounts
+
+            async with store.lock, store.engine.begin() as conn:
+                legacy = await conn.scalar(select(accounts.c.legacy).where(
+                    accounts.c.principal_id == principal_id))
+            if legacy:
+                if application.evaluations is not None:
+                    for eval_id, task in list(application.evaluations.tasks.items()):
+                        if not task.done():
+                            await application.evaluations.cancel(eval_id)
+                for run_id, task in list(service.tasks.items()):
+                    if not task.done() and (await store.snapshot(run_id)).session_context is None:
+                        await service.cancel(run_id)
+
+        identities.on_change = identity_changed
         return application
     except BaseException:
         if application is not None:

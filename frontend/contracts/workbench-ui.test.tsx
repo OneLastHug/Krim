@@ -31,6 +31,9 @@ beforeEach(() => {
     if (overridden !== undefined) return overridden;
     if (path === "/healthz") return json({ http_enabled: false, product_eval_enabled: productEnabled, evaluation_automation_enabled: productEnabled });
     if (path === "/v2/me") return json({ principal_id: "operator", generation: 1, legacy: legacyIdentity, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    // 账号接入后的新身份链路：资料对legacy服务器返回409 account_management_unavailable，接入信息404。
+    if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
+    if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
     if (path.startsWith("/v2/workspaces/local/traces?")) return json({ items: [{ source_kind: "session_turn", run_id: "run-from-trace", trace_id: "trace-from-trace", session_id: "S", turn_id: "T", session_title: "Trace session", target_key: "demo", status: "completed", created_at: 1, finished_at: 2 }], next_cursor: null });
     if (path === "/v2/workspaces/local/sessions/S/turns/T/trace") return json({ session_id: "S", turn_id: "T", trace: { run_id: "run-from-trace", trace_id: "trace-from-trace", complete: true, reasons: [], spans: [] } });
     if (path === "/v2/workspaces/local/sessions?limit=50") return json([sampleSession("A"), sampleSession("B")]);
@@ -111,7 +114,7 @@ test("首页默认对话，主导航和浏览器回退同步页面", async () =>
   await openSettingsPopover();
   await clickMenuItem("全部设置…");
   expect(new URL(location.href).searchParams.get("view")).toBe("settings");
-  await until(() => expect(host.textContent).toContain("当前身份与工作区"));
+  await until(() => expect(host.textContent).toContain("当前账号与工作区"));
   history.replaceState(null, "", "/ui/");
   await act(async () => window.dispatchEvent(new PopStateEvent("popstate")));
   await until(() => expect(host.querySelector('[aria-label="对话工作台"]')).toBeTruthy());
@@ -263,12 +266,17 @@ test("工作台切换工作区清空来源和对象深链且只读加载新索�
 });
 
 test("更换凭据后旧侧栏与标题不穿透新身份等待期", async () => {
-  let release!: () => void, identityReads = 0;
+  let release!: () => void, identityReads = 0, nextReads = 0;
   const waiting = new Promise<void>(resolve => { release = resolve; });
   releases.push(release);
   override = (path, options) => {
     if ((options.headers as Record<string, string> | undefined)?.Authorization !== "Bearer next-synthetic") return undefined;
     if (path === "/v2/me") {
+      nextReads++;
+      if (nextReads === 1) {
+        // 新登录流程：切换账号先 GET /v2/me 验证（立即通过），应用后再读取的请求才保持挂起。
+        return json({ principal_id: "operator", generation: 1, legacy: false, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+      }
       identityReads++;
       return waiting.then(() => json({ principal_id: "operator", generation: 1, legacy: false, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] }));
     }
@@ -279,9 +287,9 @@ test("更换凭据后旧侧栏与标题不穿透新身份等待期", async () =>
   history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
   await mount();
   await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("会话 A"));
-  // 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」。
-  await act(async () => button("密钥身份").click());
-  await clickMenuItem("连接 / 切换密钥");
+  // 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」。
+  await act(async () => button("账号菜单").click());
+  await clickMenuItem("切换账号");
   await act(async () => {
     const input = document.getElementById("api-key") as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "next-synthetic");
@@ -293,7 +301,10 @@ test("更换凭据后旧侧栏与标题不穿透新身份等待期", async () =>
   expect(host.querySelector('[aria-label="会话 A"]')).toBeNull();
   expect(host.querySelector('[aria-label="会话 B"]')).toBeNull();
   await act(async () => release());
-  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("新凭据对话"));
+  // 切换凭据会重置会话选择：新身份列表渲染其会话（新凭据对话），旧会话不穿透，标题回到未选中「对话」。
+  await until(() => expect(host.textContent).toContain("新凭据对话"));
+  expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("对话");
+  expect(host.querySelector('[aria-label="会话 A"]')).toBeNull();
   expect(host.querySelector('[aria-label="会话 B"]')).toBeNull();
   expect(calls.every(value => value.method === "GET")).toBe(true);
 });

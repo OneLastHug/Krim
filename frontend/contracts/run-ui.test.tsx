@@ -61,13 +61,13 @@ async function until(check: () => void) { let error: unknown; for (let i = 0; i 
 function button(label: string) { const found = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
 function ariaButton(label: string) { const found = document.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null; expect(found, label).toBeTruthy(); return found!; }
 function menuItem(label: string) { const found = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(b => b.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
-// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog（保存按钮仍为「应用」）。
+// 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog；登录先 GET /v2/me 验证再应用。
 async function connectKey(key: string) {
-    await act(async () => ariaButton("密钥身份").click());
-    await until(() => expect(menuItem("连接 / 切换密钥")).toBeTruthy());
-    await act(async () => menuItem("连接 / 切换密钥").click());
+    await act(async () => ariaButton("账号菜单").click());
+    await until(() => expect(menuItem("切换账号")).toBeTruthy());
+    await act(async () => menuItem("切换账号").click());
     await type("api-key", key);
-    await click("应用");
+    await act(async () => document.getElementById("connect-save")!.click());
 }
 async function click(label: string) { await act(async () => button(label).click()); }
 async function type(id: string, value: string) { await act(async () => { const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement; expect(input).toBeTruthy(); Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }

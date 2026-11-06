@@ -1,6 +1,6 @@
 """v2薄会话API；认证主体由LocalBoundary设置，业务只调用原服务。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import cast
 
 from fastapi import APIRouter, FastAPI, Query, Request
@@ -34,6 +34,32 @@ def service(request: Request) -> SessionService:
     if result is None:
         raise ServiceError("schema_upgrade_required")
     return result
+
+
+def stream_recheck(
+    request: Request, workspace_id: str, session_id: str
+) -> Callable[[], Awaitable[bool]] | None:
+    """托管身份下每次SSE发送/心跳前复核；legacy模式返回None保持原行为。
+
+    复核覆盖密钥轮换/吊销、账号停用与workspace授权（含owner权限：admin
+    降member后不能继续他人会话的流）；权限撤销后终止，不只在建立连接
+    时认证一次。token只在内存比较，不进入日志。
+    """
+    identities = getattr(application(request), "identities", None)
+    if identities is None or not getattr(identities, "managed", False):
+        return None
+    authorization = getattr(request.state, "authorization", "")
+
+    async def recheck() -> bool:
+        try:
+            current = identities.authenticate(authorization)
+            # 按会话归属复核当前授权：成员仍在但失去owner/admin视图同样终止。
+            await service(request).get(current, workspace_id, session_id)
+        except ServiceError:
+            return False
+        return True
+
+    return recheck
 
 
 async def run_id(request: Request, workspace_id: str, session_id: str, turn_id: str) -> str:
@@ -245,10 +271,15 @@ def mount_sessions(app: FastAPI) -> None:
         runs = application(request).service
         current_id = await run_id(request, workspace_id, session_id, turn_id)
         await runs.events(current_id, from_seq, 1)
+        recheck = stream_recheck(request, workspace_id, session_id)
 
         async def frames() -> AsyncIterator[str]:
             try:
                 async for event in runs.stream(current_id, from_seq):
+                    if recheck is not None and not await recheck():
+                        # 权限撤销/密钥失效：终止流，让客户端以新凭据重连。
+                        yield 'event: error\ndata: {"code":"unauthorized"}\n\n'
+                        return
                     yield (
                         ": heartbeat\n\n"
                         if event is None

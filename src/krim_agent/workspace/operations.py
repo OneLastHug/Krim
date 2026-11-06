@@ -36,15 +36,26 @@ from krim_agent.workspace.types import (
 
 class WorkspaceOperations:
     def __init__(self, store: SQLiteStore, artifacts: ArtifactStore, profile: WorkspaceProfile,
-                 *, access_policy: AccessPolicy | None = None,
-        runner: SandboxRunner | None = None) -> None:
+                 *, access_policy: AccessPolicy | None = None, runner: SandboxRunner | None = None,
+        identities: Any | None = None) -> None:
         self.store, self.artifacts, self.profile = store, artifacts, profile
         self.access_policy, self.runner = access_policy, runner
+        # 稳定身份服务引用；构造后不得替换（RunBinding指纹绑定其对象身份）。
+        self.identities = identities
         self.closed = False
         self._profile_hash = fingerprint(profile.model_dump(mode="json"))
 
+    def _managed(self) -> bool:
+        return self.identities is not None and bool(getattr(self.identities, "managed", False))
+
     def principal(self, frame: WorkFrame) -> PrincipalContext:
-        if self.access_policy is None:
+        if self._managed():
+            # 派发/副作用围栏的实时授权：停用/无凭据主体不回落静态快照。
+            try:
+                principal = self.identities.resolve(frame.actor_id)
+            except ServiceError:
+                raise ServiceError("permission_denied") from None
+        elif self.access_policy is None:
             principal = LOCAL
         else:
             credential = next(
@@ -77,12 +88,18 @@ class WorkspaceOperations:
     def scope(self, frame: WorkFrame, check: Callable[[], None], deadline: float,
               execution_budget: ExecutionBudget | None = None) -> Scope:
         access = ExecutionAccess(self.principal(frame), frame.grant.workspace_id, frame.session_id)
+        live = self._managed()
+
+        def current_access() -> ExecutionAccess:
+            return ExecutionAccess(self.principal(frame), frame.grant.workspace_id,
+                                   frame.session_id)
 
         def fence() -> None:
             check()
             if self.closed or fingerprint(
                 self.profile.model_dump(
-                mode="json")) != self._profile_hash or access.grant() != frame.grant:
+                mode="json")) != self._profile_hash or (current_access() if live
+                else access).grant() != frame.grant:
                 raise ServiceError("target_binding_changed")
             current_deadline = (execution_budget.deadline if execution_budget is not None
                                 else deadline)

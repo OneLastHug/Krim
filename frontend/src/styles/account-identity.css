@@ -1,0 +1,11 @@
+/* Approved account summary only. The existing composer and workbench shell stay unchanged. */
+.account-identity-line { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 5px; overflow: hidden; text-align: left; white-space: nowrap; }
+.account-identity-line strong { min-width: 24px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 1.4; font-weight: 600; }
+.account-identity-line .identity-dot, .account-gateway { color: var(--muted-foreground); font-size: 12px; }
+.account-gateway { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.account-avatar { font-size: 12px; font-weight: 600; }
+.popover-menu[aria-label="账号菜单"] .menu-identity strong { font-family: var(--font-sans); }
+.inspector-identity-details { color: var(--muted-foreground); font-size: 11px; }
+.inspector-identity-details summary { cursor: pointer; }
+.access-key-feedback { color: var(--destructive); font-size: 12px; line-height: 1.8; }
+.access-key-description { color: var(--muted-foreground); font-size: 12px; line-height: 1.8; }

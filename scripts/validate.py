@@ -18,6 +18,11 @@ CI_TESTS = (
     "tests/core/test_runtime.py",
     "tests/agent_core/test_sessions.py",
     "tests/agent_core/test_session_controls.py",
+    "tests/agent_core/test_accounts_service.py",
+    "tests/agent_core/test_account_api.py",
+    "tests/agent_core/test_account_cli.py",
+    "tests/agent_core/test_account_runtime.py",
+    "tests/agent_core/test_account_config.py",
     "tests/safe_eval/test_neutral_eval.py",
     "tests/safe_eval/test_continuous_eval.py",
 )

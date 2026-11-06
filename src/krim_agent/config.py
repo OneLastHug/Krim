@@ -32,6 +32,8 @@ class Settings(BaseModel):
     approval_timeout: float = Field(default=300, gt=0, le=86400)
 
     access_policy_file: Path | None = None
+    identity_mode: Literal["auto", "managed", "legacy"] = "auto"
+    gateway_display_name: str | None = Field(default=None, min_length=1, max_length=64)
     workspace_profile_file: Path | None = None
     tool_config_file: Path | None = None
     product_eval_enabled: bool = False
@@ -46,6 +48,18 @@ class Settings(BaseModel):
     context_max_messages: int = Field(default=256, ge=2, le=1024)
     context_reserved_output_tokens: int | None = Field(default=None, ge=1, le=32768)
     context_counter: Literal["approx-utf8/1"] = "approx-utf8/1"
+
+    @field_validator("gateway_display_name")
+    @classmethod
+    def gateway_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        import unicodedata
+
+        normalized = value.strip()
+        if not normalized or any(unicodedata.category(c).startswith("C") for c in normalized):
+            raise ValueError("网关显示名无效")
+        return normalized
 
     @field_validator("system_prompt")
     @classmethod
@@ -67,6 +81,8 @@ class Settings(BaseModel):
 SESSION_FIELDS = frozenset(
     {
         "access_policy_file",
+        "identity_mode",
+        "gateway_display_name",
         "workspace_profile_file",
         "tool_config_file",
         "product_eval_enabled",

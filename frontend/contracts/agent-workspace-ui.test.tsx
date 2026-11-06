@@ -54,10 +54,10 @@ function menuItem(label: string) {
   const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(value => value.textContent?.trim() === label);
   expect(item, label).toBeTruthy(); return item!;
 }
-// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
+// 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog；登录先 GET /v2/me 验证再应用。
 async function openAccountMenu() {
-  await act(async () => (document.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click());
-  await until(() => expect(document.querySelector(".popover-menu[aria-label='密钥身份']")).toBeTruthy());
+  await act(async () => (document.querySelector('[aria-label="账号菜单"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector(".popover-menu[aria-label='账号菜单']")).toBeTruthy());
 }
 
 test("workspace_unavailable_is_truthful_and_zero_effect", async () => {
@@ -203,7 +203,7 @@ for (const kind of ["turn", "input"] as const) for (const barrier of ["post", "g
         await until(() => expect(new URL(location.href).searchParams.get("session")).toBe(B));
         await act(async () => button("工作 A").click());
       } else if (steering === "credential") {
-        await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "rotated-synthetic");
+        await openAccountMenu(); await act(async () => menuItem("切换账号").click()); await type("api-key", "rotated-synthetic");
         await act(async () => document.getElementById("connect-save")!.click());
       } else {
         await act(async () => root.unmount()); root = createRoot(container);
@@ -214,6 +214,12 @@ for (const kind of ["turn", "input"] as const) for (const barrier of ["post", "g
       expect(localStorage.getItem(WORK_KNOWN)).toBeNull();
       expect(localStorage.getItem(WORK_INTENTS)).not.toContain("rotated-synthetic");
       expect(calls.filter(value => value.method === "POST")).toHaveLength(1);
+      if (steering === "credential") {
+        // 切换凭据会重置会话选择：重新进入会话 A，未决请求的显式找回入口仍在。
+        await until(() => expect([...document.querySelectorAll("button")].some(value => value.textContent?.trim() === "工作 A")));
+        await act(async () => button("工作 A").click());
+        await until(() => expect(new URL(location.href).searchParams.get("session")).toBe(A));
+      }
       await until(() => expect(button("查找原工作请求")).toBeTruthy());
       await act(async () => button("查找原工作请求").click());
       await until(() => expect(readWorkIntents(localStorage)).toEqual([]));
@@ -353,13 +359,19 @@ for (const steering of ["other-return", "credential", "unmount"] as const)
       expect(document.querySelector(".workspace-artifact")).toBeNull();
       await act(async () => button("工作 A").click());
     } else if (steering === "credential") {
-      await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "rotated-synthetic");
+      await openAccountMenu(); await act(async () => menuItem("切换账号").click()); await type("api-key", "rotated-synthetic");
       await act(async () => document.getElementById("connect-save")!.click());
     } else {
       await act(async () => root.unmount()); root = createRoot(container);
       await act(async () => root.render(<StrictMode><App /></StrictMode>));
     }
     await act(async () => { hold.release(); await new Promise(resolve => setTimeout(resolve, 0)); });
+    if (steering === "credential") {
+      // 切换凭据会重置会话选择：重新进入会话 A 核对新身份下的工作结果。
+      await until(() => expect([...document.querySelectorAll("button")].some(value => value.textContent?.trim() === "工作 A")));
+      await act(async () => button("工作 A").click());
+      await until(() => expect(new URL(location.href).searchParams.get("session")).toBe(A));
+    }
     await until(() => expect(document.querySelector(".workspace-artifact")?.textContent).toContain("hello.txt"));
     expect(localStorage.getItem(WORK_KNOWN)).toBe(ledger);
     expect(localStorage.getItem(WORK_KNOWN)).not.toContain("rotated-synthetic");
