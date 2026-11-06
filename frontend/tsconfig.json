@@ -66,6 +66,7 @@
     "e2e/workbench-redesign.spec.ts",
     "e2e/legacy-access.spec.ts",
     "e2e/compact-composer.spec.ts",
+    "e2e/session-row-hover.spec.ts",
     "vite.prototype.config.ts",
     "playwright.prototype.config.ts",
     "e2e/prototype.spec.ts",
