@@ -25,3 +25,6 @@ playwright-report/
 test-results/
 .local-review-*/
 .claude/launch.json
+
+# 本地内部文档（不发布）
+docs/

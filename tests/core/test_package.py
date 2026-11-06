@@ -38,7 +38,7 @@ def test_old_entrypoint_bytes_unchanged():
             "-C",
             str(root),
             "show",
-            "a99f9b7e48c81a765509d3994ec61b8ac63d90ea:src/krim_agent/__main__.py",
+            "289af1e40b962187d36d206326f08c02496de61b:src/krim_agent/__main__.py",
         ]
     )
     assert (root / "src/krim_agent/__main__.py").read_bytes() == before
