@@ -23,4 +23,4 @@ jobs:
             -o /tmp/dep.json -w "HTTP %{http_code}\n"
           cat /tmp/dep.json
         env:
-          GITHUB_TOKEN: ${{ github_token }}
+          GITHUB_TOKEN: ${{ github.token }}
