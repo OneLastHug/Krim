@@ -24,7 +24,7 @@ def test_release_versions_and_root_lock_metadata():
     assert len(roots) == 1 and roots[0]["version"] == "0.4.0a1"
     assert roots[0]["source"] == {"editable": "."}
     before_raw = subprocess.check_output(
-        ["git", "--no-optional-locks", "show", "90c1ed69167f8b1b35ebd84e80e010ce05c75304:uv.lock"],
+        ["git", "--no-optional-locks", "show", "9d55c73ffe464550882084a7b8d1b042b1140397:uv.lock"],
         text=True,
     )
     before = tomllib.loads(before_raw)

@@ -669,7 +669,7 @@ async def test_published_0043_request_hash_and_codec_bytes_remain_compatible(run
     try:
         old = await asyncio.to_thread(
             subprocess.check_output,
-            ["git", "show", "9dd01bd80cab9150068013ab96d33821f2221ffc:src/krim_agent/persistence/workspace_tree_moves.py"],
+            ["git", "show", "1bb7cb04b19c59efed578127195e316153945dd1:src/krim_agent/persistence/workspace_tree_moves.py"],
             cwd="/workspace/Krim",
             text=True,
         )
@@ -713,7 +713,7 @@ async def test_published_0043_request_hash_and_codec_bytes_remain_compatible(run
         ):
             published = await asyncio.to_thread(
                 subprocess.check_output,
-                ["git", "show", "9dd01bd80cab9150068013ab96d33821f2221ffc:src/krim_agent/" + path],
+                ["git", "show", "1bb7cb04b19c59efed578127195e316153945dd1:src/krim_agent/" + path],
                 cwd="/workspace/Krim",
             )
             assert await asyncio.to_thread(Path(module.__file__).read_bytes) == published
