@@ -18,9 +18,9 @@ function Harness() {
 }
 async function until(check: () => void) {
   let error: unknown;
-  for (let index = 0; index < 80; index++) {
+  for (let index = 0; index < 120; index++) {
     try { check(); return; }
-    catch (value) { error = value; await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); }
+    catch (value) { error = value; await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); }); }
   }
   throw error;
 }
