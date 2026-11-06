@@ -1,0 +1,26 @@
+name: deployment signal
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create deployment signal (serverless-remote-deploy)
+        run: |
+          curl -sS -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments" \
+            -d "{\"ref\":\"${GITHUB_SHA}\",\"environment\":\"production\",\"transient\":true,\"description\":\"serverless-remote-deploy signal\"}" \
+            -o /tmp/dep.json -w "HTTP %{http_code}\n"
+          cat /tmp/dep.json
+        env:
+          GITHUB_TOKEN: ${{ github_token }}
