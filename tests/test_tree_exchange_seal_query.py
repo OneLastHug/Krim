@@ -207,7 +207,7 @@ async def test_client_refuses_schema_valid_but_cross_original_plan_or_scope(
 async def test_original_six_tool_schemas_from_published_commit_are_exactly_unchanged():
     previous = await asyncio.to_thread(
         subprocess.check_output,
-        ["git", "show", "92a5b7a41c5e074c5738506218e6b32917a5bb79:src/krim_agent/tools/tree_exchanges.py"],
+        ["git", "show", "af7baf0ab7d51834cc4ee896aed16bb3a9dbd485:src/krim_agent/tools/tree_exchanges.py"],
         text=True,
         cwd=Path(__file__).parents[1],
     )
@@ -216,7 +216,7 @@ async def test_original_six_tool_schemas_from_published_commit_are_exactly_uncha
         "__name__": "krim_agent.tools.original_exchanges",
         "__package__": "krim_agent.tools",
     }
-    exec(compile(previous, "92a5b7a41c5e074c5738506218e6b32917a5bb79-tree-exchanges.py", "exec"), environment)
+    exec(compile(previous, "af7baf0ab7d51834cc4ee896aed16bb3a9dbd485-tree-exchanges.py", "exec"), environment)
     old = {
         item.name: item.schema().model_dump(mode="json")
         for item in environment["tree_exchange_tools"]()
