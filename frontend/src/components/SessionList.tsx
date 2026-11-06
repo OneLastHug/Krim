@@ -7,11 +7,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { chatCopy as c } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 
-function createdLabel(value: number) {
-  const date = new Date(value * 1000);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "时间未记录";
-}
-
 export function SessionList({ chat, beforeSelect }: { chat: SessionState; beforeSelect?: (workspace: string, sessionId: string) => void }) {
   const [renameOpen, setRenameOpen] = useState(false), [renameText, setRenameText] = useState(""), [submittedTitle, setSubmittedTitle] = useState<string | null>(null);
   const scopeKey = JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id]);
@@ -61,7 +56,7 @@ export function SessionList({ chat, beforeSelect }: { chat: SessionState; before
     <nav className="chat-session-list" aria-label="已存对话">
       {!chat.list.length && <p className="chat-list-empty">{chat.ready ? c.empty : "连接后显示对话"}</p>}
       {chat.list.map(s => <div className="chat-session-row" key={s.id}>
-        <Button className="session-select" variant="ghost" aria-label={s.title} aria-describedby={`session-created-${s.id}`} aria-current={chat.id === s.id ? "page" : undefined} onClick={() => { if (chat.id !== s.id) beforeSelect?.(chat.workspace, s.id); chat.select(chat.workspace, s.id); }}><span className="chat-session-label" data-ui-data><span>{s.title}</span><small id={`session-created-${s.id}`}>{createdLabel(s.created_at)}</small></span>{s.status === "closed" && <span className="muted">已关闭</span>}</Button>
+        <Button className="session-select" variant="ghost" aria-label={s.title} aria-current={chat.id === s.id ? "page" : undefined} onClick={() => { if (chat.id !== s.id) beforeSelect?.(chat.workspace, s.id); chat.select(chat.workspace, s.id); }}><span className="chat-session-label" data-ui-data><span>{s.title}</span></span>{s.status === "closed" && <span className="muted">已关闭</span>}</Button>
         {chat.id === s.id && canRename && <Button className="session-rename-trigger" variant="ghost" aria-label="重命名当前对话" title="重命名当前对话" onClick={() => openRename(chat.session?.title ?? s.title)}><Pencil aria-hidden="true"/></Button>}
         {chat.id === s.id && renameControl && <Button className="session-recovery-trigger" variant="ghost" aria-label="查找重命名结果" title="查找重命名结果" onClick={recoverRename}>恢复</Button>}
       </div>)}
