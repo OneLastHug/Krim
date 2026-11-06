@@ -42,6 +42,18 @@ async function openMorePopover() { await act(async () => (document.querySelector
 // 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog（登录先 GET /v2/me 验证再应用）。
 async function openAccountMenu() { await act(async () => (document.querySelector('[aria-label="账号菜单"]') as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='账号菜单']")).toBeTruthy()); }
 
+test("侧栏会话只展示标题，不再渲染或朗读创建时间", async () => {
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  override = path => path === "/v2/workspaces/local/sessions?limit=50" ? json([session()]) : undefined;
+  await act(async () => root.render(<App />));
+  await until(() => expect(container.querySelector(".chat-session-row .session-select")).toBeTruthy());
+  const row = container.querySelector(".chat-session-row")!;
+  expect(row.querySelector(".chat-session-label")?.textContent).toBe("演示");
+  expect(row.querySelector("small, time, [id^='session-created-']")).toBeNull();
+  expect(row.querySelector(".session-select")?.getAttribute("aria-describedby")).toBeNull();
+  expect(calls.filter(value => value.method !== "GET")).toHaveLength(0);
+});
+
 test("真实App StrictMode对话入口零自动POST，新建仅由显式操作", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   expect(calls.filter(c => c.method === "POST")).toEqual([]);
