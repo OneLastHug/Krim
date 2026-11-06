@@ -748,7 +748,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .icon-button.small svg { width: 14px; height: 14px; }
 
 .desktop-sidebar { grid-column: 1; align-self: stretch; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--sidebar-border, var(--border)); background: var(--sidebar-surface); }
-.app-sidebar { display: flex; flex-direction: column; gap: 0; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; padding: 10px 8px 10px; background: var(--sidebar-surface); }
+.app-sidebar { --sidebar-padding-inline: 8px; display: flex; flex-direction: column; gap: 0; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; padding: 10px var(--sidebar-padding-inline) 10px; background: var(--sidebar-surface); }
 .sidebar-buttons { display: flex; align-items: center; gap: 2px; padding: 0 2px 8px; }
 .sidebar-buttons .spacer, .sidebar-buttons-divider { flex: 1 1 auto; }
 .sidebar-buttons-divider { flex: 0 0 auto; width: 1px; height: 16px; margin: 0 5px; background: var(--border); }
@@ -776,7 +776,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .chat-workspace-select { display: grid; gap: 5px; margin: 0 8px 10px; }
 .chat-workspace-select label { color: var(--muted-foreground); font-size: 11px; }
 .chat-workspace-select select { min-height: 36px; width: 100%; border: 1px solid var(--input); border-radius: 6px; padding: 6px 8px; background: var(--input-surface); color: var(--foreground); }
-.sidebar-account { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-top: auto; padding: 10px 0 0; border-top: 1px solid var(--border); }
+.sidebar-account { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-top: auto; margin-inline: calc(-1 * var(--sidebar-padding-inline)); padding: 10px var(--sidebar-padding-inline) 0; border-top: 1px solid var(--border); }
 .account-button { display: flex; flex: 1 1 auto; align-items: center; gap: 9px; min-width: 0; min-height: 38px!important; height: auto; justify-content: flex-start; padding: 0 9px!important; border-radius: 7px; color: var(--foreground); }
 .account-avatar { display: grid; width: 26px; height: 26px; flex: 0 0 auto; place-items: center; border-radius: 50%; background: color-mix(in srgb, var(--brand-accent) 20%, var(--background)); color: var(--brand-accent); }
 .account-avatar svg { width: 13px; height: 13px; }
@@ -784,7 +784,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .account-label strong { overflow: hidden; font-size: 12px; line-height: 1.4; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .account-label .account-sub { display: flex; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 11px; line-height: 1.4; }
 .account-button > svg { width: 14px; height: 14px; color: var(--muted-foreground); }
-.sidebar-footer-extra { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 10px 0 0; border-top: 1px solid var(--border); }
+.sidebar-footer-extra { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .sidebar-footer-extra .access-actions { display: contents; }
 .workbench-main { grid-column: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .chat-toolbar { z-index: 1; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px 0 12px; background: var(--background); }
@@ -861,7 +861,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .mobile-drawer-content { align-content: start; inset: 0 auto 0 0!important; top: 0!important; left: 0!important; width: min(92vw,360px)!important; max-width: 360px!important; height: 100dvh!important; max-height: 100dvh!important; margin: 0!important; padding: 14px!important; --tw-translate-x: 0px!important; --tw-translate-y: 0px!important; transform: none!important; translate: 0 0!important; border-radius: 0 9px 9px 0!important; }
 .drawer-heading { padding: 3px 34px 12px 5px; }
 .drawer-heading [data-slot="dialog-title"] { margin: 0; font-size: 16px; }
-.drawer-sidebar { height: auto; min-height: 0; overflow: auto; padding: 0 2px 10px; border: 0; background: transparent; }
+.drawer-sidebar { --sidebar-padding-inline: 2px; height: auto; min-height: 0; overflow: auto; padding: 0 var(--sidebar-padding-inline) 10px; border: 0; background: transparent; }
 .drawer-sidebar .sidebar-brand { display: none; }
 .drawer-sidebar .sidebar-context { margin-bottom: 8px; }
 .drawer-sidebar .chat-sidebar { min-height: 150px; }
