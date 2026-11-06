@@ -15,11 +15,15 @@ jobs:
     steps:
       - name: Create deployment signal (serverless-remote-deploy)
         run: |
-          curl -sS -X POST \
+          set -x
+          RESP=$(curl -sS -X POST \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments" \
-            -d "{\"ref\":\"${GITHUB_SHA}\",\"description\":\"serverless-remote-deploy signal\"}" \
-            -o /tmp/dep.json -w "POST_HTTP=%{http_code}\n"
+            -d "{\"ref\":\"${GITHUB_SHA}\",\"required_contexts\":[],\"description\":\"serverless-remote-deploy signal\"}")
+          echo "$RESP" | head -c 2000
+          echo "HTTPBODY_ABOVE"
+          curl -sS -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments?per_page=3" | head -c 1500
         env:
           GITHUB_TOKEN: ${{ github.token }}
