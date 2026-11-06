@@ -12,6 +12,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from krim_agent import __version__
+from krim_agent.account_cli import add_account_parser, execute_account
 from krim_agent.client import AsyncRunClient
 from krim_agent.composition import Application, open_application
 from krim_agent.config import Settings
@@ -355,6 +356,8 @@ async def execute_workspace(args: argparse.Namespace) -> Any:
 
 
 async def execute(args: argparse.Namespace) -> Any:
+    if args.command == "account":
+        return await execute_account(args)
     if args.command == "workspace":
         return await execute_workspace(args)
     if args.command in {"session", "turn"}:
@@ -531,6 +534,7 @@ def main() -> None:
             child.add_argument("--turn")
             child.add_argument("--key")
             child.add_argument("--input-key")
+    add_account_parser(sub)
     args = parser.parse_args()
     try:
         if args.command == "serve":

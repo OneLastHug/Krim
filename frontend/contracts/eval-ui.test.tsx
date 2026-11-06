@@ -29,6 +29,9 @@ const identity = { principal_id: "local", generation: 1, legacy: true, workspace
 let identityRead = false;
 function intercept(handler: (path: string, options: RequestInit) => Promise<Response> | Response) { identityRead = false; vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => { const path = String(input); calls.push({ path, method: options.method ?? "GET", body: options.body ? JSON.parse(String(options.body)) : null }); if (path === "/v2/me") { identityRead = true; return json(identity); } return handler(path, options); })); }
 function reads(path: string) {
+    // 账号接入后的新身份链路：legacy服务器资料返回409 account_management_unavailable，接入信息404。
+    if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
+    if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
     if (path === "/v1/eval-targets")
         return json([{ key: "target-v1" }, { key: "target-v2" }, { key: "target-bad" }]);
     if (path === "/v1/eval-rules")
@@ -62,13 +65,13 @@ async function until(check: () => void) {
 async function oneCase() { await type("dataset-name", "unit"); await type("case-input", "/add 2 3"); await type("case-expected", '"5"'); await type("case-reason", "人工核算"); await click("加入样本"); }
 function ariaButton(label: string) { const value = document.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null; expect(value, label).toBeTruthy(); return value!; }
 function menuItem(label: string) { const value = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === label); expect(value, label).toBeTruthy(); return value!; }
-// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog（保存按钮仍为「应用」）。
+// 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog；登录先 GET /v2/me 验证再应用。
 async function connect(key: string) {
-    await act(async () => ariaButton("密钥身份").click());
-    await until(() => expect(menuItem("连接 / 切换密钥")).toBeTruthy());
-    await act(async () => menuItem("连接 / 切换密钥").click());
+    await act(async () => ariaButton("账号菜单").click());
+    await until(() => expect(menuItem("切换账号")).toBeTruthy());
+    await act(async () => menuItem("切换账号").click());
     await type("api-key", key);
-    await click("应用");
+    await act(async () => document.getElementById("connect-save")!.click());
 }
 // 「设置」不再是导航项：经侧栏齿轮弹出设置 popover，点「全部设置…」进入设置视图。
 async function openSettingsView() {

@@ -1,7 +1,7 @@
 import type { Actor } from "../lib/session-contracts";
 import type { WorkbenchView } from "../lib/workbench-route";
 
-export function WorkbenchInspector({ view, objectId, identity }: { view: WorkbenchView; objectId: string; identity: Actor | null }) {
+export function WorkbenchInspector({ view, objectId, identity, accountName = "账号", gatewayName = "", workspaceNames = {} }: { view: WorkbenchView; objectId: string; identity: Actor | null; accountName?: string; gatewayName?: string; workspaceNames?: Record<string, string> }) {
   const objectLabel = view === "chat" ? "对话" : view === "run" ? "运行" : view === "trace" ? "运行" : view === "eval" ? "评测" : "对象";
   return <aside className="workbench-inspector" aria-label="对象详情">
     <header className="inspector-heading"><div><span className="inspector-kicker">当前上下文</span><h2>详情</h2></div></header>
@@ -14,8 +14,9 @@ export function WorkbenchInspector({ view, objectId, identity }: { view: Workben
     <section className="inspector-section" aria-labelledby="inspector-identity-heading">
       <h3 id="inspector-identity-heading">当前身份</h3>
       {identity ? <>
-        <p className="inspector-principal" title={identity.principal_id}>{identity.principal_id}</p>
-        <ul className="inspector-workspaces">{identity.workspaces.map(workspace => <li key={workspace.workspace_id}><span>{workspace.workspace_id}</span><span>{workspace.role === "admin" ? "管理员" : workspace.role === "viewer" ? "只读" : "成员"}</span></li>)}</ul>
+        <p title={accountName}>{accountName}{gatewayName ? ` · ${gatewayName}` : ""}</p>
+        <ul className="inspector-workspaces">{identity.workspaces.map(workspace => <li key={workspace.workspace_id}><span>{workspaceNames[workspace.workspace_id] ?? "工作区"}</span><span>{workspace.role === "admin" ? "管理员" : workspace.role === "viewer" ? "只读" : "成员"}</span></li>)}</ul>
+        <details className="inspector-identity-details"><summary>定位信息</summary><p>账号 ID：<code>{identity.principal_id}</code></p>{identity.workspaces.map(workspace => <p key={workspace.workspace_id}>工作区 ID：<code>{workspace.workspace_id}</code></p>)}</details>
         {identity.legacy && <p>运行记录与评测使用旧版接口。</p>}
       </> : <p>连接后显示身份与工作区能力。</p>}
     </section>

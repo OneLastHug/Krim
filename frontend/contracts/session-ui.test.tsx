@@ -22,6 +22,9 @@ beforeEach(() => {
     const overridden = override?.(path, options); if (overridden !== undefined) return overridden;
     if (path === "/healthz") return json({ http_enabled: false });
     if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    // 账号接入后的新身份链路：legacy服务器资料返回409 account_management_unavailable，接入信息404。
+    if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
+    if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
     if (path.includes("/turns")) return json([]);
     if (method === "POST" && path.endsWith("/sessions")) return json(session("A", (body as { request_key: string }).request_key), 201);
     if (path.endsWith("/sessions/A")) return json(session());
@@ -36,8 +39,8 @@ function createButton() { const item = document.querySelector<HTMLButtonElement>
 function menuItem(label: string) { const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(b => b.textContent?.trim() === label); expect(item, label).toBeTruthy(); return item!; }
 // 顶栏「更多操作」菜单：刷新对话/关闭对话等由常驻按钮改为菜单项，须先弹出菜单。
 async function openMorePopover() { await act(async () => (document.querySelector("header.chat-toolbar [aria-label='更多操作']") as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='更多操作']")).toBeTruthy()); }
-// 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
-async function openAccountMenu() { await act(async () => (document.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='密钥身份']")).toBeTruthy()); }
+// 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog（登录先 GET /v2/me 验证再应用）。
+async function openAccountMenu() { await act(async () => (document.querySelector('[aria-label="账号菜单"]') as HTMLButtonElement).click()); await until(() => expect(document.querySelector(".popover-menu[aria-label='账号菜单']")).toBeTruthy()); }
 
 test("真实App StrictMode对话入口零自动POST，新建仅由显式操作", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
@@ -246,7 +249,7 @@ for (const barrier of ["post", "get"] as const) for (const steering of ["tab", "
     if (barrier === "get") { await act(async () => button("查找原请求").click()); await until(() => expect(fixture.findCount).toBe(1)); }
     if (steering === "tab") await act(async () => button("导航到运行记录").click());
     if (steering === "other") await act(async () => button("会话 B").click());
-    if (steering === "key") { await openAccountMenu(); await act(async () => menuItem("连接 / 切换密钥").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
+    if (steering === "key") { await openAccountMenu(); await act(async () => menuItem("切换账号").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
     if (steering === "refresh") { await openMorePopover(); await act(async () => menuItem("刷新对话").click()); }
     if (steering === "remount") { await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<StrictMode><App /></StrictMode>)); }
     await act(async () => { fixture.hold.release(); await new Promise(r => setTimeout(r, 5)); });

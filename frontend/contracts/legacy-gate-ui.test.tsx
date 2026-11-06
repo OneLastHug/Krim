@@ -11,9 +11,17 @@ const releases: (() => void)[] = [];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const actor = (legacy: boolean) => ({ principal_id: "operator", generation: 1, legacy, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
 const run = { id: "saved-run", request_key: "saved-key", status: "completed", trace_id: "saved-trace", root_span_id: "saved-span", created_at: 1, finished_at: 2, code: null, stop_requested: false };
+// 账号接入后的新身份链路：App 还会读 /v2/me/profile 与 /v2/targets/.../connection-profile。
+// legacy 服务器对 profile 返回 account_management_unavailable（409）；托管身份按真实 JSON 契约返回资料。
+let legacyActor = true;
+const profileResponse = (legacy: boolean) => legacy
+  ? json({ error: { code: "account_management_unavailable" } }, 409)
+  : json({ principal_id: "operator", display_name: "测试账号", status: "active", platform_role: "member", generation: 1, revision: 1, legacy: false, key: null, workspaces: [{ workspace_id: "local", display_name: "个人工作区", role: "admin", approve: true, personal: true }] });
 function response(path: string) {
   if (path === "/healthz") return json({ http_enabled: false, product_eval_enabled: false });
   if (path === "/v2/me") return json(actor(true));
+  if (path === "/v2/me/profile") return profileResponse(legacyActor);
+  if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
   if (path === "/v1/runs/saved-run") return json(run);
   if (path === "/v1/runs/saved-run/result") return json({ run, text: "原身份私有结果", tools: [] });
   if (path === "/v1/runs/saved-run/trace") return json({ run_id: run.id, trace_id: run.trace_id, complete: true, reasons: [], spans: [] });
@@ -30,6 +38,7 @@ beforeEach(() => {
   localStorage.clear(); history.replaceState(null, "", "/ui/?view=run");
   localStorage.setItem(CURRENT, run.id);
   calls.length = 0;
+  legacyActor = true;
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   handler = path => response(path);
@@ -54,10 +63,10 @@ async function until(check: () => void) {
   throw error;
 }
 async function connect(key: string) {
-  // 连接入口移到侧栏账户菜单：密钥身份 → 「连接 / 切换密钥」→ Dialog。
-  await act(async () => (host.querySelector('[aria-label="密钥身份"]') as HTMLButtonElement).click());
-  await until(() => expect([...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].some(item => item.textContent?.trim() === "连接 / 切换密钥")).toBe(true));
-  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === "连接 / 切换密钥")!.click());
+  // 连接入口在侧栏账号菜单：账号菜单 → 「切换账号」→ Dialog；登录先 GET /v2/me 验证再应用。
+  await act(async () => (host.querySelector('[aria-label="账号菜单"]') as HTMLButtonElement).click());
+  await until(() => expect([...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].some(item => item.textContent?.trim() === "切换账号")).toBe(true));
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent?.trim() === "切换账号")!.click());
   await act(async () => {
     const input = document.getElementById("api-key") as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, key);
@@ -87,9 +96,11 @@ test("保留旧run时等待明确legacy能力才读取v1，零自动POST", async
 for (const view of ["run", "chat", "trace", "eval"] as const) {
   test(`非legacy身份保留旧run进入${view}也不请求v1`, async () => {
     history.replaceState(null, "", `/ui/?view=${view}&source_run=unread-source`);
+    legacyActor = false;
     handler = path => path === "/v2/me" ? json(actor(false)) : response(path);
     await mount();
-    await until(() => expect(host.textContent).toContain("已连接"));
+    // 等待可读账号名称：托管资料读取完成、账号菜单已显示账号名。
+    await until(() => expect(host.textContent).toContain("测试账号"));
     expect(calls.some(value => value.path.startsWith("/v1/"))).toBe(false);
     expect(host.textContent).not.toContain("原身份私有结果");
     expect(localStorage.getItem(CURRENT)).toBe(run.id);
@@ -102,7 +113,9 @@ for (const status of [401, 503]) {
     localStorage.setItem(INTENT, intent);
     handler = path => path === "/v2/me" ? json({ error: { code: status === 401 ? "unauthorized" : "execution_error" } }, status) : response(path);
     await mount();
-    await until(() => expect(host.textContent).toContain("连接失败"));
+    // 身份失败停留在运行页的未连接空态；401/503 的具体文案由 chatReason 决定。
+    await until(() => expect(host.textContent).toContain("请连接以读取运行记录"));
+    if (status === 401) expect(host.textContent).toContain("密钥无效，请重新连接");
     expect(host.querySelector("#prompt")).toBeNull();
     expect(calls.some(value => value.path.startsWith("/v1/"))).toBe(false);
     expect(localStorage.getItem(INTENT)).toBe(intent);
@@ -112,7 +125,8 @@ for (const status of [401, 503]) {
 test("legacy身份在对话页不后台读取旧run，显式进入运行页后才读取", async () => {
   history.replaceState(null, "", "/ui/?view=chat");
   await mount();
-  await until(() => expect(host.textContent).toContain("已连接"));
+  // legacy 服务器：资料 409 → 账号菜单显示「本地账号」；等待身份链路安定。
+  await until(() => expect(host.textContent).toContain("本地账号"));
   expect(calls.some(value => value.path.startsWith("/v1/runs/"))).toBe(false);
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="导航到运行记录"]')!.click());
   await until(() => expect(host.querySelector("#result")?.textContent).toBe("原身份私有结果"));

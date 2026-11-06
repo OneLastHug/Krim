@@ -92,8 +92,9 @@ class RunBinding:
         if loop.executor.middleware or loop.executor.wrap is not None or loop.work is not None:
             result += tuple(map(id, (*loop.executor.middleware, loop.executor.wrap, loop.work)))
         if loop.work is not None:
+            # identities是稳定服务引用：改名/轮换/成员变更不替换对象，绑定不漂移。
             result += tuple(map(id, (loop.work.profile, loop.work.artifacts, loop.work.runner,
-                loop.work.access_policy)))
+                loop.work.access_policy, loop.work.identities)))
             if loop.work.runner is not None:
                 result += (id(loop.work.runner.profile), id(loop.work.runner.fence),
                     id(loop.work.runner.hook), hash(repr(loop.work.runner.profile)),

@@ -17,6 +17,9 @@ TERMINAL = frozenset({"completed", "failed", "aborted", "interrupted"})
 # 答复到达后由停靠恢复点续跑（见 runtime/recovery.py 与 ADR-0015 §3）。
 ERROR_CODES = frozenset(
     {
+        "account_management_unavailable",
+        "accounts_not_initialized",
+        "identity_mode_conflict",
         "mcp_unavailable",
         "mcp_invalid_json",
         "mcp_tool_failed",

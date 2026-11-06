@@ -1,0 +1,179 @@
+/* 账号设置命名空间样式：逐项迁移 docs/prototypes/accounts/prototype.css 已批准规则。
+   仅作用于 .accounts-settings / .account-*；不改动全局既有控件、聊天输入框或布局壳。 */
+
+.accounts-settings { width: 100%; max-width: 760px; margin: 25px auto 0; font-size: 12px; --account-positive: #318052; }
+:root[data-theme="dark"] .accounts-settings { --account-positive: #85c799; }
+
+:is(.accounts-settings, .account-dialog-content) .account-tabs { display: flex; gap: 24px; align-items: center; height: 42px; border-bottom: 1px solid var(--border); margin-bottom: 27px; }
+:is(.accounts-settings, .account-dialog-content) .account-tab { height: 42px; padding: 0 1px; border-bottom: 2px solid transparent; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
+:is(.accounts-settings, .account-dialog-content) .account-tab[aria-current="page"] { border-bottom-color: var(--foreground); color: var(--foreground); font-weight: 600; }
+
+:is(.accounts-settings, .account-dialog-content) .account-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+:is(.accounts-settings, .account-dialog-content) .account-heading h2 { font-size: 16px; line-height: 1.4; font-weight: 600; letter-spacing: -.2px; }
+:is(.accounts-settings, .account-dialog-content) .account-heading p { font-size: 12px; line-height: 1.7; color: var(--muted-foreground); margin-top: 7px; }
+
+:is(.accounts-settings, .account-dialog-content) .account-search-filter { display: flex; align-items: center; gap: 10px; margin-bottom: 17px; }
+:is(.accounts-settings, .account-dialog-content) .account-search { display: flex; align-items: center; border: 1px solid var(--input); background: var(--input-surface); border-radius: 6px; min-height: 32px; width: 244px; padding-left: 9px; gap: 7px; color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-search:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+:is(.accounts-settings, .account-dialog-content) .account-search > svg { width: 14px; height: 14px; flex: none; }
+:is(.accounts-settings, .account-dialog-content) .account-search .account-search-input { width: 100%; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 0; background: transparent; padding: 6px 8px 6px 0; color: var(--foreground); box-shadow: none; }
+:is(.accounts-settings, .account-dialog-content) .account-search .account-search-input:focus-visible { outline: none; box-shadow: none; }
+:is(.accounts-settings, .account-dialog-content) .account-select-wrap { position: relative; display: inline-flex; align-items: center; }
+:is(.accounts-settings, .account-dialog-content) .account-select-wrap select { appearance: none; -webkit-appearance: none; background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 6px; min-height: 32px; padding: 6px 29px 6px 10px; cursor: pointer; max-width: 100%; font: inherit; font-size: 12px; }
+:is(.accounts-settings, .account-dialog-content) .account-select-wrap > svg { pointer-events: none; position: absolute; right: 8px; width: 13px; height: 13px; color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-field .account-select-wrap { display: inline-flex; }
+
+:is(.accounts-settings, .account-dialog-content) .account-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+:is(.accounts-settings, .account-dialog-content) .account-table th { height: 34px; text-align: left; font-size: 11px; font-weight: 500; color: var(--muted-foreground); border-bottom: 1px solid var(--border); padding: 0 12px; }
+:is(.accounts-settings, .account-dialog-content) .account-table td { height: 62px; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+:is(.accounts-settings, .account-dialog-content) .account-table th:first-child, :is(.accounts-settings, .account-dialog-content) .account-table td:first-child { padding-left: 0; }
+:is(.accounts-settings, .account-dialog-content) .account-table th:last-child, :is(.accounts-settings, .account-dialog-content) .account-table td:last-child { padding-right: 0; }
+:is(.accounts-settings, .account-dialog-content) .account-table tbody tr:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+:is(.accounts-settings, .account-dialog-content) .account-cell { display: flex; align-items: center; gap: 11px; min-width: 0; max-width: 100%; padding: 0; text-align: left; }
+:is(.accounts-settings, .account-dialog-content) .account-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--muted); color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
+:is(.accounts-settings, .account-dialog-content) .account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; font-size: 12px; font-weight: 500; }
+:is(.accounts-settings, .account-dialog-content) .account-name-wrap { display: grid; min-width: 0; gap: 4px; }
+:is(.accounts-settings, .account-dialog-content) .account-self-label { font-size: 10px; color: var(--muted-foreground); font-weight: 400; margin-left: 5px; }
+:is(.accounts-settings, .account-dialog-content) .account-subline { font-size: 11px; color: var(--muted-foreground); line-height: 1.3; }
+:is(.accounts-settings, .account-dialog-content) .account-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+:is(.accounts-settings, .account-dialog-content) .account-status::before { content: ""; width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--account-positive); }
+:is(.accounts-settings, .account-dialog-content) .account-status.disabled { color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-status.disabled::before { background: var(--muted-foreground); opacity: .6; }
+:is(.accounts-settings, .account-dialog-content) .account-key-state { color: var(--muted-foreground); font-size: 12px; }
+:is(.accounts-settings, .account-dialog-content) .account-row-actions { text-align: right; }
+:is(.accounts-settings, .account-dialog-content) .account-row-actions .account-button-icon { margin-left: auto; }
+:is(.accounts-settings, .account-dialog-content) .account-table-audit th:first-child { width: 27%; }
+:is(.accounts-settings, .account-dialog-content) .account-table-audit td { height: 54px; font-size: 12px; }
+
+:is(.accounts-settings, .account-dialog-content) .account-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 16px; color: var(--muted-foreground); font-size: 11px; }
+:is(.accounts-settings, .account-dialog-content) .account-pagination-controls { display: flex; align-items: center; gap: 5px; }
+:is(.accounts-settings, .account-dialog-content) .account-pagination-controls .account-select-wrap { margin-right: 10px; }
+:is(.accounts-settings, .account-dialog-content) .account-pagination-controls select { font-size: 11px; min-height: 28px; padding-top: 3px; padding-bottom: 3px; }
+:is(.accounts-settings, .account-dialog-content) .account-page-number { min-width: 20px; text-align: center; color: var(--foreground); font-size: 12px; }
+
+:is(.accounts-settings, .account-dialog-content) .account-section { padding: 23px 0; border-top: 1px solid var(--border); }
+:is(.accounts-settings, .account-dialog-content) .account-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+:is(.accounts-settings, .account-dialog-content) .account-section-description { margin: 0 0 20px; font-size: 12px; color: var(--muted-foreground); line-height: 1.75; max-width: 62ch; }
+
+:is(.accounts-settings, .account-dialog-content) .account-field { display: grid; gap: 8px; margin-bottom: 18px; }
+:is(.accounts-settings, .account-dialog-content) .account-field > label { font-size: 12px; font-weight: 500; }
+:is(.accounts-settings, .account-dialog-content) .account-input { width: 100%; min-height: 36px; border: 1px solid var(--input); border-radius: 6px; background: var(--input-surface); color: var(--foreground); padding: 8px 10px; }
+:is(.accounts-settings, .account-dialog-content) .account-profile-name { max-width: 340px; }
+:is(.accounts-settings, .account-dialog-content) .account-hint { margin: 0; font-size: 11px; line-height: 1.7; color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-form-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 22px; }
+:is(.accounts-settings, .account-dialog-content) .account-save-row { justify-content: flex-start; }
+
+:is(.accounts-settings, .account-dialog-content) .account-detail-list { margin: 0; display: grid; gap: 0; }
+:is(.accounts-settings, .account-dialog-content) .account-detail-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); align-items: start; gap: 16px; padding: 10px 0; line-height: 1.7; }
+:is(.accounts-settings, .account-dialog-content) .account-detail-row dt { color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-detail-row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+:is(.accounts-settings, .account-dialog-content) .account-mono { font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Consolas, monospace; }
+:is(.accounts-settings, .account-dialog-content) .account-detail-row .account-mono { font-size: 11px; word-break: break-all; }
+:is(.accounts-settings, .account-dialog-content) .account-key-actions { display: flex; align-items: center; gap: 8px; margin-top: 15px; }
+:is(.accounts-settings, .account-dialog-content) .account-danger-action { color: var(--destructive); }
+
+:is(.accounts-settings, .account-dialog-content) .account-notice { padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--muted) 50%, transparent); line-height: 1.8; font-size: 12px; }
+:is(.accounts-settings, .account-dialog-content) .account-notice svg { width: 14px; height: 14px; vertical-align: -3px; margin-right: 5px; }
+:is(.accounts-settings, .account-dialog-content) .account-notice-warning { color: var(--destructive); background: color-mix(in srgb, var(--destructive) 4%, var(--background)); border-color: color-mix(in srgb, var(--destructive) 20%, var(--border)); }
+:is(.accounts-settings, .account-dialog-content) .account-notice-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; }
+:is(.accounts-settings, .account-dialog-content) .account-inline-error { margin: 12px 0 0; font-size: 12px; line-height: 1.8; color: var(--destructive); }
+:is(.accounts-settings, .account-dialog-content) .account-unknown-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+
+:is(.accounts-settings, .account-dialog-content) .account-metadata { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; color: var(--muted-foreground); font-size: 11px; }
+:is(.accounts-settings, .account-dialog-content) .account-metadata summary { cursor: pointer; min-height: 22px; line-height: 1.6; }
+:is(.accounts-settings, .account-dialog-content) .account-metadata .account-detail-list { margin-top: 6px; }
+
+:is(.accounts-settings, .account-dialog-content) .account-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; min-height: 240px; text-align: center; border-block: 1px solid var(--border); gap: 10px; padding: 32px 15px; }
+:is(.accounts-settings, .account-dialog-content) .account-empty > svg { width: 22px; height: 22px; color: var(--muted-foreground); margin-bottom: 5px; }
+:is(.accounts-settings, .account-dialog-content) .account-empty h3 { margin: 0; font-size: 13px; font-weight: 500; }
+:is(.accounts-settings, .account-dialog-content) .account-empty p { margin: 0; font-size: 12px; line-height: 1.8; color: var(--muted-foreground); max-width: 42ch; }
+:is(.accounts-settings, .account-dialog-content) .account-empty .account-unknown-actions, :is(.accounts-settings, .account-dialog-content) .account-empty button { margin-top: 7px; }
+:is(.accounts-settings, .account-dialog-content) .account-skeleton { display: inline-block; border-radius: 3px; background: var(--muted); height: 11px; width: 110px; }
+:is(.accounts-settings, .account-dialog-content) .account-skeleton.wide { width: 190px; }
+:is(.accounts-settings, .account-dialog-content) .account-skeleton-row { display: flex; gap: 34px; align-items: center; padding: 24px 0; border-bottom: 1px solid var(--border); }
+
+:is(.accounts-settings, .account-dialog-content) .account-blocked { max-width: 400px; margin: 15vh auto 0; display: grid; justify-items: start; gap: 15px; }
+:is(.accounts-settings, .account-dialog-content) .account-blocked > svg { width: 26px; height: 26px; color: var(--muted-foreground); }
+:is(.accounts-settings, .account-dialog-content) .account-blocked h2 { margin: 0; font-size: 18px; font-weight: 600; }
+:is(.accounts-settings, .account-dialog-content) .account-blocked p { margin: 0; font-size: 12px; line-height: 1.8; color: var(--muted-foreground); }
+
+.account-dialog-content { display: flex; flex-direction: column; width: min(440px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 40px); overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 12px; padding: 24px; gap: 0; text-align: left; font-size: 12px; }
+.account-dialog-content.account-dialog-wide { width: min(520px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
+.account-dialog-content .account-dialog-title { font-size: 16px; line-height: 1.5; font-weight: 600; letter-spacing: -.2px; padding-right: 24px; margin: 0; }
+.account-dialog-content .account-dialog-description { margin: 6px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.75; max-width: 65ch; overflow-wrap: anywhere; }
+.account-dialog-content .account-dialog-body { margin-top: 18px; min-width: 0; flex: 0 0 auto; }
+.account-dialog-content .account-dialog-title, .account-dialog-content .account-dialog-description { flex: 0 0 auto; }
+.account-dialog-content .account-workspace-permission > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.account-dialog-content .account-dialog-body:empty { display: none; }
+.account-dialog-content .account-field:last-child { margin-bottom: 0; }
+.account-dialog-content .account-dialog-body > .account-field + .account-field { margin-top: 0; }
+.account-dialog-content .account-dialog-footer { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 8px; margin: 20px 0 0; padding: 0; border: 0; background: transparent; flex: 0 0 auto; }
+.account-dialog-content .account-modal-divider { height: 1px; background: var(--border); margin: 16px 0; }
+.account-dialog-content .account-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.account-dialog-content .account-section-title h3 { margin: 0; font-size: 12px; font-weight: 600; }
+.account-dialog-content .account-section-title-gap { margin-top: 20px; }
+.account-dialog-content .account-workspace-permission { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 9px 0; line-height: 1.5; }
+.account-dialog-content .account-workspace-permission small { display: block; color: var(--muted-foreground); font-size: 10px; margin-top: 4px; }
+.account-dialog-content .account-workspace-permission .account-select-wrap select { font-size: 11px; }
+.account-dialog-content .account-muted { color: var(--muted-foreground); }
+.account-dialog-content .account-key-value { width: 100%; border: 1px solid var(--border); background: var(--input-surface); border-radius: 7px; padding: 12px 13px; margin: 0 0 12px; font: 11px/1.75 "Geist Mono Variable", ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--foreground); overflow-wrap: anywhere; user-select: all; }
+.account-dialog-content .account-confirm-target { display: flex; align-items: center; gap: 10px; padding: 0; margin-bottom: 0; min-width: 0; }
+.account-dialog-content .account-confirm-target strong { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.account-dialog-content .account-confirm-target > div { min-width: 0; }
+.account-dialog-content .account-confirm-target .account-avatar { display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; background: var(--muted); color: var(--muted-foreground); font-size: 12px; }
+.account-dialog-content .account-confirm-target .account-avatar { width: 26px; height: 26px; }
+.account-dialog-content .account-small-paragraph { margin: 0; font-size: 12px; line-height: 1.9; color: var(--muted-foreground); }
+
+:is(.accounts-settings, .account-dialog-content) .account-row-menu { gap: 2px; }
+:is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-item { display: flex; align-items: center; gap: 8px; min-height: 32px; width: 100%; padding: 6px 9px; border-radius: 6px; font-size: 12px; text-align: left; line-height: 1.5; }
+:is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-item svg { width: 15px; height: 15px; color: var(--muted-foreground); flex: none; }
+:is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-item:hover:not(:disabled) { background: var(--muted); }
+:is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-item.account-danger-item, :is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-item.account-danger-item svg { color: var(--destructive); }
+:is(.accounts-settings, .account-dialog-content) .account-row-menu .account-menu-separator { height: 1px; border: 0; background: var(--border); width: calc(100% - 4px); margin: 5px 2px; }
+
+.account-dialog-content .account-field .account-select-wrap { display: flex; justify-self: start; width: min(220px, 100%); min-width: 0; }
+.account-dialog-content .account-select-wrap select { width: 100%; min-width: 0; }
+.account-dialog-content .account-workspace-permission .account-select-wrap { flex: 0 0 auto; width: 112px; }
+.account-dialog-content .account-dialog-body > .account-field:nth-child(2) { margin-bottom: 0; }
+.account-dialog-content .account-metadata { margin-top: 16px; padding-top: 12px; }
+.account-dialog-content .account-metadata summary { display: list-item; min-height: 22px; margin: 0; padding: 0; font-size: 11px; line-height: 22px; }
+.account-dialog-content .account-key-actions { margin-top: 12px; flex-wrap: wrap; }
+.account-dialog-content .account-section-title h3 { font-size: 12px; }
+.account-dialog-content .account-dialog-body > .account-notice + .account-small-paragraph { margin-top: 12px; }
+.account-toast { position: fixed; z-index: 90; bottom: 24px; left: calc(50% + 80px); transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 32px); padding: 11px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); box-shadow: 0 5px 22px rgb(0 0 0 / 9%); font-size: 12px; line-height: 1.7; }
+.account-toast svg { width: 14px; height: 14px; color: var(--account-positive, #318052); }
+
+@media (max-width: 800px) {
+  :is(.accounts-settings, .account-dialog-content) .account-table .account-key-column { display: none; }
+  :is(.accounts-settings, .account-dialog-content) .account-heading { margin-bottom: 20px; }
+}
+@media (max-width: 700px) {
+  .accounts-settings { margin-top: 18px; }
+  :is(.accounts-settings, .account-dialog-content) .account-tabs { height: 40px; margin-bottom: 23px; gap: 24px; }
+  :is(.accounts-settings, .account-dialog-content) .account-tab { height: 40px; }
+  :is(.accounts-settings, .account-dialog-content) .account-heading { align-items: flex-start; gap: 10px; }
+  :is(.accounts-settings, .account-dialog-content) .account-heading p { font-size: 11px; max-width: 32ch; }
+  :is(.accounts-settings, .account-dialog-content) .account-search-filter { gap: 8px; }
+  :is(.accounts-settings, .account-dialog-content) .account-search { flex: 1; min-width: 0; width: auto; }
+  :is(.accounts-settings, .account-dialog-content) .account-table th, :is(.accounts-settings, .account-dialog-content) .account-table td { padding-inline: 6px; }
+  :is(.accounts-settings, .account-dialog-content) .account-table td { height: 62px; }
+  :is(.accounts-settings, .account-dialog-content) .account-table th:first-child { width: 58% !important; }
+  :is(.accounts-settings, .account-dialog-content) .account-table th.account-action-column { width: 38px !important; }
+  :is(.accounts-settings, .account-dialog-content) .account-table th.account-status-column { width: auto !important; }
+  :is(.accounts-settings, .account-dialog-content) .account-table .account-role-column { display: none; }
+  :is(.accounts-settings, .account-dialog-content) .account-pagination { font-size: 10px; gap: 8px; }
+  :is(.accounts-settings, .account-dialog-content) .account-pagination-controls { gap: 2px; }
+  :is(.accounts-settings, .account-dialog-content) .account-pagination-controls .account-select-wrap { display: none; }
+  :is(.accounts-settings, .account-dialog-content) .account-page-number { font-size: 11px; }
+  :is(.accounts-settings, .account-dialog-content) .account-section { padding-block: 20px; }
+  :is(.accounts-settings, .account-dialog-content) .account-detail-row { grid-template-columns: 90px minmax(0, 1fr); gap: 10px; }
+  .account-dialog-content { padding: 19px 20px 20px; }
+  .account-dialog-content .account-dialog-title { font-size: 15px; }
+  .account-dialog-content .account-dialog-description { margin-bottom: 0; }
+  .account-dialog-content .account-dialog-footer { flex-wrap: wrap; }
+  .account-toast { left: 50%; bottom: 18px; width: max-content; }
+  :is(.accounts-settings, .account-dialog-content) .account-table-audit td:nth-child(3), :is(.accounts-settings, .account-dialog-content) .account-table-audit th:nth-child(3) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .accounts-settings *, .account-dialog-content * { transition: none !important; animation: none !important; }
+}

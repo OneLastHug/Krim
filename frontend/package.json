@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc --noEmit && node scripts/build.mjs",
     "check": "tsc --noEmit",
-    "test:contracts": "node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/evaluation.test.ts && node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/agent-workspace.test.ts && node --experimental-strip-types contracts/session-presentation.test.ts",
+    "test:contracts": "node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/evaluation.test.ts && node --experimental-strip-types contracts/agent-core.test.ts && node --experimental-strip-types contracts/agent-workspace.test.ts && node --experimental-strip-types contracts/session-presentation.test.ts && node --experimental-strip-types contracts/accounts.test.ts",
     "test:e2e": "playwright test",
     "test:components": "vitest run --config vitest.config.ts",
     "dev:prototype": "vite --config vite.prototype.config.ts",

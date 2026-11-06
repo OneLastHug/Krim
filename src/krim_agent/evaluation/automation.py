@@ -36,8 +36,11 @@ from .repository import eval_schedule_windows, eval_schedules, meta, tasks
 class EvaluationAutomation:
     """Application持有的单Task服务；不会接管输入对象的关闭权。
 
-    `principals` 是宿主冻结的可信身份目录。它不是请求中的授权依据；请求主体
-    必须与目录中的 principal_id、generation 和 memberships 完全对应。
+    legacy模式下 `principals` 是宿主冻结的可信身份目录。它不是请求中的
+    授权依据；请求主体必须与目录中的 principal_id、generation 和
+    memberships 完全对应。托管身份模式下传入稳定 `identities` 服务引用，
+    actors目录在每次信任检查、调度派发与消费轮实时读取，永不冻结；
+    此时 `principals` 仅做类型校验，可为空。
     """
 
     def __init__(
@@ -47,33 +50,39 @@ class EvaluationAutomation:
         *,
         clock: Callable[[], float] = time.time,
         poll_interval: float = 1.0,
+        identities: object | None = None,
     ) -> None:
         if not callable(clock) or not 0 < poll_interval <= 60:
             raise ServiceError("invalid_input", 422)
+        managed = identities is not None and bool(getattr(identities, "managed", False))
         frozen = tuple(principals)
-        if not frozen or len(frozen) > 64 or any(
-            not isinstance(value, PrincipalContext) for value in frozen
+        if len(frozen) > 64 or any(not isinstance(value, PrincipalContext) for value in frozen) or (
+            not frozen and not managed
         ):
             raise ServiceError("invalid_input", 422)
         actors: dict[str, PrincipalContext] = {}
         scope_workspaces: dict[str, str] = {}
-        for actor in frozen:
-            if actor.principal_id in actors:
-                raise ServiceError("invalid_input", 422)
-            actors[actor.principal_id] = actor
-            for membership in actor.memberships:
-                scope = EvaluationProduct._scope(membership.workspace_id)
-                old = scope_workspaces.get(scope)
-                if old is not None and old != membership.workspace_id:
+        if not managed:
+            for actor in frozen:
+                if actor.principal_id in actors:
                     raise ServiceError("invalid_input", 422)
-                if old is None and len(scope_workspaces) >= 256:
-                    raise ServiceError("invalid_input", 422)
-                scope_workspaces[scope] = membership.workspace_id
+                actors[actor.principal_id] = actor
+                for membership in actor.memberships:
+                    scope = EvaluationProduct._scope(membership.workspace_id)
+                    old = scope_workspaces.get(scope)
+                    if old is not None and old != membership.workspace_id:
+                        raise ServiceError("invalid_input", 422)
+                    if old is None and len(scope_workspaces) >= 256:
+                        raise ServiceError("invalid_input", 422)
+                    scope_workspaces[scope] = membership.workspace_id
         self.product = product
         self.evaluation: EvalApplication = product.evaluation
         self.runs: RunService = product.runs
         self.sessions: SessionService = product.sessions
         self.store: SQLiteStore = product.sessions.store
+        self._managed = managed
+        # 稳定身份服务引用；运行期不得替换。
+        self._identities = identities
         self._actors = MappingProxyType(actors)
         self._scope_workspaces = MappingProxyType(scope_workspaces)
         self._clock_source = clock
@@ -92,6 +101,35 @@ class EvaluationAutomation:
         self._workspace_offset = 0
         self._schedule_offset = 0
         self._destination_id: str | None = None
+
+    def _directory(self) -> dict[str, PrincipalContext]:
+        """托管身份实时读取actors目录；legacy返回构造时冻结目录的副本。"""
+        if not self._managed:
+            return dict(self._actors)
+        actors: dict[str, PrincipalContext] = {}
+        for value in getattr(self._identities, "principals", ()):
+            # 目录异常条目保守跳过，不信任重复或非PrincipalContext值。
+            if not isinstance(value, PrincipalContext) or value.principal_id in actors:
+                continue
+            if len(actors) >= 64:
+                break
+            actors[value.principal_id] = value
+        return actors
+
+    def _scopes(self) -> dict[str, str]:
+        """当前目录可见的scope->workspace映射；有界且确定顺序。"""
+        result: dict[str, str] = {}
+        for actor in sorted(self._directory().values(), key=lambda value: value.principal_id):
+            for membership in actor.memberships:
+                scope = EvaluationProduct._scope(membership.workspace_id)
+                old = result.get(scope)
+                if old is not None and old != membership.workspace_id:
+                    continue
+                if old is None:
+                    if len(result) >= 256:
+                        continue
+                    result[scope] = membership.workspace_id
+        return result
 
     async def start(self) -> None:
         """读取真实Repository身份并启动唯一的后台轮询Task。"""
@@ -144,9 +182,16 @@ class EvaluationAutomation:
         write: bool = False,
     ) -> PrincipalContext:
         self._ensure_open()
-        trusted = self._actors.get(principal.principal_id)
-        if trusted is None or trusted != principal:
-            raise ServiceError("permission_denied", 403)
+        if self._managed:
+            # 每次可信主体检查实时核对状态与成员关系；拒绝旧generation快照。
+            try:
+                trusted = self._identities.validate(principal)
+            except ServiceError:
+                raise ServiceError("permission_denied", 403) from None
+        else:
+            trusted = self._actors.get(principal.principal_id)
+            if trusted is None or trusted != principal:
+                raise ServiceError("permission_denied", 403)
         trusted.member(workspace_id, write=write)
         return trusted
 
@@ -473,7 +518,7 @@ class EvaluationAutomation:
         schedules_total, schedules_enabled = await self._schedule_counts(workspace_id)
         observer_ready = False
         if policy is not None:
-            observer = self._actors.get(policy.observer)
+            observer = self._directory().get(policy.observer)
             if observer is not None and _observer_generation_salt(observer) == policy.salt_id:
                 try:
                     observer_ready = observer.member(workspace_id).role == "admin"
@@ -776,9 +821,18 @@ class EvaluationAutomation:
 
     def _schedule_actor(self, row: dict[str, Any], workspace_id: str) -> PrincipalContext:
         actor_id = row.get("actor")
-        actor = self._actors.get(actor_id) if isinstance(actor_id, str) else None
-        if actor is None:
-            raise ServiceError("permission_denied", 403)
+        if self._managed:
+            # 新调度派发前实时复核；停用/无凭据/成员移除的主体不再派发。
+            if not isinstance(actor_id, str):
+                raise ServiceError("permission_denied", 403)
+            try:
+                actor = self._identities.resolve(actor_id)
+            except ServiceError:
+                raise ServiceError("permission_denied", 403) from None
+        else:
+            actor = self._actors.get(actor_id) if isinstance(actor_id, str) else None
+            if actor is None:
+                raise ServiceError("permission_denied", 403)
         actor.member(workspace_id, write=True)
         return actor
 
@@ -805,6 +859,50 @@ class EvaluationAutomation:
             ).scalar_one()
         return int(total), int(enabled)
 
+    async def _task_actor(self, task_id: str) -> str | None:
+        """按调度行归属评测Task主体；无法归属的task返回None（不猜着取消）。"""
+        repository = self.evaluation.repository
+        try:
+            snapshot = await repository.snapshot(task_id)
+        except ServiceError:
+            return None
+        request = snapshot.get("request_json") if isinstance(snapshot, dict) else None
+        schedule = request.get("schedule") if isinstance(request, dict) else None
+        scope = request.get("scope") if isinstance(request, dict) else None
+        schedule_id = schedule.get("schedule_id") if isinstance(schedule, dict) else None
+        if not isinstance(scope, str) or not isinstance(schedule_id, str):
+            return None
+        try:
+            row = await repository.schedule(scope, schedule_id)
+        except ServiceError:
+            return None
+        actor = row.get("actor")
+        return actor if isinstance(actor, str) else None
+
+    async def cancel_principal(self, principal_id: str) -> dict[str, Any]:
+        """停用/吊销/重签发后取消该主体名下仍在执行的评测Task。
+
+        只取消能通过调度记录明确归属到该actor的活跃task；等待每个cancel
+        收束后才返回，不自动重放结果未知的评测。v1手工评测无主体归属，
+        不在此范围（继续受legacy主体门禁约束）。幂等；不影响其他主体。
+        """
+        kernel = self.evaluation.kernel
+        cancelled: list[str] = []
+        failures: list[ServiceError] = []
+        for task_id, task in list(kernel.tasks.items()):
+            if task.done():
+                continue
+            if await self._task_actor(task_id) != principal_id:
+                continue
+            try:
+                await kernel.cancel(task_id)
+                cancelled.append(task_id)
+            except ServiceError as error:
+                failures.append(error)
+        if failures:
+            raise failures[0]
+        return {"principal_id": principal_id, "cancelled": cancelled}
+
     async def _pending_policies(self, workspace_id: str) -> list[CapturePolicy]:
         _policy, rows = await self._workspace_facts(workspace_id)
         policies: dict[str, CapturePolicy] = {}
@@ -823,10 +921,11 @@ class EvaluationAutomation:
 
     async def _consume_workspace(self, workspace_id: str) -> None:
         policies = await self._pending_policies(workspace_id)
+        directory = self._directory()
         for policy in policies:
             if self._closing:
                 return
-            observer = self._actors.get(policy.observer)
+            observer = directory.get(policy.observer)
             if observer is None or _observer_generation_salt(observer) != policy.salt_id:
                 continue
             try:
@@ -836,7 +935,7 @@ class EvaluationAutomation:
                 continue
             port = KrimOutboxPort(self.store, self.sessions, observer, policy)
             actors: dict[str, PrincipalContext] = {}
-            for candidate in self._actors.values():
+            for candidate in directory.values():
                 try:
                     candidate.member(workspace_id)
                 except ServiceError:
@@ -863,7 +962,8 @@ class EvaluationAutomation:
             await flow.consume_once(limit=1)
 
     async def _tick_authorized_schedules(self) -> None:
-        scopes = tuple(sorted(self._scope_workspaces))
+        scope_map = self._scopes()
+        scopes = tuple(sorted(scope_map))
         if not scopes or self._closing:
             return
         repository = self.evaluation.repository
@@ -901,7 +1001,7 @@ class EvaluationAutomation:
         for row in rows:
             if self._closing:
                 return
-            workspace_id = self._scope_workspaces.get(row.scope)
+            workspace_id = scope_map.get(row.scope)
             if workspace_id is None:
                 continue
             body = row.body
@@ -926,7 +1026,7 @@ class EvaluationAutomation:
 
     async def _poll_round(self) -> None:
         self._last_error = None
-        workspaces = sorted(set(self._scope_workspaces.values()))
+        workspaces = sorted(set(self._scopes().values()))
         if workspaces:
             offset = self._workspace_offset % len(workspaces)
             rotated = workspaces[offset:] + workspaces[:offset]

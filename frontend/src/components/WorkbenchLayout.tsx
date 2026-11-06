@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Activity, ArrowUpRight, ChevronDown, Database, Eye, FlaskConical, Folder, MessageSquare, MoreVertical, PanelLeft, Play, RefreshCw, SquarePlus, Terminal } from "lucide-react";
+import type { AccountTab } from "./AccountSettings";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { workbenchTitles, type WorkbenchView } from "../lib/workbench-route";
@@ -40,8 +41,10 @@ const themes: { id: DisplayTheme; label: string }[] = [
 ];
 const readingSizes = [12, 14, 16] as const;
 
-export function WorkbenchLayout({ view, identity, identityLoading, identityError, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children }: {
+export function WorkbenchLayout({ view, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children }: {
   view: WorkbenchView; identity: Actor | null; identityLoading: boolean; identityError: string;
+  accountName?: string; gatewayName?: string; workspaceNames?: Record<string, string>; accountAdmin?: boolean;
+  onAccountTab?: (tab: AccountTab) => void; onLogout?: () => void;
   theme: DisplayTheme; onThemeSelect: (theme: DisplayTheme) => void;
   readingSize: ReadingSize; onReadingSizeSelect: (size: ReadingSize) => void;
   chatTitle: string; chat: SessionState | null;
@@ -58,9 +61,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   const moreRef = useRef<HTMLButtonElement>(null);
   const previousIdentity = useRef("");
   const currentTitle = view === "chat" ? chatTitle || workbenchTitles[view] : workbenchTitles[view];
-  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false) };
-  const candidateWorkspace = view === "chat" ? chat?.workspace : new URL(location.href).searchParams.get("workspace");
-  const workspace = identity?.workspaces.find(item => item.workspace_id === candidateWorkspace)?.workspace_id ?? identity?.workspaces[0]?.workspace_id;
+  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout };
   const chatSession = view === "chat" ? chat : null;
   const canCreate = !!chatSession?.ready && chatSession.canWrite;
   const workspaceConfigured = chat?.actor?.target_keys?.includes("target-workspace") === true;
@@ -103,7 +104,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
       <header className="chat-toolbar" aria-label="会话标题栏">
         <Button variant="ghost" className="icon-button" aria-label={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} title={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={mobile ? navOpen : !collapsed} onClick={() => mobile ? setNavOpen(true) : setCollapsed(value => !value)}><PanelLeft aria-hidden="true" /></Button>
         <span className="actions-divider" aria-hidden="true"></span>
-        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1>{workspace && <span className="brand-capability" title="当前工作区">{workspace}</span>}</div>
+        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1></div>
         <div className="toolbar-actions">
           {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => setCreateOpen(true)}><SquarePlus aria-hidden="true" /></Button>}
           <Button variant="ghost" className="icon-button" aria-label="终端（规划中）" title="终端（规划中）" disabled><Terminal aria-hidden="true" /></Button>
