@@ -359,7 +359,12 @@ class SessionService:
         if isinstance(request, WorkspaceTurnRequest):
             # 工作请求的嵌套expected必须在首await前脱离调用者；legacy顺序不变。
             request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
-        await self.get(principal, workspace, session_id, write=True)
+        accepted_session = await self.get(principal, workspace, session_id, write=True)
+        selected_binding = self.runs.bindings.get(accepted_session.target_key)
+        if (selected_binding is not None and selected_binding.loop.sandbox is not None
+                and accepted_session.owner_id != principal.principal_id):
+            # 普通会话只持有owner快照，不能将管理员提交误当owner授权。
+            raise ServiceError("permission_denied", 403)
         # 入队前实时复核：边界认证与本次写入之间被停用/降权的主体不再排队。
         principal = self._live_principal(principal)
         body = (

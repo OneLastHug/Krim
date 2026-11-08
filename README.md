@@ -51,6 +51,25 @@ python -m krim_agent account --help
 
 网页账号菜单可打开个人资料、管理员账号管理、切换账号和退出登录；设置中可查看管理记录。密钥轮换后先保存一次性明文再关闭对话框，当前页面随后使用新密钥。退出登录只清除当前页面认证，不吊销密钥；账号权限与密钥变更的服务端执行结果仍按实际记录呈现。
 
+## 沙箱管理后端（开发中）
+
+设置 `KRIM_AGENT_SANDBOX_CONFIG_FILE` 指向权限为 `0600` 的可信 JSON 文件可启用管理接口；未配置时保持旧行为，且需要已初始化的托管账号。配置结构为 `quotas.defaults`、`quotas.profiles`，管理员再通过 `PUT /v2/admin/accounts/{principal_id}/sandbox/quota` 设置 `profile_name` 和 `overrides`，依次覆盖全局默认与规格模板。未准备环境的写操作要求 `request_key` 和 `expected_revision`；首次配置版本为 0。已准备环境采用在线预览/确认流程，目标配置和实际限额分开。该 PUT 完整替换账号配额选择：省略或传 `profile_name: null` 使用全局默认，省略 `overrides` 清空账号覆盖；更新前先读取当前配置并明确提交需要保留的字段。
+
+额度可调整项目环境字节/inode、检查点容量/数量/期限及独立冻结预算；`frozen_bytes: null` 表示关闭冻结能力。`GET /v2/me/sandbox` 返回合并后的配置，`/v2/me/sandbox/projects` 提供账号私有项目管理。未接通 Broker 时，状态为 `unprovisioned`，用量未知，保存配额不表示硬限制已生效。
+
+配置 `broker_socket` 可连接独立的本机存储 Broker。控制面不持有 Docker socket；Broker 校验 Unix 对端 UID，管理 XFS 项目硬配额与内部 ID 对应的持久目录。通过 `POST /v2/me/sandbox/projects/{project_id}/provision`（携带 `request_key`）准备目录后，`/files` 提供有界分页列表，`/file?path=...` 提供分块读取，`/search?query=...` 提供有界文本搜索；用量与已应用限额从 Broker 查询。
+
+存储管理默认不开放命令。可信配置显式增加 `command_image`（已安装镜像的固定 `sha256` ID），并在 Broker 用 `--image` 指定同一镜像后，`target-http` 会切为 `sandbox/1` 命令工具集；旧会话绑定不会静默改写。该目标只能通过持久会话使用，模型调用 `sandbox_command_run` 必须先人工批准，再取得项目租约、捕获执行前检查点、验证实际 cgroup 后启动 runsc。当前命令只支持受限 Python，默认20秒、网络关闭，拒绝任意宿主路径或 Docker 参数。新版文件工具包括项目查询、列表、读取、搜索、写文件、建目录和删单文件；写操作同样需审批、租约和修改前检查点。
+
+失败和取消保留已经发生的文件修改，原操作只核实、不自动重跑；回执标记 `verification=not_evaluated`，退出0不是项目完成证明。检查点独立持有者引用、两阶段 GC、多文件恢复和在线调额现已接入后端；依赖安装、受控联网、个人 MCP 与独立冻结核验仍未完成。实际镜像匹配且 Broker 可用时才报告 `runtime_available=true`。
+
+
+`GET/PUT /v2/me/sandbox/sessions/{session_id}/project` 管理会话项目绑定，独立于旧会话响应。改绑需 `request_key`、绑定 `expected_revision`、`expected_session_revision`；仅允许所有者在会话空闲时选择同一工作区的自有项目。改绑更新会话版本，旧版本提交不能入队；停靠批准后再次核对绑定。绑定后文件/命令工具可省略 `project_id`，不能用显式参数越过绑定访问另一个项目。
+
+恢复先创建检查点恢复预览，再用计划摘要、项目 generation、明确选中的步骤及确认请求执行。后来新增文件默认保留；预览后变化则冲突，恢复中断保留逐文件进度并阻止新写者，允许核实、继续或放弃剩余步骤。运行和恢复引用分别保护，用户取消固定不会解除作业保护；GC报告逻辑删除和实际物理回收两种结果。
+
+管理员在线调额使用 `POST /v2/admin/accounts/{principal}/sandbox/quota-plans` 及对应确认接口，查询 `quota-operations/{operation}`。目标低于用量时显示 `pending_reclaim`，不删文件；等待任务收束和部分应用状态都可查询。字节和 inode 的区域重分配先缩后扩，未核实释放的额度不提前分配给别人。已有检查点区设置为0不会隐式销毁历史或变成无限额度，旧实际限额保留并等待明确清理。
+
 ## 开发与验证
 
 普通回归入口会保存命令输出和 JUnit（测试结果交换格式）：

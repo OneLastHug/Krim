@@ -117,6 +117,18 @@ class RunBinding:
                 for token in (id(method), id(getattr(method, "__code__", None)))
             )
             result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        if loop.sandbox is not None:
+            result += (id(loop.sandbox), id(loop.sandbox.service),
+                       id(loop.sandbox.service.broker), id(loop.sandbox.service.identities),
+                       hash(loop.sandbox.service.configuration.model_dump_json(exclude_unset=True)),
+                       id(function(loop.sandbox.scope)), id(function(loop.sandbox.execute)))
+            from krim_agent.sandbox import command as sandbox_command
+            from krim_agent.sandbox import execution as sandbox_execution
+            from krim_agent.sandbox import operations as sandbox_operations
+            from krim_agent.sandbox import bindings as sandbox_bindings
+            from krim_agent.sandbox import file_models as sandbox_file_models
+            result += tuple(source_digest(module.__file__) for module in (
+                sandbox_command, sandbox_execution, sandbox_operations, sandbox_bindings, sandbox_file_models))
         from krim_agent import config as config_module
         from krim_agent.tools import executor as executor_module
         from krim_agent.tools import pipeline as pipeline_module
@@ -194,9 +206,10 @@ class RunBinding:
         )
         if isinstance(loop.provider, OpenAICompatibleProvider):
             provider.update(behavior_version="http-sse/1", config=loop.provider.identity())
-        policy = implementation(getattr(loop.executor.policy, "__func__",
-            loop.executor.policy)) if loop.work is not None else implementation(
-            loop.executor.policy)
+        policy_callable = (getattr(loop.executor.policy, "__func__", loop.executor.policy)
+                           if loop.work is not None or loop.sandbox is not None
+                           else loop.executor.policy)
+        policy = implementation(policy_callable)
         policy["allowed_names"] = (
             ["add", "echo"]
             if policy["id"]
@@ -242,6 +255,11 @@ class RunBinding:
             }
             assert loop._verifier is not None
             descriptor["workspace_verification"] = loop._verifier.descriptor()
+        if loop.sandbox is not None:
+            descriptor["sandbox"] = {"version": "sandbox/1",
+                "image": loop.sandbox.service.configuration.command_image,
+                "completion": "command_receipt_not_project_verification",
+                "implementation": implementation(loop.sandbox)}
         return descriptor
 
     @classmethod
@@ -399,6 +417,8 @@ class RunService:
         if binding is None:
             raise ServiceError("invalid_input", 422)
         binding.assert_current()
+        if binding.loop.sandbox is not None and turn_id is None:
+            raise ServiceError("workspace_contract_required")
         if expected is not None and fingerprint(parse_json(binding.descriptor_json)) != expected:
             raise ServiceError("target_binding_changed")
         if len(request.text.encode()) > binding.settings.max_input_bytes:

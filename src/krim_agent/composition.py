@@ -29,6 +29,9 @@ from krim_agent.providers.types import ModelProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
 from krim_agent.runtime.service import RunBinding, RunService
+from krim_agent.sandbox.configuration import SandboxConfiguration
+from krim_agent.sandbox.operations import SandboxOperations
+from krim_agent.sandbox.service import SandboxService
 from krim_agent.security import LOCAL, AccessPolicy, PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.source_fingerprints import reset_source_fingerprints
@@ -65,6 +68,7 @@ class Application:
     evaluation_automation: EvaluationAutomation | None = None
     tool_runtime: ToolRuntime | None = None
     identities: IdentityService | None = field(default=None, repr=False)
+    sandbox: SandboxService | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -137,8 +141,12 @@ class Application:
                                 raise outcome
                 finally:
                     try:
-                        if self.identities is not None:
-                            await self.identities.close()
+                        try:
+                            if self.sandbox is not None:
+                                await self.sandbox.close()
+                        finally:
+                            if self.identities is not None:
+                                await self.identities.close()
                     finally:
                         await self.store.close()
 
@@ -184,6 +192,8 @@ async def open_application(
     agent_http = live and config.http_mode == "agent"
     if config.evaluation_automation_enabled and not config.product_eval_enabled:
         raise ServiceError("invalid_input", 422)
+    sandbox_configuration = (SandboxConfiguration.load(config.sandbox_config_file)
+                             if config.sandbox_config_file is not None else None)
     reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
@@ -337,6 +347,8 @@ async def open_application(
             raise ServiceError("identity_mode_conflict", 422)
         if config.identity_mode == "managed" and not identities.managed:
             raise ServiceError("accounts_not_initialized", 422)
+        if sandbox_configuration is not None and not identities.managed:
+            raise ServiceError("accounts_not_initialized", 422)
         if external_config is not None:
             tool_runtime = await ToolRuntime.open(tools, external_config, policy)
             tools, policy = tool_runtime.registry, tool_runtime.policy
@@ -350,7 +362,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7}:
+                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10}:
                     queued = await conn.scalar(
                         select(turns.c.id).join(sessions, turns.c.session_id == sessions.c.id)
                         .where(sessions.c.target_key == "target-workspace",
@@ -363,7 +375,7 @@ async def open_application(
                                session_controls.c.status == "pending").limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"])).limit(1)
@@ -439,6 +451,20 @@ async def open_application(
                 work_settings, work=operations)
             bindings["target-workspace"] = RunBinding.freeze("target-workspace", work_loop,
                 work_settings)
+        sandbox_service = (SandboxService(store, identities, sandbox_configuration)
+                           if sandbox_configuration is not None else None)
+        if sandbox_service is not None and sandbox_service.configuration.command_image is not None:
+            base_binding = bindings.get("target-http")
+            if base_binding is None:
+                raise ServiceError("sandbox_config_invalid", 422)
+            sandbox_operations = SandboxOperations(sandbox_service)
+            sandbox_settings = base_binding.settings.model_copy(update={
+                "target_version": "sandbox/1", "run_timeout": 180.0, "tool_timeout": 30.0})
+            sandbox_loop = AgentLoop(store, base_binding.loop.provider,
+                ToolExecutor(sandbox_operations.registry(), sandbox_operations.policy, pre, post),
+                sandbox_settings, sandbox=sandbox_operations)
+            bindings["target-http"] = RunBinding.freeze(
+                "target-http", sandbox_loop, sandbox_settings)
         service = RunService(store, loop, config, target, bindings)
         application = Application(
             store,
@@ -456,6 +482,7 @@ async def open_application(
             runner=runner,
             tool_runtime=tool_runtime,
             identities=identities,
+            sandbox=sandbox_service,
         )
         if evaluation_path is not None:
             adapters = {

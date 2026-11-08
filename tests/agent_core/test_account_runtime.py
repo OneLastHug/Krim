@@ -477,6 +477,7 @@ def binding_loop(operations: WorkspaceOperations, settings: Settings) -> SimpleN
         executor=executor,
         settings=settings,
         work=operations,
+        sandbox=None,
         _verifier=verifier,
     )
 

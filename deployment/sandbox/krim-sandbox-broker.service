@@ -1,0 +1,32 @@
+[Unit]
+Description=Krim sandbox storage broker (root, XFS quota enforcement)
+Documentation=file:@KRIM_INSTALL_ROOT@/share/krim/deployment/sandbox/README.md
+Requires=krim-sandbox-data.mount
+After=krim-sandbox-data.mount
+
+[Service]
+Type=simple
+# ExecStart指向admin自有安装前缀内的模块，不是业务可写的工作树；
+# 路径含空格时按systemd规则加引号。镜像必须为固定digest或本地image ID。
+ExecStart=@KRIM_INSTALL_ROOT@/bin/python -m krim_agent.sandbox.broker --socket @KRIM_BROKER_SOCKET@ --storage @KRIM_STORAGE_ROOT@ --state @KRIM_STATE_ROOT@ --allow-uid @KRIM_CONTROL_UID@ --socket-gid @KRIM_SOCKET_GID@ --image @KRIM_COMMAND_IMAGE@
+User=root
+Group=root
+UMask=0077
+# Broker自建并校验socket（拒绝已存在路径、O_NOFOLLOW），故不用systemd .socket单元预创建。
+# 最小能力集：XFS project配额需要CAP_SYS_ADMIN；建号/限额/属主调整需要CHOWN/FOWNER/DAC_OVERRIDE。
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# ProtectSystem=strict使XFS配额ioctl仅在被明确授权的路径内可用：
+# ReadWritePaths必须覆盖数据根、state与socket父目录，否则xfs_quota完全失效。
+# 生效性用README中预检清单第3项在启用前实际演练，不能只看单元文件。
+ProtectSystem=strict
+ReadWritePaths=@KRIM_STORAGE_ROOT@ @KRIM_STATE_ROOT@ @KRIM_SOCKET_DIR@
+RestrictAddressFamilies=AF_UNIX
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
