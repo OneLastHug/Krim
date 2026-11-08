@@ -1,0 +1,25 @@
+[Unit]
+Description=Krim control-plane API (non-root sandbox control user)
+Documentation=file:@KRIM_INSTALL_ROOT@/share/krim/deployment/sandbox/README.md
+After=network.target krim-sandbox-broker.service
+Wants=krim-sandbox-broker.service
+
+[Service]
+Type=simple
+# 控制面以非root业务用户运行，经Broker socket的SO_PEERCRED uid校验接入；
+# 不持有Docker socket、root或任何capability，与root Broker严格分离。
+User=@KRIM_CONTROL_USER@
+Group=@KRIM_CONTROL_GROUP@
+UMask=0077
+ExecStart=@KRIM_INSTALL_ROOT@/bin/krim serve --database @KRIM_DB_PATH@ --port @KRIM_API_PORT@
+NoNewPrivileges=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=@KRIM_DB_DIR@ @KRIM_WORKSPACE_ROOT@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -317,6 +317,10 @@ def create_app(
 
     mount_accounts(app)
 
+    from .sandbox import mount_sandbox
+
+    mount_sandbox(app)
+
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:
         return evaluation(request).targets()

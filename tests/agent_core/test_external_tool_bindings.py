@@ -105,15 +105,18 @@ async def execute(registry, arguments, policy, pre=None, post=None, allow=True):
     return result, events, approvals
 
 
-def test_legacy_descriptor_and_legacy_write_guard_stay_unchanged():
+def test_legacy_descriptor_metadata_and_legacy_write_guard():
     for spec, _ in builtin_registry()._frozen:
-        assert set(spec.descriptor()) == {
-            "name",
-            "version",
-            "implementation_digest",
-            "input_schema",
-            "output_schema",
+        expected = {
+            "name", "version", "implementation_digest", "input_schema", "output_schema",
         }
+        if spec.description:
+            expected.add("description")
+        descriptor = spec.descriptor()
+        assert set(descriptor) == expected
+        if spec.description:
+            assert descriptor["description"] == spec.description
+        assert not {"risk", "capability", "source", "policy_version"} & set(descriptor)
         with pytest.raises(ValueError):
             replace(spec, risk="write")
 

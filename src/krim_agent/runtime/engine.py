@@ -26,6 +26,7 @@ from krim_agent.contracts import (
     parse_json,
 )
 from krim_agent.providers.types import ModelProvider, ModelToolCall
+from krim_agent.sandbox.operations import SandboxOperations
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Admission, Approve, ToolContext, ToolExecutor
@@ -53,7 +54,7 @@ class Parked(Exception):
 class AgentLoop:
     def __init__(
         self, store: RunStore, provider: ModelProvider, executor: ToolExecutor, settings: Settings,
-        *, work: WorkRuntime | None = None,
+        *, work: WorkRuntime | None = None, sandbox: SandboxOperations | None = None,
     ) -> None:
         self.store, self.provider, self.executor, self.settings = (
             store,
@@ -61,6 +62,9 @@ class AgentLoop:
             executor,
             settings,
         )
+        if work is not None and sandbox is not None:
+            raise ServiceError("sandbox_config_invalid", 422)
+        self.sandbox = sandbox
         self.work = cast(WorkspaceOperations | None, work)
         self._verifier = Verifier(self.store, self.work.artifacts) if self.work else None
         self._d4_seal = self._verifier.assert_current if self._verifier else None
@@ -111,6 +115,8 @@ class AgentLoop:
             execution_budget = ExecutionBudget(deadline)
         if frame is not None and operations is not None:
             scope = operations.scope(frame, check, execution_budget.deadline, execution_budget)
+        if self.sandbox is not None:
+            scope = await self.sandbox.scope(run_id, check, execution_budget)
         max_steps = cast(int, runtime["model_steps"]) if frame else self.settings.max_steps
         max_group = cast(int,
             runtime["max_tools_per_step"]) if frame else self.settings.max_tools_per_step

@@ -562,7 +562,7 @@ def private_handoff_for_same_owner_and_run(run_id: str) -> _Handoff | None:
 async def terminal_attempt_same_conn(
     conn: AsyncConnection, store: object, run_id: str, handoff: _Handoff | None
 ) -> _TerminalAttempt | None:
-    if getattr(store, "schema_version", None) not in {4, 5, 6, 7}:
+    if getattr(store, "schema_version", None) not in {4, 5, 6, 7, 8, 9, 10}:
         return None
     row = (
         await conn.execute(select(work_turns.c.conditions).where(work_turns.c.run_id == run_id))

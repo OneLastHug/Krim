@@ -34,6 +34,7 @@ class Settings(BaseModel):
     access_policy_file: Path | None = None
     identity_mode: Literal["auto", "managed", "legacy"] = "auto"
     gateway_display_name: str | None = Field(default=None, min_length=1, max_length=64)
+    sandbox_config_file: Path | None = None
     workspace_profile_file: Path | None = None
     tool_config_file: Path | None = None
     product_eval_enabled: bool = False
@@ -84,6 +85,7 @@ SESSION_FIELDS = frozenset(
         "identity_mode",
         "gateway_display_name",
         "workspace_profile_file",
+        "sandbox_config_file",
         "tool_config_file",
         "product_eval_enabled",
         "product_eval_database",

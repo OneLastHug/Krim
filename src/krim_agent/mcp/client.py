@@ -7,7 +7,10 @@ import os
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Any, TextIO, cast
+from typing import TYPE_CHECKING, Any, TextIO, cast
+
+if TYPE_CHECKING:
+    from krim_agent.network.egress_policy import EgressPolicy
 
 from pydantic import JsonValue
 
@@ -110,7 +113,12 @@ class _CallRequest:
 class MCPConnection:
     """Own one MCP SDK connection, its fixed tool set, and its shutdown task."""
 
-    def __init__(self, config: MCPServerConfig) -> None:
+    def __init__(
+        self, config: MCPServerConfig, *, egress_policy: EgressPolicy | None = None
+    ) -> None:
+        if egress_policy is not None and config.transport != "streamable_http":
+            raise ValueError("HTTP出站策略不能约束stdio子进程")
+        self._egress_policy = egress_policy
         self._config = config.model_copy(deep=True)
         self._ready = asyncio.Event()
         self._shutdown = asyncio.Event()
@@ -260,14 +268,24 @@ class MCPConnection:
 
                     import httpx
 
-                    client = await stack.enter_async_context(
-                        httpx.AsyncClient(
+                    if self._egress_policy is not None:
+                        from krim_agent.network.http_transport import make_http_client
+
+                        self._egress_policy.validate_target(self._config.url or "")
+                        http_client = make_http_client(
+                            self._egress_policy,
+                            headers=secret_headers,
+                            timeout=self._config.timeout_seconds,
+                        )
+                    else:
+                        # 已有宿主MCP配置保持原行为；个人连接必须由可信装配注入策略。
+                        http_client = httpx.AsyncClient(
                             headers=secret_headers,
                             timeout=self._config.timeout_seconds,
                             trust_env=False,
                             follow_redirects=False,
                         )
-                    )
+                    client = await stack.enter_async_context(http_client)
                     streams = await stack.enter_async_context(
                         streamablehttp_client(
                             self._config.url,

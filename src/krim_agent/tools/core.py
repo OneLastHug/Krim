@@ -87,6 +87,16 @@ class ToolSpec:
         external = self.external_executor is not None
         if external:
             if self.name in {
+                "sandbox_project",
+                "sandbox_read",
+                "sandbox_list",
+                "sandbox_search",
+                "sandbox_write",
+                "sandbox_mkdir",
+                "sandbox_remove",
+                "sandbox_patch",
+                "sandbox_rename",
+                "sandbox_command_run",
                 "workspace_read",
                 "workspace_search",
                 "workspace_write",
@@ -113,6 +123,16 @@ class ToolSpec:
             or self.capability is None
             or self.capability
             != {
+                "sandbox_project": "read",
+                "sandbox_read": "read",
+                "sandbox_list": "read",
+                "sandbox_search": "read",
+                "sandbox_write": "write",
+                "sandbox_mkdir": "write",
+                "sandbox_remove": "write",
+                "sandbox_patch": "write",
+                "sandbox_rename": "write",
+                "sandbox_command_run": "command",
                 "workspace_read": "read",
                 "workspace_search": "search",
                 "workspace_write": "write",
@@ -163,7 +183,8 @@ class ToolSpec:
             "output_schema": OutputContract(self.output_schema).schema(),
         }
         if self.scoped_executor is not None:
-            value.update(risk=self.risk, capability=self.capability, policy_version="workspace/1")
+            value.update(risk=self.risk, capability=self.capability, policy_version=(
+                "sandbox/1" if self.name.startswith("sandbox_") else "workspace/1"))
         if self.source is not None:
             if type(self.source) is not ToolSource or self.external_executor is None:
                 raise ValueError("外部来源绑定已变化")
