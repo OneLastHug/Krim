@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -301,6 +301,19 @@ def _usage(value: Any) -> TokenUsage | None:
         ]
         if value.get(source) is not None
     }
+    # 只保留协议中明确报告的子计数；不保存opaque usage/cost原文。
+    for source, targets in (
+        ("prompt_tokens_details", (("cached_tokens", "cached_input_tokens"),)),
+        ("completion_tokens_details", (("reasoning_tokens", "reasoning_output_tokens"),)),
+    ):
+        details = value.get(source)
+        if details is None:
+            continue
+        if not isinstance(details, dict):
+            raise ProviderError("provider_usage_conflict")
+        for field, target in targets:
+            if details.get(field) is not None:
+                fields[target] = details[field]
     if not fields:
         return None
     try:
@@ -426,7 +439,7 @@ class OpenAICompatibleProvider:
         messages: Sequence[Message],
         tools: list[dict[str, JsonValue]],
         budget: ModelRequestBudget | None,
-    ) -> AsyncIterator[ModelEvent]:
+    ) -> AsyncGenerator[ModelEvent, None]:
         if self.closed:
             raise ProviderError("closed", 503)
         if self.binding_token() != self._sealed:

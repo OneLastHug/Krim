@@ -290,6 +290,9 @@ def create_app(
     mount_sessions(app)
     mount_traces(app)
     mount_workspace(app)
+    from .observations import mount_observations
+
+    mount_observations(app)
     from krim_agent.evaluation.product import EvaluationProduct
 
     from .evaluations import mount_evaluations

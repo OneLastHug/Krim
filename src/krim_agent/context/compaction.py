@@ -14,6 +14,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.context import builder
+from krim_agent.context.manifest import ItemMetadata
 from krim_agent.context.types import CompactionPolicy, ContextPolicy, HistorySource, PreparedContext
 from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
 from krim_agent.runtime.contracts import settled
@@ -46,6 +47,7 @@ class Compactor:
         self.provider_identity = cast(dict[str, JsonValue], json.loads(encoded(provider_identity)))
         self.history: list[dict[str, Any]] | None = None
         self.covered, self.passes, self.summary = 0, 0, ""
+        self.compaction_changes: list[dict[str, JsonValue]] = []
         self.producer = asyncio.current_task()
         self.record_policy = {"context": self.policy.model_dump(mode="json"),
             "compaction": self.compaction.model_dump(mode="json"),
@@ -231,6 +233,19 @@ class Compactor:
                     self.max_group, self.remaining_tools, purpose="summary"
                 ),
                 request_prepared=True,
+                request_metadata=(
+                    None,
+                    ItemMetadata(
+                        category="history",
+                        label="Compaction source history",
+                        source_refs=tuple(refs),
+                    ),
+                ),
+                reserved_output_tokens=self.policy.reserved_output_tokens,
+                input_budget_bytes=max(0, min(
+                    self.request_limit - 1024,
+                    self.policy.max_bytes - 1024 - self.policy.reserved_output_tokens * 4,
+                )),
             )
             self.guard()
             completed = await self.complete(index, result.text)
@@ -259,6 +274,7 @@ class Compactor:
         remaining_tools: int,
     ) -> list[Message]:
         self.run_id = run_id
+        self.compaction_changes = []
         self.conversation = [Message.model_validate_json(m.model_dump_json()) for m in conversation]
         self.tools = tools
         self.max_group, self.remaining_tools = max_group, remaining_tools
@@ -362,9 +378,17 @@ class Compactor:
             # 原始连续Turn前缀，不用摘要ID代替来源；最多2次仍由summarize拒绝。
             refs = [dict(ref) for ref in self.anchor_refs[:end]]
             self.candidate_end = end
+            pass_index, summary_step = self.passes, self.step.index
             output = await self.summarize(refs, summary_request(selected))
             self.guard()
             self.summary, self.covered = output, end
+            after_size, _ = self.measure(compose(), tools, self.max_group, self.remaining_tools)
+            self.compaction_changes.append({
+                "pass_index": pass_index, "summary_step_index": summary_step,
+                "before_input_bytes": size, "after_input_bytes": after_size,
+                "counter_version": "approx-utf8/1", "source_hash": fingerprint(refs),
+                "output_hash": hashlib.sha256(output.encode()).hexdigest(),
+            })
         if size > cap or len(messages) > self.policy.max_messages:
             raise ServiceError("context_budget", 422)
         try:
@@ -394,10 +418,38 @@ class Compactor:
         self.guard()
         return messages
 
+    def manifest_metadata(self, messages: list[Message]) -> list[ItemMetadata | None]:
+        """Attach frozen source and summary facts without inspecting message bodies."""
+        result: list[ItemMetadata | None] = [None] * len(messages)
+        cursor = 1  # compose() always starts with the top-level system message
+        if self.summary and self.covered and cursor < len(messages):
+            refs = tuple(
+                cast(dict[str, JsonValue], ref) for ref in self.anchor_refs[:self.covered]
+            )
+            result[cursor] = ItemMetadata(
+                category="summary",
+                label="Compacted history summary",
+                source_refs=refs,
+            )
+            cursor += 1
+        if self.history is not None:
+            for turn in self.history[self.covered:]:
+                refs = (cast(dict[str, JsonValue], turn["ref"]),)
+                for _message in turn["messages"]:
+                    if cursor >= len(messages):
+                        return result
+                    result[cursor] = ItemMetadata(
+                        category="tool_result" if _message.role == "tool" else "history",
+                        label=None if _message.role == "tool" else "Historical turn message",
+                        source_refs=refs,
+                    )
+                    cursor += 1
+        return result
+
 
 def binding_token() -> tuple[object, ...]:
     return (id(Compactor), id(Compactor.__init__), id(Compactor.prepare),
             id(Compactor.summarize), id(Compactor.complete), id(Compactor.guard),
             id(Compactor.measure), id(Compactor.row), id(Compactor.verify), id(Compactor.snapshot),
-            id(workspace_history),
+            id(Compactor.manifest_metadata), id(workspace_history),
             fingerprint(PROMPT), source_digest(__file__))

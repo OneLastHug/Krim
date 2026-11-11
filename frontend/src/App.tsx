@@ -1,5 +1,5 @@
 import "./styles/account-identity.css";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, lazy, Suspense } from "react";
 import { object, request } from "./api";
 import { AccountSettings, type AccountTab } from "./components/AccountSettings";
 import { useAccountIdentity } from "./hooks/use-account-identity";
@@ -21,6 +21,10 @@ import { useDisplayTheme } from "./lib/use-display-theme";
 import { useReadingSize, type ReadingSize } from "./hooks/use-reading-size";
 import { chatReason } from "./lib/copy";
 import type { SessionState } from "./hooks/use-session";
+import type { ObsPage } from "./observability/obs-route";
+import { readObsState, writeObsState } from "./observability/obs-route";
+
+const ObservabilityModule = lazy(() => import("./observability").then(module => ({ default: module.ObservabilityModule })));
 
 function UnavailablePage({ title, children }: { title: string; children: ReactNode }) {
   return <section className="capability-page" aria-labelledby="capability-heading">
@@ -38,6 +42,7 @@ export function App() {
   const [keyPrepared, setKeyPrepared] = useState(false);
   const chatFence = useRef(0);
   const [mode, setMode] = useState<WorkbenchView>(() => readWorkbenchView(new URL(location.href)));
+  const [obsPage, setObsPage] = useState<ObsPage>(() => readObsState(new URL(location.href)).page);
   const [sourceRun, setSourceRun] = useState(() => new URL(location.href).searchParams.get("source_run") ?? "");
   const [selectedChatId, setSelectedChatId] = useState("");
   const [selectedTraceRunId, setSelectedTraceRunId] = useState("");
@@ -123,8 +128,9 @@ export function App() {
     setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
     const url = new URL(location.href);
     url.searchParams.delete("source_run"); url.searchParams.delete("product_candidate_id");
+    for (const field of ["obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
     if (!preserveAccount) {
-      for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id"]) url.searchParams.delete(field);
+      for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
       url.hash = "";
       setAccountTab("profile");
     }
@@ -145,7 +151,7 @@ export function App() {
     setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
     setAccountTab("profile"); setChatMount(revision => revision + 1);
     const url = new URL(location.href);
-    for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run"]) url.searchParams.delete(field);
+    for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run", "obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
     url.hash = ""; window.history.replaceState(null, "", url);
   }
 
@@ -155,6 +161,7 @@ export function App() {
       chatFence.current++;
       const next = readWorkbenchView(new URL(location.href));
       setMode(next);
+      setObsPage(readObsState(new URL(location.href)).page);
       setSelectedTraceRunId("");
       if (next !== "chat") setIdentityLoading(true);
       setChatMount(value => value + 1);
@@ -179,13 +186,24 @@ export function App() {
     }
   }
 
+  function chooseObservabilityPage(page: ObsPage) {
+    if (!identity?.workspaces.some(value => value.workspace_id === productWorkspace)) return;
+    const next = { ...readObsState(new URL(location.href)), page };
+    const url = writeObsState(new URL(location.href), next);
+    url.searchParams.set("view", "observe");
+    url.searchParams.set("workspace", productWorkspace);
+    window.history.pushState(null, "", url);
+    setObsPage(page);
+    if (mode !== "observe") setMode("observe");
+  }
+
   function chooseWorkspace(workspace: string) {
     if (!identity?.workspaces.some(value => value.workspace_id === workspace)) return;
     chatFence.current++;
     chatNavigation.current = null;
     const url = new URL(location.href);
     url.searchParams.set("workspace", workspace);
-    for (const field of ["session", "turn", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run"]) url.searchParams.delete(field);
+    for (const field of ["session", "turn", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item"]) url.searchParams.delete(field);
     window.history.pushState(null, "", url);
     setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
     setChatMount(value => value + 1);
@@ -335,6 +353,8 @@ export function App() {
       httpEnabled={httpEnabled === true}
       beforeSessionSelect={recordChatSelection}
       onNavigate={choose}
+      onObservabilityPage={chooseObservabilityPage}
+      observabilityPage={obsPage}
       onConnect={() => setKeyOpen(true)}
       onOpenTask={() => setTaskOpen(true)}
       canOpenTask={isLegacyRouteAvailable}
@@ -357,6 +377,11 @@ export function App() {
       </section>
       <section className="page-view" hidden={mode !== "trace"} aria-label="Trace 页面">
         <TraceWorkbench apiKey={key} workspace={currentUrl.searchParams.get("workspace") ?? productWorkspace} identity={identity} active={mode === "trace" && !identityLoading} sessionId={currentUrl.searchParams.get("session") ?? undefined} turnId={currentUrl.searchParams.get("turn") ?? undefined} onSelection={setSelectedTraceRunId} onSession={returnToTraceSession} onEvaluate={productEnabled ? (workspace, runId) => evaluateRun(workspace, runId) : undefined}/>
+      </section>
+      <section className="page-view" hidden={mode !== "observe"} aria-label="观测页面">
+        {mode === "observe" && <Suspense fallback={<UnavailablePage title="正在加载观测">正在载入观测模块。</UnavailablePage>}>
+          <ObservabilityModule key={`observability-${chatMount}`} apiKey={key} workspace={productWorkspace} identity={identity} identityLoading={identityLoading} theme={theme} page={obsPage} onPageChange={setObsPage} onNavigate={choose}/>
+        </Suspense>}
       </section>
       {productEnabled && (mode === "datasets" || mode === "eval" && !legacyEvaluation) && (identityLoading || !identity) && <UnavailablePage title={identityLoading ? "正在读取工作区" : "请连接工作区"}>{identityError || "正在确认当前身份与工作区能力。"}</UnavailablePage>}
       {productEnabled && automationEnabled && mode === "eval" && !legacyEvaluation && <nav className="product-eval-actions" aria-label="评测功能"><Button variant={automationOpen ? "ghost" : "secondary"} aria-pressed={!automationOpen} onClick={() => setAutomationOpen(false)}>评测任务</Button><Button variant={automationOpen ? "secondary" : "ghost"} aria-pressed={automationOpen} onClick={() => setAutomationOpen(true)}>持续回归</Button></nav>}

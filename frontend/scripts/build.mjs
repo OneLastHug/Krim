@@ -19,11 +19,15 @@ const webRoot = resolve(root, "../src/krim_agent/web");
 const fontDirectory = "assets/fonts";
 const generatedFontManifest = ".vite/font-assets.json";
 const packagedFontManifest = "font-manifest.json";
+const generatedScriptManifest = "script-manifest.json";
+const packagedScriptManifest = "script-manifest.json";
+const scriptPathPattern = /^assets\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.js$/;
 const fontPathPattern = /^assets\/fonts\/[A-Za-z0-9][A-Za-z0-9._-]*-[A-Za-z0-9_-]{6,64}\.woff2$/;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 await mkdir(cache, { recursive: true });
 const out = await mkdtemp(resolve(cache, "build-"));
 let modules = [];
+let bundleScriptNames = [];
 
 async function files(path, prefix = "") {
   const found = [];
@@ -142,6 +146,63 @@ async function existingFontManifestNames() {
   return old.fonts.map(item => item.path);
 }
 
+async function existingScriptManifestNames() {
+  const manifestPath = resolve(webRoot, packagedScriptManifest);
+  let text;
+  try {
+    const info = await lstat(manifestPath);
+    if (info.isSymbolicLink() || !info.isFile() || info.size > 1_048_576) {
+      throw new Error(`既有脚本清单无效：${manifestPath}`);
+    }
+    text = await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const assetsDir = resolve(webRoot, "assets");
+  try {
+    const info = await lstat(assetsDir);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`既有脚本目录无效：${assetsDir}`);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  if (text === undefined) {
+    const scripts = (await readdir(assetsDir, { withFileTypes: true })).filter(entry => entry.name.endsWith(".js"));
+    if (scripts.some(entry => entry.isSymbolicLink() || !entry.isFile() || entry.name !== "app.js")) {
+      throw new Error("没有旧脚本清单，拒绝清理或覆盖未知 JS 资源");
+    }
+    return scripts.map(entry => `assets/${entry.name}`);
+  }
+  let value;
+  try { value = JSON.parse(text); }
+  catch (error) { throw new Error(`既有脚本清单不是有效JSON：${error}`); }
+  if (!value || Array.isArray(value) || typeof value !== "object"
+    || Object.keys(value).sort().join(",") !== "scripts,version"
+    || value.version !== 1 || !Array.isArray(value.scripts) || value.scripts.length > 256) {
+    throw new Error("既有脚本清单不符合schema");
+  }
+  const paths = new Set();
+  for (const item of value.scripts) {
+    if (!item || Array.isArray(item) || typeof item !== "object"
+      || Object.keys(item).sort().join(",") !== "path,sha256,size_bytes"
+      || typeof item.path !== "string" || !scriptPathPattern.test(item.path)
+      || !Number.isSafeInteger(item.size_bytes) || item.size_bytes <= 0
+      || typeof item.sha256 !== "string" || !sha256Pattern.test(item.sha256)
+      || paths.has(item.path.toLowerCase())) throw new Error("既有脚本清单含无效条目");
+    paths.add(item.path.toLowerCase());
+  }
+  const canonical = `${JSON.stringify({ version: 1, scripts: value.scripts }, null, 2)}\n`;
+  if (text !== canonical) throw new Error("既有脚本清单不是构建器生成的规范清单");
+  const expected = new Set(value.scripts.map(item => item.path.split("/").at(-1)));
+  for (const entry of await readdir(assetsDir, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".js")) continue;
+    if (entry.isSymbolicLink() || !entry.isFile() || !expected.has(entry.name)) {
+      throw new Error(`脚本资源目录含未被旧清单管理的内容：${entry.name}`);
+    }
+  }
+  return value.scripts.map(item => item.path);
+}
+
 await build({
   configFile: resolve(root, "vite.config.ts"),
   root,
@@ -149,8 +210,9 @@ await build({
   plugins: [{
     name: "agent-ui-provenance",
     generateBundle(_options, bundle) {
-      modules = [...new Set(Object.values(bundle).flatMap(item =>
-        item.type === "chunk" ? Object.keys(item.modules) : []))];
+      const chunks = Object.values(bundle).filter(item => item.type === "chunk");
+      bundleScriptNames = [...new Set(chunks.map(item => item.fileName))].sort();
+      modules = [...new Set(chunks.flatMap(item => Object.keys(item.modules)))];
     },
   }],
 });
@@ -173,13 +235,28 @@ for (const name of fontFiles) {
   });
 }
 const fontManifest = { version: 1, fonts };
+const outputFiles = await files(out);
+const scriptFiles = [...new Set(bundleScriptNames)].sort();
+if (!scriptFiles.includes("assets/app.js") || scriptFiles.some(name => !scriptPathPattern.test(name))) {
+  throw new Error("构建 bundle 含未允许的 JavaScript 路径");
+}
+for (const name of outputFiles.filter(value => value.endsWith(".js"))) {
+  if (!scriptFiles.includes(name)) throw new Error(`输出目录含非 bundle 确认的 JS 文件：${name}`);
+}
+const scripts = [];
+for (const name of scriptFiles) {
+  const bytes = await readFile(resolve(out, name));
+  scripts.push({ path: name, size_bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+}
+const scriptManifest = { version: 1, scripts };
 await mkdir(resolve(out, ".vite"), { recursive: true });
 await writeFile(resolve(out, generatedFontManifest), `${JSON.stringify(fontManifest, null, 2)}\n`);
+await writeFile(resolve(out, generatedScriptManifest), `${JSON.stringify(scriptManifest, null, 2)}\n`);
 
 const actual = (await files(out)).sort();
-const product = ["index.html", "assets/app.js", "assets/styles.css"];
-const buildManifests = [".vite/manifest.json", ".vite/licenses.json", generatedFontManifest];
-const allowed = [...product, ...buildManifests, ...fontFiles].sort();
+const product = ["index.html", "assets/styles.css"];
+const buildManifests = [".vite/manifest.json", ".vite/licenses.json", generatedFontManifest, generatedScriptManifest];
+const allowed = [...product, ...scriptFiles, ...buildManifests, ...fontFiles].sort();
 if (JSON.stringify(actual) !== JSON.stringify(allowed)) {
   throw new Error("构建资源集合不符：" + JSON.stringify({ actual, allowed }));
 }
@@ -233,11 +310,26 @@ if (licenses.some(item => !item.identifier || !item.text)) {
 }
 
 const oldFontPaths = await existingFontManifestNames();
+const oldScriptPaths = await existingScriptManifestNames();
 await writeFile(resolve(root, "THIRD-PARTY-NOTICES.txt"), notices);
 await mkdir(webRoot, { recursive: true });
 for (const name of product) {
   await copyFile(resolve(out, name), resolve(webRoot, name));
 }
+for (const oldPath of oldScriptPaths) {
+  if (scriptFiles.includes(oldPath)) continue;
+  try {
+    await unlink(resolve(webRoot, oldPath));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+for (const name of scriptFiles) {
+  const destination = resolve(webRoot, name);
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(resolve(out, name), destination);
+}
+await writeFile(resolve(webRoot, packagedScriptManifest), `${JSON.stringify(scriptManifest, null, 2)}\n`);
 for (const oldPath of oldFontPaths) {
   try {
     await unlink(resolve(webRoot, oldPath));
@@ -257,7 +349,7 @@ await writeFile(
 await copyFile(resolve(root, "THIRD-PARTY-NOTICES.txt"), resolve(webRoot, "THIRD-PARTY-NOTICES.txt"));
 
 const hashes = {};
-for (const name of [...product, ...fontFiles]) {
+for (const name of [...product, ...scriptFiles, ...fontFiles]) {
   hashes[name] = createHash("sha256").update(await readFile(resolve(out, name))).digest("hex");
 }
 await writeFile(resolve(out, ".vite/source-modules.json"), JSON.stringify(modules, null, 2));
@@ -267,12 +359,14 @@ await writeFile(resolve(out, ".vite/proof.json"), JSON.stringify({
   source_hashes: sourceSnapshot,
   licenses: licenses.map(item => ({ name: item.name, version: item.version, license: item.identifier })),
   font_assets: fonts,
+  script_assets: scripts,
   hashes,
   imports: modules.filter(id => relative(root, id).startsWith("src/")),
 }, null, 2));
 console.log(JSON.stringify({
   out,
-  products: [...product, ...fontFiles, packagedFontManifest, "THIRD-PARTY-NOTICES.txt"],
+  products: [...product, ...scriptFiles, ...fontFiles, packagedFontManifest, packagedScriptManifest, "THIRD-PARTY-NOTICES.txt"],
   font_assets: fonts.length,
+  script_assets: scripts.length,
   modules: modules.length,
 }));
