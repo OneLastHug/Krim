@@ -1,6 +1,6 @@
-export type WorkbenchView = "chat" | "run" | "trace" | "datasets" | "eval" | "settings";
+export type WorkbenchView = "chat" | "run" | "trace" | "datasets" | "eval" | "observe" | "settings";
 
-const knownViews = new Set<WorkbenchView>(["chat", "run", "trace", "datasets", "eval", "settings"]);
+const knownViews = new Set<WorkbenchView>(["chat", "run", "trace", "datasets", "eval", "observe", "settings"]);
 
 /** 读取新工作台和旧版 query/hash 深链接的当前页。 */
 export function readWorkbenchView(url: URL): WorkbenchView {
@@ -19,5 +19,6 @@ export const workbenchTitles: Record<WorkbenchView, string> = {
   trace: "Trace",
   datasets: "数据集",
   eval: "评测",
+  observe: "观测",
   settings: "设置",
 };

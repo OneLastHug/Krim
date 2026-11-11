@@ -1,9 +1,10 @@
 import { useRef, useState, type ReactNode } from "react";
-import { ChevronDown, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
+import { Activity, ChevronDown, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
 import type { AccountTab } from "./AccountSettings";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
 import type { WorkbenchView } from "../lib/workbench-route";
+import type { ObsPage } from "../observability/obs-route";
 import type { DisplayTheme } from "../lib/use-display-theme";
 import type { ReadingSize } from "../hooks/use-reading-size";
 import { workbenchNavigationEntries, workbenchThemeOptions, workbenchReadingSizes } from "./WorkbenchLayout";
@@ -17,10 +18,16 @@ const sectionLabels: Record<WorkbenchView, string> = {
   trace: "Trace",
   datasets: "数据集",
   eval: "评测",
+  observe: "观测",
   settings: "设置",
 };
 
-export function AppSidebar({ active, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, chat, beforeSessionSelect, onClose, onNavigate, onOpenSearch, onConnect, onCreate, theme, onThemeSelect, readingSize, onReadingSizeSelect, footerExtra, className = "" }: {
+const observationEntries = [
+  ["overview", "概览"], ["runs", "运行"], ["session", "会话"], ["context", "上下文"],
+  ["eval", "评测"], ["review", "复核"], ["status", "数据状态"],
+] as const;
+
+export function AppSidebar({ active, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, chat, beforeSessionSelect, onClose, onNavigate, onObservabilityPage, observabilityPage = "context", onOpenSearch, onConnect, onCreate, theme, onThemeSelect, readingSize, onReadingSizeSelect, footerExtra, className = "" }: {
   active: WorkbenchView;
   identity: Actor | null;
   identityLoading: boolean;
@@ -31,6 +38,8 @@ export function AppSidebar({ active, identity, identityLoading, identityError, a
   beforeSessionSelect?: (workspace: string, sessionId: string) => void;
   onClose?: () => void;
   onNavigate: (view: WorkbenchView) => void;
+  onObservabilityPage?: (page: ObsPage) => void;
+  observabilityPage?: ObsPage;
   onOpenSearch: () => void;
   onConnect: () => void;
   onCreate: () => void;
@@ -56,9 +65,15 @@ export function AppSidebar({ active, identity, identityLoading, identityError, a
       <span className="spacer" aria-hidden="true"></span>
       <Button variant="ghost" className="icon-button" aria-label="查找对话" title="查找对话 Ctrl K" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true" /></Button>
     </div>
+    <Button type="button" variant="ghost" className="sidebar-observability-entry" aria-label="导航到观测" aria-current={active === "observe" ? "page" : undefined} onClick={() => { onNavigate("observe"); onClose?.(); }}>
+      <Activity aria-hidden="true"/>观测
+    </Button>
     {chatMode && chat && <div className="sidebar-group-label">{workspaceNames[chat.workspace] ?? "个人工作区"}</div>}
     {chatMode && chat && <SessionList chat={chat} beforeSelect={(workspace, sessionId) => { beforeSessionSelect?.(workspace, sessionId); onClose?.(); }} />}
-    {!chatMode && <section className="sidebar-current-section" aria-label="当前分区"><span className="workspace-label">当前分区</span><strong>{sectionLabels[active]}</strong></section>}
+    {active === "observe" ? <nav className="sidebar-current-section sidebar-observability-nav" aria-label="观测分析">
+      <span className="workspace-label">观测分析</span>
+      {observationEntries.map(([id, label]) => <button key={id} type="button" className="sidebar-observe-link" aria-current={observabilityPage === id ? "page" : undefined} onClick={() => { onObservabilityPage?.(id); onClose?.(); }}>{label}</button>)}
+    </nav> : !chatMode && <section className="sidebar-current-section" aria-label="当前分区"><span className="workspace-label">当前分区</span><strong>{sectionLabels[active]}</strong></section>}
     {footerExtra && <div className="sidebar-footer-extra">{footerExtra}</div>}
     <div className="sidebar-account">
       <Button variant="ghost" className="account-button" ref={accountRef} aria-label="账号菜单" title={identity ? `${identityLabel} · ${connection}` : identityLabel} aria-haspopup="menu" aria-expanded={accountOpen} onClick={() => identity ? setAccountOpen(open => !open) : onConnect()}>

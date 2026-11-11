@@ -6,6 +6,7 @@ import type { SessionState } from "../hooks/use-session";
 import { workbenchTitles, type WorkbenchView } from "../lib/workbench-route";
 import type { DisplayTheme } from "../lib/use-display-theme";
 import type { ReadingSize } from "../hooks/use-reading-size";
+import type { ObsPage } from "../observability/obs-route";
 import { chatCopy as c } from "../lib/copy";
 import { AppSidebar } from "./AppSidebar";
 import { PopoverMenu } from "./popover-menu";
@@ -41,7 +42,7 @@ const themes: { id: DisplayTheme; label: string }[] = [
 ];
 const readingSizes = [12, 14, 16] as const;
 
-export function WorkbenchLayout({ view, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children }: {
+export function WorkbenchLayout({ view, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children, onObservabilityPage, observabilityPage }: {
   view: WorkbenchView; identity: Actor | null; identityLoading: boolean; identityError: string;
   accountName?: string; gatewayName?: string; workspaceNames?: Record<string, string>; accountAdmin?: boolean;
   onAccountTab?: (tab: AccountTab) => void; onLogout?: () => void;
@@ -49,7 +50,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   readingSize: ReadingSize; onReadingSizeSelect: (size: ReadingSize) => void;
   chatTitle: string; chat: SessionState | null;
   httpEnabled: boolean; beforeSessionSelect?: (workspace: string, sessionId: string) => void;
-  onNavigate: (view: WorkbenchView) => void; onConnect: () => void;
+  onNavigate: (view: WorkbenchView) => void; onObservabilityPage?: (page: ObsPage) => void; observabilityPage: ObsPage; onConnect: () => void;
   onOpenTask: () => void; canOpenTask: boolean;
   actions: ReactNode; inspector: ReactNode; children: ReactNode;
 }) {
@@ -61,7 +62,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   const moreRef = useRef<HTMLButtonElement>(null);
   const previousIdentity = useRef("");
   const currentTitle = view === "chat" ? chatTitle || workbenchTitles[view] : workbenchTitles[view];
-  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout };
+  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout, onObservabilityPage, observabilityPage };
   const chatSession = view === "chat" ? chat : null;
   const canCreate = !!chatSession?.ready && chatSession.canWrite;
   const workspaceConfigured = chat?.actor?.target_keys?.includes("target-workspace") === true;

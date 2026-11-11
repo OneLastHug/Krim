@@ -15,6 +15,7 @@ from pydantic import JsonValue
 
 from krim_agent.config import Settings
 from krim_agent.context import builder, compaction
+from krim_agent.context.manifest import ItemMetadata, session_message_metadata
 from krim_agent.context.types import SessionContext
 from krim_agent.contracts import (
     Message,
@@ -198,6 +199,28 @@ class AgentLoop:
                         snapshot.session_context.context.policy,
                         request_limit,
                     )
+            request_metadata: list[ItemMetadata | None] = []
+            reserved_output_tokens = None
+            if compressor is not None:
+                policy = compressor.policy
+                request_metadata = compressor.manifest_metadata(request_messages)
+                reserved_output_tokens = policy.reserved_output_tokens
+                input_budget_bytes = max(0, min(
+                    request_limit - 1024,
+                    policy.max_bytes - 1024 - policy.reserved_output_tokens * 4,
+                ))
+            elif isinstance(snapshot.session_context, SessionContext):
+                policy = snapshot.session_context.context.policy
+                request_metadata = session_message_metadata(
+                    request_messages, snapshot.session_context.context.sources
+                )
+                reserved_output_tokens = policy.reserved_output_tokens
+                input_budget_bytes = max(0, min(
+                    request_limit - 1024,
+                    policy.max_bytes - 1024 - policy.reserved_output_tokens * 4,
+                ))
+            else:
+                input_budget_bytes = request_limit
             response = await stepper.call(
                 request_messages,
                 request_tools,
@@ -205,6 +228,10 @@ class AgentLoop:
                 remaining_tools=remaining_tools,
                 request_budget=request_budget,
                 request_prepared=True,
+                request_metadata=request_metadata,
+                reserved_output_tokens=reserved_output_tokens,
+                input_budget_bytes=input_budget_bytes,
+                compaction_changes=compressor.compaction_changes if compressor is not None else (),
             )
             check()
             text, calls, step = response.text, list(response.calls), response.index
