@@ -13,6 +13,8 @@ export interface ObsViewProps {
   onState: (next: ObsState, replace?: boolean) => void;
   dark: boolean;
   data: ObservationsState;
+  onSession?: (sessionId: string) => void;
+  onEvaluate?: (runId: string) => void;
 }
 
 /** 观测页内共用小组件：页头、状态签、空态与提示。样式全部在 obs.css，沿用工作台 token。 */

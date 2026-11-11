@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Activity, ChevronDown, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
+import { ChevronDown, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
 import type { AccountTab } from "./AccountSettings";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
@@ -18,7 +18,6 @@ const sectionLabels: Record<WorkbenchView, string> = {
   trace: "Trace",
   datasets: "数据集",
   eval: "评测",
-  observe: "观测",
   settings: "设置",
 };
 
@@ -65,12 +64,9 @@ export function AppSidebar({ active, identity, identityLoading, identityError, a
       <span className="spacer" aria-hidden="true"></span>
       <Button variant="ghost" className="icon-button" aria-label="查找对话" title="查找对话 Ctrl K" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true" /></Button>
     </div>
-    <Button type="button" variant="ghost" className="sidebar-observability-entry" aria-label="导航到观测" aria-current={active === "observe" ? "page" : undefined} onClick={() => { onNavigate("observe"); onClose?.(); }}>
-      <Activity aria-hidden="true"/>观测
-    </Button>
     {chatMode && chat && <div className="sidebar-group-label">{workspaceNames[chat.workspace] ?? "个人工作区"}</div>}
     {chatMode && chat && <SessionList chat={chat} beforeSelect={(workspace, sessionId) => { beforeSessionSelect?.(workspace, sessionId); onClose?.(); }} />}
-    {active === "observe" ? <nav className="sidebar-current-section sidebar-observability-nav" aria-label="观测分析">
+    {active === "trace" ? <nav className="sidebar-current-section sidebar-observability-nav" aria-label="观测分析">
       <span className="workspace-label">观测分析</span>
       {observationEntries.map(([id, label]) => <button key={id} type="button" className="sidebar-observe-link" aria-current={observabilityPage === id ? "page" : undefined} onClick={() => { onObservabilityPage?.(id); onClose?.(); }}>{label}</button>)}
     </nav> : !chatMode && <section className="sidebar-current-section" aria-label="当前分区"><span className="workspace-label">当前分区</span><strong>{sectionLabels[active]}</strong></section>}

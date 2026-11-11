@@ -1,5 +1,5 @@
-/** 观测工作区路由状态：view=observe 下的页内深链参数，读写均为纯函数。
- * 参数名避开既有 session/turn/workspace 等协议字段，统一使用 obs 前缀。 */
+/** 原 Trace 分区内的观测页状态；view=observe 仅兼容已有链接。
+ * 读取原 session/turn 深链，新增筛选与选中对象继续使用 obs 前缀。 */
 
 export type ObsPage = "overview" | "runs" | "session" | "context" | "eval" | "review" | "status";
 
@@ -42,11 +42,14 @@ function readId(value: string | null): string {
 export function readObsState(url: URL): ObsState {
   const page = url.searchParams.get("obs");
   const mode = url.searchParams.get("obs_mode");
+  const legacyTrace = url.searchParams.get("view") === "trace" && !url.searchParams.has("obs_session");
+  const session = readId(url.searchParams.get("obs_session") ?? (legacyTrace ? url.searchParams.get("session") : null));
+  const turn = readId(url.searchParams.get("obs_turn") ?? (legacyTrace ? url.searchParams.get("turn") : null));
   return {
-    page: page && knownPages.has(page as ObsPage) ? page as ObsPage : "context",
+    page: page && knownPages.has(page as ObsPage) ? page as ObsPage : legacyTrace && session && turn ? "runs" : "context",
     status: url.searchParams.get("obs_status") ?? "",
-    session: readId(url.searchParams.get("obs_session")),
-    turn: readId(url.searchParams.get("obs_turn")),
+    session,
+    turn,
     request: readId(url.searchParams.get("obs_req")),
     base: readId(url.searchParams.get("obs_base")),
     run: readId(url.searchParams.get("obs_run")),
@@ -58,6 +61,9 @@ export function readObsState(url: URL): ObsState {
 /** 写回观测参数；空值删除对应参数，保持 URL 精简。 */
 export function writeObsState(url: URL, state: ObsState): URL {
   const next = new URL(url.href);
+  next.searchParams.set("view", "trace");
+  next.searchParams.delete("session");
+  next.searchParams.delete("turn");
   const values: Record<(typeof paramNames)[number], string> = {
     obs: state.page === "context" ? "" : state.page,
     obs_status: state.status,
