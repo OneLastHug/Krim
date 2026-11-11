@@ -1,10 +1,12 @@
-export type WorkbenchView = "chat" | "run" | "trace" | "datasets" | "eval" | "observe" | "settings";
+export type WorkbenchView = "chat" | "run" | "trace" | "datasets" | "eval" | "settings";
 
-const knownViews = new Set<WorkbenchView>(["chat", "run", "trace", "datasets", "eval", "observe", "settings"]);
+const knownViews = new Set<WorkbenchView>(["chat", "run", "trace", "datasets", "eval", "settings"]);
 
 /** 读取新工作台和旧版 query/hash 深链接的当前页。 */
 export function readWorkbenchView(url: URL): WorkbenchView {
   const explicit = url.searchParams.get("view");
+  // 已生成的观测链接兼容到原 Trace 分区，不再创建第二个工作台入口。
+  if (explicit === "observe") return "trace";
   if (explicit && knownViews.has(explicit as WorkbenchView)) return explicit as WorkbenchView;
   if (url.searchParams.has("eval_id") || url.searchParams.has("product_eval_id")) return "eval";
   if (url.searchParams.has("session") || url.searchParams.has("workspace") || url.searchParams.has("turn")) return "chat";
@@ -19,6 +21,5 @@ export const workbenchTitles: Record<WorkbenchView, string> = {
   trace: "Trace",
   datasets: "数据集",
   eval: "评测",
-  observe: "观测",
   settings: "设置",
 };

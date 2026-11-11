@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { traceDuration, traceSpanRows, type TraceSpan } from "../lib/trace-contracts";
-import { obsFilterStatuses, obsStatusNames, type ObsRequestRecord, type ObsToolRecord } from "./obs-contracts";
+import { obsFilterStatuses, obsStatusNames, type ObsRequestRecord, type ObsToolRecord, type ObsRunStatus } from "./obs-contracts";
 import { downloadObservationCsv } from "./export";
 import { formatBytes, formatClock, formatCost, formatCount, formatDuration, formatTime, formatReportedTokens } from "./obs-format";
 import { obsSeries } from "./obs-palette";
@@ -15,10 +15,13 @@ function spanKind(span: TraceSpan, requests: ObsRequestRecord[], tools: ObsToolR
   return span.parent_span_id === null ? "root" : "other";
 }
 
-export function RunsView({ state, onState, dark, data, workspace }: ObsViewProps) {
+export function RunsView({ state, onState, dark, data, workspace, onSession, onEvaluate }: ObsViewProps) {
   const items = data.items;
   const detail = data.detail;
-  const selected = state.run ? items.find(item => item.run_id === state.run) ?? null : null;
+  const selected = items.find(item => state.run ? item.run_id === state.run
+    : !!state.turn && item.session_id === state.session && item.turn_id === state.turn)
+    ?? (detail ? { run_id: detail.run.run_id, session_id: detail.session_id,
+      session_title: "运行详情", status: detail.run.status as ObsRunStatus, projection_status: "ok", projection_code: null } : null);
 
   const spanRows = useMemo(() => detail ? traceSpanRows(detail.trace.spans) : [], [detail]);
   const timeline = useMemo(() => {
@@ -81,7 +84,11 @@ export function RunsView({ state, onState, dark, data, workspace }: ObsViewProps
               <p className="obs-caption obs-mono">{detail.run.run_id} · key {detail.run.request_key}</p>
             </div>
             <ObsStatusPill status={selected.status}/>
-            <button type="button" className="obs-button obs-button-small" onClick={() => onState({ ...state, run: "", item: "" })}>返回列表</button>
+            <button type="button" className="obs-button obs-button-small" onClick={() => onState({ ...state, run: "", session: "", turn: "", item: "" })}>返回列表</button>
+            <div className="obs-actions">
+              {onSession && <button type="button" className="obs-button obs-button-small" onClick={() => onSession(detail.session_id)}>返回对话</button>}
+              {onEvaluate && <button type="button" className="obs-button obs-button-small" onClick={() => onEvaluate(detail.run.run_id)}>加入数据集</button>}
+            </div>
           </header>
           <div className="obs-fact-grid">
             <div className="obs-fact"><span>开始</span><strong>{formatTime(detail.run.created_at)}</strong></div>

@@ -2,6 +2,22 @@ import { describe, expect, test } from "vitest";
 import { diffManifests, manifestBytesSum, parseManifest, parseObservationsPage, parseTurnObservations } from "../src/observability/obs-contracts";
 import pageFixture from "./observability-api-page-fixture.json";
 import detailFixtures from "./observability-api-detail-fixtures.json";
+import { readWorkbenchView } from "../src/lib/workbench-route";
+import { readObsState, writeObsState } from "../src/observability/obs-route";
+
+
+test("原Trace轮次深链进入运行诊断，新增观测链接作为同一分区别名", () => {
+  const original = new URL("https://krim.test/ui/?view=trace&workspace=team&session=S&turn=T");
+  expect(readWorkbenchView(original)).toBe("trace");
+  expect(readObsState(original)).toMatchObject({ page: "runs", session: "S", turn: "T" });
+  const next = writeObsState(original, { ...readObsState(original), page: "context", request: "request-2" });
+  expect(next.searchParams.get("view")).toBe("trace");
+  expect(next.searchParams.has("session")).toBe(false);
+  expect(readObsState(next)).toMatchObject({ page: "context", session: "S", turn: "T", request: "request-2" });
+  const compatibility = new URL("https://krim.test/ui/?view=observe&obs=status&obs_session=S&obs_turn=T");
+  expect(readWorkbenchView(compatibility)).toBe("trace");
+  expect(readObsState(compatibility)).toMatchObject({ page: "status", session: "S", turn: "T" });
+});
 
 /** 来自隔离验收服务（合成脚本运行）的真实响应；不含任何正文。 */
 

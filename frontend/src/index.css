@@ -966,15 +966,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 .session-search-results > button > span { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
 .session-search-results p, .session-search-scope { margin: 0; color: var(--muted-foreground); font-size: 12px; }
 
-/* 观测入口位于原图标行之下，不改原图标行的顺序与尺寸。 */
-.sidebar-observability-entry {
-  display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; min-height: 34px;
-  margin: 0 2px 6px; padding: 5px 8px !important; border: 0 !important; border-radius: 6px !important;
-  color: var(--muted-foreground); font-size: 12px; font-weight: 500; text-align: left;
-}
-.sidebar-observability-entry:hover { background: var(--muted) !important; color: var(--foreground) !important; }
-.sidebar-observability-entry[aria-current="page"] { background: var(--session-selected, var(--muted)) !important; color: var(--foreground) !important; }
-.sidebar-observability-entry > svg { width: 15px; height: 15px; }
+/* 原 Trace 分区内的观测子页导航。 */
 .sidebar-observability-nav { align-content: start; gap: 2px; }
 .sidebar-observe-link {
   min-height: 30px; padding: 4px 8px; border: 0; border-radius: 5px; background: transparent;
@@ -982,4 +974,3 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 }
 .sidebar-observe-link:hover { background: var(--muted); color: var(--foreground); }
 .sidebar-observe-link[aria-current="page"] { background: var(--session-selected, var(--muted)); color: var(--foreground); font-weight: 600; }
-@media (max-width: 700px) { .sidebar-observability-entry { min-height: 38px; } }

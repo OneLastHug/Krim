@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
 import { INTENTS, KNOWN, readIntents } from "../src/lib/session-requests";
+import { navigationObservation, navigationObservationPage } from "./observability-navigation-fixture";
 
 let root: Root, container: HTMLDivElement;
 let override: ((path: string, options: RequestInit) => Response | Promise<Response> | undefined) | undefined;
@@ -311,7 +312,9 @@ test("消息更多操作提供可导航Trace路由且保持只读", async () => 
   const fallback = override!, base = "/v2/workspaces/local/sessions";
   override = (path, options) => {
     if (path === base + "/A/turns?offset=0&limit=50") return json([historyTurn("A1", 1)]);
-    if (path.startsWith("/v2/workspaces/local/traces?")) return json({ items: [{ source_kind: "session_turn", run_id: "run-A1", trace_id: "trace-A1", session_id: "A", turn_id: "A1", session_title: "会话 A", target_key: "demo", status: "completed", created_at: 1, finished_at: 2 }], next_cursor: null });
+    const observation = navigationObservation("A", "A1", "run-A1", "会话 A");
+    if (path.startsWith("/v2/workspaces/local/observations?")) return json(navigationObservationPage("local", [observation.item]));
+    if (path === base + "/A/turns/A1/observations") return json(observation.detail);
     return fallback(path, options);
   };
   await mountExisting();

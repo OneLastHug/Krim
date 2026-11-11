@@ -3,6 +3,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
 import { webcrypto } from "node:crypto";
+import { navigationObservation, navigationObservationPage } from "./observability-navigation-fixture";
+
+const traceObservation = navigationObservation("S", "T", "run-from-trace", "Trace session");
 
 let root: Root, host: HTMLDivElement;
 let legacyIdentity = true;
@@ -34,8 +37,8 @@ beforeEach(() => {
     // 账号接入后的新身份链路：资料对legacy服务器返回409 account_management_unavailable，接入信息404。
     if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
     if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
-    if (path.startsWith("/v2/workspaces/local/traces?")) return json({ items: [{ source_kind: "session_turn", run_id: "run-from-trace", trace_id: "trace-from-trace", session_id: "S", turn_id: "T", session_title: "Trace session", target_key: "demo", status: "completed", created_at: 1, finished_at: 2 }], next_cursor: null });
-    if (path === "/v2/workspaces/local/sessions/S/turns/T/trace") return json({ session_id: "S", turn_id: "T", trace: { run_id: "run-from-trace", trace_id: "trace-from-trace", complete: true, reasons: [], spans: [] } });
+    if (path.startsWith("/v2/workspaces/local/observations?")) return json(navigationObservationPage("local", [traceObservation.item]));
+    if (path === "/v2/workspaces/local/sessions/S/turns/T/observations") return json(traceObservation.detail);
     if (path === "/v2/workspaces/local/sessions?limit=50") return json([sampleSession("A"), sampleSession("B")]);
     if (path.includes("/turns?offset=")) return json([]);
     if (path === "/v2/workspaces/local/sessions/A" || path === "/v2/workspaces/local/sessions/B") return json(sampleSession(path.endsWith("/A") ? "A" : "B"));
@@ -219,11 +222,32 @@ test("手机导航抽屉可打开并导航后关闭", async () => {
   await until(() => expect(document.querySelector(".mobile-inspector-content")).toBeTruthy());
 });
 
-test("侧栏Trace入口打开独立运行索引路由", async () => {
+test("原侧栏Trace入口承载观测内容，不再追加重复入口", async () => {
   await mount();
+  const icons = [...host.querySelectorAll('.sidebar-buttons button')].map(button => button.getAttribute("aria-label"));
+  expect(icons).toEqual(["新建对话", "导航到对话", "导航到运行记录", "导航到Trace", "导航到数据集", "导航到评测", "查找对话"]);
+  expect(host.querySelector('.sidebar-observability-entry')).toBeNull();
+  expect(host.querySelector('[aria-label="导航到观测"]')).toBeNull();
   await act(async () => button("导航到Trace").click());
   expect(new URL(location.href).searchParams.get("view")).toBe("trace");
-  await until(() => expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("Trace"));
+  await until(() => expect(host.querySelector('.observability-root')).toBeTruthy());
+  expect(host.querySelectorAll('[aria-label="观测分析"]')).toHaveLength(1);
+  expect(host.querySelectorAll('.sidebar-observe-link')).toHaveLength(7);
+  expect(button("导航到Trace").querySelector('.lucide-eye')).toBeTruthy();
+  expect(button("导航到Trace").getAttribute("aria-current")).toBe("page");
+  expect(host.querySelector(".chat-toolbar .toolbar-title h1")?.textContent).toBe("Trace");
+  expect(calls.some(value => value.path.includes("/observations?"))).toBe(true);
+  expect(calls.some(value => value.path.includes("/traces?"))).toBe(false);
+});
+
+test("已有view=observe链接兼容到原Trace分区并保留子页", async () => {
+  history.replaceState(null, "", "/ui/?view=observe&workspace=local&obs=status");
+  await mount();
+  await until(() => expect(host.querySelector('[data-obs-page="status"]')).toBeTruthy());
+  expect(new URL(location.href).searchParams.get("view")).toBe("trace");
+  expect(button("导航到Trace").getAttribute("aria-current")).toBe("page");
+  expect(host.querySelector('[aria-label="观测页面"]')).toBeNull();
+  expect(calls.every(value => value.method === "GET")).toBe(true);
 });
 
 test("Trace加入数据集入口导航传递原始run且不创建请求", async () => {
@@ -243,24 +267,24 @@ test("工作台切换工作区清空来源和对象深链且只读加载新索�
   const memberships = [{ workspace_id: "local", role: "admin", approve: true }, { workspace_id: "research", role: "viewer", approve: false }];
   override = path => {
     if (path === "/v2/me") return json({ principal_id: "operator", generation: 1, legacy: false, workspaces: memberships });
-    if (path.startsWith("/v2/workspaces/research/traces?")) return json({ items: [], next_cursor: null });
+    if (path.startsWith("/v2/workspaces/research/observations?")) return json(navigationObservationPage("research", []));
     return undefined;
   };
   history.replaceState(null, "", "/ui/?view=trace&workspace=local&session=S&turn=T&eval_id=old-eval&legacy_eval=1&product_eval_id=old-task&product_candidate_id=old-candidate&source_run=old-run");
   await mount();
-  await until(() => expect(host.querySelector("#trace-detail-heading")?.textContent).toBe("Trace session"));
+  await until(() => expect(host.querySelector(".obs-run-detail h3")?.textContent).toBe("Trace session"));
   const chooser = host.querySelector<HTMLSelectElement>('select[aria-label="当前工作区"]');
   expect(chooser).toBeTruthy();
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(chooser, "research");
     chooser!.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await until(() => expect(calls.some(value => value.path.startsWith("/v2/workspaces/research/traces?"))).toBe(true));
+  await until(() => expect(calls.some(value => value.path.startsWith("/v2/workspaces/research/observations?"))).toBe(true));
   const url = new URL(location.href);
   expect(url.searchParams.get("view")).toBe("trace");
   expect(url.searchParams.get("workspace")).toBe("research");
   for (const field of ["session", "turn", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run"]) expect(url.searchParams.has(field), field).toBe(false);
-  expect(host.querySelector("#trace-detail-heading")).toBeNull();
+  expect(host.querySelector(".obs-run-detail")).toBeNull();
   expect(calls.every(value => value.method === "GET")).toBe(true);
   expect(calls.some(value => value.path.startsWith("/v1/"))).toBe(false);
 });

@@ -30,6 +30,8 @@ export interface ObservabilityModuleProps {
   page: ObsState["page"];
   onPageChange: (page: ObsState["page"]) => void;
   onNavigate: (view: WorkbenchView) => void;
+  onSession?: (sessionId: string) => void;
+  onEvaluate?: (runId: string) => void;
 }
 
 function pushUrl(next: URL, replace: boolean) {
@@ -37,7 +39,7 @@ function pushUrl(next: URL, replace: boolean) {
   else window.history.pushState(null, "", next);
 }
 
-export function ObservabilityModule({ apiKey, workspace, identity, identityLoading, theme, page, onPageChange, onNavigate }: ObservabilityModuleProps) {
+export function ObservabilityModule({ apiKey, workspace, identity, identityLoading, theme, page, onPageChange, onNavigate, onSession, onEvaluate }: ObservabilityModuleProps) {
   const dark = theme === "dark";
   const [state, setState] = useState<ObsState>(() => readObsState(new URL(location.href)));
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -112,7 +114,7 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
     let restored = false;
     let pending: number | undefined = scrollPositions.get(routeKey);
     const save = () => {
-      if (!restored || new URL(location.href).searchParams.get("view") !== "observe") return;
+      if (!restored || !["trace", "observe"].includes(new URL(location.href).searchParams.get("view") ?? "")) return;
       scrollPositions.set(routeKey, element.scrollTop);
       if (scrollPositions.size > maxScrollPositions) {
         const oldest = scrollPositions.keys().next().value;
@@ -159,7 +161,7 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
     return <div ref={scrollRef} className="observability-root"><ObsEmpty title="当前工作区不可用">切换工作区后查看观测。</ObsEmpty></div>;
   }
 
-  const viewProps = { apiKey, workspace, identity, onNavigate, state, onState, dark, data };
+  const viewProps = { apiKey, workspace, identity, onNavigate, onSession, onEvaluate, state, onState, dark, data };
 
   return <div ref={scrollRef} className="observability-root" data-obs-page={state.page}>
     <div className="obs-content">
