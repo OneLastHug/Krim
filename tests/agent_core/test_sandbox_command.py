@@ -41,7 +41,10 @@ class CommandBroker:
                     "python": {"image": IMAGE, "fingerprint": None, "image_id": IMAGE}
                 },
             }
-        if action in {"command_start", "file_start"}:
+        if action == "command_start":
+            self.starts.append(arguments)
+            return {"status": "accepted"}
+        if action == "file_start":
             self.starts.append(arguments)
             return {"status": "accepted"}
         if action == "command_status":

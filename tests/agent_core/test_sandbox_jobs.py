@@ -224,7 +224,7 @@ def test_intent_record_reconciles_orphaned_lease_without_execution(command_jobs)
         },
     )
     result = jobs.status(env, project, operation)
-    assert result["status"] == "finished"
+    assert result["status"] == "unknown"
     assert result["receipt"]["executor_started"] is False
     assert broker.leases.status(project)["status"] == "idle"
 

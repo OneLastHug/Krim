@@ -327,8 +327,26 @@ class StorageBroker:
                     kind=values["kind"],
                 )
             if action == "command_start":
+                operation_id = internal_id(values["operation_id"])
+                record = self._read(self.jobs.filename(operation_id))
+                command = values["command"]
+                if set(values) != {
+                    "environment_id", "project_id", "operation_id", "command",
+                    "runtime_image", "runtime_fingerprint",
+                }:
+                    raise ServiceError("invalid_input", 422)
+                if (
+                    record is None
+                    or record.get("environment_id") != environment_id
+                    or record.get("project_id") != project_id
+                    or record.get("status") not in {"accepted", "intent"}
+                    or record.get("command") != command
+                    or record.get("image") != values["runtime_image"]
+                    or record.get("runtime_fingerprint") != values["runtime_fingerprint"]
+                ):
+                    raise ServiceError("target_binding_changed")
                 return self.jobs.submit(
-                    environment_id, project_id, values["operation_id"], values["command"]
+                    environment_id, project_id, operation_id, command
                 )
             if action == "command_reconcile":
                 return self.jobs.reconcile(environment_id, project_id, values["operation_id"])
