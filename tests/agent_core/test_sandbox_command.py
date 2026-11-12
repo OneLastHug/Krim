@@ -34,6 +34,8 @@ class CommandBroker:
                 "storage_available": True,
                 "execution_available": True,
                 "image": IMAGE,
+                "configured_programs": ["python"],
+                "executable_programs": ["python"],
                 "available_programs": ["python"],
                 "runtimes": {
                     "python": {"image": IMAGE, "fingerprint": None, "image_id": IMAGE}

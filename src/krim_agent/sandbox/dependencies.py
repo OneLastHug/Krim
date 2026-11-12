@@ -163,6 +163,8 @@ def _opener(policy: DependencyPolicy) -> OpenerDirector:
 def fetch_artifact(artifact: LockedArtifact, policy: DependencyPolicy) -> bytes:
     """Fetch one allowlisted artifact and verify size plus SHA-256 before return."""
 
+    if artifact.size_bytes > policy.max_artifact_bytes:
+        raise ServiceError("artifact_limit")
     _check_allowed(artifact.url, policy)
     request = Request(
         artifact.url,
@@ -212,6 +214,8 @@ def fetch_locked_bundle(
 
     if hashlib.sha256(lockfile).hexdigest() != lock.lockfile_sha256:
         raise ServiceError("artifact_conflict")
+    if any(artifact.size_bytes > policy.max_artifact_bytes for artifact in lock.artifacts):
+        raise ServiceError("artifact_limit")
     if sum(artifact.size_bytes for artifact in lock.artifacts) > policy.max_bundle_bytes:
         raise ServiceError("artifact_limit")
     return {

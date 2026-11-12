@@ -131,16 +131,19 @@ class CommandJobs:
             return None
         return runtime
 
-    def available_programs(self) -> list[str]:
+    def configured_programs(self) -> list[str]:
         if self.catalog is None:
             return sorted(self.runners)
         return [
             program for program in ("python", "node") if self._resolved(program) is not None
         ]
 
+    def available_programs(self) -> list[str]:
+        return sorted(self.runners)
+
     def runtime_info(self) -> dict[str, dict[str, str | None]]:
         info: dict[str, dict[str, str | None]] = {}
-        for program in self.available_programs():
+        for program in self.configured_programs():
             runner = self.runners.get(program)
             runtime = (
                 getattr(runner, "runtime", None)
@@ -161,6 +164,26 @@ class CommandJobs:
     @staticmethod
     def filename(operation_id: str) -> str:
         return "command-" + internal_id(operation_id) + ".json"
+
+    @staticmethod
+    def _request_digest(
+        environment_id: str,
+        command: dict[str, Any],
+        image: str | None,
+        runtime_fingerprint: str | None,
+        program: str,
+        kind: str,
+    ) -> str:
+        return fingerprint(
+            {
+                "environment": environment_id,
+                "command": command,
+                "image": image,
+                "runtime_fingerprint": runtime_fingerprint,
+                "program": program,
+                "kind": kind,
+            }
+        )
 
     def submit(
         self,
@@ -187,34 +210,67 @@ class CommandJobs:
             values: Any = models[kind].model_validate(command)
             if values.project_id != project_id:
                 raise ServiceError("invalid_input", 422)
-            runner = (
-                self._runner_for(values.program)
-                if isinstance(values, SandboxCommand)
-                else self.runner
-            )
+            requested_program = values.program if isinstance(values, SandboxCommand) else "python"
+            previous = self.broker._read(self.filename(operation_id))
+            if previous is not None and previous.get("status") in {"finished", "unknown"}:
+                if previous.get("project_id") != project_id:
+                    raise ServiceError("not_found", 404)
+                if previous.get("kind", "command") != kind:
+                    raise ServiceError("key_conflict")
+                if all(key in previous for key in ("command", "image", "runtime_fingerprint")):
+                    digest = self._request_digest(
+                        environment_id,
+                        command,
+                        previous.get("image"),
+                        previous.get("runtime_fingerprint"),
+                        requested_program,
+                        kind,
+                    )
+                    if previous.get("request_hash") != digest:
+                        raise ServiceError("key_conflict")
+                return previous
             env_state = self.broker._environment(environment_id)
             if env_state.get("quota_operation"):
                 raise ServiceError("workspace_busy")
             project_state = self.broker._project(environment_id, project_id)
             if project_state["status"] != "ready":
                 raise ServiceError("workspace_busy")
-            digest = fingerprint(
-                {
-                    "environment": environment_id,
-                    "command": command,
-                    "image": runner.identity if runner is not None else None,
-                    "runtime_fingerprint": (
-                        getattr(runner, "runtime_fingerprint", None) if runner is not None else None
-                    ),
-                    "program": values.program if isinstance(values, SandboxCommand) else "python",
-                    "kind": kind,
-                }
-            )
-            previous = self.broker._read(self.filename(operation_id))
             if previous is not None:
+                if previous.get("project_id") != project_id:
+                    raise ServiceError("not_found", 404)
+                if previous.get("kind", "command") != kind:
+                    raise ServiceError("key_conflict")
+                if previous.get("status") in {"finished", "unknown"}:
+                    return previous
+                runner = (
+                    self._runner_for(requested_program)
+                    if isinstance(values, SandboxCommand)
+                    else self.runner
+                )
+                digest = self._request_digest(
+                    environment_id,
+                    command,
+                    runner.identity if runner is not None else None,
+                    getattr(runner, "runtime_fingerprint", None) if runner is not None else None,
+                    requested_program,
+                    kind,
+                )
                 if previous["request_hash"] != digest:
                     raise ServiceError("key_conflict")
                 return self.status(environment_id, project_id, operation_id)
+            runner = (
+                self._runner_for(requested_program)
+                if isinstance(values, SandboxCommand)
+                else self.runner
+            )
+            digest = self._request_digest(
+                environment_id,
+                command,
+                runner.identity if runner is not None else None,
+                getattr(runner, "runtime_fingerprint", None) if runner is not None else None,
+                requested_program,
+                kind,
+            )
             if len(self.active) >= 2:
                 raise ServiceError("capacity", 429)
             project = self.broker._project(environment_id, project_id)
@@ -227,12 +283,21 @@ class CommandJobs:
                 "environment_id": environment_id,
                 "project_id": project_id,
                 "request_hash": digest,
-                "program": values.program if isinstance(values, SandboxCommand) else "python",
+                "program": requested_program,
                 "kind": kind,
                 "status": "accepted",
                 "generation": values.expected_generation,
                 "receipt": None,
             }
+            if kind == "command":
+                record.update(
+                    command=command,
+                    image=runner.identity if runner is not None else None,
+                    runtime_fingerprint=(
+                        getattr(runner, "runtime_fingerprint", None)
+                        if runner is not None else None
+                    ),
+                )
             try:
                 self.broker._save(self.filename(operation_id), record)
             except BaseException:

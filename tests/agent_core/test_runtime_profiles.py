@@ -209,6 +209,11 @@ def test_wall_and_tool_timeout_coordination():
         python_profile(supervisor_grace_seconds=0)
 
 
+def test_container_interpreter_paths_are_platform_neutral():
+    assert RuntimeProfile(program="python", interpreter="/usr/bin/python3.12").interpreter
+    assert RuntimeProfile(program="node", interpreter="/usr/local/bin/node").interpreter
+
+
 def test_resource_and_path_boundaries():
     node_profile = {"program": "node", "interpreter": "/usr/local/bin/node"}
     for interpreter in ["/tmp/node-malicious", "/usr/bin/node", "/usr/local/bin/node-helper"]:

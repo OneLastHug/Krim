@@ -304,8 +304,7 @@ def test_configuration_manifest_requires_matching_image_and_dev_gate(tmp_path):
     with pytest.raises(ValidationError):
         SandboxConfiguration.model_validate(common)
     selected = SandboxConfiguration.model_validate({**common, "allow_dev_runtimes": True})
-    assert selected.command_purpose == "normal_job"
-    assert selected.model_dump(mode="json")["command_purpose"] == "normal_job"
+    assert "command_purpose" not in selected.model_dump(mode="json")
     assert selected.resolve_runtime("python").image == image
     with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
         selected.resolve_runtime("node")

@@ -149,6 +149,36 @@ def test_dependency_fetch_refuses_non_https_or_non_allowlisted_urls():
         fetch_artifact(artifact, DependencyPolicy(allowed_hosts=["packages.example.test"]))
 
 
+def test_lock_rejects_artifact_larger_than_policy_before_network(monkeypatch):
+    body = b"x"
+    artifact = LockedArtifact(
+        url="https://packages.example.test/pkg.whl",
+        sha256=hashlib.sha256(body).hexdigest(),
+        filename="pkg.whl",
+        size_bytes=2048,
+    )
+    lock = DependencyLock(
+        program="python",
+        lockfile_sha256=hashlib.sha256(b"lock").hexdigest(),
+        artifacts=[artifact],
+    )
+    called = False
+
+    def fail_opener(_policy):
+        nonlocal called
+        called = True
+        raise AssertionError("network must not be opened")
+
+    monkeypatch.setattr(dependency_module, "_opener", fail_opener)
+    with pytest.raises(ServiceError, match="artifact_limit"):
+        fetch_locked_bundle(
+            lock,
+            b"lock",
+            DependencyPolicy(allowed_hosts=["packages.example.test"], max_artifact_bytes=1),
+        )
+    assert called is False
+
+
 def test_dependency_artifact_bounds_and_duplicate_names_are_rejected():
     with pytest.raises(ValidationError):
         DependencyPolicy(allowed_hosts=["packages.example.test", "PACKAGES.example.test"])

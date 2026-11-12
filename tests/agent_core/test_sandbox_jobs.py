@@ -134,6 +134,8 @@ def test_catalog_mode_lazily_constructs_only_requested_program(command_jobs, mon
     )
     try:
         assert calls == []
+        assert selected.configured_programs() == ["python"]
+        assert selected.available_programs() == []
         with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
             selected.submit(
                 env,
@@ -167,6 +169,38 @@ def test_catalog_mode_truthfully_hides_dev_profile_without_explicit_gate(command
             selected.submit(env, project, str(uuid.uuid4()), command(project))
     finally:
         selected.close()
+
+
+def test_finished_record_can_be_read_when_runtime_probe_is_unavailable(command_jobs, monkeypatch):
+    broker, jobs, env, project = command_jobs
+    operation = str(uuid.uuid4())
+    command_body = command(project)
+    row = {
+        "operation_id": operation,
+        "environment_id": env,
+        "project_id": project,
+        "request_hash": jobs._request_digest(
+            env,
+            command_body,
+            jobs.runner.identity,
+            getattr(jobs.runner, "runtime_fingerprint", None),
+            "python",
+            "command",
+        ),
+        "command": command_body,
+        "image": jobs.runner.identity,
+        "runtime_fingerprint": getattr(jobs.runner, "runtime_fingerprint", None),
+        "kind": "command",
+        "program": "python",
+        "status": "finished",
+        "generation": 1,
+        "receipt": {"cleanup": "clean", "code": None},
+    }
+    broker._save(jobs.filename(operation), row)
+    monkeypatch.setattr(
+        jobs, "_runner_for", lambda _program: (_ for _ in ()).throw(AssertionError())
+    )
+    assert jobs.submit(env, project, operation, command_body) == row
 
 
 def test_original_operation_is_never_executed_twice(command_jobs):

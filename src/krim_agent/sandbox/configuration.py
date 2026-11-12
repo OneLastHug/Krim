@@ -24,7 +24,6 @@ class SandboxConfiguration(StrictModel):
     broker_socket: Path | None = None
     broker_owner_uid: int = Field(default=0, ge=0)
     command_image: str | None = None
-    command_purpose: Literal["normal_job"] = "normal_job"
     runtime_manifest: Path | None = None
     allow_dev_runtimes: bool = False
     quotas: QuotaPolicy = Field(default_factory=QuotaPolicy)
@@ -49,7 +48,7 @@ class SandboxConfiguration(StrictModel):
         if self.runtime_manifest is not None:
             if not self.runtime_manifest.is_absolute() or self.command_image is None:
                 raise ValueError("运行时manifest必须为绝对路径并绑定command_image")
-            entry = RuntimeCatalog.load(self.runtime_manifest).entry("python", self.command_purpose)
+            entry = RuntimeCatalog.load(self.runtime_manifest).entry("python", "normal_job")
             if entry.availability == "dev_verified" and not self.allow_dev_runtimes:
                 raise ValueError("dev运行时必须显式允许")
             if entry.image is not None and entry.image != self.command_image:
@@ -61,9 +60,10 @@ class SandboxConfiguration(StrictModel):
         return self
 
     def resolve_runtime(self, program: ProfileProgram) -> ResolvedRuntime | None:
+        """Resolve only the normal-job command runtime; installs/connectors stay closed."""
         if self.runtime_manifest is not None:
             return RuntimeCatalog.load(self.runtime_manifest).resolve(
-                program, self.command_purpose, allow_dev=self.allow_dev_runtimes
+                program, "normal_job", allow_dev=self.allow_dev_runtimes
             )
         if program != "python" or self.command_image is None:
             raise ServiceError("sandbox_backend_unavailable", 503)

@@ -202,8 +202,7 @@ async def execute_command(
                 else health.get("image") if program == "python" else None
             )
             if (
-                not health.get("execution_available")
-                or program not in health.get("available_programs", ["python"])
+                program not in health.get("configured_programs", ["python"])
                 or runtime_image != intent["image"]
                 or intent["runtime_fingerprint"] is not None
                 and runtime_health.get("fingerprint") != intent["runtime_fingerprint"]
