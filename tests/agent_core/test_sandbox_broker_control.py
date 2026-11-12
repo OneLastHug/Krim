@@ -21,6 +21,14 @@ class FakeBroker:
         if self.fail_once:
             self.fail_once = False
             raise ServiceError("sandbox_backend_unavailable", 503)
+        if action == "runtime_probe":
+            image = "sha256:" + "a" * 64
+            return {
+                "program": arguments["program"],
+                "image": image,
+                "image_id": image,
+                "fingerprint": None,
+            }
         if action == "usage":
             return {
                 "usage": {

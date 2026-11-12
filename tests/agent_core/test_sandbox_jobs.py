@@ -203,6 +203,32 @@ def test_finished_record_can_be_read_when_runtime_probe_is_unavailable(command_j
     assert jobs.submit(env, project, operation, command_body) == row
 
 
+def test_intent_record_reconciles_orphaned_lease_without_execution(command_jobs):
+    broker, jobs, env, project = command_jobs
+    operation = str(uuid.uuid4())
+    lease = broker.leases.claim(project, operation, deadline=time.time() + 60)
+    lease.release(clean=False)
+    broker._save(
+        jobs.filename(operation),
+        {
+            "operation_id": operation,
+            "environment_id": env,
+            "project_id": project,
+            "request_hash": "intent",
+            "program": "python",
+            "kind": "command",
+            "status": "intent",
+            "lease_claimed": False,
+            "generation": 0,
+            "receipt": None,
+        },
+    )
+    result = jobs.status(env, project, operation)
+    assert result["status"] == "finished"
+    assert result["receipt"]["executor_started"] is False
+    assert broker.leases.status(project)["status"] == "idle"
+
+
 def test_original_operation_is_never_executed_twice(command_jobs):
     _, jobs, env, project = command_jobs
     operation = str(uuid.uuid4())

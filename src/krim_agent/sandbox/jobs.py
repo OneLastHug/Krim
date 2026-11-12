@@ -217,6 +217,8 @@ class CommandJobs:
                     raise ServiceError("not_found", 404)
                 if previous.get("kind", "command") != kind:
                     raise ServiceError("key_conflict")
+                if not all(key in previous for key in ("command", "image", "runtime_fingerprint")):
+                    raise ServiceError("sandbox_operation_unknown")
                 if all(key in previous for key in ("command", "image", "runtime_fingerprint")):
                     digest = self._request_digest(
                         environment_id,
@@ -276,7 +278,6 @@ class CommandJobs:
             project = self.broker._project(environment_id, project_id)
             if project.get("generation", 0) != values.expected_generation:
                 raise ServiceError("input_revision_conflict")
-            lease = self.broker.leases.claim(project_id, operation_id, deadline=time.time() + 120)
             cancel = threading.Event()
             record = {
                 "operation_id": operation_id,
@@ -285,7 +286,8 @@ class CommandJobs:
                 "request_hash": digest,
                 "program": requested_program,
                 "kind": kind,
-                "status": "accepted",
+                "status": "intent",
+                "lease_claimed": False,
                 "generation": values.expected_generation,
                 "receipt": None,
             }
@@ -298,11 +300,11 @@ class CommandJobs:
                         if runner is not None else None
                     ),
                 )
-            try:
-                self.broker._save(self.filename(operation_id), record)
-            except BaseException:
-                lease.release(clean=True)
-                raise
+            self.broker._save(self.filename(operation_id), record)
+            lease = self.broker.leases.claim(project_id, operation_id, deadline=time.time() + 120)
+            record["status"] = "accepted"
+            record["lease_claimed"] = True
+            self.broker._save(self.filename(operation_id), record)
             state = {
                 "environment_id": environment_id,
                 "cancel": cancel,
@@ -539,6 +541,23 @@ class CommandJobs:
             ):
                 raise ServiceError("not_found", 404)
             active = self.active.get(operation_id)
+            if active is None and row.get("status") == "intent":
+                lease = self.broker.leases.status(project_id)
+                if lease.get("lease_id") == operation_id:
+                    self.broker.leases.reconcile(project_id, operation_id, stopped=True)
+                row["status"] = "finished"
+                row["lease_claimed"] = False
+                row["receipt"] = {
+                    "executor_started": False,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "output_complete": True,
+                    "cleanup": "clean",
+                    "code": "cancelled",
+                }
+                self.broker._save(self.filename(operation_id), row)
+                return row
             if active is not None:
                 if renew:
                     active["permit"] = time.time() + 5

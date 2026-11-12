@@ -194,16 +194,20 @@ async def execute_command(
         scope.check()
         if accepted.get("new"):
             health = await broker.call("health")
-            raw_runtime_health = health.get("runtimes", {}).get(program, {})
-            runtime_health = raw_runtime_health if isinstance(raw_runtime_health, dict) else {}
+            runtime_health = health.get("runtimes", {}).get(program, {})
+            runtime_health = runtime_health if isinstance(runtime_health, dict) else {}
             runtime_image = (
                 runtime_health.get("image")
                 if runtime_health
                 else health.get("image") if program == "python" else None
             )
+            if program not in health.get("configured_programs", ["python"]):
+                raise ServiceError("target_binding_changed")
+            if isinstance(values, SandboxCommand):
+                runtime_health = await broker.call("runtime_probe", program=program)
+                runtime_image = runtime_health.get("image")
             if (
-                program not in health.get("configured_programs", ["python"])
-                or runtime_image != intent["image"]
+                runtime_image != intent["image"]
                 or intent["runtime_fingerprint"] is not None
                 and runtime_health.get("fingerprint") != intent["runtime_fingerprint"]
             ):
