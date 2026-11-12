@@ -562,30 +562,16 @@ class CommandJobs:
                     self.broker.leases.reconcile(project_id, operation_id, stopped=True)
                 elif lease.get("status") != "idle":
                     raise ServiceError("sandbox_operation_unknown")
-                if row.get("lease_claimed") is not True:
-                    row["status"] = "unknown"
-                    row["lease_claimed"] = False
-                    row["receipt"] = {
-                        "executor_started": False,
-                        "exit_code": None,
-                        "stdout": "",
-                        "stderr": "",
-                        "output_complete": False,
-                        "cleanup": "unknown",
-                        "code": "execution_unknown",
-                    }
-                    self.broker._save(self.filename(operation_id), row)
-                    raise ServiceError("sandbox_operation_unknown")
-                row["status"] = "finished"
+                row["status"] = "finished" if row.get("lease_claimed") is True else "unknown"
                 row["lease_claimed"] = False
                 row["receipt"] = {
                     "executor_started": False,
                     "exit_code": None,
                     "stdout": "",
                     "stderr": "",
-                    "output_complete": True,
-                    "cleanup": "clean",
-                    "code": "cancelled",
+                    "output_complete": row["status"] == "finished",
+                    "cleanup": "clean" if row["status"] == "finished" else "unknown",
+                    "code": "cancelled" if row["status"] == "finished" else "execution_unknown",
                 }
                 self.broker._save(self.filename(operation_id), row)
                 return row
@@ -637,6 +623,10 @@ class CommandJobs:
                 or row["project_id"] != project_id
             ):
                 raise ServiceError("not_found", 404)
+            if row.get("project_blocked"):
+                project = self.broker._project(environment_id, project_id)
+                project["status"] = "blocked"
+                self.broker._save("project-" + project_id + ".json", project)
             if row["status"] == "finished" and row.get("reconciled"):
                 return row
             if row["status"] == "finished" and row.get("receipt", {}).get("cleanup") == "clean":
@@ -644,6 +634,7 @@ class CommandJobs:
             if row.get("status") != "reconciling":
                 row["status"] = "reconciling"
                 row["reconcile_generation"] = row["generation"] + 1
+                row["project_blocked"] = True
                 self.broker._save(self.filename(operation_id), row)
             if row.get("kind", "command") == "command":
                 stopped = self._runner_for(row.get("program", "python")).stop(operation_id)
@@ -680,6 +671,7 @@ class CommandJobs:
             row["reconciled"] = True
             row["generation"] = project["generation"]
             row.pop("reconcile_generation", None)
+            row.pop("project_blocked", None)
             self.broker._save(self.filename(operation_id), row)
             if row.get("kind", "command") == "command":
                 try:

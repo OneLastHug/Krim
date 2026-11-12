@@ -359,6 +359,7 @@ def test_reconcile_reenters_reconciling_record_without_replaying(command_jobs, m
             "status": "reconciling",
             "generation": 0,
             "reconcile_generation": 1,
+            "project_blocked": True,
             "kind": "file",
             "receipt": {"cleanup": "clean", "exit_code": None},
         },
