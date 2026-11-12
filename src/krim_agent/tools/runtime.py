@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
 from krim_agent.contracts import ServiceError, parse_json
 from krim_agent.mcp import MCPConnection, MCPServerConfig
+from krim_agent.network.egress_policy import EgressPolicy, EgressViolation
 from krim_agent.runtime.contracts import settled
 from krim_agent.web_access import TavilyWebAccess, WebAccessConfig
 
@@ -45,15 +47,17 @@ class ToolRuntimeConfig:
         ):
             raise ValueError("外部工具配置无效")
         copied = dict(self.tool_overrides)
-        if len(copied) > 16 or any(
-            not isinstance(k, str) or not isinstance(v, str) for k, v in copied.items()
-        ):
+        if len(copied) > 16:
+            raise ServiceError("tool_limit", 422)
+        if any(not isinstance(k, str) or not isinstance(v, str) for k, v in copied.items()):
             raise ValueError("工具覆盖配置无效")
         object.__setattr__(self, "mcp_servers", servers)
         object.__setattr__(self, "tool_overrides", MappingProxyType(copied))
         if self.public_tools is not None:
             names = tuple(self.public_tools)
-            if len(names) > 16 or len(names) != len(set(names)):
+            if len(names) > 16:
+                raise ServiceError("tool_limit", 422)
+            if len(names) != len(set(names)):
                 raise ValueError("公开工具选择无效")
             object.__setattr__(self, "public_tools", names)
 
@@ -62,10 +66,8 @@ class ToolRuntimeConfig:
         """JSON只引用凭据变量名，不接受浏览器上传或配置内的明文Key。"""
         environment = os.environ if environment is None else environment
         try:
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
-                raise ValueError("配置必须是有界普通文件")
-            body = parse_json(path.read_text(encoding="utf-8"))
+            raw = _read_runtime_config(path)
+            body = parse_json(raw.decode("utf-8"))
             if not isinstance(body, dict) or set(body) - {
                 "web",
                 "mcp_servers",
@@ -137,6 +139,256 @@ class ToolRuntimeConfig:
             raise ServiceError("invalid_input", 422) from None
 
 
+def _validate_windows_acl(descriptor: int) -> None:
+    """Require a user-owned config without write ACEs for broad principals."""
+    if os.name != "nt":
+        return
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    security_descriptor = ctypes.c_void_p()
+    owner_sid = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    get_security_info = advapi32.GetSecurityInfo
+    get_security_info.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = wintypes.DWORD
+    result = get_security_info(
+        wintypes.HANDLE(msvcrt.get_osfhandle(descriptor)),
+        1,  # SE_FILE_OBJECT
+        0x00000001 | 0x00000004,  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+        ctypes.byref(owner_sid),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(security_descriptor),
+    )
+    if result != 0:
+        raise ValueError("无法读取配置文件ACL")
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = [("user", _SidAndAttributes)]
+
+    class _AceHeader(ctypes.Structure):
+        _fields_ = [
+            ("ace_type", ctypes.c_ubyte),
+            ("ace_flags", ctypes.c_ubyte),
+            ("ace_size", wintypes.WORD),
+        ]
+
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    token = wintypes.HANDLE()
+    allocated_sids: list[ctypes.c_void_p] = []
+    try:
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+        ):
+            raise ValueError("无法读取当前用户Token")
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        if not size.value:
+            raise ValueError("无法读取当前用户SID")
+        token_buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token, 1, token_buffer, size, ctypes.byref(size)
+        ):
+            raise ValueError("无法读取当前用户SID")
+        current_sid = ctypes.cast(token_buffer, ctypes.POINTER(_TokenUser)).contents.user.sid
+
+        get_security_descriptor_owner = advapi32.GetSecurityDescriptorOwner
+        get_security_descriptor_owner.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_security_descriptor_owner.restype = wintypes.BOOL
+        owner_defaulted = wintypes.BOOL()
+        if not get_security_descriptor_owner(
+            security_descriptor, ctypes.byref(owner_sid), ctypes.byref(owner_defaulted)
+        ):
+            raise ValueError("无法读取配置文件所有者")
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        equal_sid.restype = wintypes.BOOL
+        if not equal_sid(owner_sid, current_sid):
+            raise ValueError("配置文件所有者不可信")
+
+        # A null DACL grants full access to everyone, so it is never trusted.
+        get_security_descriptor_dacl = advapi32.GetSecurityDescriptorDacl
+        get_security_descriptor_dacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_security_descriptor_dacl.restype = wintypes.BOOL
+        dacl_present = wintypes.BOOL()
+        dacl_defaulted = wintypes.BOOL()
+        if not get_security_descriptor_dacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ) or not dacl_present.value or not dacl.value:
+            raise ValueError("配置文件ACL缺失")
+
+        class _Acl(ctypes.Structure):
+            _fields_ = [
+                ("revision", ctypes.c_ubyte),
+                ("sbz1", ctypes.c_ubyte),
+                ("size", wintypes.WORD),
+                ("ace_count", wintypes.WORD),
+                ("sbz2", wintypes.WORD),
+            ]
+
+        acl = ctypes.cast(dacl, ctypes.POINTER(_Acl)).contents
+        get_ace = advapi32.GetAce
+        get_ace.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+        get_ace.restype = wintypes.BOOL
+        write_mask = 0x00000002 | 0x00000004 | 0x00000010 | 0x00000100
+        write_mask |= 0x00010000 | 0x00040000 | 0x00080000 | 0x40000000 | 0x10000000
+        allowed_ace_types = {0}  # Standard ACCESS_ALLOWED_ACE_TYPE.
+        known_non_grant_types = {1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 17, 18, 19, 20, 21}
+        permitted_sids: list[ctypes.c_void_p] = [current_sid]
+        convert_sid = advapi32.ConvertStringSidToSidW
+        convert_sid.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+        convert_sid.restype = wintypes.BOOL
+        for value in ("S-1-5-18", "S-1-5-32-544"):
+            sid = ctypes.c_void_p()
+            if not convert_sid(value, ctypes.byref(sid)):
+                raise ValueError("无法读取系统ACL主体")
+            allocated_sids.append(sid)
+            permitted_sids.append(sid)
+
+        for index in range(acl.ace_count):
+            ace = ctypes.c_void_p()
+            if not get_ace(dacl, index, ctypes.byref(ace)):
+                raise ValueError("无法读取配置文件ACE")
+            header = ctypes.cast(ace, ctypes.POINTER(_AceHeader)).contents
+            if header.ace_type not in allowed_ace_types:
+                if header.ace_type in known_non_grant_types:
+                    continue
+                raise ValueError("配置文件ACL含未知ACE类型")
+            mask = ctypes.c_uint32.from_address(ace.value + ctypes.sizeof(_AceHeader)).value
+            if not mask & write_mask:
+                continue
+            sid_offset = 8
+            ace_sid = ctypes.c_void_p(ace.value + sid_offset)
+            if not any(equal_sid(ace_sid, permitted) for permitted in permitted_sids):
+                raise ValueError("配置文件ACL允许不可信主体写入")
+    finally:
+        for sid in allocated_sids:
+            kernel32.LocalFree(sid)
+        if token.value:
+            kernel32.CloseHandle(token)
+        if security_descriptor.value:
+            kernel32.LocalFree(security_descriptor)
+
+
+def _read_runtime_config(path: Path) -> bytes:
+    if not isinstance(path, Path):
+        raise ValueError("配置路径无效")
+    path = path.absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("配置路径不得包含符号链接")
+    known = path.lstat()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size)
+        known_identity = (
+            known.st_dev, known.st_ino, known.st_mode, known.st_nlink, known.st_size
+        )
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_size > 65536
+            or identity != known_identity
+            or os.name == "posix"
+            and (
+                info.st_mode & 0o077
+                or not hasattr(os, "geteuid")
+                or info.st_uid != os.geteuid()
+            )
+        ):
+            raise ValueError("配置必须是权限受限的有界普通文件")
+        try:
+            _validate_windows_acl(descriptor)
+        except Exception:
+            raise ValueError("配置文件ACL无效") from None
+        chunks: list[bytes] = []
+        remaining = 65537
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        path_after = path.lstat()
+        if (
+            len(raw) != info.st_size
+            or len(raw) > 65536
+            or (after.st_dev, after.st_ino, after.st_size, after.st_nlink)
+            != (info.st_dev, info.st_ino, info.st_size, info.st_nlink)
+            or (path_after.st_dev, path_after.st_ino) != (info.st_dev, info.st_ino)
+            or any(part.is_symlink() for part in (path, *path.parents))
+        ):
+            raise ValueError("配置文件在读取期间发生变化")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _mcp_egress_policy(server: MCPServerConfig) -> EgressPolicy:
+    try:
+        parsed = urlsplit(server.url or "")
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if host is None:
+            raise ValueError("MCP endpoint is missing a host")
+        policy_type = EgressPolicy.authorize_loopback if parsed.scheme == "http" else EgressPolicy
+        return policy_type({host}, {port})
+    except (EgressViolation, ValueError):
+        raise ServiceError("invalid_input", 422) from None
+
+
 def _credential(name: object, env: Mapping[str, str], *, required: bool = True) -> str:
     if not isinstance(name, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", name) is None:
         raise ValueError("凭据变量名无效")
@@ -175,7 +427,12 @@ class ToolRuntime:
                 web = TavilyWebAccess(config.web or WebAccessConfig())
                 specs.extend(web_tools(web))
             for server in config.mcp_servers:
-                connection = MCPConnection(server)
+                if server.transport == "streamable_http":
+                    connection = MCPConnection(
+                        server, egress_policy=_mcp_egress_policy(server)
+                    )
+                else:
+                    connection = MCPConnection(server)
                 connections.append(connection)
                 await connection.connect()
                 specs.extend(mcp_tools(connection))

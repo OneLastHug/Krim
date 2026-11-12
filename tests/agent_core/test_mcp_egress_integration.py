@@ -2,7 +2,6 @@
 
 from contextlib import asynccontextmanager
 
-import httpx
 import pytest
 from test_mcp_client import _install_fake_sdk, _stdio_config
 
@@ -57,7 +56,7 @@ def test_http_policy_cannot_claim_to_protect_stdio():
         MCPConnection(_stdio_config(), egress_policy=EgressPolicy({"example.com"}, {443}))
 
 
-async def test_existing_host_mcp_retains_normal_client(monkeypatch):
+async def test_direct_http_connection_defaults_to_pinned_client(monkeypatch):
     _install_fake_sdk(monkeypatch)
     sdk = client_module._load_sdk()
     observed = []
@@ -71,4 +70,4 @@ async def test_existing_host_mcp_retains_normal_client(monkeypatch):
     connection = MCPConnection(config())
     await connection.connect()
     await connection.close()
-    assert observed == [httpx.AsyncHTTPTransport]
+    assert observed == [PinnedAsyncTransport]

@@ -437,6 +437,16 @@ async def test_response_streams_body_and_close_is_preserved() -> None:
     assert backend.streams[0].closed is True
 
 
+async def test_cleartext_http_dns_must_resolve_only_to_loopback() -> None:
+    policy = EgressPolicy.authorize_loopback({"localhost"}, {8399})
+    resolver = FakeResolver({"localhost": ("1.2.3.4",)})
+    backend = RecordingBackend()
+    async with make_http_client(policy, resolver=resolver, network_backend=backend) as client:
+        with pytest.raises(EgressViolation):
+            await client.get("http://localhost:8399/")
+    assert backend.attempts == []
+
+
 async def test_loopback_clearance_end_to_end() -> None:
     resolver = FakeResolver({"localhost": ("127.0.0.1", "::1")})
     backend = RecordingBackend()
