@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
+import json
 import os
+import re
 import stat
 import unicodedata
 import uuid
@@ -17,6 +20,14 @@ from krim_agent.contracts import ServiceError
 
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 MAX_FILE = 4 * 1024**2
+MAX_SEARCH_PATTERN_BYTES = 256
+MAX_SEARCH_ENTRIES = 4096
+MAX_SEARCH_BYTES = 32 * 1024**2
+MAX_REGEX_SEARCH_BYTES = 512 * 1024
+MAX_REGEX_PATTERN_BYTES = 64
+MAX_REGEX_LINE_CHARS = 1024
+MAX_SEARCH_MATCHES = 4096
+MAX_SEARCH_RESULT_BYTES = 64 * 1024
 
 
 def _uuid(value: str) -> str:
@@ -53,6 +64,52 @@ def _parts(path: str, *, directory: bool = False) -> tuple[str, ...]:
     ):
         raise ServiceError("permission_denied", 403)
     return parts
+
+
+def glob_matches(path: str, pattern: str) -> bool:
+    path_parts = path.split("/")
+    pattern_parts = pattern.split("/")
+    reachable = {0}
+    for pattern_part in pattern_parts:
+        next_reachable: set[int] = set()
+        if pattern_part == "**":
+            for start in reachable:
+                next_reachable.update(range(start, len(path_parts) + 1))
+        else:
+            next_reachable.update(
+                index + 1
+                for index in reachable
+                if index < len(path_parts)
+                and fnmatch.fnmatchcase(path_parts[index], pattern_part)
+            )
+        reachable = next_reachable
+        if not reachable:
+            return False
+    return len(path_parts) in reachable
+
+
+def validate_glob(pattern: str) -> str:
+    if (
+        type(pattern) is not str
+        or not pattern
+        or len(pattern.encode("utf-8")) > MAX_SEARCH_PATTERN_BYTES
+        or not any(char in pattern for char in "*?[")
+        or "\\" in pattern
+        or any(part in {"", ".", ".."} for part in pattern.split("/"))
+        or any(unicodedata.category(char).startswith("C") for char in pattern)
+    ):
+        raise ServiceError("invalid_input", 422)
+    protected = (".git", ".ssh", ".aws", ".env", "credentials", "id_rsa", "id_ed25519")
+    for segment in pattern.split("/"):
+        if segment.lower() == ".env" or segment.lower().startswith(".env."):
+            raise ServiceError("permission_denied", 403)
+        try:
+            _parts(segment)
+        except ServiceError:
+            raise ServiceError("permission_denied", 403) from None
+        if any(char in segment for char in "*?[") and segment.lower().startswith(protected):
+            raise ServiceError("permission_denied", 403)
+    return pattern
 
 
 class ProjectFiles:
@@ -207,6 +264,84 @@ class ProjectFiles:
             "offset": offset,
             "next_offset": following if following < total else None,
             "total": total,
+        }
+
+    def find(
+        self,
+        environment_id: str,
+        project_id: str,
+        *,
+        path: str = ".",
+        include_glob: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        names = _parts(path, directory=True)
+        validate_glob(include_glob)
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 100
+            or type(offset) is not int
+            or not 0 <= offset < MAX_SEARCH_ENTRIES
+            or offset + limit > MAX_SEARCH_ENTRIES
+        ):
+            raise ServiceError("invalid_input", 422)
+        found: list[dict[str, Any]] = []
+        count = 0
+        entry_cap = False
+        depth_cap = False
+
+        def walk(directory: int, prefix: str, depth: int) -> None:
+            nonlocal count, entry_cap, depth_cap
+            with os.scandir(directory) as listing:
+                items = sorted(
+                    ((entry.name, entry.stat(follow_symlinks=False)) for entry in listing),
+                    key=lambda item: item[0],
+                )
+            for name, info in items:
+                if entry_cap:
+                    return
+                count += 1
+                if count > MAX_SEARCH_ENTRIES:
+                    entry_cap = True
+                    return
+                full = prefix + name
+                try:
+                    _parts(full)
+                except ServiceError:
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    if depth >= 16:
+                        depth_cap = True
+                        continue
+                    if depth < 16:
+                        child = os.open(name, FLAGS, dir_fd=directory)
+                        try:
+                            if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (info.st_dev, info.st_ino):
+                                raise ServiceError("artifact_conflict")
+                            walk(child, full + "/", depth + 1)
+                        finally:
+                            os.close(child)
+                    continue
+                matches_glob = glob_matches(full, include_glob)
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and matches_glob:
+                    found.append({"path": full, "size": info.st_size})
+
+        with self._content(environment_id, project_id) as content, self._parent(content, names) as fd:
+            walk(fd, "/".join(names) + "/" if names else "", 0)
+        page = found[offset : offset + limit]
+        return {
+            "path": path,
+            "include_glob": include_glob,
+            "files": page,
+            "offset": offset,
+            "total": None if entry_cap or depth_cap else len(found),
+            "next_offset": None
+            if entry_cap or depth_cap
+            else (offset + len(page) if offset + len(page) < len(found) else None),
+            "truncated": entry_cap or depth_cap,
+            "entry_cap_reached": entry_cap,
+            "depth_cap_reached": depth_cap,
         }
 
     def read(
@@ -441,78 +576,122 @@ class ProjectFiles:
         query: str,
         path: str = ".",
         limit: int = 50,
+        offset: int = 0,
+        include_glob: str | None = None,
+        mode: str = "literal",
+        case_sensitive: bool = True,
+        before: int = 0,
+        after: int = 0,
     ) -> dict[str, Any]:
-        """有界文本搜索；只读API允许的普通文件，命中限额、字节或深度上限都明确标注。"""
+        """有界文本搜索；regex刻意限制为无量词/分组/回溯的安全子集。"""
         names = _parts(path, directory=True)
         if (
             type(query) is not str
+            or mode not in {"literal", "regex"}
+            or not query.strip()
+            or not 1 <= len(query.encode("utf-8")) <= MAX_SEARCH_PATTERN_BYTES
             or type(limit) is not int
             or not 1 <= limit <= 100
-            or not 1 <= len(query.encode("utf-8")) <= 256
+            or type(offset) is not int
+            or not 0 <= offset < MAX_SEARCH_MATCHES
+            or offset + limit > MAX_SEARCH_MATCHES
+            or type(case_sensitive) is not bool
+            or type(before) is not int
+            or not 0 <= before <= 3
+            or type(after) is not int
+            or not 0 <= after <= 3
         ):
             raise ServiceError("invalid_input", 422)
+        if include_glob is not None:
+            validate_glob(include_glob)
+        matcher: re.Pattern[str] | None = None
+        if mode == "regex":
+            # Only single-character escapes and character classes are supported. No
+            # groups, alternation, quantifiers, anchors, or backreferences are exposed.
+            if (
+                len(query.encode("utf-8")) > MAX_REGEX_PATTERN_BYTES
+                or any(char in query for char in "*+?{}()|^$")
+                or any(
+                    query[index] == "\\" and query[index + 1] not in "dDsSwW.[]-\\"
+                    for index in range(len(query) - 1)
+                )
+                or re.search(r"\\[1-9]", query)
+            ):
+                raise ServiceError("invalid_input", 422)
+            try:
+                matcher = re.compile(query, 0 if case_sensitive else re.IGNORECASE)
+            except re.error:
+                raise ServiceError("invalid_input", 422) from None
+        elif not case_sensitive:
+            query = query.casefold()
+
         matches: list[dict[str, Any]] = []
+        result_bytes = 0
         scanned_bytes = 0
         skipped = 0
-        truncated = False
-        byte_cap = False
-        depth_cap = False
+        total_matches = 0
+        entry_cap = byte_cap = depth_cap = match_cap = False
         count = 0
 
         def scan(directory: int, prefix: str, depth: int) -> None:
-            nonlocal count, scanned_bytes, skipped, truncated, byte_cap, depth_cap
+            nonlocal count, scanned_bytes, skipped, total_matches, result_bytes
+            nonlocal entry_cap, byte_cap, depth_cap, match_cap
             with os.scandir(directory) as listing:
                 items = sorted(
                     ((entry.name, entry.stat(follow_symlinks=False)) for entry in listing),
                     key=lambda item: item[0],
                 )
-            for name, before in items:
+            for name, before_info in items:
+                if entry_cap or match_cap:
+                    return
                 count += 1
-                if count > 4096:
-                    raise ServiceError("artifact_limit")
-                if truncated:
+                if count > MAX_SEARCH_ENTRIES:
+                    entry_cap = True
                     return
                 full = prefix + name
                 try:
                     _parts(full)
                 except ServiceError:
                     continue
-                if stat.S_ISDIR(before.st_mode):
+                if stat.S_ISDIR(before_info.st_mode):
                     if depth >= 16:
                         depth_cap = True
                         continue
                     child = os.open(name, FLAGS, dir_fd=directory)
                     try:
                         if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (
-                            before.st_dev,
-                            before.st_ino,
+                            before_info.st_dev,
+                            before_info.st_ino,
                         ):
                             raise ServiceError("artifact_conflict")
                         scan(child, full + "/", depth + 1)
                     finally:
                         os.close(child)
                     continue
-                if not (stat.S_ISREG(before.st_mode) and before.st_nlink == 1):
+                if not (stat.S_ISREG(before_info.st_mode) and before_info.st_nlink == 1):
                     continue
-                if before.st_size > MAX_FILE:
+                if include_glob is not None and not glob_matches(full, include_glob):
+                    continue
+                if before_info.st_size > MAX_FILE:
                     skipped += 1
                     continue
-                if scanned_bytes + before.st_size > 32 * 1024**2:
+                byte_limit = MAX_REGEX_SEARCH_BYTES if mode == "regex" else MAX_SEARCH_BYTES
+                if scanned_bytes + before_info.st_size > byte_limit:
                     skipped += 1
                     byte_cap = True
                     continue
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                 try:
                     actual = self._regular(fd)
-                    if (actual.st_dev, actual.st_ino) != (before.st_dev, before.st_ino):
+                    if (actual.st_dev, actual.st_ino) != (before_info.st_dev, before_info.st_ino):
                         raise ServiceError("artifact_conflict")
                     body = os.pread(fd, actual.st_size, 0)
-                    after = os.fstat(fd)
+                    after_info = os.fstat(fd)
                     if len(body) != actual.st_size or (
                         actual.st_size,
                         actual.st_mtime_ns,
                         actual.st_ctime_ns,
-                    ) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    ) != (after_info.st_size, after_info.st_mtime_ns, after_info.st_ctime_ns):
                         raise ServiceError("artifact_conflict")
                 finally:
                     os.close(fd)
@@ -520,24 +699,55 @@ class ProjectFiles:
                 try:
                     text = body.decode("utf-8")
                 except UnicodeDecodeError:
+                    skipped += 1
                     continue
-                for number, line in enumerate(text.splitlines(), 1):
-                    if query in line:
-                        matches.append({"path": full, "line": number, "preview": line[:256]})
-                        if len(matches) >= limit:
-                            truncated = True
+                lines = text.splitlines()
+                if mode == "regex" and any(len(line) > MAX_REGEX_LINE_CHARS for line in lines):
+                    skipped += 1
+                    byte_cap = True
+                    continue
+                for index, line in enumerate(lines):
+                    subject = line if mode == "regex" or case_sensitive else line.casefold()
+                    hit = matcher.search(subject) is not None if matcher else query in subject
+                    if not hit:
+                        continue
+                    if total_matches >= MAX_SEARCH_MATCHES:
+                        match_cap = True
+                        return
+                    current = total_matches
+                    total_matches += 1
+                    if offset <= current < offset + limit:
+                        item = {
+                            "path": full,
+                            "line": index + 1,
+                            "preview": line[:256],
+                            "before": [v[:256] for v in lines[max(0, index-before):index]],
+                            "after": [v[:256] for v in lines[index+1:index+1+after]],
+                        }
+                        item_bytes = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+                        if result_bytes + item_bytes > MAX_SEARCH_RESULT_BYTES:
+                            match_cap = True
                             return
+                        result_bytes += item_bytes
+                        matches.append(item)
 
         with (
             self._content(environment_id, project_id) as content,
             self._parent(content, names) as fd,
         ):
-            # 命中路径始终相对项目根，便于直接用于read/write。
             scan(fd, "/".join(names) + "/" if names else "", 0)
+        next_offset = offset + len(matches) if offset + len(matches) < total_matches else None
+        scan_incomplete = entry_cap or match_cap or byte_cap or depth_cap
+        results_truncated = scan_incomplete or next_offset is not None
         return {
             "path": path,
+            "offset": offset,
             "matches": matches,
-            "truncated": truncated,
+            "total_matches": total_matches if not scan_incomplete else None,
+            "next_offset": next_offset if not scan_incomplete else None,
+            "truncated": results_truncated,
+            "entry_cap_reached": entry_cap,
+            "match_cap_reached": match_cap,
             "skipped": skipped,
             "scanned_bytes": scanned_bytes,
             "byte_cap_reached": byte_cap,
