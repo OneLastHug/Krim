@@ -562,6 +562,20 @@ class CommandJobs:
                     self.broker.leases.reconcile(project_id, operation_id, stopped=True)
                 elif lease.get("status") != "idle":
                     raise ServiceError("sandbox_operation_unknown")
+                if row.get("lease_claimed") is not True:
+                    row["status"] = "unknown"
+                    row["lease_claimed"] = False
+                    row["receipt"] = {
+                        "executor_started": False,
+                        "exit_code": None,
+                        "stdout": "",
+                        "stderr": "",
+                        "output_complete": False,
+                        "cleanup": "unknown",
+                        "code": "execution_unknown",
+                    }
+                    self.broker._save(self.filename(operation_id), row)
+                    raise ServiceError("sandbox_operation_unknown")
                 row["status"] = "finished"
                 row["lease_claimed"] = False
                 row["receipt"] = {
@@ -637,6 +651,8 @@ class CommandJobs:
                 stopped = {"State": {"ExitCode": None}}
             lease = self.broker.leases.status(project_id)
             if lease["status"] != "idle":
+                if lease.get("lease_id") != operation_id:
+                    raise ServiceError("sandbox_cleanup_required")
                 self.broker.leases.reconcile(project_id, operation_id, stopped=True)
             project = self.broker._project(environment_id, project_id)
             project["generation"] = max(
