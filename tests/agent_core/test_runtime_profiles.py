@@ -210,6 +210,10 @@ def test_wall_and_tool_timeout_coordination():
 
 
 def test_resource_and_path_boundaries():
+    node_profile = {"program": "node", "interpreter": "/usr/local/bin/node"}
+    for interpreter in ["/tmp/node-malicious", "/usr/bin/node", "/usr/local/bin/node-helper"]:
+        with pytest.raises(ValidationError):
+            RuntimeProfile.model_validate({**node_profile, "interpreter": interpreter})
     for patch in [
         {"memory_bytes": 2**34, "memory_swap_bytes": 2**34},
         {"memory_swap_bytes": 2**30 + 1},
@@ -225,6 +229,8 @@ def test_resource_and_path_boundaries():
         {"interpreter": "python3.12"},
         {"interpreter": "/usr/bin/../bin/python3.12"},
         {"interpreter": "/usr/bin/python3.12 "},
+        {"interpreter": "/opt/python-malicious"},
+        {"interpreter": "/opt/python3.12"},
         {"workdir": "workspace"},
         {"workdir": "/"},
         {"tmpfs": ({"destination": "/var/tmp", "size_bytes": 134217728},)},

@@ -211,12 +211,18 @@ class RunscRunner:
         }
         quota_period = actual["cpu.max"].split()
         profile = self.profile
-        # memory_swap_bytes==memory_bytes由模型强制，因此swap上限恒为0。
-        # cpu.max无配额（"max ..."/格式缺失）一律按限额漂移处理，失败即关闭。
+        # Docker writes integer quota/period values. Compare the expected integer
+        # quota for the actual period and allow one unit of kernel rounding.
+        try:
+            quota, period = (int(item) for item in quota_period)
+            expected_quota = round(profile.cpu_cores * period)
+        except (TypeError, ValueError, ZeroDivisionError):
+            raise ServiceError("sandbox_limit") from None
         if (
             len(quota_period) != 2
             or quota_period[0] == "max"
-            or abs(int(quota_period[0]) / int(quota_period[1]) - profile.cpu_cores) > 1e-9
+            or period <= 0
+            or abs(quota - expected_quota) > 1
             or actual["memory.max"] != str(profile.memory_bytes)
             or actual["memory.swap.max"] != str(profile.memory_swap_bytes - profile.memory_bytes)
             or actual["pids.max"] != str(profile.pids_limit)

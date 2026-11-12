@@ -174,8 +174,18 @@ def fetch_artifact(artifact: LockedArtifact, policy: DependencyPolicy) -> bytes:
         response = opener.open(request, timeout=policy.timeout_seconds)
         with response:
             length = response.headers.get("Content-Length")
-            if length is not None and int(length) != artifact.size_bytes:
-                raise ServiceError("artifact_conflict")
+            if length is not None:
+                if type(length) is not str or re.fullmatch(r"[0-9]+", length) is None:
+                    raise ServiceError("artifact_conflict")
+                normalized_length = length.lstrip("0") or "0"
+                max_length = str(policy.max_artifact_bytes)
+                if len(normalized_length) > len(max_length) or (
+                    len(normalized_length) == len(max_length) and normalized_length > max_length
+                ):
+                    raise ServiceError("artifact_limit")
+                declared_length = int(normalized_length)
+                if declared_length != artifact.size_bytes:
+                    raise ServiceError("artifact_conflict")
             digest = hashlib.sha256()
             body = bytearray()
             while True:

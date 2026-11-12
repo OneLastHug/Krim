@@ -479,6 +479,34 @@ def test_cgroup_verification_follows_injected_profile(
             runner._cgroup({"State": {"Pid": FAKE_PID}})
 
 
+@pytest.mark.parametrize("cores", [0.1, 1.0, 3.0])
+def test_cgroup_integer_quota_uses_profile_and_rounding_tolerance(
+    fake_docker: FakeDocker,
+    monkeypatch: pytest.MonkeyPatch,
+    cores: float,
+):
+    runner = make_runner(runtime_for(profile_with(cpu_cores=cores)))
+    period = 100000
+    quota = round(cores * period)
+    values = {
+        "cpu.max": f"{quota} {period}",
+        "memory.max": "1073741824",
+        "memory.swap.max": "0",
+        "pids.max": "512",
+    }
+    install_cgroup_fs(monkeypatch, FAKE_PID, values)
+    assert runner._cgroup({"State": {"Pid": FAKE_PID}}) == values
+
+    rounded = {**values, "cpu.max": f"{quota + 1} {period}"}
+    install_cgroup_fs(monkeypatch, FAKE_PID, rounded)
+    runner._cgroup({"State": {"Pid": FAKE_PID}})
+
+    outside_tolerance = {**values, "cpu.max": f"{quota + 2} {period}"}
+    install_cgroup_fs(monkeypatch, FAKE_PID, outside_tolerance)
+    with pytest.raises(ServiceError, match="sandbox_limit"):
+        runner._cgroup({"State": {"Pid": FAKE_PID}})
+
+
 def test_cgroup_verification_keeps_legacy_defaults(
     fake_docker: FakeDocker, monkeypatch: pytest.MonkeyPatch
 ):
