@@ -204,7 +204,13 @@ async def execute_command(
             if program not in health.get("configured_programs", ["python"]):
                 raise ServiceError("target_binding_changed")
             if isinstance(values, SandboxCommand):
-                runtime_health = await broker.call("runtime_probe", program=program)
+                runtime_health = await broker.call(
+                    "runtime_probe",
+                    environment_id=intent["environment_id"],
+                    project_id=values.project_id,
+                    operation_id=operation_id,
+                    program=program,
+                )
                 runtime_image = runtime_health.get("image")
             if (
                 runtime_image != intent["image"]
@@ -260,8 +266,11 @@ async def execute_command(
                 "invalid_input",
                 "input_revision_conflict",
                 "permission_denied",
+                "target_binding_changed",
+                "sandbox_backend_unavailable",
             }
         ):
+            # These failures occur before a durable Broker job is accepted.
             submission_attempted = False
 
         async def stop_original() -> dict[str, Any]:
