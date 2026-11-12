@@ -289,6 +289,7 @@ class ProjectFiles:
         found: list[dict[str, Any]] = []
         count = 0
         entry_cap = False
+        root_prefix = "/".join(names) + "/" if names else ""
         depth_cap = False
 
         def walk(directory: int, prefix: str, depth: int) -> None:
@@ -307,23 +308,30 @@ class ProjectFiles:
                     return
                 full = prefix + name
                 try:
+                    _parts(name)
+                except ServiceError:
+                    continue
+                if len(names) + depth + 1 > 16:
+                    depth_cap = True
+                    continue
+                try:
                     _parts(full)
                 except ServiceError:
                     continue
                 if stat.S_ISDIR(info.st_mode):
-                    if depth >= 16:
-                        depth_cap = True
-                        continue
-                    if depth < 16:
-                        child = os.open(name, FLAGS, dir_fd=directory)
-                        try:
-                            if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (info.st_dev, info.st_ino):
-                                raise ServiceError("artifact_conflict")
-                            walk(child, full + "/", depth + 1)
-                        finally:
-                            os.close(child)
+                    child = os.open(name, FLAGS, dir_fd=directory)
+                    try:
+                        if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (
+                            info.st_dev,
+                            info.st_ino,
+                        ):
+                            raise ServiceError("artifact_conflict")
+                        walk(child, full + "/", depth + 1)
+                    finally:
+                        os.close(child)
                     continue
-                matches_glob = glob_matches(full, include_glob)
+                relative_path = full[len(root_prefix):] if full.startswith(root_prefix) else full
+                matches_glob = glob_matches(relative_path, include_glob)
                 if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and matches_glob:
                     found.append({"path": full, "size": info.st_size})
 
@@ -345,7 +353,15 @@ class ProjectFiles:
         }
 
     def read(
-        self, environment_id: str, project_id: str, path: str, offset: int = 0, limit: int = 65536
+        self,
+        environment_id: str,
+        project_id: str,
+        path: str,
+        offset: int = 0,
+        limit: int = 65536,
+        *,
+        expected_sha256: str | None = None,
+        expected_stat: list[int] | tuple[int, int, int, int, int] | None = None,
     ) -> dict[str, Any]:
         names = _parts(path)
         if (
@@ -353,6 +369,18 @@ class ProjectFiles:
             or offset < 0
             or type(limit) is not int
             or not 1 <= limit <= 65536
+            or (expected_sha256 is None) != (expected_stat is None)
+            or expected_sha256 is not None
+            and (
+                type(expected_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            )
+            or expected_stat is not None
+            and (
+                type(expected_stat) not in {list, tuple}
+                or len(expected_stat) != 5
+                or any(type(value) is not int or value < 0 for value in expected_stat)
+            )
         ):
             raise ServiceError("invalid_input", 422)
         with (
@@ -362,15 +390,25 @@ class ProjectFiles:
             handle = os.open(names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             try:
                 info = self._regular(handle)
+                initial_stat = (
+                    info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+                )
+                if expected_stat is not None and initial_stat != tuple(expected_stat):
+                    raise ServiceError("artifact_conflict")
                 if offset > info.st_size:
+                    if expected_stat is not None:
+                        raise ServiceError("artifact_conflict")
                     raise ServiceError("invalid_input", 422)
-                digest = self._hash(handle, info.st_size)
+                # 后续块复用首块摘要；调用方仍须校验完整拼接结果的SHA-256。
+                digest = (
+                    self._hash(handle, info.st_size)
+                    if expected_sha256 is None
+                    else expected_sha256
+                )
                 data = os.pread(handle, limit, offset)
                 after = os.fstat(handle)
-                if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
-                    after.st_size,
-                    after.st_mtime_ns,
-                    after.st_ctime_ns,
+                if initial_stat != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
                 ):
                     raise ServiceError("artifact_conflict")
                 return {
@@ -379,6 +417,7 @@ class ProjectFiles:
                     "size": info.st_size,
                     "eof": offset + len(data) >= info.st_size,
                     "sha256": digest,
+                    "stat_token": list(initial_stat),
                     "data": base64.b64encode(data).decode(),
                 }
             finally:
@@ -628,6 +667,7 @@ class ProjectFiles:
         matches: list[dict[str, Any]] = []
         result_bytes = 0
         scanned_bytes = 0
+        root_prefix = "/".join(names) + "/" if names else ""
         skipped = 0
         total_matches = 0
         entry_cap = byte_cap = depth_cap = match_cap = False
@@ -650,13 +690,17 @@ class ProjectFiles:
                     return
                 full = prefix + name
                 try:
+                    _parts(name)
+                except ServiceError:
+                    continue
+                if len(names) + depth + 1 > 16:
+                    depth_cap = True
+                    continue
+                try:
                     _parts(full)
                 except ServiceError:
                     continue
                 if stat.S_ISDIR(before_info.st_mode):
-                    if depth >= 16:
-                        depth_cap = True
-                        continue
                     child = os.open(name, FLAGS, dir_fd=directory)
                     try:
                         if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (
@@ -670,7 +714,8 @@ class ProjectFiles:
                     continue
                 if not (stat.S_ISREG(before_info.st_mode) and before_info.st_nlink == 1):
                     continue
-                if include_glob is not None and not glob_matches(full, include_glob):
+                relative_path = full[len(root_prefix):] if full.startswith(root_prefix) else full
+                if include_glob is not None and not glob_matches(relative_path, include_glob):
                     continue
                 if before_info.st_size > MAX_FILE:
                     skipped += 1
