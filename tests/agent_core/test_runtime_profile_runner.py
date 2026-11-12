@@ -404,13 +404,35 @@ def test_runtime_image_binding_and_legacy_image_validation(fake_docker: FakeDock
         make_runner(runtime_for(profile_with(), image="sha256:" + "a" * 64))
     with pytest.raises(ServiceError, match="sandbox_config_invalid"):
         RunscRunner("python:latest", str(uuid.uuid4()))
+    with pytest.raises(ServiceError, match="sandbox_config_invalid"):
+        RunscRunner("docker.io/library/python:3.12@sha256:" + "a" * 64, str(uuid.uuid4()))
     assert fake_docker.calls == []  # 镜像校验先于任何docker调用
 
 
-def test_node_runtime_is_refused_before_any_docker_call(fake_docker: FakeDocker):
-    with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
-        make_runner(node_runtime())
-    assert fake_docker.calls == []
+def test_node_runtime_builds_a_fixed_gate_without_shell_controls(
+    capture_only: FakeDocker, tmp_path: Path
+):
+    content = tmp_path / "content"
+    content.mkdir()
+    runner = make_runner(node_runtime())
+    runner.run(
+        str(uuid.uuid4()), content, ["--eval", "console.log(1)"], 5,
+        threading.Event(), observe,
+    )
+    args = capture_only.create_args
+    assert args is not None
+    image_index = args.index(DEV_IMAGE)
+    gate = args[image_index + 3]
+    assert args[image_index + 1 : image_index + 5] == [
+        "/usr/local/bin/node", "-e", gate, "--"
+    ]
+    assert "--disallow-code-generation-from-strings" in gate
+    assert "--max-old-space-size=512" in gate
+    assert "KRIM_GATE_READY\\n" in gate
+    assert "KRIM_PAYLOAD_START\\n" in gate
+    assert "shell:false" in gate
+    assert args[-2:] == ["--eval", "console.log(1)"]
+    assert "--network=none" in args and "--runtime=runsc" in args
 
 
 def test_cgroup_verification_follows_injected_profile(

@@ -30,7 +30,15 @@ class CommandBroker:
 
     async def call(self, action, **arguments):
         if action == "health":
-            return {"storage_available": True, "execution_available": True, "image": IMAGE}
+            return {
+                "storage_available": True,
+                "execution_available": True,
+                "image": IMAGE,
+                "available_programs": ["python"],
+                "runtimes": {
+                    "python": {"image": IMAGE, "fingerprint": None, "image_id": IMAGE}
+                },
+            }
         if action in {"command_start", "file_start"}:
             self.starts.append(arguments)
             return {"status": "accepted"}

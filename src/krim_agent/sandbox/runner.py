@@ -1,9 +1,7 @@
 """固定 runsc 容器执行；先握手核对宿主限制，再放行用户程序。
 
 docker创建参数、容器入口与cgroup核对值一律由注入的ResolvedRuntime规格生成；
-两参构造保持历史python默认参数（LEGACY_PYTHON_PROFILE，逐值等于profile化
-之前的固定参数）。node监管门尚未实现：注入node runtime在构造时即拒绝，
-不编造镜像、不静默联网构建。
+两参构造保持历史python默认参数。模型argv永远作为数组传递，不经过shell。
 """
 
 from __future__ import annotations
@@ -11,7 +9,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import selectors
 import subprocess
 import threading
@@ -22,13 +19,14 @@ from typing import Any
 
 from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.sandbox.runtime_profiles import (
+    IMAGE_REFERENCE,
     LEGACY_PYTHON_PROFILE,
     TMPFS_FLAGS,
     ResolvedRuntime,
 )
 from krim_agent.sandbox.xfs import internal_id, private_directory
 
-IMAGE = re.compile(r"(?:sha256:[0-9a-f]{64}|[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64})\Z")
+IMAGE = IMAGE_REFERENCE
 # LEGACY_PYTHON_PROFILE的输出上限；运行时以profile.output_limit_bytes为准。
 OUTPUT_LIMIT = 32768
 GATE = r"""
@@ -62,6 +60,47 @@ with selectors.DefaultSelector() as channels:
 code=child.wait()
 sys.exit(code if code>=0 else 128-code)
 """
+NODE_GATE = r"""
+// __KRIM_NODE_GATE__
+'use strict';
+const cp=require('node:child_process');
+const readline=require('node:readline');
+const flags=__KRIM_RUNTIME_FLAGS__;
+const workdir=__KRIM_WORKDIR__;
+const wall=Number(process.env.KRIM_JOB_WALL);
+const input=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
+process.stdout.write('KRIM_GATE_READY\n');
+input.once('line', line => {
+  input.close();
+  if(line!=='go') process.exit(125);
+  const args=[...flags,...process.argv.slice(1)];
+  const child=cp.spawn(process.execPath,args,{
+    cwd:workdir,
+    env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/tmp',NODE_OPTIONS:''},
+    stdio:['ignore','pipe','pipe'],
+    detached:true,
+    shell:false
+  });
+  process.stdout.write('KRIM_PAYLOAD_START\n');
+  let exited=false;
+  const stop=signal=>{if(!exited){try{process.kill(-child.pid,signal)}catch(_){}}};
+  process.on('SIGTERM',()=>stop('SIGTERM'));
+  process.on('SIGINT',()=>stop('SIGINT'));
+  let expired=false;
+  let spawnError=false;
+  const deadline=setTimeout(()=>{
+    expired=true;stop('SIGTERM');
+    setTimeout(()=>stop('SIGKILL'),1000).unref();
+  },wall*1000);
+  child.stdout.on('data',chunk=>process.stdout.write(chunk));
+  child.stderr.on('data',chunk=>process.stderr.write(chunk));
+  child.once('error',()=>{spawnError=true});
+  child.once('close',code=>{
+    exited=true;clearTimeout(deadline);
+    process.exitCode=expired?124:spawnError?126:code===null?128:code<0?128-code:code;
+  });
+});
+"""
 
 
 class RunscRunner:
@@ -70,12 +109,10 @@ class RunscRunner:
     ) -> None:
         if not IMAGE.fullmatch(image):
             raise ServiceError("sandbox_config_invalid", 422)
-        if runtime is not None:
-            if runtime.image != image:
-                raise ServiceError("sandbox_config_invalid", 422)
-            if runtime.profile.program != "python":
-                # node监管门未接线：拒绝注入，等待专用node门实现后开放。
-                raise ServiceError("sandbox_backend_unavailable", 503)
+        if runtime is not None and runtime.image != image:
+            raise ServiceError("sandbox_config_invalid", 422)
+        if runtime is not None and runtime.program != runtime.profile.program:
+            raise ServiceError("sandbox_config_invalid", 422)
         self.runtime = runtime
         self.profile = runtime.profile if runtime is not None else LEGACY_PYTHON_PROFILE
         # 请求指纹绑定运行规格而非仅镜像：注入runtime用其fingerprint（镜像+规格），
@@ -226,6 +263,7 @@ class RunscRunner:
                 f"--tmpfs={mount.destination}:{tmpfs_flags},size={mount.size_bytes},"
                 f"mode={format(mount.mode, 'o')}"
             )
+        gate_source = GATE if profile.program == "python" else NODE_GATE
         args += [
             "--env",
             "KRIM_JOB_WALL=" + str(wall),
@@ -233,7 +271,7 @@ class RunscRunner:
             "--mount",
             "type=bind,src=" + str(content) + ",dst=" + profile.workdir,
             self.image,
-            *profile.gate_entry(GATE),
+            *profile.gate_entry(gate_source),
             *argv,
         ]
         return args

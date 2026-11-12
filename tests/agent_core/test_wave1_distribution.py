@@ -12,7 +12,7 @@ def test_wave1_modules_are_explicitly_shipped():
     required = {
         "sandbox/ports.py", "sandbox/port_adapters.py", "sandbox/transfer_store.py",
         "sandbox/archive_io.py", "sandbox/edit_models.py", "sandbox/file_editing.py",
-        "sandbox/runtime_profiles.py", "sandbox/quota_retirement.py",
+        "sandbox/runtime_profiles.py", "sandbox/dependencies.py", "sandbox/quota_retirement.py",
         "sandbox/quota_retirement_adapter.py", "account_mcp/__init__.py",
         "account_mcp/contracts.py", "account_mcp/secrets.py", "network/__init__.py",
         "network/egress_policy.py", "network/http_transport.py",

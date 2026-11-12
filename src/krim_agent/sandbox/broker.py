@@ -13,15 +13,13 @@ import stat
 import struct
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from krim_agent.sandbox.runtime_profiles import ResolvedRuntime
+from typing import Any
 
 from krim_agent.contracts import ServiceError
 from krim_agent.runtime.contracts import settled
 from krim_agent.sandbox.broker_client import MAX_MESSAGE
 from krim_agent.sandbox.filesystem import ProjectFiles
+from krim_agent.sandbox.runtime_profiles import ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.jobs import CommandJobs
 from krim_agent.sandbox.leases import ProjectLeases
 from krim_agent.sandbox.quota import QuotaLimits
@@ -36,10 +34,16 @@ class StorageBroker:
     """不接受Docker API、任意宿主路径或命令；只有可信控制面可访问。"""
 
     def __init__(
-        self, storage: Path, state: Path, *, image: str | None = None,
+        self,
+        storage: Path,
+        state: Path,
+        *,
+        image: str | None = None,
         runtime: ResolvedRuntime | None = None,
+        catalog: RuntimeCatalog | None = None,
+        allow_dev: bool = False,
     ) -> None:
-        if runtime is not None and image is None:
+        if (runtime is not None or catalog is not None) and image is None:
             raise ServiceError("sandbox_config_invalid", 422)
         self.storage = private_directory(storage)
         self.state = private_directory(state)
@@ -84,7 +88,11 @@ class StorageBroker:
             os.close(self.fd)
             raise
         self.active: dict[str, Any] = {}
-        self.jobs = CommandJobs(self, image, runtime) if image is not None else None
+        self.jobs = (
+            CommandJobs(self, image, runtime, catalog=catalog, allow_dev=allow_dev)
+            if image is not None
+            else None
+        )
         self.recovery = Recovery(self)
         self.quota_changes = QuotaChanges(self)
         self.quota_retirements = QuotaRetirement(BrokerRetirementPort(self))
@@ -255,8 +263,11 @@ class StorageBroker:
             self.quota.current()
             return {
                 "storage_available": True,
-                "execution_available": self.jobs is not None,
-                "image": self.jobs.runner.identity if self.jobs else None,
+                "execution_available": bool(self.jobs and self.jobs.available_programs()),
+                "image": self.jobs.image if self.jobs else None,
+                "image_id": self.jobs.runner.identity if self.jobs and self.jobs.runner else None,
+                "available_programs": self.jobs.available_programs() if self.jobs else [],
+                "runtimes": self.jobs.runtime_info() if self.jobs else {},
                 "enforcement": "xfs_project_quota",
             }
         if action == "list" and "offset" not in values:
@@ -342,7 +353,14 @@ class StorageBroker:
 
 
 async def serve(
-    socket_path: Path, storage: Path, state: Path, uid: int, gid: int, image: str | None = None
+    socket_path: Path,
+    storage: Path,
+    state: Path,
+    uid: int,
+    gid: int,
+    image: str | None = None,
+    runtime_manifest: Path | None = None,
+    allow_dev: bool = False,
 ) -> None:
     private_directory(socket_path.parent)
     try:
@@ -354,7 +372,16 @@ async def serve(
     if occupied:
         # 不删未知socket；遗留路径由运维显式核实再清理。
         raise ServiceError("sandbox_cleanup_required")
-    broker = StorageBroker(storage, state, image=image)
+    if allow_dev and runtime_manifest is None:
+        raise ServiceError("sandbox_config_invalid", 422)
+    if runtime_manifest is not None and image is None:
+        raise ServiceError("sandbox_config_invalid", 422)
+    catalog = RuntimeCatalog.load(runtime_manifest) if runtime_manifest is not None else None
+    if catalog is not None:
+        python_entry = catalog.entry("python", "normal_job")
+        if python_entry.availability == "dev_verified" and python_entry.image != image:
+            raise ServiceError("sandbox_config_invalid", 422)
+    broker = StorageBroker(storage, state, image=image, catalog=catalog, allow_dev=allow_dev)
     gate = asyncio.Semaphore(8)
     dispatch_lock = asyncio.Lock()
     checkpoint_gate = asyncio.Semaphore(2)
@@ -480,11 +507,22 @@ def main() -> None:
     parser.add_argument("--allow-uid", type=int, required=True)
     parser.add_argument("--socket-gid", type=int, required=True)
     parser.add_argument("--image", default=None)
+    parser.add_argument("--runtime-manifest", type=Path, default=None)
+    parser.add_argument("--allow-dev-runtimes", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("存储Broker需要宿主配额管理权限")
     asyncio.run(
-        serve(args.socket, args.storage, args.state, args.allow_uid, args.socket_gid, args.image)
+        serve(
+            args.socket,
+            args.storage,
+            args.state,
+            args.allow_uid,
+            args.socket_gid,
+            args.image,
+            args.runtime_manifest,
+            args.allow_dev_runtimes,
+        )
     )
 
 
