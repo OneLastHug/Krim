@@ -10,8 +10,13 @@ from .core import ToolSpec
 
 
 class ToolRegistry:
-    def __init__(self, specs: tuple[ToolSpec, ...]) -> None:
-        if len({item.name for item in specs}) != len(specs) or len(specs) > 16:
+    def __init__(self, specs: tuple[ToolSpec, ...], *, max_tools: int = 16) -> None:
+        if (
+            type(max_tools) is not int
+            or not 16 <= max_tools <= 32
+            or len({item.name for item in specs}) != len(specs)
+            or len(specs) > max_tools
+        ):
             raise ValueError("工具名称冲突或目录超限")
         self._items = MappingProxyType({item.name: item for item in specs})
         self._frozen = tuple((item, item.fingerprint) for item in specs)

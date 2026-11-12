@@ -1,5 +1,7 @@
 """项目绑定版本、会话空闲门、权限及旧schema8升级。"""
 
+import base64
+import hashlib
 import sqlite3
 import uuid
 
@@ -29,6 +31,10 @@ async def new_session(store, actor):
         ContextPolicy(),
         Settings(),
     )
+
+
+def sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 async def new_project(service, actor):
@@ -318,6 +324,17 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
                     "matches": [{"path": "src/code.py", "line": 1, "preview": "answer"}],
                     "truncated": False,
                 }
+            if action == "find":
+                return {"files": [], "offset": arguments["offset"], "total": 0}
+            if action == "read":
+                return {
+                    "path": arguments["path"],
+                    "offset": arguments["offset"],
+                    "size": 5,
+                    "eof": True,
+                    "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                    "data": "aGVsbG8=",
+                }
             return {"status": "ready"}
 
     async with client_for(database, token, sandbox_config_file=configuration) as (app, client):
@@ -332,5 +349,68 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         found = await client.get(route + "/search", params={"query": "answer", "limit": 3})
         assert found.status_code == 200 and found.json()["matches"][0]["path"] == "src/code.py"
         assert calls[-1][0] == "search" and calls[-1][1]["limit"] == 3
+        listed = await client.get(
+            route + "/find", params={"include_glob": "**/*.py", "limit": 10}
+        )
+        assert listed.status_code == 200 and calls[-1][0] == "find"
+        protected_glob = await client.get(
+            route + "/find", params={"include_glob": "**/.git*"}
+        )
+        assert protected_glob.status_code == 403
+        found_page = await client.get(
+            route + "/search",
+            params={"query": "answer", "mode": "regex", "include_glob": "**/*.py",
+                    "offset": 4, "before": 1, "after": 2},
+        )
+        assert found_page.status_code == 200
+        assert calls[-1][1]["offset"] == 4 and calls[-1][1]["before"] == 1
+        names = await client.get(route + "/search", params={"query": "answer", "mode": "regex"})
+        assert names.status_code == 200 and calls[-1][1]["mode"] == "regex"
+        assert "regex_limit_bytes" in names.json()
+        lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
+        assert lookup.status_code == 422
+        assert (await client.get(route + "/search", params={"offset": 4050, "query": "x"})).status_code == 422
         assert (await client.get(route + "/files", params={"offset": -1})).status_code == 422
         assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
+        assert (await client.get(route + "/export-file", params={"path": "../secret"})).status_code == 422
+        downloaded = await client.get(route + "/export-file", params={"path": "note.txt"})
+        assert downloaded.status_code == 200 and downloaded.content == b"hello"
+        assert downloaded.headers["etag"] == '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
+        assert downloaded.headers["x-content-type-options"] == "nosniff"
+        digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
+        assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
+        assert (await client.get(route + "/find", params={"include_glob": "../*"})).status_code == 422
+        assert (await client.get(route + "/find", params={"include_glob": "src"})).status_code == 422
+        preview = await app.sandbox.preview_replace(
+            actor, project["project_id"], path="note.txt", expected_generation=0,
+            expected_sha256="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            find="ell", replacement="世界",
+        )
+        assert preview["patch"]["offset"] == 1
+        assert preview["patch"]["delete_length"] == 3
+        assert preview["patch"]["replacement"] == "世界"
+        assert preview["preview_only"] is True
+        assert "-hello" in preview["diff"] and "+h世界o" in preview["diff"]
+        unicode_preview = await app.sandbox.preview_replace(
+            actor, project["project_id"], path="note.txt", expected_generation=0,
+            expected_sha256="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            find="ell", replacement="x", occurrence=1,
+        )
+        assert unicode_preview["patch"]["offset"] == 1
+        class LongFileBroker(Broker):
+            async def call(self, action, **arguments):
+                if action == "read":
+                    body = (b"line\n" * 5000)
+                    if arguments["offset"] >= len(body):
+                        return {"path": arguments["path"], "offset": arguments["offset"], "size": len(body), "eof": True, "sha256": sha256(body), "data": ""}
+                    chunk = body[arguments["offset"]:arguments["offset"] + arguments["limit"]]
+                    return {"path": arguments["path"], "offset": arguments["offset"], "size": len(body), "eof": arguments["offset"] + len(chunk) >= len(body), "sha256": sha256(body), "data": base64.b64encode(chunk).decode()}
+                return await super().call(action, **arguments)
+
+        long_source = b"line\n" * 5000
+        app.sandbox.broker = LongFileBroker()
+        long_preview = await app.sandbox.preview_replace(
+            actor, project["project_id"], path="note.txt", expected_generation=0,
+            expected_sha256=sha256(long_source), find="line", replacement="LONG", occurrence=2500,
+        )
+        assert "LONG" in long_preview["diff"] and long_preview["diff_truncated"] is False

@@ -182,7 +182,9 @@ def test_search_matches_boundaries_and_flags(files):
     assert len(limited["matches"]) == 1
     assert limited["truncated"] is True
     scoped = fs.search(env, project, "hello", path="src")
-    assert scoped["matches"] == [{"path": "src/code.py", "line": 1, "preview": "hello world"}]
+    assert scoped["matches"] == [{
+        "path": "src/code.py", "line": 1, "preview": "hello world", "before": [], "after": [],
+    }]
     for bad in ["", "x" * 257, "🦀" * 65, 5, None, True]:
         with pytest.raises(ServiceError, match="invalid_input"):
             fs.search(env, project, bad)
@@ -193,6 +195,44 @@ def test_search_matches_boundaries_and_flags(files):
         fs.search(env, project, "hello", path="missing")
     with pytest.raises(ServiceError, match="permission_denied"):
         fs.search(env, project, "hello", path=".git")
+
+
+def test_find_glob_and_search_modes_context_and_pagination(files):
+    fs, env, project, content = files
+    (content / "src").mkdir()
+    (content / "src" / "one.py").write_text("before\nNeedle here\nafter\n", encoding="utf-8")
+    (content / "src" / "two.txt").write_text("needle elsewhere\n", encoding="utf-8")
+    (content / ".env.local").write_text("Needle secret\n", encoding="utf-8")
+
+    found = fs.find(env, project, include_glob="**/*.py")
+    assert found["files"] == [{
+        "path": "src/one.py", "size": len(b"before\nNeedle here\nafter\n")
+    }]
+    search = fs.search(
+        env, project, "Needle", mode="literal", case_sensitive=False,
+        include_glob="**/*.py", before=1, after=1, limit=1,
+    )
+    assert search["matches"] == [{
+        "path": "src/one.py", "line": 2, "preview": "Needle here",
+        "before": ["before"], "after": ["after"],
+    }]
+    regex = fs.search(env, project, r"N..dle", mode="regex", include_glob="**/*.py")
+    assert len(regex["matches"]) == 1
+    page = fs.search(env, project, "needle", case_sensitive=False, limit=1, offset=1)
+    assert page["matches"][0]["path"] == "src/two.txt"
+    assert page["offset"] == 1
+    assert page["truncated"] is False
+    assert page["total_matches"] == 2
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.search(env, project, r"(a+)+$", mode="regex")
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.search(env, project, r"a\\1", mode="regex")
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.search(env, project, "word$", mode="regex")
+    with pytest.raises(ServiceError, match="permission_denied"):
+        fs.search(env, project, "needle", include_glob="**/.env*")
+    with pytest.raises(ServiceError, match="permission_denied"):
+        fs.find(env, project, include_glob="**/.git*")
 
 
 def test_search_skips_secrets_links_and_binary(files, tmp_path):
@@ -234,6 +274,9 @@ def test_search_skips_oversize_and_respects_byte_cap(files):
     assert {m["path"] for m in capped["matches"]} == expected
     assert capped["skipped"] == 3
     assert capped["byte_cap_reached"] is True
+    assert capped["truncated"] is True
+    assert capped["next_offset"] is None
+    assert capped["total_matches"] is None
     assert capped["scanned_bytes"] == 32 * 1024**2
 
 
@@ -241,10 +284,26 @@ def test_search_and_list_entry_hard_cap(files):
     fs, env, project, content = files
     for i in range(4097):
         (content / f"f{i:05d}.txt").write_bytes(b"needle\n")
-    with pytest.raises(ServiceError, match="artifact_limit"):
-        fs.search(env, project, "absent")
+    partial = fs.search(env, project, "absent")
+    assert partial["entry_cap_reached"] is True and partial["total_matches"] is None
     with pytest.raises(ServiceError, match="artifact_limit"):
         fs.list(env, project)
+
+
+def test_find_depth_cap_does_not_abort_other_siblings(files):
+    fs, env, project, content = files
+    deep = content
+    for index in range(17):
+        deep = deep / f"d{index}"
+    deep.mkdir(parents=True)
+    (deep / "hidden.py").write_text("depth limited", encoding="utf-8")
+    (content / "visible.py").write_text("still found", encoding="utf-8")
+    result = fs.find(env, project, include_glob="**/*.py")
+    assert [item["path"] for item in result["files"]] == ["visible.py"]
+    assert result["depth_cap_reached"] is True
+    assert result["truncated"] is True
+    assert result["total"] is None
+    assert result["next_offset"] is None
 
 
 def test_mkdir_creates_recursively_and_is_idempotent(files):

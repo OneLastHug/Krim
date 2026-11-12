@@ -196,6 +196,16 @@ def test_edit_tools_are_registered_as_private_scoped_writes(name, model):
     assert spec.risk == "write" and spec.capability == "write"
 
 
+def test_search_tools_fit_in_sandbox_registry_and_remain_private():
+    registry = SandboxOperations(None).registry()
+    assert len(registry.schemas()) == 12
+    assert registry.get("sandbox_find").descriptor()["output_schema"]["properties"]["files"]
+    assert registry.get("sandbox_preview_replace").descriptor()["output_schema"]["properties"]["patch"]
+    for name in ("sandbox_find", "sandbox_search", "sandbox_preview_replace"):
+        spec = registry.get(name)
+        assert spec.risk == "read" and spec.capability == "read"
+
+
 @pytest.mark.parametrize("name,kind,body", [
     ("sandbox_patch", "patch", {"expected_generation": 0, "path": "note.txt",
      "expected_sha256": sha(b"hello"), "offset": 1, "delete_length": 3, "replacement": "i"}),

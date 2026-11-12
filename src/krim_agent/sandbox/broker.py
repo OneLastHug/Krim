@@ -272,14 +272,30 @@ class StorageBroker:
                 "runtimes": self.jobs.runtime_info() if self.jobs else {},
                 "enforcement": "xfs_project_quota",
             }
-        if action == "list" and "offset" not in values:
+        if action in {"list", "find"} and "offset" not in values:
             values = {**values, "offset": 0}
+        if action == "find" and "limit" not in values:
+            values = {**values, "limit": 100}
+        if action == "search":
+            values = {
+                "offset": 0,
+                "include_glob": None,
+                "mode": "literal",
+                "case_sensitive": True,
+                "before": 0,
+                "after": 0,
+                **values,
+            }
         fields = {
             "provision_environment": {"environment_id", "limits"},
             "provision_project": {"environment_id", "project_id"},
             "usage": {"environment_id"},
             "list": {"environment_id", "project_id", "path", "limit", "offset"},
-            "search": {"environment_id", "project_id", "path", "query", "limit"},
+            "find": {"environment_id", "project_id", "path", "include_glob", "limit", "offset"},
+            "search": {
+                "environment_id", "project_id", "path", "query", "limit", "offset",
+                "include_glob", "mode", "case_sensitive", "before", "after",
+            },
             "read": {"environment_id", "project_id", "path", "offset", "limit"},
             "claim": {"environment_id", "project_id", "lease_id", "deadline"},
             "release": {"environment_id", "project_id", "lease_id", "clean"},
@@ -307,9 +323,28 @@ class StorageBroker:
             return self.files.list(
                 environment_id, project_id, values["path"], values["limit"], values["offset"]
             )
+        if action == "find":
+            return self.files.find(
+                environment_id,
+                project_id,
+                path=values["path"],
+                include_glob=values["include_glob"],
+                limit=values["limit"],
+                offset=values["offset"],
+            )
         if action == "search":
             return self.files.search(
-                environment_id, project_id, values["query"], values["path"], values["limit"]
+                environment_id,
+                project_id,
+                values["query"],
+                values["path"],
+                values["limit"],
+                values["offset"],
+                values["include_glob"],
+                values["mode"],
+                values["case_sensitive"],
+                values["before"],
+                values["after"],
             )
         if action == "read":
             return self.files.read(

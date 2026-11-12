@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import difflib
+import hashlib
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -1025,6 +1028,247 @@ class SandboxService:
 
         return await settled(self.store._write(finish))
 
+    async def download_file(
+        self, actor: PrincipalContext, project_id: str, *, path: str
+    ) -> tuple[bytes, str]:
+        project = await self.project(actor, project_id)
+        if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        if project["status"] != "ready" or project["lease_id"] is not None:
+            raise ServiceError("workspace_busy")
+        if len(path.encode("utf-8")) > 512:
+            raise ServiceError("invalid_input", 422)
+        self._live(actor)
+        chunks = bytearray()
+        offset = 0
+        expected_hash: str | None = None
+        generation: int | None = None
+        while True:
+            result = await self.read_file(actor, project_id, path=path, offset=offset, limit=65536)
+            if result["may_change"]:
+                raise ServiceError("input_revision_conflict")
+            if expected_hash is None:
+                expected_hash = result["sha256"]
+                generation = result["generation"]
+            elif result["sha256"] != expected_hash or result["generation"] != generation:
+                raise ServiceError("artifact_conflict")
+            block = base64.b64decode(result["data"], validate=True)
+            if len(chunks) + len(block) > 4 * 1024**2:
+                raise ServiceError("sandbox_limit")
+            chunks.extend(block)
+            offset += len(block)
+            if result["eof"]:
+                break
+            if not block:
+                raise ServiceError("artifact_conflict")
+        self._live(actor)
+        current_project = await self.project(actor, project_id)
+        if current_project["generation"] != generation or current_project["status"] != "ready":
+            raise ServiceError("artifact_conflict")
+        if hashlib.sha256(chunks).hexdigest() != expected_hash:
+            raise ServiceError("artifact_conflict")
+        return bytes(chunks), expected_hash or hashlib.sha256(b"").hexdigest()
+
+    async def project_file_digest(
+        self, actor: PrincipalContext, project_id: str, *, path: str
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
+        self._live(actor)
+        project = await self.project(actor, project_id)
+        if project["status"] != "ready" or project["lease_id"] is not None:
+            raise ServiceError("workspace_busy")
+        result = await self.read_file(actor, project_id, path=path, offset=0, limit=1)
+        return {
+            "project_id": project_id,
+            "path": path,
+            "generation": result["generation"],
+            "sha256": result["sha256"],
+            "size": result["size"],
+            "may_change": result["may_change"],
+        }
+
+    async def find_files(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str = ".",
+        include_glob: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import validate_glob
+
+        validate_glob(include_glob)
+        project = await self.project(actor, project_id)
+        if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        result = await self.broker.call(
+            "find",
+            environment_id=project["environment_id"],
+            project_id=project_id,
+            path=path,
+            include_glob=include_glob,
+            limit=limit,
+            offset=offset,
+        )
+        self._live(actor)
+        current = await self.project(actor, project_id)
+        return {
+            **result,
+            "project_id": project_id,
+            "generation": current["generation"],
+            "may_change": (
+                current["generation"] != project["generation"] or project["status"] != "ready"
+            ),
+        }
+
+    async def preview_replace(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str,
+        expected_generation: int,
+        expected_sha256: str,
+        find: str,
+        replacement: str,
+        occurrence: int = 1,
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
+        project = await self.project(actor, project_id)
+        if project["status"] != "ready" or project["lease_id"] is not None:
+            raise ServiceError("workspace_busy")
+        if project["generation"] != expected_generation:
+            raise ServiceError("input_revision_conflict")
+        if (
+            not find
+            or len(find.encode("utf-8")) > 4096
+            or len(replacement.encode("utf-8")) > 16384
+            or len(expected_sha256) != 64
+            or occurrence > 4096
+        ):
+            raise ServiceError("invalid_input", 422)
+        try:
+            current = await self.read_file(actor, project_id, path=path, offset=0, limit=65536)
+        except ServiceError as error:
+            if error.code == "artifact_limit":
+                raise ServiceError("sandbox_limit") from None
+            raise
+        if current["may_change"] or current["generation"] != expected_generation:
+            raise ServiceError("input_revision_conflict")
+        if current["size"] > 4 * 1024**2:
+            raise ServiceError("sandbox_limit")
+        raw_parts = [base64.b64decode(current["data"], validate=True)]
+        offset = len(raw_parts[0])
+        while offset < current["size"]:
+            try:
+                chunk = await self.read_file(actor, project_id, path=path, offset=offset, limit=65536)
+            except ServiceError as error:
+                if error.code == "artifact_limit":
+                    raise ServiceError("sandbox_limit") from None
+                raise
+            if (
+                chunk["may_change"]
+                or chunk["generation"] != expected_generation
+                or chunk["sha256"] != expected_sha256
+            ):
+                raise ServiceError("input_revision_conflict")
+            block = base64.b64decode(chunk["data"], validate=True)
+            if not block:
+                raise ServiceError("artifact_conflict")
+            raw_parts.append(block)
+            offset += len(block)
+        raw = b"".join(raw_parts)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ServiceError("source_changed")
+        if len(raw) != current["size"]:
+            raise ServiceError("artifact_conflict")
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ServiceError("invalid_input", 422) from None
+        positions = []
+        cursor = 0
+        while True:
+            found = source.find(find, cursor)
+            if found < 0:
+                break
+            positions.append(found)
+            cursor = found + len(find)
+            if len(positions) >= 4096:
+                break
+        count = len(positions)
+        if count == 0 or occurrence > count:
+            raise ServiceError("not_found", 404)
+        if count == 4096 and source.find(find, cursor) >= 0:
+            raise ServiceError("artifact_limit")
+        char_offset = positions[occurrence - 1]
+        byte_offset = len(source[:char_offset].encode("utf-8"))
+        delete_length = len(find.encode("utf-8"))
+        updated = source[:char_offset] + replacement + source[char_offset + len(find):]
+        if len(updated.encode("utf-8")) > 4 * 1024**2:
+            raise ServiceError("sandbox_limit")
+        if updated == source:
+            raise ServiceError("key_conflict")
+        def context_window(text: str, start_position: int, end_position: int) -> tuple[str, bool]:
+            start = text.rfind("\n", 0, start_position) + 1
+            for _ in range(3):
+                previous = text.rfind("\n", 0, max(0, start - 1))
+                start = previous + 1 if previous >= 0 else 0
+            end = text.find("\n", end_position)
+            end = len(text) if end < 0 else end + 1
+            for _ in range(3):
+                following = text.find("\n", end)
+                if following < 0:
+                    end = len(text)
+                    break
+                end = following + 1
+            if end - start <= 16384:
+                return text[start:end], False
+            first = text[start:start + 4096]
+            last = text[end - 4096:end]
+            return first + "\n... diff context omitted ...\n" + last, True
+
+        old_context, old_clipped = context_window(source, char_offset, char_offset + len(find))
+        new_context, new_clipped = context_window(
+            updated, char_offset, char_offset + len(replacement)
+        )
+        diff = "".join(difflib.unified_diff(
+            old_context.splitlines(keepends=True),
+            new_context.splitlines(keepends=True),
+            fromfile=path,
+            tofile=path,
+            fromfiledate="",
+            tofiledate="",
+            n=3,
+        ))
+        return {
+            "path": path,
+            "generation": expected_generation,
+            "source_sha256": expected_sha256,
+            "result_sha256": hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+            "occurrence": occurrence,
+            "matches": count,
+            "patch": {
+                "path": path,
+                "expected_generation": expected_generation,
+                "expected_sha256": expected_sha256,
+                "offset": byte_offset,
+                "delete_length": delete_length,
+                "replacement": replacement,
+            },
+            "diff": diff[:32768],
+            "diff_truncated": len(diff) > 32768 or old_clipped or new_clipped,
+            "replacement": replacement,
+            "find": find,
+            "preview_only": True,
+        }
+
     async def search_files(
         self,
         actor: PrincipalContext,
@@ -1033,6 +1277,12 @@ class SandboxService:
         query: str,
         path: str = ".",
         limit: int = 50,
+        offset: int = 0,
+        include_glob: str | None = None,
+        mode: str = "literal",
+        case_sensitive: bool = True,
+        before: int = 0,
+        after: int = 0,
     ) -> dict[str, Any]:
         project = await self.project(actor, project_id)
         if self.broker is None or project["status"] not in {
@@ -1049,7 +1299,14 @@ class SandboxService:
             query=query,
             path=path,
             limit=limit,
+            offset=offset,
+            include_glob=include_glob,
+            mode=mode,
+            case_sensitive=case_sensitive,
+            before=before,
+            after=after,
         )
+        self._live(actor)
         current = await self.project(actor, project_id)
         return {
             **result,

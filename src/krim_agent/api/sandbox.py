@@ -3,10 +3,12 @@
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi.responses import Response
 
 from krim_agent.api.accounts import _mutation
 from krim_agent.api.sessions import application, principal
 from krim_agent.contracts import ServiceError
+from krim_agent.sandbox.filesystem import _parts, validate_glob
 from krim_agent.sandbox.service import SandboxService
 
 
@@ -78,6 +80,21 @@ def mount_sandbox(app: FastAPI) -> None:
             principal(request), request_key=key, project_id=project_id
         )
 
+    @router.get("/v2/me/sandbox/projects/{project_id}/find")
+    async def find_files(
+        project_id: str,
+        request: Request,
+        include_glob: str = Query(min_length=1, max_length=256),
+        path: str = Query(default=".", max_length=512),
+        limit: int = Query(default=100, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=3999),
+    ) -> Any:
+        validate_glob(include_glob)
+        return await _service(request).find_files(
+            principal(request), project_id, include_glob=include_glob,
+            path=path, limit=limit, offset=offset,
+        )
+
     @router.get("/v2/me/sandbox/projects/{project_id}/files")
     async def directory(
         project_id: str,
@@ -97,9 +114,17 @@ def mount_sandbox(app: FastAPI) -> None:
         query: str = Query(min_length=1, max_length=256),
         path: str = Query(default=".", max_length=512),
         limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=3996),
+        include_glob: str | None = Query(default=None, max_length=256),
+        mode: str = Query(default="literal", pattern="^(literal|regex)$"),
+        case_sensitive: bool = True,
+        before: int = Query(default=0, ge=0, le=3),
+        after: int = Query(default=0, ge=0, le=3),
     ) -> Any:
         return await _service(request).search_files(
-            principal(request), project_id, query=query, path=path, limit=limit
+            principal(request), project_id, query=query, path=path, limit=limit,
+            offset=offset, include_glob=include_glob, mode=mode,
+            case_sensitive=case_sensitive, before=before, after=after,
         )
 
     @router.get("/v2/me/sandbox/projects/{project_id}/file")
@@ -112,6 +137,39 @@ def mount_sandbox(app: FastAPI) -> None:
     ) -> Any:
         return await _service(request).read_file(
             principal(request), project_id, path=path, offset=offset, limit=limit
+        )
+
+    @router.get("/v2/me/sandbox/projects/{project_id}/file-digest")
+    async def file_digest(
+        project_id: str, request: Request, path: str = Query(max_length=512)
+    ) -> Any:
+        _parts(path)
+        return await _service(request).project_file_digest(
+            principal(request), project_id, path=path
+        )
+
+    @router.get("/v2/me/sandbox/projects/{project_id}/export-file")
+    async def download_file(
+        project_id: str,
+        request: Request,
+        path: str = Query(max_length=512),
+    ) -> Response:
+        from urllib.parse import quote
+
+        _parts(path)
+        data, digest = await _service(request).download_file(
+            principal(request), project_id, path=path
+        )
+        filename = quote(path.rsplit("/", 1)[-1], safe="")
+        return Response(
+            data,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "ETag": f'"{digest}"',
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @router.post("/v2/me/sandbox/projects/{project_id}/commands/{operation_id}/reconcile")

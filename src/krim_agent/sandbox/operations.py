@@ -18,9 +18,11 @@ from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.sandbox.command import SandboxCommand
 from krim_agent.sandbox.file_models import (
     DirectoryCreate,
+    FileFind,
     FileList,
     FilePatch,
     FileRead,
+    FileReplacePreview,
     FileRemove,
     FileRename,
     FileSearch,
@@ -189,10 +191,47 @@ class SandboxOperations:
             result = await execute_command(self.service, scope.actor, values, invocation, scope)
             if result.get("code") is not None:
                 raise ServiceError(result["code"])
+        elif isinstance(values, FileFind):
+            result = await self.service.find_files(
+                scope.actor,
+                project_id,
+                path=values.path,
+                include_glob=values.include_glob,
+                limit=values.limit,
+                offset=values.offset,
+            )
+            if result.get("truncated"):
+                result["next_offset"] = None
+        elif isinstance(values, FileReplacePreview):
+            result = await self.service.preview_replace(
+                scope.actor,
+                project_id,
+                path=values.path,
+                expected_generation=values.expected_generation,
+                expected_sha256=values.expected_sha256,
+                find=values.find,
+                replacement=values.replacement,
+                occurrence=values.occurrence,
+            )
         elif isinstance(values, FileSearch):
             result = await self.service.search_files(
-                scope.actor, project_id, query=values.query, path=values.path, limit=values.limit
+                scope.actor,
+                project_id,
+                query=values.query,
+                path=values.path,
+                limit=values.limit,
+                offset=values.offset,
+                include_glob=values.include_glob,
+                mode=values.mode,
+                case_sensitive=values.case_sensitive,
+                before=values.before,
+                after=values.after,
             )
+            result["max_result_bytes"] = 64 * 1024
+            if values.mode == "regex":
+                result["regex_limit_bytes"] = 64
+                result["max_regex_scan_bytes"] = 512 * 1024
+                result["max_regex_line_chars"] = 1024
         elif isinstance(values, FileList):
             result = await self.service.directory(
                 scope.actor, project_id, path=values.path, limit=values.limit, offset=values.offset
@@ -213,7 +252,9 @@ class SandboxOperations:
             "sandbox_command_run": SandboxCommand,
             "sandbox_read": FileRead,
             "sandbox_list": FileList,
+            "sandbox_find": FileFind,
             "sandbox_search": FileSearch,
+            "sandbox_preview_replace": FileReplacePreview,
             "sandbox_write": FileWrite,
             "sandbox_mkdir": DirectoryCreate,
             "sandbox_remove": FileRemove,
@@ -229,6 +270,43 @@ class SandboxOperations:
     def registry(self) -> ToolRegistry:
         async def unavailable(_: BaseModel) -> JsonValue:
             raise ServiceError("workspace_contract_required")
+
+        def _output_schema(name: str) -> dict[str, JsonValue]:
+            if name == "sandbox_find":
+                return {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "include_glob": {"type": "string"},
+                        "files": {"type": "array", "items": {"type": "object"}},
+                        "offset": {"type": "integer"},
+                        "next_offset": {"type": ["integer", "null"]},
+                        "total": {"type": ["integer", "null"]},
+                        "truncated": {"type": "boolean"},
+                        "entry_cap_reached": {"type": "boolean"},
+                        "depth_cap_reached": {"type": "boolean"},
+                        "project_id": {"type": "string"},
+                        "generation": {"type": "integer"},
+                        "may_change": {"type": "boolean"},
+                    },
+                }
+            if name == "sandbox_preview_replace":
+                return {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "generation": {"type": "integer"},
+                        "source_sha256": {"type": "string"},
+                        "result_sha256": {"type": "string"},
+                        "occurrence": {"type": "integer"},
+                        "matches": {"type": "integer"},
+                        "patch": {"type": "object"},
+                        "diff": {"type": "string"},
+                        "diff_truncated": {"type": "boolean"},
+                        "preview_only": {"const": True},
+                    },
+                }
+            return {"type": "object"}
 
         digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         result = []
@@ -252,7 +330,48 @@ class SandboxOperations:
                     name,
                     model,
                     unavailable,
-                    {"type": "object"},
+                    (
+                        {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "project_id": {"type": "string"},
+                                "generation": {"type": "integer"},
+                                "may_change": {"type": "boolean"},
+                                "offset": {"type": "integer"},
+                                "matches": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "path": {"type": "string"},
+                                            "line": {"type": "integer"},
+                                            "preview": {"type": "string"},
+                                            "before": {"type": "array", "items": {"type": "string"}},
+                                            "after": {"type": "array", "items": {"type": "string"}},
+                                        },
+                                        "required": ["path", "line", "preview", "before", "after"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                                "total_matches": {"type": ["integer", "null"]},
+                                "next_offset": {"type": ["integer", "null"]},
+                                "truncated": {"type": "boolean"},
+                                "entry_cap_reached": {"type": "boolean"},
+                                "match_cap_reached": {"type": "boolean"},
+                                "skipped": {"type": "integer"},
+                                "scanned_bytes": {"type": "integer"},
+                                "byte_cap_reached": {"type": "boolean"},
+                                "depth_cap_reached": {"type": "boolean"},
+                                "max_result_bytes": {"type": "integer"},
+                                "regex_limit_bytes": {"type": "integer"},
+                                "max_regex_scan_bytes": {"type": "integer"},
+                                "max_regex_line_chars": {"type": "integer"},
+                            },
+                        }
+                        if name == "sandbox_search"
+                        else _output_schema(name)
+                    ),
                     "sandbox/1",
                     digest,
                     risk,
@@ -261,4 +380,4 @@ class SandboxOperations:
                     description="访问会话绑定的持久项目；写操作需批准，失败和取消保留已发生改动。",
                 )
             )
-        return ToolRegistry(tuple(result))
+        return ToolRegistry(tuple(result), max_tools=24)
