@@ -1,6 +1,6 @@
-"""有限HTTP/SSE适配；SRC-M3-01/02，固定3174b663旧解析逻辑适配，非官方完整协议。
+"""Python AI SDK 的 Chat Completions 接入及 Krim 出站/响应边界。
 
-只产模型事件；完整finish/DONE和全部工具JSON通过后才释放调用。无重试/重定向。
+SDK 负责模型请求和流式模型事件；完整 finish/DONE 和工具 JSON 校验后才释放调用。
 """
 
 from __future__ import annotations
@@ -9,11 +9,19 @@ import asyncio
 import os
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
 
+import ai
 import httpx
+import openai
+from ai.providers.openai import OpenAIChatCompletionsProtocol
+from ai.types.messages import Message as SDKMessage
+from ai.types.messages import TextPart, ToolCallPart, ToolResultPart
+from ai.types.tools import Tool, ToolSpec
 from pydantic import Field, JsonValue, SecretStr, ValidationError, field_validator, model_validator
 
 from krim_agent.contracts import (
@@ -233,7 +241,12 @@ class _ToolBuffer:
             if value is not None:
                 if not isinstance(value, str):
                     raise ProviderError("provider_protocol")
-                setattr(self, field, getattr(self, field) + value)
+                current = getattr(self, field)
+                if field == "arguments":
+                    setattr(self, field, current + value)
+                elif value and value != current:
+                    # 完整元数据重发幂等；仍接受既有的工具名/ID分片。
+                    setattr(self, field, current + value)
         if len(self.identifier) > 128 or len(self.name) > 64:
             raise ProviderError("provider_protocol")
         if len(self.arguments.encode()) > config.max_arguments_bytes:
@@ -336,6 +349,175 @@ def _texts(value: str) -> list[str]:
     return result
 
 
+def _sdk_messages(messages: Sequence[Message]) -> list[SDKMessage]:
+    # 在 SDK 的历史修复之前检查 Krim 的工具结果配对，避免静默修补无效历史。
+    _messages(messages)
+    result: list[SDKMessage] = []
+    names: dict[str, str] = {}
+    for message in messages:
+        parts: list[Any] = []
+        if message.role == "tool":
+            parts.append(
+                ToolResultPart(
+                    tool_call_id=message.call_id or "",
+                    tool_name=names[message.call_id or ""],
+                    result=message.content,
+                    model_input=message.content,
+                )
+            )
+        else:
+            if message.content or not message.tool_calls:
+                parts.append(TextPart(text=message.content))
+            for raw in message.tool_calls:
+                call = ModelToolCall.model_validate(raw)
+                names[call.id] = call.name
+                parts.append(
+                    ToolCallPart(
+                        tool_call_id=call.id,
+                        tool_name=call.name,
+                        tool_args=encoded(call.arguments),
+                    )
+                )
+        result.append(SDKMessage(role=message.role, parts=parts))
+    return result
+
+
+@dataclass
+class _StreamBoundary:
+    """保留 Krim 的资源与完整性约束；模型事件的解析和聚合交给 SDK。"""
+
+    config: OpenAICompatibleConfig
+    max_tool_calls: int
+    calls: dict[int, _ToolBuffer] = dataclass_field(default_factory=dict)
+    sdk_ids: dict[int, str] = dataclass_field(default_factory=dict)
+    snapshots: list[TokenUsage] = dataclass_field(default_factory=list)
+    prior: TokenUsage | None = None
+    finish: str | None = None
+    done: bool = False
+    error: ProviderError | None = None
+    response: httpx.Response | None = None
+
+    def accept(self, payload: str) -> str:
+        if payload.strip() == "[DONE]":
+            self.done = True
+            self.complete()
+            return "[DONE]"
+        event = parse_json(payload)
+        if not isinstance(event, dict) or "error" in event:
+            raise ProviderError("provider_protocol")
+        usage = _usage(event.get("usage"))
+        if usage is not None:
+            if self.prior is not None and not usage.follows(self.prior):
+                raise ProviderError("provider_usage_conflict")
+            if usage != self.prior:
+                self.snapshots.append(usage)
+                self.prior = usage
+        choices = event.get("choices")
+        if choices == []:
+            if self.finish is None or usage is None:
+                raise ProviderError("provider_protocol")
+            return encoded(event)
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ProviderError("provider_protocol")
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        if (
+            type(choice.get("index")) is not int
+            or choice["index"] != 0
+            or not isinstance(delta, dict)
+            or self.finish is not None
+        ):
+            raise ProviderError("provider_protocol")
+        allowed = {"role", "content", "tool_calls", "refusal"}
+        if self.config.thinking == "disabled":
+            allowed.add("reasoning_content")
+            if delta.get("reasoning_content") not in (None, ""):
+                raise ProviderError("provider_protocol")
+        if (
+            set(delta) - allowed
+            or delta.get("role", "assistant") != "assistant"
+            or delta.get("refusal")
+        ):
+            raise ProviderError("provider_protocol")
+        if delta.get("content") is not None and not isinstance(delta["content"], str):
+            raise ProviderError("provider_protocol")
+        tool_deltas = delta.get("tool_calls", [])
+        if not isinstance(tool_deltas, list):
+            raise ProviderError("provider_protocol")
+        for raw in tool_deltas:
+            if not isinstance(raw, dict):
+                raise ProviderError("provider_protocol")
+            index = raw.get("index")
+            if type(index) is not int or not 0 <= index < self.config.max_response_bytes:
+                raise ProviderError("provider_protocol")
+            buffer = self.calls.setdefault(index, _ToolBuffer())
+            buffer.append(raw, self.config)
+            # SDK 在 ToolStart 时固定内部 ID；外部元数据仍可分片到达。
+            function = cast(dict[str, Any], raw.setdefault("function", {}))
+            if index not in self.sdk_ids and buffer.identifier:
+                self.sdk_ids[index] = buffer.identifier
+                function["arguments"] = buffer.arguments
+            if index in self.sdk_ids:
+                raw["id"] = self.sdk_ids[index]
+                if buffer.name:
+                    function["name"] = buffer.name
+            else:
+                function["arguments"] = ""
+        reason = choice.get("finish_reason")
+        if reason == "length":
+            raise ProviderError("provider_output_limit")
+        if reason is not None:
+            if reason not in ("stop", "tool_calls"):
+                raise ProviderError("provider_protocol")
+            self.finish = reason
+        return encoded(event)
+
+    def complete(self) -> list[ModelToolCall]:
+        if sorted(self.calls) != list(range(len(self.calls))):
+            raise ProviderError("provider_protocol")
+        if not self.done or self.finish is None:
+            raise ProviderError("provider_incomplete_stream")
+        if bool(self.calls) != (self.finish == "tool_calls"):
+            raise ProviderError("provider_protocol")
+        complete = [self.calls[index].collect() for index in sorted(self.calls)]
+        if len({call.id for call in complete}) != len(complete):
+            raise ProviderError("provider_protocol")
+        if len(complete) > self.max_tool_calls:
+            raise ProviderError("tool_limit")
+        return complete
+
+
+class _GuardedStream(httpx.AsyncByteStream):
+    def __init__(self, response: httpx.Response, boundary: _StreamBoundary) -> None:
+        self.raw = httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            stream=response.stream,
+            request=response.request,
+        )
+        self.boundary = boundary
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            async for payload in _sse_data(self.raw, self.boundary.config):
+                if not payload.strip():
+                    continue
+                normalized = self.boundary.accept(payload)
+                yield ("data: " + normalized + "\n\n").encode()
+                if self.boundary.done:
+                    return
+            self.boundary.complete()
+        except ProviderError as error:
+            self.boundary.error = error
+            raise
+        except (ValueError, RecursionError):
+            self.boundary.error = ProviderError("provider_protocol")
+            raise self.boundary.error from None
+
+    async def aclose(self) -> None:
+        await settled(self.raw.aclose())
+
+
 class OpenAICompatibleProvider:
     def __init__(self, config: OpenAICompatibleConfig, *, max_connections: int = 4) -> None:
         if type(max_connections) is not int or not 1 <= max_connections <= 16:
@@ -361,10 +543,78 @@ class OpenAICompatibleProvider:
             ),
         )
         self._owned_client = self._client
+        self._boundary: ContextVar[_StreamBoundary] = ContextVar("krim_model_boundary")
+        self._client.event_hooks["request"].append(self._guard_request)
+        self._client.event_hooks["response"].append(self._guard_response)
+        self._sdk_client = openai.AsyncOpenAI(
+            base_url=self.config.base_url + "/",
+            api_key=self.config.api_key.get_secret_value() or "krim-local-no-auth",
+            http_client=self._client,
+            timeout=self._client.timeout,
+            max_retries=0,
+            _enforce_credentials=False,
+        )
+        self._sdk_provider = ai.get_provider(
+            "openai",
+            client=self._sdk_client,
+            base_url=self.config.base_url,
+            api_key=self.config.api_key.get_secret_value(),
+            env={},
+            protocol=OpenAIChatCompletionsProtocol(),
+        )
+        self._sdk_model = ai.Model(id=self.config.model, provider=self._sdk_provider)
         self._sealed = self.binding_token()
         self._close_task: asyncio.Task[None] | None = None
         self.calls = self.active = self.streams_closed = 0
         self.closed = False
+
+    async def _guard_request(self, request: httpx.Request) -> None:
+        boundary = self._boundary.get()
+        if not self.config.api_key.get_secret_value():
+            request.headers.pop("Authorization", None)
+        request.headers["Accept-Encoding"] = "identity"
+        request.headers["Accept"] = "text/event-stream"
+        request.headers["User-Agent"] = self._client.headers["User-Agent"]
+        for header in tuple(request.headers):
+            if header.startswith("x-stainless-") or header in {
+                "openai-organization",
+                "openai-project",
+            }:
+                del request.headers[header]
+        # SDK 会发送 description: null；既有兼容网关要求缺省描述直接省略。
+        body = parse_json(request.content.decode())
+        if isinstance(body, dict):
+            for tool in cast(list[dict[str, Any]], body.get("tools", [])):
+                function = tool.get("function", {})
+                if function.get("description") in (None, ""):
+                    function.pop("description", None)
+            wire = encoded(body).encode()
+            request._content = wire
+            request.stream = httpx.ByteStream(wire)
+            request.headers["Content-Length"] = str(len(wire))
+        if len(request.content) > self.config.max_request_bytes:
+            boundary.error = ProviderError("provider_request_limit")
+            raise boundary.error
+
+    async def _guard_response(self, response: httpx.Response) -> None:
+        boundary = self._boundary.get()
+        boundary.response = response
+        code = None
+        if 300 <= response.status_code < 400:
+            code = "provider_redirect"
+        elif response.status_code != 200:
+            code = "provider_http_error"
+        elif (
+            response.headers.get("content-type", "").split(";")[0].strip().lower()
+            != "text/event-stream"
+            or response.headers.get("content-encoding", "identity").lower() != "identity"
+        ):
+            code = "provider_protocol"
+        if code:
+            boundary.error = ProviderError(code)
+            await settled(response.aclose())
+            raise boundary.error
+        response.stream = _GuardedStream(response, boundary)
 
     def binding_token(self) -> tuple[object, ...]:
         """仅私有内存使用，含凭据的值绝不repr/序列化。"""
@@ -374,6 +624,23 @@ class OpenAICompatibleProvider:
             self.config.api_key.get_secret_value(),
             encoded(self.config.model_dump(mode="json", exclude={"api_key", "base_url"})),
             id(self._client),
+            id(self._sdk_client),
+            id(self._sdk_client._client),
+            str(self._sdk_client.base_url),
+            self._sdk_client.api_key,
+            self._sdk_client.max_retries,
+            repr(self._sdk_client.timeout),
+            id(self._sdk_provider),
+            id(self._sdk_provider.client),
+            id(self._sdk_model),
+            id(self._sdk_model.protocol),
+            self._sdk_model.id,
+            id(self._sdk_model.provider),
+            id(self._sdk_provider.protocol),
+            tuple(
+                tuple(id(hook) for hook in self._client.event_hooks[key])
+                for key in ("request", "response")
+            ),
             id(getattr(self._client.stream, "__func__", self._client.stream)),
             str(self._client.base_url),
             tuple(self._client.headers.multi_items()),
@@ -447,165 +714,89 @@ class OpenAICompatibleProvider:
         max_tool_calls = self.config.max_tool_calls
         if budget is not None:
             max_tool_calls = min(max_tool_calls, budget.max_tool_calls_this_step)
-        body: dict[str, JsonValue] = {
-            "model": self.config.model,
-            "messages": cast(JsonValue, _messages(messages)),
-            "stream": True,
-            "n": 1,
-            "max_tokens": self.config.max_output_tokens,
-            "stream_options": {"include_usage": True},
-        }
+        boundary = _StreamBoundary(self.config, max_tool_calls)
+        # 保留现有兼容端点的参数名，而不是 SDK 默认的 max_completion_tokens。
+        extra: dict[str, Any] = {"max_tokens": self.config.max_output_tokens, "n": 1}
         if self.config.reasoning_effort is not None:
-            body["reasoning_effort"] = self.config.reasoning_effort
+            extra["reasoning_effort"] = self.config.reasoning_effort
         if self.config.thinking is not None:
-            body["thinking"] = {"type": self.config.thinking}
-        if tools and max_tool_calls > 0:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "function": {"name": tool["name"], "parameters": tool["input_schema"]}
-                    | ({"description": tool["description"]} if tool.get("description") else {}),
-                }
+            extra["thinking"] = {"type": self.config.thinking}
+        declarations = (
+            [
+                Tool(
+                    kind="function",
+                    name=str(tool["name"]),
+                    spec=ToolSpec(
+                        params=cast(dict[str, Any], tool["input_schema"]),
+                        description=cast(str | None, tool.get("description")),
+                    ),
+                )
                 for tool in tools
             ]
-            if max_tool_calls == 1:
-                body["parallel_tool_calls"] = False
-        try:
-            wire = encoded(body).encode()
-        except (ValueError, RecursionError):
-            raise ProviderError("provider_request_limit") from None
-        if len(wire) > self.config.max_request_bytes:
-            raise ProviderError("provider_request_limit")
-        headers = {
-            "Accept": "text/event-stream",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-        }
-        if self.config.api_key.get_secret_value():
-            headers["Authorization"] = "Bearer " + self.config.api_key.get_secret_value()
-        response = None
+            if max_tool_calls
+            else []
+        )
+        if declarations and max_tool_calls == 1:
+            extra["parallel_tool_calls"] = False
+        projected = _sdk_messages(messages)
         self.calls += 1
         self.active += 1
         try:
-            request = self._client.build_request(
-                "POST", "chat/completions", content=wire, headers=headers
-            )
-            response = await self._client.send(request, stream=True)
-            if 300 <= response.status_code < 400:
-                raise ProviderError("provider_redirect")
-            if response.status_code != 200:
-                raise ProviderError("provider_http_error")
-            if (
-                response.headers.get("content-type", "").split(";")[0].strip().lower()
-                != "text/event-stream"
-                or response.headers.get("content-encoding", "identity").lower() != "identity"
-            ):
-                raise ProviderError("provider_protocol")
-            calls: dict[int, _ToolBuffer] = {}
-            finish = None
-            prior: TokenUsage | None = None
-            done = False
-            async for payload in _sse_data(response, self.config):
-                if payload.strip() == "[DONE]":
-                    done = True
-                    break
-                if not payload.strip():
-                    continue
-                try:
-                    event = parse_json(payload)
-                except (ValueError, RecursionError):
-                    raise ProviderError("provider_protocol") from None
-                if not isinstance(event, dict) or "error" in event:
+            async with ai.stream(
+                self._sdk_model,
+                projected,
+                tools=declarations,
+                params=ai.InferenceRequestParams(extra_body=extra),
+            ) as stream:
+                while True:
+                    # 仅在 SDK 拉取事件期间绑定，不能跨 yield 保留 ContextVar token：
+                    # Krim 的 settled(aclose) 会在独立清理任务中关闭生成器。
+                    token = self._boundary.set(boundary)
+                    try:
+                        try:
+                            event = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                    finally:
+                        self._boundary.reset(token)
+                    while boundary.snapshots:
+                        yield ModelUsage(usage=boundary.snapshots.pop(0), final=False)
+                    if isinstance(event, ai.events.TextDelta):
+                        for part in _texts(event.chunk):
+                            yield ModelText(text=part)
+                complete = boundary.complete()
+                sdk_calls = {call.tool_call_id: call for call in stream.tool_calls}
+                if len(sdk_calls) != len(complete):
                     raise ProviderError("provider_protocol")
-                usage = _usage(event.get("usage"))
-                if usage is not None:
-                    if prior is not None and not usage.follows(prior):
-                        raise ProviderError("provider_usage_conflict")
-                    if usage != prior:
-                        yield ModelUsage(usage=usage, final=False)
-                        prior = usage
-                choices = event.get("choices")
-                if choices == []:
-                    if finish is None or usage is None:
+                for index, call in enumerate(complete):
+                    sdk_call = sdk_calls.get(boundary.sdk_ids[index])
+                    if sdk_call is None or parse_json(sdk_call.tool_args) != call.arguments:
                         raise ProviderError("provider_protocol")
-                    continue
-                if (
-                    not isinstance(choices, list)
-                    or len(choices) != 1
-                    or not isinstance(choices[0], dict)
-                ):
-                    raise ProviderError("provider_protocol")
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                if (
-                    type(choice.get("index")) is not int
-                    or choice["index"] != 0
-                    or not isinstance(delta, dict)
-                    or finish is not None
-                ):
-                    raise ProviderError("provider_protocol")
-                allowed_delta_fields = {"role", "content", "tool_calls", "refusal"}
-                if self.config.thinking == "disabled":
-                    allowed_delta_fields.add("reasoning_content")
-                    reasoning_content = delta.get("reasoning_content")
-                    if reasoning_content is not None and reasoning_content != "":
-                        raise ProviderError("provider_protocol")
-                if (
-                    set(delta) - allowed_delta_fields
-                    or delta.get("role", "assistant") != "assistant"
-                    or delta.get("refusal")
-                ):
-                    raise ProviderError("provider_protocol")
-                text = delta.get("content")
-                if text is not None and not isinstance(text, str):
-                    raise ProviderError("provider_protocol")
-                if text:
-                    for part in _texts(text):
-                        yield ModelText(text=part)
-                tool_deltas = delta.get("tool_calls", [])
-                if not isinstance(tool_deltas, list):
-                    raise ProviderError("provider_protocol")
-                for raw in tool_deltas:
-                    if not isinstance(raw, dict):
-                        raise ProviderError("provider_protocol")
-                    index = raw.get("index")
-                    if type(index) is not int or not 0 <= index < self.config.max_response_bytes:
-                        raise ProviderError("provider_protocol")
-                    calls.setdefault(index, _ToolBuffer()).append(raw, self.config)
-                reason = choice.get("finish_reason")
-                if reason == "length":
-                    raise ProviderError("provider_output_limit")
-                if reason is not None:
-                    if reason not in ("stop", "tool_calls"):
-                        raise ProviderError("provider_protocol")
-                    finish = reason
-            if sorted(calls) != list(range(len(calls))):
-                raise ProviderError("provider_protocol")
-            if not done or finish is None:
-                raise ProviderError("provider_incomplete_stream")
-            if bool(calls) != (finish == "tool_calls"):
-                raise ProviderError("provider_protocol")
-            complete = [calls[index].collect() for index in sorted(calls)]
-            if len({call.id for call in complete}) != len(complete):
-                raise ProviderError("provider_protocol")
-            if len(complete) > max_tool_calls:
-                raise ProviderError("tool_limit")
-            await settled(response.aclose())
-            response = None
+                # SDK 的 ToolStart 只带最初名称；分片工具名仍使用边界完成校验的名称。
+                # 调用 ID 和参数必须同时通过 SDK 聚合与 Krim 的严格 JSON 校验。
+            if boundary.response is not None:
+                await settled(boundary.response.aclose())
             for call in complete:
                 yield call
-            if prior is not None:
-                yield ModelUsage(usage=prior, final=True)
-        except httpx.TimeoutException:
-            raise ProviderError("provider_timeout") from None
-        except httpx.HTTPError:
-            raise ProviderError("provider_network") from None
-        except (ValueError, RecursionError):
+            if boundary.prior is not None:
+                yield ModelUsage(usage=boundary.prior, final=True)
+        except Exception as error:
+            if boundary.error is not None:
+                raise boundary.error from None
+            if isinstance(error, ServiceError):
+                raise
+            cause: BaseException | None = error
+            for _ in range(16):
+                if isinstance(cause, (httpx.TimeoutException, openai.APITimeoutError)):
+                    raise ProviderError("provider_timeout") from None
+                if isinstance(cause, (httpx.HTTPError, openai.APIConnectionError)):
+                    raise ProviderError("provider_network") from None
+                cause = cause.__cause__ if cause is not None else None
             raise ProviderError("provider_protocol") from None
         finally:
             try:
-                if response is not None:
-                    await settled(response.aclose())
+                if boundary.response is not None:
+                    await settled(boundary.response.aclose())
             finally:
                 self.active -= 1
                 self.streams_closed += 1

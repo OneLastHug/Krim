@@ -24,6 +24,8 @@ uv run --frozen python -m krim_agent serve --database .data/krim.sqlite --port 8
 
 HTTP 模型地址、凭据和预算由可信宿主设置，网页不接收供应商地址或密钥。网页搜索/读取与 MCP 工具通过独立宿主配置启用，支持 stdio、Streamable HTTP 和显式覆盖；工具凭据与模型凭据分离。工作区文件任务还需要有效的 Linux 隔离配置；只提供普通对话服务时，不展示为可执行文件环境。SQLite 按单进程单写端运行；无访问策略的本机模式只供回环访问。
 
+HTTP 模型接入使用 Vercel Labs Python AI SDK `ai[openai]`，固定为 `0.9.0`，通过 Chat Completions 协议直连宿主配置的兼容端点，不要求使用 Vercel AI Gateway。模型协议与流式事件由 SDK 处理；Krim 保留请求和响应上限、严格工具参数校验、预算与工具执行，完整响应通过检查后才释放工具调用。
+
 ## 工作流
 
 - **任务与对话**：持久 Session/Turn、多轮上下文、有界队列、审批、取消、原请求键找回与执行事件。

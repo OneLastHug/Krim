@@ -1147,7 +1147,8 @@ async def test_sigkill_windows_restart_interrupts_with_zero_replay(tmp_path, pha
                 stderr=log,
             )
             try:
-                async with asyncio.timeout(6):
+                # 等待子进程导入 SDK 并到达强退屏障，不限制模型回复时延。
+                async with asyncio.timeout(20):
                     while not ready.exists():
                         assert process.returncode is None, (tmp_path / "worker.log").read_text()
                         await asyncio.sleep(0.01)

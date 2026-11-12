@@ -603,7 +603,9 @@ async def d2_http_resource_record(request, monkeypatch):
         response = await actual_send(client, *args, **kwargs)
         wire = next((wire for wire in notes["wires"] if isinstance(wire, D2Wire)), None)
         if wire is not None:
-            original_raw = response.aiter_raw
+            # SDK 的响应外层是校验/规范化流；屏障仍观察底层真实 TCP 字节。
+            raw_response = getattr(response.stream, "raw", response)
+            original_raw = raw_response.aiter_raw
             async def consumed_bytes():
                 size = 0
                 async for chunk in original_raw():
@@ -615,7 +617,7 @@ async def d2_http_resource_record(request, monkeypatch):
                         total += len(part)
                         if size >= total:
                             wire.consumed[i].set()
-            response.aiter_raw = consumed_bytes
+            raw_response.aiter_raw = consumed_bytes
         return response
     monkeypatch.setattr(httpx.AsyncClient, "send", observed_send)
     try:
@@ -635,7 +637,8 @@ async def d2_http_resource_record(request, monkeypatch):
         path = Path(os.environ["KRIM_D2_EVIDENCE"]) / "cases"
         path.mkdir(exist_ok=True)
         consumer = Path(openai_compatible.__file__)
-        assert consumer.is_relative_to(Path(os.environ["KRIM_D2_ROOT"]) / "source/src")
+        assert consumer.resolve().is_relative_to(
+            (Path(os.environ["KRIM_D2_ROOT"]) / "source/src").resolve())
         unexpected = [t.get_name() for t in asyncio.all_tasks()
                       if t is not asyncio.current_task() and t not in existing and not t.done()]
         providers = [{"calls": p.calls, "active": p.active, "closed": p.closed,
