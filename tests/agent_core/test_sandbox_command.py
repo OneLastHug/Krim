@@ -41,6 +41,15 @@ class CommandBroker:
                     "python": {"image": IMAGE, "fingerprint": None, "image_id": IMAGE}
                 },
             }
+        if action == "runtime_probe":
+            if self.waiting:
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            return {
+                "program": arguments["program"],
+                "image": IMAGE,
+                "image_id": IMAGE,
+                "fingerprint": None,
+            }
         if action in {"command_start", "file_start"}:
             self.starts.append(arguments)
             return {"status": "accepted"}
@@ -360,6 +369,30 @@ def test_supervisor_and_command_inputs_are_bounded():
     ]:
         with pytest.raises((ValidationError, ServiceError)):
             SandboxCommand.model_validate({**good, **patch})
+
+
+async def test_runtime_probe_failure_before_submission_does_not_block_project(tmp_path, wire, monkeypatch):
+    async with command_app(tmp_path, wire, monkeypatch) as (
+        app,
+        broker,
+        actor,
+        project,
+        run,
+        request,
+    ):
+        original = broker.call
+
+        async def unavailable(action, **arguments):
+            if action == "runtime_probe":
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            return await original(action, **arguments)
+
+        broker.call = unavailable
+        await app.service.reply_approval(run, request["request_id"], approval(request))
+        await finished(app, run)
+        saved = await app.sandbox.project(actor, project["project_id"])
+        assert saved["status"] == "ready" and saved["generation"] == 0
+        assert broker.starts == []
 
 
 async def test_health_failure_before_submission_does_not_block_project(tmp_path, wire, monkeypatch):

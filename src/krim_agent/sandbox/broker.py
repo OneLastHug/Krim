@@ -259,6 +259,20 @@ class StorageBroker:
             from krim_agent.sandbox.maintenance import dispatch_maintenance
 
             return dispatch_maintenance(self, action, values)
+        if action == "runtime_probe" and set(values) == {"program"}:
+            if self.jobs is None:
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            program = values["program"]
+            if program not in {"python", "node"} or program not in self.jobs.configured_programs():
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            runner = self.jobs._runner_for(program)
+            runtime = getattr(runner, "runtime", None)
+            return {
+                "program": program,
+                "image": runtime.image if runtime is not None else self.jobs.image,
+                "image_id": runner.identity,
+                "fingerprint": getattr(runner, "runtime_fingerprint", None),
+            }
         if action == "health" and not values:
             self.quota.current()
             return {
@@ -287,6 +301,7 @@ class StorageBroker:
             "command_start": {"environment_id", "project_id", "operation_id", "command"},
             "command_reconcile": {"environment_id", "project_id", "operation_id"},
             "command_status": {"environment_id", "project_id", "operation_id", "renew", "cancel"},
+            "runtime_probe": {"program"},
         }
         if action not in fields or set(values) != fields[action]:
             raise ServiceError("invalid_input", 422)
