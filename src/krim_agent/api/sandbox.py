@@ -87,8 +87,10 @@ def mount_sandbox(app: FastAPI) -> None:
         include_glob: str = Query(min_length=1, max_length=256),
         path: str = Query(default=".", max_length=512),
         limit: int = Query(default=100, ge=1, le=100),
-        offset: int = Query(default=0, ge=0, le=3999),
+        offset: int = Query(default=0, ge=0, le=4095),
     ) -> Any:
+        if offset + limit > 4096:
+            raise ServiceError("invalid_input", 422)
         validate_glob(include_glob)
         return await _service(request).find_files(
             principal(request), project_id, include_glob=include_glob,
@@ -114,13 +116,15 @@ def mount_sandbox(app: FastAPI) -> None:
         query: str = Query(min_length=1, max_length=256),
         path: str = Query(default=".", max_length=512),
         limit: int = Query(default=50, ge=1, le=100),
-        offset: int = Query(default=0, ge=0, le=3996),
+        offset: int = Query(default=0, ge=0, le=4095),
         include_glob: str | None = Query(default=None, max_length=256),
         mode: str = Query(default="literal", pattern="^(literal|regex)$"),
         case_sensitive: bool = True,
         before: int = Query(default=0, ge=0, le=3),
         after: int = Query(default=0, ge=0, le=3),
     ) -> Any:
+        if offset + limit > 4096:
+            raise ServiceError("invalid_input", 422)
         return await _service(request).search_files(
             principal(request), project_id, query=query, path=path, limit=limit,
             offset=offset, include_glob=include_glob, mode=mode,

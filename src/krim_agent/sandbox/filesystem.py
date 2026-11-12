@@ -316,7 +316,9 @@ class ProjectFiles:
                     continue
                 try:
                     _parts(full)
-                except ServiceError:
+                except ServiceError as error:
+                    if error.code == "invalid_input" and len(full.encode("utf-8")) > 512:
+                        depth_cap = True
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     child = os.open(name, FLAGS, dir_fd=directory)
@@ -379,7 +381,8 @@ class ProjectFiles:
             and (
                 type(expected_stat) not in {list, tuple}
                 or len(expected_stat) != 5
-                or any(type(value) is not int or value < 0 for value in expected_stat)
+                or any(type(value) is not int for value in expected_stat)
+                or any(value < 0 for value in expected_stat[:3])
             )
         ):
             raise ServiceError("invalid_input", 422)
@@ -698,7 +701,9 @@ class ProjectFiles:
                     continue
                 try:
                     _parts(full)
-                except ServiceError:
+                except ServiceError as error:
+                    if error.code == "invalid_input" and len(full.encode("utf-8")) > 512:
+                        depth_cap = True
                     continue
                 if stat.S_ISDIR(before_info.st_mode):
                     child = os.open(name, FLAGS, dir_fd=directory)

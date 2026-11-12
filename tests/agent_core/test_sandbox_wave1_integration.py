@@ -8,7 +8,7 @@ from test_sandbox_command import approval, command_app, finished
 from test_sandbox_jobs import command_jobs as command_jobs
 from test_sandbox_jobs import wait_result
 
-from krim_agent.sandbox.file_models import FilePatch, FileRename
+from krim_agent.sandbox.file_models import FileFind, FilePatch, FileRename, FileSearch
 from krim_agent.sandbox.operations import SandboxOperations
 
 
@@ -259,6 +259,12 @@ def test_edit_tools_are_registered_as_private_scoped_writes(name, model):
 
 
 def test_search_tools_fit_in_sandbox_registry_and_remain_private():
+    assert FileFind(include_glob="*.py", offset=4095, limit=1).offset == 4095
+    with pytest.raises(ValueError):
+        FileFind(include_glob="*.py", offset=4095, limit=2)
+    assert FileSearch(query="needle", offset=4095, limit=1).offset == 4095
+    with pytest.raises(ValueError):
+        FileSearch(query="needle", offset=4095, limit=2)
     registry = SandboxOperations(None).registry()
     assert len(registry.schemas()) == 12
     assert registry.get("sandbox_find").descriptor()["output_schema"]["properties"]["files"]
