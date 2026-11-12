@@ -11,7 +11,6 @@ import os
 import re
 import stat
 from pathlib import Path
-from posixpath import basename
 from typing import Literal, Self
 
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -118,8 +117,11 @@ class RuntimeProfile(StrictModel):
     @model_validator(mode="after")
     def _bounded(self) -> Self:
         _container_path(self.interpreter, max_depth=6)
-        expected = "python" if self.program == "python" else "node"
-        if expected not in basename(self.interpreter):
+        allowed_interpreters = {
+            "python": {"/usr/bin/python3.12"},
+            "node": {"/usr/local/bin/node"},
+        }
+        if self.interpreter not in allowed_interpreters[self.program]:
             raise ValueError("解释器路径与运行时不匹配")
         _container_path(self.workdir, max_depth=4)
         if self.workdir == "/":

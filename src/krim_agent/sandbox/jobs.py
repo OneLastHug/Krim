@@ -85,23 +85,11 @@ class CommandJobs:
         self.runner: RunscRunner | None = None
         if catalog is not None:
             python_entry = catalog.entry("python", "normal_job")
-            if python_entry.availability == "dev_verified" and python_entry.image != image:
+            if python_entry.image is not None and python_entry.image != image:
                 raise ServiceError("sandbox_config_invalid", 422)
-            for program in ("python", "node"):
-                try:
-                    selected = catalog.resolve(program, "normal_job", allow_dev=allow_dev)
-                except ServiceError:
-                    continue
-                if program == "python" and selected.image != image:
-                    continue
-                try:
-                    self.runners[program] = RunscRunner(
-                        selected.image, self.installation_id, selected
-                    )
-                except ServiceError as error:
-                    if error.code != "sandbox_backend_unavailable":
-                        raise
-            self.runner = self.runners.get("python")
+            # Resolve profiles lazily. Docker/runsc probing for an unused
+            # program must not prevent the Broker from serving other runtimes.
+            self.runner = None
         elif runtime is not None:
             self.runner = RunscRunner(image, self.installation_id, runtime)
             self.runners[runtime.program] = self.runner
@@ -120,19 +108,53 @@ class CommandJobs:
             return runner
         if self.catalog is None:
             raise ServiceError("sandbox_backend_unavailable", 503)
-        raise ServiceError("sandbox_backend_unavailable", 503)
+        runtime = self._resolved(program)
+        if runtime is None:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        try:
+            runner = RunscRunner(runtime.image, self.installation_id, runtime)
+        except ServiceError:
+            raise
+        self.runners[program] = runner
+        if program == "python":
+            self.runner = runner
+        return runner
+
+    def _resolved(self, program: str) -> ResolvedRuntime | None:
+        if self.catalog is None:
+            return None
+        try:
+            runtime = self.catalog.resolve(program, "normal_job", allow_dev=self.allow_dev)
+        except ServiceError:
+            return None
+        if program == "python" and runtime.image != self.image:
+            return None
+        return runtime
 
     def available_programs(self) -> list[str]:
-        return sorted(self.runners)
+        if self.catalog is None:
+            return sorted(self.runners)
+        return [
+            program for program in ("python", "node") if self._resolved(program) is not None
+        ]
 
     def runtime_info(self) -> dict[str, dict[str, str | None]]:
         info: dict[str, dict[str, str | None]] = {}
-        for program, runner in self.runners.items():
-            runtime = getattr(runner, "runtime", None)
+        for program in self.available_programs():
+            runner = self.runners.get(program)
+            runtime = (
+                getattr(runner, "runtime", None)
+                if runner is not None
+                else self._resolved(program)
+            )
             info[program] = {
                 "image": runtime.image if runtime is not None else self.image,
-                "image_id": runner.identity,
-                "fingerprint": getattr(runner, "runtime_fingerprint", None),
+                "image_id": runner.identity if runner is not None else None,
+                "fingerprint": (
+                    getattr(runner, "runtime_fingerprint", None)
+                    if runner is not None
+                    else runtime.fingerprint if runtime is not None else None
+                ),
             }
         return info
 
@@ -170,8 +192,6 @@ class CommandJobs:
                 if isinstance(values, SandboxCommand)
                 else self.runner
             )
-            if isinstance(values, SandboxCommand) and runner is None:
-                raise ServiceError("sandbox_backend_unavailable", 503)
             env_state = self.broker._environment(environment_id)
             if env_state.get("quota_operation"):
                 raise ServiceError("workspace_busy")

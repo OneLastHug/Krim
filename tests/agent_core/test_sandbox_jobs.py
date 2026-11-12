@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from test_runtime_profiles import catalog as runtime_catalog
 from test_sandbox_broker import FakeQuota
 
 from krim_agent.contracts import ServiceError
@@ -109,6 +110,43 @@ def wait_result(jobs, environment, project, operation):
             return result
         assert time.monotonic() < until
         time.sleep(0.01)
+
+
+def test_catalog_mode_lazily_constructs_only_requested_program(command_jobs, monkeypatch):
+    broker, jobs, env, project = command_jobs
+    jobs.close()
+    catalog = runtime_catalog()
+    calls = []
+
+    class LazyRunner(Runner):
+        def __init__(self, image, installation_id, runtime=None):
+            calls.append(runtime.program)
+            self.runtime = runtime
+            self.runtime_fingerprint = runtime.fingerprint
+            self.identity = Runner.identity
+
+    monkeypatch.setattr(jobs_module, "RunscRunner", LazyRunner)
+    selected = CommandJobs(
+        broker,
+        "sha256:d163eadaea1f779baca092829e2c6969e7514bf284880f8637d8204320ff505b",
+        catalog=catalog,
+        allow_dev=True,
+    )
+    try:
+        assert calls == []
+        with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+            selected.submit(
+                env,
+                project,
+                str(uuid.uuid4()),
+                {**command(project), "program": "node", "argv": ["--eval", "1"]},
+            )
+        assert calls == []
+        assert selected._runner_for("python").runtime.program == "python"
+        assert selected._runner_for("python").runtime.program == "python"
+        assert calls == ["python"]
+    finally:
+        selected.close()
 
 
 def test_catalog_mode_truthfully_hides_dev_profile_without_explicit_gate(command_jobs, monkeypatch):
