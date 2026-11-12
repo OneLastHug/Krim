@@ -21,7 +21,9 @@ from krim_agent.context.types import (
     WorkspaceSessionContext,
 )
 from krim_agent.contracts import Message, RunRequest, RunView, ServiceError, encoded, fingerprint
+from krim_agent.extensions import ExtensionService, extension_messages, load_turn_extensions
 from krim_agent.runtime.contracts import RunSnapshot, settled
+from krim_agent.security import PrincipalContext
 from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, TurnRequest, TurnView
 from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
@@ -49,7 +51,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10}:
+    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -323,10 +325,14 @@ async def list_trace_index(
                 )
             )
         rows = (
-            await conn.execute(
-                query.order_by(runs.c.created_at.desc(), runs.c.id.desc()).limit(limit + 1)
+            (
+                await conn.execute(
+                    query.order_by(runs.c.created_at.desc(), runs.c.id.desc()).limit(limit + 1)
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         return [dict(row) for row in rows]
 
     return await read(store, operation)
@@ -353,6 +359,8 @@ async def submit(
     settings: Settings,
     *,
     access: ExecutionAccess | None = None,
+    actor: PrincipalContext | None = None,
+    extension_service: ExtensionService | None = None,
 ) -> TurnView:
     require(store)
     if isinstance(body, WorkspaceTurnRequest):
@@ -362,6 +370,8 @@ async def submit(
 
     async def operation(conn: AsyncConnection) -> TurnView:
         session = await session_row(conn, session_id)
+        if actor is not None and extension_service is not None:
+            extension_service.actor(actor)
         if session["target_key"] == "target-workspace":
             if access is None or not isinstance(body, WorkspaceTurnRequest):
                 raise ServiceError("workspace_contract_required")
@@ -379,6 +389,8 @@ async def submit(
         if old is not None:
             if old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
+            if actor is not None and extension_service is not None:
+                extension_service.actor(actor)
             return turn_view(old)
         if session["target_key"] == "target-workspace":
             work_sql.require(store)
@@ -421,6 +433,8 @@ async def submit(
             finished_at=None,
         )
         await conn.execute(insert(turns).values(**row))
+        if actor is not None and extension_service is not None:
+            await extension_service.freeze(conn, session, row["id"], row["text"], actor)
         if session["target_key"] == "target-workspace":
             assert isinstance(body, WorkspaceTurnRequest) and access is not None
             await work_sql.enqueue(conn, row, body, access)
@@ -509,20 +523,25 @@ async def begin_run(
         if session["target_key"] == "target-workspace":
             work_sql.require(store)
             from .models import run_events
+
             frozen = []
             for row in previous:
-                last = await conn.scalar(select(func.max(run_events.c.seq)).where(
-                    run_events.c.run_id == row["run_id"])) if row["run_id"] else None
+                last = (
+                    await conn.scalar(
+                        select(func.max(run_events.c.seq)).where(
+                            run_events.c.run_id == row["run_id"]
+                        )
+                    )
+                    if row["run_id"]
+                    else None
+                )
                 frozen.append(dict(row) | {"terminal_seq": last if last is not None else -1})
             frame = await work_sql.bind(
                 conn,
                 turn,
                 run_id,
                 target,
-                [
-                    dict(row) | {"terminal_seq": row["terminal_seq"]}
-                    for row in frozen
-                ],
+                [dict(row) | {"terminal_seq": row["terminal_seq"]} for row in frozen],
             )
             effective = target | {"context": frame}
             digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
@@ -567,6 +586,12 @@ async def begin_run(
                 )
             )
         policy = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+        ext = (
+            await load_turn_extensions(conn, turn["id"])
+            if store.schema_version >= 11
+            else {"version": "extensions/1", "items": []}
+        )
+        extension_snapshot = cast(dict[str, JsonValue], ext)
         context = builder.prepare(
             settings.system_prompt,
             history,
@@ -575,14 +600,17 @@ async def begin_run(
             cast(list[dict[str, JsonValue]], target["tools"]),
             policy,
             settings.max_request_bytes,
+            extension_messages(ext),
+            extension_snapshot,
         )
-        effective = target | {
-            "context": {
-                "schema_version": 1,
-                "policy": policy.model_dump(mode="json"),
-                "builder": context.builder_fingerprint,
-            }
+        context_descriptor: dict[str, JsonValue] = {
+            "schema_version": 1,
+            "policy": policy.model_dump(mode="json"),
+            "builder": context.builder_fingerprint,
         }
+        if extension_snapshot["items"]:
+            context_descriptor["extensions"] = fingerprint(extension_snapshot)
+        effective = target | {"context": context_descriptor}
         digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
         run = await store._insert_run(conn, request, effective, run_id, digest)
         raw = context.model_dump(mode="json")
@@ -618,7 +646,7 @@ async def source(
     version: int,
     target: dict[str, JsonValue],
 ) -> SessionContext | WorkspaceSessionContext | None:
-    if version not in {3, 4, 5, 6, 7, 8, 9, 10}:
+    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
@@ -641,10 +669,12 @@ async def source(
                 }
             ):
                 raise ServiceError("facts_corrupt")
-            prepared = await conn.scalar(select(work_turns.c.prepared_context).where(
-                work_turns.c.run_id == run_id))
+            prepared = await conn.scalar(
+                select(work_turns.c.prepared_context).where(work_turns.c.run_id == run_id)
+            )
             if prepared is not None:
                 from krim_agent.context.types import PreparedContext
+
                 context2 = PreparedContext.model_validate_json(encoded(prepared))
                 if context2.source_fingerprint != fingerprint(list(frame.source_refs)):
                     raise ServiceError("facts_corrupt")
@@ -669,6 +699,9 @@ async def source(
             "policy": context.policy.model_dump(mode="json"),
             "builder": context.builder_fingerprint,
         }
+        target_context = target.get("context")
+        if isinstance(target_context, dict) and "extensions" in target_context:
+            expected["extensions"] = fingerprint(context.extensions)
         if fingerprint(target.get("context")) != fingerprint(expected):
             raise ValueError("内部上下文身份损坏")
         return SessionContext(
@@ -688,19 +721,38 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
         await work_sql.finish(
             conn, snapshot.run.id, interrupted=snapshot.run.status == "interrupted"
         )
+
         def task_transcript() -> list[Message]:
             from dataclasses import replace
-            summary = {e.data.get("step_index") for e in snapshot.events
-                       if e.kind == "model_start" and e.data.get("purpose") == "summary"}
-            events = tuple(e for e in snapshot.events if e.kind != "summary_text"
-                           and not (e.kind in {"model_start", "model_end", "usage"}
-                                    and e.data.get("step_index") in summary))
+
+            summary = {
+                e.data.get("step_index")
+                for e in snapshot.events
+                if e.kind == "model_start" and e.data.get("purpose") == "summary"
+            }
+            events = tuple(
+                e
+                for e in snapshot.events
+                if e.kind != "summary_text"
+                and not (
+                    e.kind in {"model_start", "model_end", "usage"}
+                    and e.data.get("step_index") in summary
+                )
+            )
             return builder.transcript(replace(snapshot, events=events))
+
         from .models import compactions
-        await conn.execute(update(compactions).where(
-            compactions.c.run_id == snapshot.run.id, compactions.c.status == "reserved"
-        ).values(status="interrupted" if snapshot.run.status in {"aborted", "interrupted"}
-                 else "failed", finished_at=time.time()))
+
+        await conn.execute(
+            update(compactions)
+            .where(compactions.c.run_id == snapshot.run.id, compactions.c.status == "reserved")
+            .values(
+                status="interrupted"
+                if snapshot.run.status in {"aborted", "interrupted"}
+                else "failed",
+                finished_at=time.time(),
+            )
+        )
         await conn.execute(
             update(turns)
             .where(turns.c.id == snapshot.session_context.turn_id)
@@ -972,9 +1024,15 @@ async def recover_controls(conn: AsyncConnection) -> None:
         )
 
 
-async def workspace_history(conn: AsyncConnection, run_id: str, offset: int,
-                            limit: int, access: ExecutionAccess, *,
-                            source_anchor: str) -> list[dict[str, Any]]:
+async def workspace_history(
+    conn: AsyncConnection,
+    run_id: str,
+    offset: int,
+    limit: int,
+    access: ExecutionAccess,
+    *,
+    source_anchor: str,
+) -> list[dict[str, Any]]:
     """同连接分页，核实完整冻结引用；不持锁请求模型。"""
     frame = await work_sql.load(conn, run_id)
     if frame is None or access.session_id != frame.session_id or not 1 <= limit <= 16:
@@ -982,22 +1040,35 @@ async def workspace_history(conn: AsyncConnection, run_id: str, offset: int,
     if fingerprint(list(frame.source_refs)) != source_anchor:
         raise ServiceError("facts_corrupt")
     from .models import runs
+
     target = await conn.scalar(select(runs.c.target).where(runs.c.id == run_id))
-    if (not isinstance(target, dict) or not isinstance(target.get("context"), dict)
-            or target["context"].get("source_fingerprint") != source_anchor):
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("context"), dict)
+        or target["context"].get("source_fingerprint") != source_anchor
+    ):
         raise ServiceError("facts_corrupt")
     await work_sql.row(conn, frame.session_id, access)
-    selected = frame.source_refs[offset:offset+limit]
+    selected = frame.source_refs[offset : offset + limit]
     result = []
     for ref in selected:
         row = await turn_row(conn, cast(str, ref["turn_id"]))
         if row["status"] in {"queued", "running"}:
             raise ServiceError("facts_corrupt")
-        messages = ([Message.model_validate_json(encoded(m)) for m in row["transcript"]]
-                    if row["transcript"] is not None else [Message(role="user",
-                        content=row["text"]),
-                    Message(role="user", content="[不可信历史状态数据] " + row["status"]
-                            + ": " + (row["code"] or "unknown"))])
+        messages = (
+            [Message.model_validate_json(encoded(m)) for m in row["transcript"]]
+            if row["transcript"] is not None
+            else [
+                Message(role="user", content=row["text"]),
+                Message(
+                    role="user",
+                    content="[不可信历史状态数据] "
+                    + row["status"]
+                    + ": "
+                    + (row["code"] or "unknown"),
+                ),
+            ]
+        )
         builder.validate_groups(messages)
         result.append({"ref": dict(ref), "messages": messages})
     return result

@@ -10,6 +10,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import ServiceError, encoded, fingerprint
+from krim_agent.extensions import load_turn_extensions
 from krim_agent.workspace.types import (
     ArtifactRevision,
     EffectIntent,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {4, 5, 6, 7, 8, 9, 10}:
+    if store.schema_version not in {4, 5, 6, 7, 8, 9, 10, 11}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -232,6 +233,7 @@ async def bind(
         for k, v in target.items()
         if k not in {"workspace_profile", "limits", "limits_fingerprint", "workspace_verification"}
     }
+    extensions = await load_turn_extensions(conn, turn["id"])
     conditions = {
         "runtime": profile.runtime.model_dump(mode="json")
         | {
@@ -254,6 +256,7 @@ async def bind(
                 select(sessions.c.context_policy).where(sessions.c.id == turn["session_id"])
             ),
             "compaction": profile.compaction.model_dump(mode="json"),
+            "extensions": extensions,
         },
         "artifact": {
             "version": "artifact/1",
@@ -568,6 +571,7 @@ async def dispatch(conn: AsyncConnection, call_id: str, access: ExecutionAccess)
 
 async def finish(conn: AsyncConnection, run_id: str, *, interrupted: bool = False) -> None:
     from krim_agent.workspace import verification
+
     frame = await load(conn, run_id)
     if frame is None:
         return
@@ -607,8 +611,10 @@ async def finish(conn: AsyncConnection, run_id: str, *, interrupted: bool = Fals
         )
 
     verification_contract = frame.conditions.get("verification")
-    if (isinstance(verification_contract, dict)
-            and verification_contract.get("schema") == "completion-verification/1"):
+    if (
+        isinstance(verification_contract, dict)
+        and verification_contract.get("schema") == "completion-verification/1"
+    ):
         await verification._TERMINAL_HELPERS[5](conn, run_id, interrupted=interrupted)
 
 

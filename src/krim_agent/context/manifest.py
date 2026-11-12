@@ -12,10 +12,10 @@ from pydantic import JsonValue
 from krim_agent.contracts import Message, encoded
 
 Category = Literal[
-    "system", "tools", "history", "tool_result", "summary", "unknown", "files", "memory"
+    "system", "tools", "history", "tool_result", "summary", "unknown", "files", "memory", "skill"
 ]
 _CATEGORIES = frozenset(
-    {"system", "tools", "history", "tool_result", "summary", "unknown", "files", "memory"}
+    {"system", "tools", "history", "tool_result", "summary", "unknown", "files", "memory", "skill"}
 )
 _MAX_ITEMS = 128
 _MAX_LABEL_CHARS = 64
@@ -273,13 +273,17 @@ def build_context_manifest(
         estimated_total = (total_bytes + 3) // 4
         for item in visible_items:
             item["estimated_tokens"] = cast(int, item["input_bytes"]) // 4
-        remainder = estimated_total - sum(cast(int, item["estimated_tokens"])
-                                          for item in visible_items)
-        ranked = sorted(range(len(visible_items)), key=lambda index: (
-            -(cast(int, visible_items[index]["input_bytes"]) % 4), index))
+        remainder = estimated_total - sum(
+            cast(int, item["estimated_tokens"]) for item in visible_items
+        )
+        ranked = sorted(
+            range(len(visible_items)),
+            key=lambda index: (-(cast(int, visible_items[index]["input_bytes"]) % 4), index),
+        )
         for index in ranked[:remainder]:
             visible_items[index]["estimated_tokens"] = (
-                cast(int, visible_items[index]["estimated_tokens"]) + 1)
+                cast(int, visible_items[index]["estimated_tokens"]) + 1
+            )
         items_truncated = bool(omitted)
         visible_source_refs_truncated = source_refs_truncated or any(
             bool(item.get("source_refs")) for item in omitted
@@ -314,8 +318,7 @@ def session_message_metadata(
     """Associate frozen turn references with exact message groups by their stored digest."""
     result: list[ItemMetadata | None] = [None] * len(messages)
     cursor = 1 if messages and messages[0].role == "system" else 0
-    serialized = [encoded(message.model_dump(mode="json")).encode("utf-8")
-                  for message in messages]
+    serialized = [encoded(message.model_dump(mode="json")).encode("utf-8") for message in messages]
     for source in sources:
         expected = getattr(source, "fingerprint", None)
         if not isinstance(expected, str):
@@ -346,4 +349,27 @@ def session_message_metadata(
         for index in range(cursor, match_end):
             result[index] = metadata
         cursor = match_end
+    for index in range(cursor, max(cursor, len(messages) - 1)):
+        message = messages[index]
+        if message.role != "user":
+            continue
+        if message.content.startswith("[不可信技能内容"):
+            category: Category = "skill"
+            label = "Frozen Skill snapshot"
+        elif message.content.startswith("[不可信长期记忆内容"):
+            category = "memory"
+            label = "Frozen private memory snapshot"
+        else:
+            continue
+        result[index] = ItemMetadata(
+            category=category,
+            label=label,
+            source_refs=(
+                {
+                    "fingerprint": hashlib.sha256(
+                        encoded(message.model_dump(mode="json")).encode("utf-8")
+                    ).hexdigest()
+                },
+            ),
+        )
     return result

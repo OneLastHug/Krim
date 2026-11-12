@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import JsonValue
 
+from krim_agent.accounts.service import IdentityService
 from krim_agent.config import Settings
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import (
@@ -44,9 +45,7 @@ from .types import (
 )
 
 _CONTROL_KINDS = frozenset({"rename", "close", "resume", "cancel_turn", "approval"})
-_TRACE_STATUSES = frozenset(
-    {"queued", "running", "completed", "failed", "aborted", "interrupted"}
-)
+_TRACE_STATUSES = frozenset({"queued", "running", "completed", "failed", "aborted", "interrupted"})
 _TRACE_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,1024}\Z")
 
 
@@ -137,9 +136,7 @@ async def read_trace_index(
         not isinstance(session_id, str) or not session_id or len(session_id) > 128
     ):
         raise ServiceError("invalid_input", 422)
-    if turn_id is not None and (
-        not isinstance(turn_id, str) or not turn_id or len(turn_id) > 128
-    ):
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id or len(turn_id) > 128):
         raise ServiceError("invalid_input", 422)
 
     scope = _trace_cursor_scope(
@@ -202,7 +199,7 @@ class SessionService:
         runs: RunService,
         settings: Settings,
         *,
-        identities: object | None = None,
+        identities: IdentityService | None = None,
     ) -> None:
         self.store, self.runs, self.settings = store, runs, settings
         # 稳定身份服务引用；托管模式由composition注入，legacy保持None。
@@ -361,8 +358,11 @@ class SessionService:
             request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
         accepted_session = await self.get(principal, workspace, session_id, write=True)
         selected_binding = self.runs.bindings.get(accepted_session.target_key)
-        if (selected_binding is not None and selected_binding.loop.sandbox is not None
-                and accepted_session.owner_id != principal.principal_id):
+        if (
+            selected_binding is not None
+            and selected_binding.loop.sandbox is not None
+            and accepted_session.owner_id != principal.principal_id
+        ):
             # 普通会话只持有owner快照，不能将管理员提交误当owner授权。
             raise ServiceError("permission_denied", 403)
         # 入队前实时复核：边界认证与本次写入之间被停用/降权的主体不再排队。
@@ -374,6 +374,8 @@ class SessionService:
         )
         if len(body.text.encode()) > self.settings.max_input_bytes:
             raise ServiceError("input_limit", 422)
+        from krim_agent.extensions import ExtensionService
+
         result = await sql.submit(
             self.store,
             session_id,
@@ -382,6 +384,13 @@ class SessionService:
             access=ExecutionAccess(principal, workspace, session_id)
             if isinstance(body, WorkspaceTurnRequest)
             else None,
+            actor=principal,
+            extension_service=ExtensionService(
+                self.store,
+                self.identities
+                if self.identities is not None and self.identities.managed
+                else None,
+            ),
         )
         self.runs.slot_changed.set()
         return result
@@ -494,8 +503,8 @@ class SessionService:
                 raise failures[0]
             return {
                 "principal_id": principal_id,
-                "failed_queued": failed_queued,
-                "cancelled_runs": cancelled_runs,
+                "failed_queued": cast(list[JsonValue], failed_queued),
+                "cancelled_runs": cast(list[JsonValue], cancelled_runs),
             }
         finally:
             self._revoked.discard(principal_id)

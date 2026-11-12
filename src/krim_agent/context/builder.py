@@ -117,16 +117,21 @@ def prepare(
     tools: list[dict[str, JsonValue]],
     policy: ContextPolicy,
     request_limit: int,
+    extensions: list[Message] | None = None,
+    extension_snapshot: dict[str, JsonValue] | None = None,
 ) -> ContextSnapshot:
+    extra = extensions or []
     messages = [
         Message(role="system", content=system),
         *history,
+        *extra,
         Message(role="user", content=current),
     ]
     size = check_budget(messages, tools, policy, request_limit)
     return ContextSnapshot(
         messages=tuple(messages),
         sources=tuple(sources),
+        extensions=extension_snapshot or {},
         policy=policy,
         tool_fingerprint=fingerprint(tools),
         builder_fingerprint=identity(),
@@ -137,5 +142,6 @@ def prepare(
                 "history": [m.model_dump(mode="json") for m in history],
                 "sources": [v.model_dump(mode="json") for v in sources],
             }
+            | ({"extensions": extension_snapshot} if extension_snapshot else {})
         ),
     )

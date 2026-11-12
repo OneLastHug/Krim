@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from krim_agent.contracts import Message, StrictModel
 
@@ -25,6 +25,7 @@ class ContextSnapshot(StrictModel):
     schema_version: int = 1
     messages: tuple[Message, ...]
     sources: tuple[HistorySource, ...]
+    extensions: dict[str, JsonValue] = Field(default_factory=dict)
     policy: ContextPolicy
     tool_fingerprint: str
     builder_fingerprint: str
