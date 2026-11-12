@@ -371,6 +371,24 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
         assert lookup.status_code == 422
         assert (await client.get(route + "/search", params={"offset": 4050, "query": "x"})).status_code == 422
+        search_last_page = await client.get(
+            route + "/search", params={"offset": 4095, "limit": 1, "query": "answer"}
+        )
+        assert search_last_page.status_code == 200
+        assert calls[-1][1]["offset"] == 4095 and calls[-1][1]["limit"] == 1
+        assert (
+            await client.get(route + "/search", params={"offset": 4095, "limit": 2, "query": "x"})
+        ).status_code == 422
+        find_last_page = await client.get(
+            route + "/find", params={"offset": 4095, "limit": 1, "include_glob": "**/*.py"}
+        )
+        assert find_last_page.status_code == 200
+        assert calls[-1][1]["offset"] == 4095 and calls[-1][1]["limit"] == 1
+        assert (
+            await client.get(
+                route + "/find", params={"offset": 4095, "limit": 2, "include_glob": "**/*.py"}
+            )
+        ).status_code == 422
         assert (await client.get(route + "/files", params={"offset": -1})).status_code == 422
         assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
         assert (await client.get(route + "/export-file", params={"path": "../secret"})).status_code == 422

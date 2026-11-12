@@ -324,6 +324,28 @@ def test_search_depth_cap_is_reported_when_path_limit_is_reached(files):
     assert result["next_offset"] is None
 
 
+def test_find_and_search_mark_overlong_candidate_paths_incomplete(files):
+    fs, env, project, content = files
+    scope = content / ("s" * 240) / ("t" * 240)
+    scope.mkdir(parents=True)
+    (scope / ("a" * 40 + ".txt")).write_text("needle beyond path budget", encoding="utf-8")
+    (scope / "visible.txt").write_text("needle visible", encoding="utf-8")
+    (scope / ".env").write_text("needle secret", encoding="utf-8")
+    request_path = "s" * 240 + "/" + "t" * 240
+
+    found = fs.find(env, project, path=request_path, include_glob="**/*")
+    assert found["files"] == [{"path": request_path + "/visible.txt", "size": len(b"needle visible")}]
+    assert found["truncated"] is True
+    assert found["depth_cap_reached"] is True
+    assert found["total"] is None
+
+    searched = fs.search(env, project, "needle", path=request_path, include_glob="**/*")
+    assert [item["path"] for item in searched["matches"]] == [request_path + "/visible.txt"]
+    assert searched["truncated"] is True
+    assert searched["depth_cap_reached"] is True
+    assert searched["total_matches"] is None
+
+
 def test_find_and_search_glob_matches_relative_to_scope(files):
     """path 作用域内的 include_glob 按作用域相对路径匹配：不下探子目录，也不跨出作用域。"""
     fs, env, project, content = files
@@ -433,6 +455,28 @@ def test_stale_stat_token_rejected_after_inplace_write_and_replace(files):
     assert replaced["sha256"] == hashlib.sha256(b"C" * len(payload)).hexdigest()
 
 
+def test_chunked_read_accepts_negative_mtime_stat_token(files):
+    fs, env, project, content = files
+    payload = b"pre-epoch" * 9000
+    fs.write(env, project, "pre-epoch.bin", payload, None)
+    target = content / "pre-epoch.bin"
+    os.utime(target, ns=(-1_000_000_000, -1_000_000_000))
+
+    first = fs.read(env, project, "pre-epoch.bin", 0, 65536)
+    assert first["stat_token"][3] < 0
+    tail = fs.read(
+        env,
+        project,
+        "pre-epoch.bin",
+        65536,
+        65536,
+        expected_sha256=first["sha256"],
+        expected_stat=first["stat_token"],
+    )
+    assert base64.b64decode(first["data"]) + base64.b64decode(tail["data"]) == payload
+    assert tail["eof"] is True
+
+
 def test_read_rejects_partial_or_malformed_expectations(files):
     """读取期望值必须成对传入且格式完整；残缺或畸形一律 invalid_input。"""
     fs, env, project, content = files
@@ -459,7 +503,9 @@ def test_read_rejects_partial_or_malformed_expectations(files):
         123,
         [str(value) for value in token],
         [True, *token[1:]],
-        [*token[:4], -1],
+        [-1, *token[1:]],
+        [token[0], -1, *token[2:]],
+        [*token[:2], -1, *token[3:]],
         [float(token[2]), *token[1:]],
     ]:
         with pytest.raises(ServiceError, match="invalid_input"):

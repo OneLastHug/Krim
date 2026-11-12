@@ -64,6 +64,12 @@ class FileFind(ProjectInput):
             raise ValueError("文件模式需要包含glob通配符")
         return value
 
+    @model_validator(mode="after")
+    def valid_page(self) -> Self:
+        if self.offset + self.limit > 4096:
+            raise ValueError("文件分页超出上限")
+        return self
+
 
 class FileSearch(FileList):
     query: str = Field(min_length=1, max_length=256)
