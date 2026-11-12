@@ -204,14 +204,11 @@ async def execute_command(
             if program not in health.get("configured_programs", ["python"]):
                 raise ServiceError("target_binding_changed")
             if isinstance(values, SandboxCommand):
-                runtime_health = await broker.call(
-                    "runtime_probe",
-                    environment_id=intent["environment_id"],
-                    project_id=values.project_id,
-                    operation_id=operation_id,
-                    program=program,
-                )
-                runtime_image = runtime_health.get("image")
+                runtime_health = {
+                    "image": intent["image"],
+                    "fingerprint": intent["runtime_fingerprint"],
+                }
+                runtime_image = runtime_health["image"]
             if (
                 runtime_image != intent["image"]
                 or intent["runtime_fingerprint"] is not None
