@@ -23,6 +23,7 @@ from krim_agent.evaluation.product import EvaluationProduct
 from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
 from krim_agent.execution.linux import SandboxRunner
+from krim_agent.extensions import ExtensionService
 from krim_agent.providers.fake import FakeProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.providers.types import ModelProvider
@@ -69,6 +70,7 @@ class Application:
     tool_runtime: ToolRuntime | None = None
     identities: IdentityService | None = field(default=None, repr=False)
     sandbox: SandboxService | None = None
+    extensions: ExtensionService | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -134,8 +136,9 @@ class Application:
                         if self.tool_runtime is not None:
                             await self.tool_runtime.close()
                     finally:
-                        outcomes = await asyncio.gather(*(p.close() for p in self.owned_providers),
-                            return_exceptions=True)
+                        outcomes = await asyncio.gather(
+                            *(p.close() for p in self.owned_providers), return_exceptions=True
+                        )
                         for outcome in outcomes:
                             if isinstance(outcome, BaseException):
                                 raise outcome
@@ -192,28 +195,39 @@ async def open_application(
     agent_http = live and config.http_mode == "agent"
     if config.evaluation_automation_enabled and not config.product_eval_enabled:
         raise ServiceError("invalid_input", 422)
-    sandbox_configuration = (SandboxConfiguration.load(config.sandbox_config_file)
-                             if config.sandbox_config_file is not None else None)
+    sandbox_configuration = (
+        SandboxConfiguration.load(config.sandbox_config_file)
+        if config.sandbox_config_file is not None
+        else None
+    )
     reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
     workspace = workspace_profile or (
-        WorkspaceConfiguration.load(
-        config.workspace_profile_file) if config.workspace_profile_file is not None else None)
+        WorkspaceConfiguration.load(config.workspace_profile_file)
+        if config.workspace_profile_file is not None
+        else None
+    )
     if workspace is not None:
         workspace.__post_init__()
     raw_http_fields = set(http_config.model_fields_set) if http_config is not None else set()
     if isinstance(provider, OpenAICompatibleProvider):
-        cap = workspace.profile.max_tools_per_step if workspace is not None else (
-            min(config.max_tools_per_step, provider.config.max_tool_calls) if agent_http else 1
+        cap = (
+            workspace.profile.max_tools_per_step
+            if workspace is not None
+            else (
+                min(config.max_tools_per_step, provider.config.max_tool_calls) if agent_http else 1
+            )
         )
         if provider.binding_token() != provider._sealed or provider.config.max_tool_calls != cap:
             raise ProviderError("provider_config", 422)
         if workspace is not None and http_config is not None:
             raise ProviderError("provider_config", 422)
     if http_config is not None:
-        cap = workspace.profile.max_tools_per_step if workspace is not None else (
-            min(config.max_tools_per_step, 4) if agent_http else 1
+        cap = (
+            workspace.profile.max_tools_per_step
+            if workspace is not None
+            else (min(config.max_tools_per_step, 4) if agent_http else 1)
         )
         if "max_tool_calls" in raw_http_fields:
             if agent_http and workspace is None:
@@ -224,9 +238,13 @@ async def open_application(
                 raise ProviderError("provider_config", 422)
         if workspace is not None or agent_http:
             http_config = OpenAICompatibleConfig.model_validate(
-                http_config.model_dump() | {"max_tool_calls": cap})
-    if workspace is not None and http_config is None and not isinstance(provider,
-        OpenAICompatibleProvider):
+                http_config.model_dump() | {"max_tool_calls": cap}
+            )
+    if (
+        workspace is not None
+        and http_config is None
+        and not isinstance(provider, OpenAICompatibleProvider)
+    ):
         raise ServiceError("workspace_unavailable")
     primary_settings = config
     if workspace is not None and isinstance(provider, OpenAICompatibleProvider) and not live:
@@ -255,12 +273,12 @@ async def open_application(
         primary_settings = Settings.model_validate(
             config.model_dump()
             | {
-                "system_prompt": config.system_prompt if "system_prompt" in specified else (
-                    "你是 Krim Agent。使用获授权工具完成用户任务；依据实际结果回答。"
-                ),
-                "target_version": config.target_version if "target_version" in specified else (
-                    "agent-http/1"
-                ),
+                "system_prompt": config.system_prompt
+                if "system_prompt" in specified
+                else ("你是 Krim Agent。使用获授权工具完成用户任务；依据实际结果回答。"),
+                "target_version": config.target_version
+                if "target_version" in specified
+                else ("agent-http/1"),
                 "max_tools_per_step": min(config.max_tools_per_step, http_config.max_tool_calls),
                 "max_request_bytes": min(config.max_request_bytes, http_config.max_request_bytes),
             }
@@ -324,12 +342,17 @@ async def open_application(
     tools = registry if registry is not None else builtin_registry()
     if tool_config is not None and config.tool_config_file is not None:
         raise ServiceError("invalid_input", 422)
-    external_config = (tool_config if tool_config is not None else
-        ToolRuntimeConfig.load(config.tool_config_file)
-        if config.tool_config_file is not None else None)
+    external_config = (
+        tool_config
+        if tool_config is not None
+        else ToolRuntimeConfig.load(config.tool_config_file)
+        if config.tool_config_file is not None
+        else None
+    )
     evaluation_path = (
         _evaluation_database_path(path, config.product_eval_database)
-        if config.product_eval_enabled else None
+        if config.product_eval_enabled
+        else None
     )
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
@@ -341,7 +364,8 @@ async def open_application(
     try:
         identities = await IdentityService.open(store)
         if identities.managed and (
-            config.identity_mode == "legacy" or active_access is not None
+            config.identity_mode == "legacy"
+            or active_access is not None
             or config.api_key.get_secret_value()
         ):
             raise ServiceError("identity_mode_conflict", 422)
@@ -355,42 +379,55 @@ async def open_application(
         if workspace is None:
             # 只读判定恢复需求；缺可信工作区资源时不先写 interrupted/paused。
             async with store.engine.connect() as conn:
-                pending = (await conn.execute(
-                    select(runs.c.request).where(runs.c.status.not_in(TERMINAL))
-                )).scalars()
+                pending = (
+                    await conn.execute(select(runs.c.request).where(runs.c.status.not_in(TERMINAL)))
+                ).scalars()
                 needs_workspace = any(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
                 if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10}:
                     queued = await conn.scalar(
-                        select(turns.c.id).join(sessions, turns.c.session_id == sessions.c.id)
-                        .where(sessions.c.target_key == "target-workspace",
-                               turns.c.status.in_(["queued", "running"])).limit(1)
+                        select(turns.c.id)
+                        .join(sessions, turns.c.session_id == sessions.c.id)
+                        .where(
+                            sessions.c.target_key == "target-workspace",
+                            turns.c.status.in_(["queued", "running"]),
+                        )
+                        .limit(1)
                     )
                     control = await conn.scalar(
                         select(session_controls.c.request_key)
                         .join(sessions, session_controls.c.session_id == sessions.c.id)
-                        .where(sessions.c.target_key == "target-workspace",
-                               session_controls.c.status == "pending").limit(1)
+                        .where(
+                            sessions.c.target_key == "target-workspace",
+                            session_controls.c.status == "pending",
+                        )
+                        .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
                 if store.schema_version in {4, 5, 6, 7, 8, 9, 10}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
-                        .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"])).limit(1)
+                        .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
+                        .limit(1)
                     )
                     needs_workspace = needs_workspace or active_effect is not None
             if needs_workspace:
                 raise ServiceError("workspace_unavailable")
         else:
             artifacts = ArtifactStore(store, workspace.artifact_root)
-            operations = WorkspaceOperations(store, artifacts, workspace.profile,
+            operations = WorkspaceOperations(
+                store,
+                artifacts,
+                workspace.profile,
                 access_policy=active_access,
-                identities=identities if identities.managed else None)
+                identities=identities if identities.managed else None,
+            )
             # 构造器用原票据/inode/UID完成真实资源恢复；失败则仅 finally 收已拥有资源。
-            runner = SandboxRunner(workspace.execution, hook=operations.runner_hook,
-                fence=operations.runner_fence)
+            runner = SandboxRunner(
+                workspace.execution, hook=operations.runner_hook, fence=operations.runner_fence
+            )
             operations.runner = runner
         await store.recover()
         selected = (
@@ -424,47 +461,76 @@ async def open_application(
                 http_config, max_connections=config.max_active_runs
             )
             owned.append(http_provider)
-            bindings["target-http"] = (_make_http_binding(store, config, http_provider,
-                registry=tools, policy=policy) if tool_runtime is not None else
-                _make_http_binding(store, config, http_provider))
+            bindings["target-http"] = (
+                _make_http_binding(store, config, http_provider, registry=tools, policy=policy)
+                if tool_runtime is not None
+                else _make_http_binding(store, config, http_provider)
+            )
         if workspace is not None:
             if "target-http" not in bindings and isinstance(provider, OpenAICompatibleProvider):
-                bindings["target-http"] = (_make_http_binding(store, config, provider,
-                    registry=tools, policy=policy) if tool_runtime is not None else
-                    _make_http_binding(store, config, provider))
+                bindings["target-http"] = (
+                    _make_http_binding(store, config, provider, registry=tools, policy=policy)
+                    if tool_runtime is not None
+                    else _make_http_binding(store, config, provider)
+                )
             http_binding = bindings.get("target-http")
-            if http_binding is None or not isinstance(http_binding.loop.provider,
-                OpenAICompatibleProvider):
+            if http_binding is None or not isinstance(
+                http_binding.loop.provider, OpenAICompatibleProvider
+            ):
                 raise ServiceError("workspace_unavailable")
             assert artifacts is not None and operations is not None and runner is not None
             work_settings = config.model_copy(
-                update={"system_prompt": (
-                    "你是 Krim Agent。使用获授权工作区工具完成任务；"
-                    "模型陈述不等于完成核验。"
+                update={
+                    "system_prompt": (
+                        "你是 Krim Agent。使用获授权工作区工具完成任务；模型陈述不等于完成核验。"
+                    ),
+                    "target_version": "workspace/1",
+                    "max_request_bytes": min(
+                        config.max_request_bytes,
+                        http_binding.loop.provider.config.max_request_bytes,
+                    ),
+                }
+            )
+            work_loop = AgentLoop(
+                store,
+                http_binding.loop.provider,
+                ToolExecutor(
+                    workspace_registry(operations),
+                    operations.policy,
+                    pre,
+                    post,
+                    middleware=workspace_middleware,
+                    wrap=workspace_wrap,
                 ),
-                "target_version": "workspace/1",
-                "max_request_bytes": min(config.max_request_bytes,
-                http_binding.loop.provider.config.max_request_bytes)})
-            work_loop = AgentLoop(store, http_binding.loop.provider,
-                ToolExecutor(workspace_registry(operations), operations.policy, pre, post,
-                             middleware=workspace_middleware, wrap=workspace_wrap),
-                work_settings, work=operations)
-            bindings["target-workspace"] = RunBinding.freeze("target-workspace", work_loop,
-                work_settings)
-        sandbox_service = (SandboxService(store, identities, sandbox_configuration)
-                           if sandbox_configuration is not None else None)
+                work_settings,
+                work=operations,
+            )
+            bindings["target-workspace"] = RunBinding.freeze(
+                "target-workspace", work_loop, work_settings
+            )
+        sandbox_service = (
+            SandboxService(store, identities, sandbox_configuration)
+            if sandbox_configuration is not None
+            else None
+        )
         if sandbox_service is not None and sandbox_service.configuration.command_image is not None:
             base_binding = bindings.get("target-http")
             if base_binding is None:
                 raise ServiceError("sandbox_config_invalid", 422)
             sandbox_operations = SandboxOperations(sandbox_service)
-            sandbox_settings = base_binding.settings.model_copy(update={
-                "target_version": "sandbox/1", "run_timeout": 180.0, "tool_timeout": 30.0})
-            sandbox_loop = AgentLoop(store, base_binding.loop.provider,
+            sandbox_settings = base_binding.settings.model_copy(
+                update={"target_version": "sandbox/1", "run_timeout": 180.0, "tool_timeout": 30.0}
+            )
+            sandbox_loop = AgentLoop(
+                store,
+                base_binding.loop.provider,
                 ToolExecutor(sandbox_operations.registry(), sandbox_operations.policy, pre, post),
-                sandbox_settings, sandbox=sandbox_operations)
+                sandbox_settings,
+                sandbox=sandbox_operations,
+            )
             bindings["target-http"] = RunBinding.freeze(
-                "target-http", sandbox_loop, sandbox_settings)
+                "target-http", sandbox_loop, sandbox_settings
+            )
         service = RunService(store, loop, config, target, bindings)
         application = Application(
             store,
@@ -474,8 +540,9 @@ async def open_application(
             provider is None,
             tuple({id(p): p for p in owned}.values()),
             EvaluationService(store, service),
-            SessionService(store, service, config,
-                           identities=identities if identities.managed else None),
+            SessionService(
+                store, service, config, identities=identities if identities.managed else None
+            ),
             active_access,
             work=operations,
             artifacts=artifacts,
@@ -483,12 +550,17 @@ async def open_application(
             tool_runtime=tool_runtime,
             identities=identities,
             sandbox=sandbox_service,
+            extensions=ExtensionService(store, identities if identities.managed else None),
         )
         if evaluation_path is not None:
             adapters = {
                 "krim-script-" + key.removeprefix("target-"): AdapterLease(
-                    NeutralKrimAdapter(store, service, key,
-                        neutral_key="krim-script-" + key.removeprefix("target-")),
+                    NeutralKrimAdapter(
+                        store,
+                        service,
+                        key,
+                        neutral_key="krim-script-" + key.removeprefix("target-"),
+                    ),
                     owned=True,
                 )
                 for key in ("target-v1", "target-v2", "target-bad")
@@ -508,10 +580,12 @@ async def open_application(
                         )
                         for item in active_access.credentials
                     )
-                    if active_access is not None else (LOCAL,)
+                    if active_access is not None
+                    else (LOCAL,)
                 )
                 application.evaluation_automation = EvaluationAutomation(
-                    application.evaluation_product, principals,
+                    application.evaluation_product,
+                    principals,
                     identities=identities if identities.managed else None,
                 )
                 await application.evaluation_automation.start()
@@ -529,8 +603,9 @@ async def open_application(
             from krim_agent.storage.account_models import accounts
 
             async with store.lock, store.engine.begin() as conn:
-                legacy = await conn.scalar(select(accounts.c.legacy).where(
-                    accounts.c.principal_id == principal_id))
+                legacy = await conn.scalar(
+                    select(accounts.c.legacy).where(accounts.c.principal_id == principal_id)
+                )
             if legacy:
                 if application.evaluations is not None:
                     for eval_id, task in list(application.evaluations.tasks.items()):
@@ -563,8 +638,9 @@ async def open_application(
                     if tool_runtime is not None:
                         await settled(tool_runtime.close())
                 finally:
-                    outcomes = await settled(asyncio.gather(*(p.close() for p in owned),
-                        return_exceptions=True))
+                    outcomes = await settled(
+                        asyncio.gather(*(p.close() for p in owned), return_exceptions=True)
+                    )
             finally:
                 await settled(store.close())
         for outcome in outcomes:
@@ -574,8 +650,12 @@ async def open_application(
 
 
 def _make_http_binding(
-    store: SQLiteStore, settings: Settings, provider: OpenAICompatibleProvider,
-    *, registry: ToolRegistry | None = None, policy: Policy | None = controlled_policy,
+    store: SQLiteStore,
+    settings: Settings,
+    provider: OpenAICompatibleProvider,
+    *,
+    registry: ToolRegistry | None = None,
+    policy: Policy | None = controlled_policy,
 ) -> RunBinding:
     config = settings.model_copy(
         update={
@@ -591,6 +671,10 @@ def _make_http_binding(
             "tool_timeout": min(2, settings.tool_timeout),
         }
     )
-    loop = AgentLoop(store, provider, ToolExecutor(
-        registry if registry is not None else builtin_registry(), policy), config)
+    loop = AgentLoop(
+        store,
+        provider,
+        ToolExecutor(registry if registry is not None else builtin_registry(), policy),
+        config,
+    )
     return RunBinding.freeze("target-http", loop, config)

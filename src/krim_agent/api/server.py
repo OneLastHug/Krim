@@ -94,8 +94,9 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
         active = (
-            await open_application(config.database, settings=config, http_config=http_config,
-                                   tool_config=tool_config)
+            await open_application(
+                config.database, settings=config, http_config=http_config, tool_config=tool_config
+            )
             if owned
             else application
         )
@@ -319,6 +320,10 @@ def create_app(
     from .accounts import mount_accounts
 
     mount_accounts(app)
+
+    from .extensions import mount_extensions
+
+    mount_extensions(app)
 
     from .sandbox import mount_sandbox
 
