@@ -10,8 +10,8 @@
 - 默认仅 HTTPS、不读取环境代理（``trust_env=False``，连接池也未配置代理）、
   不跟随重定向（``follow_redirects=False``，即使调用方打开，重定向目标也会
   重新过策略）。
-- 连接复用键是 httpcore 连接池的 origin（scheme/host/port）；每个 policy
-  对应独立的 client 与连接池，不同 host 即使解析到同一 IP 也不会共享连接。
+- 每个请求都重新解析并审批 DNS，pinned origin 不复用 keep-alive socket，
+  因此 DNS 撤销会在下一请求生效；不同 host 即使解析到同一 IP 也不会共享连接。
 - 错误消息只含 host/地址与原因，不含请求头或凭据。
 
 复用的既有安装 API（httpx 0.28.1 / httpcore 1.0.9）：TLS 仍由 httpcore
@@ -90,8 +90,12 @@ class PinnedIPBackend(httpcore.AsyncNetworkBackend):
         self._inner = inner if inner is not None else AutoBackend()
         self._pins: dict[str, tuple[str, ...]] = {}
 
-    def pin(self, host: str, addresses: Sequence[str]) -> None:
-        self._pins[host] = tuple(addresses)
+    def pin(self, host: str, addresses: Sequence[str]) -> bool:
+        """Replace a host's pin and report whether DNS changed."""
+        normalized = tuple(addresses)
+        changed = self._pins.get(host) != normalized
+        self._pins[host] = normalized
+        return changed
 
     async def connect_tcp(  # noqa: ASYNC109 -- httpcore 接口签名，参数名不可改
         self,
@@ -149,7 +153,9 @@ class PinnedAsyncTransport(httpx.AsyncBaseTransport):
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=create_ssl_context(verify=True, trust_env=False),
             max_connections=effective_limits.max_connections,
-            max_keepalive_connections=effective_limits.max_keepalive_connections,
+            # DNS is approved on every request. Reusing an origin socket would
+            # bypass a changed or revoked resolution without a new connect_tcp.
+            max_keepalive_connections=0,
             keepalive_expiry=effective_limits.keepalive_expiry,
             http1=http1,
             http2=http2,

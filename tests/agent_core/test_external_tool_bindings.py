@@ -305,7 +305,7 @@ async def test_runtime_config_injects_pinned_policy_for_http_mcp(monkeypatch):
         name="remote",
         transport="streamable_http",
         url="https://mcp.example.test:8443/v1",
-        allowed_hosts=frozenset({"mcp.example.test"}),
+        allowed_hosts=frozenset({"mcp.example.test", "redirect.example.test"}),
         selected_tools=("search",),
     )
     runtime = await ToolRuntime.open(
@@ -317,10 +317,15 @@ async def test_runtime_config_injects_pinned_policy_for_http_mcp(monkeypatch):
         await runtime.close()
     assert len(observed) == 1
     assert observed[0].validate_target("https://mcp.example.test:8443/v1").port == 8443
+    assert observed[0].validate_target("https://redirect.example.test:8443/next").host == (
+        "redirect.example.test"
+    )
     from krim_agent.network.egress_policy import EgressViolation
 
     with pytest.raises(EgressViolation):
         observed[0].validate_target("https://other.example.test:8443/v1")
+    with pytest.raises(EgressViolation):
+        observed[0].validate_target("https://redirect.example.test:443/next")
 
 
 async def test_discovery_failure_closes_resources_and_old_registry_is_not_modified(monkeypatch):

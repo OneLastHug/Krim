@@ -202,8 +202,14 @@ class EgressPolicy:
         canonical = _canonical_host(normalized)
         if canonical not in self._allowed_hosts:
             raise EgressViolation(f"egress host is not allowed: {normalized}")
-        if scheme == "http" and not _is_ip_literal(canonical) and canonical != "localhost":
-            raise EgressViolation("cleartext http is allowed only for loopback hosts")
+        if scheme == "http":
+            if canonical == "localhost":
+                pass
+            elif _is_ip_literal(canonical):
+                if not ipaddress.ip_address(canonical).is_loopback:
+                    raise EgressViolation("cleartext http is allowed only for loopback hosts")
+            else:
+                raise EgressViolation("cleartext http is allowed only for loopback hosts")
         if port is None:
             port = _DEFAULT_PORTS[scheme]
         if port not in self._allowed_ports:

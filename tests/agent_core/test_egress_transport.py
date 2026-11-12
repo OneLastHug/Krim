@@ -292,6 +292,27 @@ async def test_redirect_is_not_followed() -> None:
     assert resolver.calls == ["api.test"]
 
 
+async def test_followed_redirect_to_explicitly_allowed_host_is_revalidated() -> None:
+    policy = EgressPolicy({"api.test", "other.test"}, {443})
+    resolver = FakeResolver({"api.test": ("1.2.3.4",), "other.test": ("4.5.6.7",)})
+    backend = RecordingBackend()
+    backend.queue_responses(
+        [
+            _response(
+                "HTTP/1.1 307 Temporary Redirect",
+                [("Location", "https://other.test/next"), ("Content-Length", "0")],
+            ),
+            _ok_response(b"redirected"),
+        ]
+    )
+    async with _build(policy, resolver, backend) as client:
+        response = await client.get("https://api.test/a", follow_redirects=True)
+    assert response.status_code == 200
+    assert response.content == b"redirected"
+    assert resolver.calls == ["api.test", "other.test"]
+    assert backend.connections == [("1.2.3.4", 443), ("4.5.6.7", 443)]
+
+
 async def test_followed_redirect_target_is_revalidated() -> None:
     # 即使调用方按请求打开 follow_redirects，重定向目标也重新过策略。
     policy = EgressPolicy({"api.test"}, {443})
@@ -386,18 +407,30 @@ async def test_pins_refresh_per_request() -> None:
     assert backend.connections == [("1.2.3.4", 443), ("4.5.6.7", 443)]
 
 
-async def test_same_host_reuses_connection() -> None:
+async def test_dns_revocation_closes_idle_connection_before_reuse() -> None:
+    policy = EgressPolicy({"api.test"}, {443})
+    table: dict[str, Sequence[str]] = {"api.test": ("1.2.3.4",)}
+    resolver = FakeResolver(table)
+    backend = RecordingBackend()
+    backend.queue_responses([_ok_response() + _ok_response(), _ok_response()])
+    async with _build(policy, resolver, backend) as client:
+        assert (await client.get("https://api.test/")).status_code == 200
+        table["api.test"] = ("4.5.6.7",)
+        assert (await client.get("https://api.test/")).status_code == 200
+    assert backend.connections == [("1.2.3.4", 443), ("4.5.6.7", 443)]
+    assert backend.streams[0].closed is True
+
+
+async def test_same_host_reconnects_for_each_dns_snapshot() -> None:
     policy = EgressPolicy({"api.test"}, {443})
     resolver = FakeResolver({"api.test": ("1.2.3.4",)})
     backend = RecordingBackend()
-    # keep-alive：同一连接按 HTTP/1.1 分帧依次应答两个请求。
-    backend.queue_responses([_ok_response() + _ok_response()])
+    backend.queue_responses([_ok_response(), _ok_response()])
     async with _build(policy, resolver, backend) as client:
         assert (await client.get("https://api.test/")).status_code == 200
         assert (await client.get("https://api.test/")).status_code == 200
-    assert len(backend.connections) == 1
-    assert len(backend.streams) == 1
-    assert backend.streams[0].written.count(b"GET / HTTP/1.1") == 2
+    assert backend.connections == [("1.2.3.4", 443), ("1.2.3.4", 443)]
+    assert len(backend.streams) == 2
 
 
 async def test_same_ip_different_hosts_do_not_share_connections() -> None:
