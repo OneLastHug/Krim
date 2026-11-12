@@ -57,6 +57,68 @@ def test_rename_uses_existing_lease_and_preserves_content(command_jobs):
     assert broker.leases.status(project)["status"] == "idle"
 
 
+def test_chunked_reads_reuse_hash_and_reject_stale_stat_token(command_jobs, monkeypatch):
+    from krim_agent.contracts import ServiceError
+
+    broker, _, env, project = command_jobs
+    original = bytes(range(256)) * 512
+    broker.files.write(env, project, "large.bin", original, None)
+    calls = 0
+    hash_file = broker.files._hash
+
+    def count_hash(fd, size):
+        nonlocal calls
+        calls += 1
+        return hash_file(fd, size)
+
+    monkeypatch.setattr(broker.files, "_hash", count_hash)
+    first = broker.dispatch("read", {
+        "environment_id": env,
+        "project_id": project,
+        "path": "large.bin",
+        "offset": 0,
+        "limit": 65536,
+    })
+    assert calls == 1
+    next_chunk = broker.dispatch("read", {
+        "environment_id": env,
+        "project_id": project,
+        "path": "large.bin",
+        "offset": 65536,
+        "limit": 65536,
+        "expected_sha256": first["sha256"],
+        "expected_stat": first["stat_token"],
+    })
+    assert calls == 1
+    assert next_chunk["sha256"] == first["sha256"]
+    assert next_chunk["stat_token"] == first["stat_token"]
+
+    broker.files.write(env, project, "large.bin", b"x" * len(original), first["sha256"])
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        broker.dispatch("read", {
+            "environment_id": env,
+            "project_id": project,
+            "path": "large.bin",
+            "offset": 65536,
+            "limit": 65536,
+            "expected_sha256": first["sha256"],
+            "expected_stat": first["stat_token"],
+        })
+    for partial in (
+        {"expected_sha256": first["sha256"]},
+        {"expected_stat": first["stat_token"]},
+    ):
+        with pytest.raises(ServiceError, match="invalid_input"):
+            broker.dispatch("read", {
+                "environment_id": env,
+                "project_id": project,
+                "path": "large.bin",
+                "offset": 0,
+                "limit": 1,
+                **partial,
+            })
+
+
 def test_corrupt_file_edit_journal_does_not_become_an_untracked_write():
     from krim_agent.contracts import ServiceError
     from krim_agent.sandbox.jobs import _FileEditJournal

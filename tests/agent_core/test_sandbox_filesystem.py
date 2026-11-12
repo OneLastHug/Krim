@@ -1,4 +1,4 @@
-"""真实Linux目录适配：路径/链接拒绝、读写上限与原子替换。"""
+"""真实Linux目录适配：路径/链接拒绝、读写上限、原子替换、glob 作用域与分块读取期望值。"""
 
 import base64
 import hashlib
@@ -304,6 +304,169 @@ def test_find_depth_cap_does_not_abort_other_siblings(files):
     assert result["truncated"] is True
     assert result["total"] is None
     assert result["next_offset"] is None
+
+
+def test_search_depth_cap_is_reported_when_path_limit_is_reached(files):
+    fs, env, project, content = files
+    deep = content
+    for index in range(17):
+        deep = deep / f"d{index}"
+    deep.mkdir(parents=True)
+    (deep / "hidden.txt").write_text("needle is beyond the path limit", encoding="utf-8")
+    (content / "visible.txt").write_text("needle remains searchable", encoding="utf-8")
+
+    result = fs.search(env, project, "needle")
+
+    assert [item["path"] for item in result["matches"]] == ["visible.txt"]
+    assert result["depth_cap_reached"] is True
+    assert result["truncated"] is True
+    assert result["total_matches"] is None
+    assert result["next_offset"] is None
+
+
+def test_find_and_search_glob_matches_relative_to_scope(files):
+    """path 作用域内的 include_glob 按作用域相对路径匹配：不下探子目录，也不跨出作用域。"""
+    fs, env, project, content = files
+    (content / "src" / "nested").mkdir(parents=True)
+    (content / "top.py").write_bytes(b"needle root\n")
+    (content / "src" / "one.py").write_bytes(b"needle one\n")
+    (content / "src" / "nested" / "deep.py").write_bytes(b"needle deep\n")
+    (content / "src" / "notes.txt").write_bytes(b"needle notes\n")
+
+    found = fs.find(env, project, path="src", include_glob="*.py")
+    assert found["path"] == "src"
+    assert found["include_glob"] == "*.py"
+    assert found["files"] == [{"path": "src/one.py", "size": len(b"needle one\n")}]
+    assert found["total"] == 1
+    assert found["truncated"] is False
+
+    scanned = fs.search(env, project, "needle", path="src", include_glob="*.py")
+    assert [item["path"] for item in scanned["matches"]] == ["src/one.py"]
+    assert scanned["total_matches"] == 1
+    assert scanned["truncated"] is False
+
+    recursive = fs.find(env, project, path="src", include_glob="**/*.py")
+    assert [item["path"] for item in recursive["files"]] == [
+        "src/nested/deep.py",
+        "src/one.py",
+    ]
+
+
+def test_chunked_read_reuses_digest_and_returns_stat_token(files, monkeypatch):
+    """首块读取整文件计算 SHA-256 并返回 stat_token；携带成对期望值的后续块不再整文件 hash。"""
+    fs, env, project, content = files
+    payload = bytes(range(256)) * 300  # 76800 字节，跨两个块
+    written = fs.write(env, project, "chunked.bin", payload, None)
+    first = fs.read(env, project, "chunked.bin", 0, 65536)
+    assert first["eof"] is False
+    assert first["sha256"] == written["sha256"]
+    assert base64.b64decode(first["data"]) == payload[:65536]
+    token = first["stat_token"]
+    assert len(token) == 5 and all(type(value) is int for value in token)
+
+    calls = []
+    original_hash = ProjectFiles._hash
+
+    def counting_hash(fd, size):
+        calls.append(size)
+        return original_hash(fd, size)
+
+    monkeypatch.setattr(fs, "_hash", counting_hash)
+
+    plain = fs.read(env, project, "chunked.bin", 65536, 65536)
+    assert calls == [len(payload)]  # 无期望值时仍整文件计算摘要
+    assert base64.b64decode(plain["data"]) == payload[65536:]
+    assert plain["eof"] is True
+
+    calls.clear()
+    tail = fs.read(
+        env,
+        project,
+        "chunked.bin",
+        65536,
+        65536,
+        expected_sha256=first["sha256"],
+        expected_stat=token,
+    )
+    assert calls == []  # 成对期望值成立时跳过整文件摘要
+    assert tail["eof"] is True
+    assert tail["sha256"] == first["sha256"]
+    assert tail["stat_token"] == token
+
+
+def test_stale_stat_token_rejected_after_inplace_write_and_replace(files):
+    """首块后原地改写或 replace 换入新 inode，旧 stat_token 一律拒绝；新 token 可继续分块读取。"""
+    fs, env, project, content = files
+    payload = b"A" * 70000
+    fs.write(env, project, "watched.bin", payload, None)
+    first = fs.read(env, project, "watched.bin", 0, 65536)
+    token, sha = first["stat_token"], first["sha256"]
+
+    mutated = b"B" * len(payload)
+    with open(content / "watched.bin", "r+b") as stream:
+        stream.write(mutated)
+    os.utime(content / "watched.bin", (0, 0))  # 固定 mtime，避免时间戳粒度掩盖失效
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        fs.read(
+            env, project, "watched.bin", 65536, 65536,
+            expected_sha256=sha, expected_stat=token,
+        )
+
+    fresh = fs.read(env, project, "watched.bin")
+    assert fresh["sha256"] == hashlib.sha256(mutated).hexdigest()
+    assert fresh["stat_token"] != token
+    resumed = fs.read(
+        env, project, "watched.bin", 65536, 65536,
+        expected_sha256=fresh["sha256"], expected_stat=fresh["stat_token"],
+    )
+    assert base64.b64decode(resumed["data"]) == mutated[65536:]
+    assert resumed["eof"] is True
+
+    (content / "watched.bin.next").write_bytes(b"C" * len(payload))
+    os.replace(content / "watched.bin.next", content / "watched.bin")
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        fs.read(
+            env, project, "watched.bin", 65536, 65536,
+            expected_sha256=fresh["sha256"], expected_stat=fresh["stat_token"],
+        )
+    replaced = fs.read(env, project, "watched.bin")
+    assert replaced["sha256"] == hashlib.sha256(b"C" * len(payload)).hexdigest()
+
+
+def test_read_rejects_partial_or_malformed_expectations(files):
+    """读取期望值必须成对传入且格式完整；残缺或畸形一律 invalid_input。"""
+    fs, env, project, content = files
+    fs.write(env, project, "expect.bin", b"0123456789" * 7000, None)
+    first = fs.read(env, project, "expect.bin", 0, 4096)
+    sha, token = first["sha256"], first["stat_token"]
+
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.read(env, project, "expect.bin", 0, 4096, expected_sha256=sha)
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.read(env, project, "expect.bin", 0, 4096, expected_stat=token)
+
+    for bad_sha in [123, b"0" * 64, "z" * 64, "0" * 63, "0" * 65, "A" * 64, sha + "\n"]:
+        with pytest.raises(ServiceError, match="invalid_input"):
+            fs.read(
+                env, project, "expect.bin", 0, 4096,
+                expected_sha256=bad_sha, expected_stat=token,
+            )
+
+    for bad_stat in [
+        token[:4],
+        token + [0],
+        "token",
+        123,
+        [str(value) for value in token],
+        [True, *token[1:]],
+        [*token[:4], -1],
+        [float(token[2]), *token[1:]],
+    ]:
+        with pytest.raises(ServiceError, match="invalid_input"):
+            fs.read(
+                env, project, "expect.bin", 0, 4096,
+                expected_sha256=sha, expected_stat=bad_stat,
+            )
 
 
 def test_mkdir_creates_recursively_and_is_idempotent(files):

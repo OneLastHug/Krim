@@ -591,6 +591,12 @@ class SandboxService:
     async def project(
         self, actor: PrincipalContext, project_id: str, *, write: bool = False
     ) -> dict[str, Any]:
+        return self._project(await self._project_state(actor, project_id, write=write))
+
+    async def _project_state(
+        self, actor: PrincipalContext, project_id: str, *, write: bool = False
+    ) -> dict[str, Any]:
+        """已授权的内部状态；公开project响应仍隐藏租约字段。"""
         async def read(conn: AsyncConnection) -> dict[str, Any]:
             row = (
                 (
@@ -618,7 +624,7 @@ class SandboxService:
                 raise ServiceError("not_found", 404)
             if write:
                 actor.member(row["workspace_id"], write=True)
-            return self._project(row)
+            return dict(row)
 
         return await self._read(actor, read)
 
@@ -871,7 +877,7 @@ class SandboxService:
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {
             "ready",
             "running",
@@ -888,14 +894,16 @@ class SandboxService:
             offset=offset,
         )
         self._live(actor)
-        current = await self.project(actor, project_id)
+        current = await self._project_state(actor, project_id)
         return {
             **result,
             "project_id": project_id,
             "generation": current["generation"],
             "may_change": (
-                project["status"] in {"running", "blocked", "restoring"}
-                or current["status"] in {"running", "blocked", "restoring"}
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
                 or current["generation"] != project["generation"]
             ),
         }
@@ -908,8 +916,11 @@ class SandboxService:
         path: str,
         offset: int = 0,
         limit: int = 65536,
+        expected_sha256: str | None = None,
+        expected_stat: list[int] | None = None,
+        _include_stat_token: bool = False,
     ) -> dict[str, Any]:
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {
             "ready",
             "running",
@@ -924,19 +935,26 @@ class SandboxService:
             path=path,
             offset=offset,
             limit=limit,
+            expected_sha256=expected_sha256,
+            expected_stat=expected_stat,
         )
         self._live(actor)
-        current = await self.project(actor, project_id)
-        return {
+        current = await self._project_state(actor, project_id)
+        response = {
             **result,
             "project_id": project_id,
             "generation": current["generation"],
             "may_change": (
-                project["status"] in {"running", "blocked", "restoring"}
-                or current["status"] in {"running", "blocked", "restoring"}
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
                 or current["generation"] != project["generation"]
             ),
         }
+        if not _include_stat_token:
+            response.pop("stat_token", None)
+        return response
 
     async def reconcile_command(
         self,
@@ -1031,7 +1049,7 @@ class SandboxService:
     async def download_file(
         self, actor: PrincipalContext, project_id: str, *, path: str
     ) -> tuple[bytes, str]:
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
             raise ServiceError("sandbox_backend_unavailable", 503)
         if project["status"] != "ready" or project["lease_id"] is not None:
@@ -1042,13 +1060,24 @@ class SandboxService:
         chunks = bytearray()
         offset = 0
         expected_hash: str | None = None
+        expected_stat: list[int] | None = None
         generation: int | None = None
         while True:
-            result = await self.read_file(actor, project_id, path=path, offset=offset, limit=65536)
+            result = await self.read_file(
+                actor,
+                project_id,
+                path=path,
+                offset=offset,
+                limit=65536,
+                expected_sha256=expected_hash,
+                expected_stat=expected_stat,
+                _include_stat_token=True,
+            )
             if result["may_change"]:
                 raise ServiceError("input_revision_conflict")
             if expected_hash is None:
                 expected_hash = result["sha256"]
+                expected_stat = list(result["stat_token"])
                 generation = result["generation"]
             elif result["sha256"] != expected_hash or result["generation"] != generation:
                 raise ServiceError("artifact_conflict")
@@ -1062,8 +1091,12 @@ class SandboxService:
             if not block:
                 raise ServiceError("artifact_conflict")
         self._live(actor)
-        current_project = await self.project(actor, project_id)
-        if current_project["generation"] != generation or current_project["status"] != "ready":
+        current_project = await self._project_state(actor, project_id)
+        if (
+            current_project["generation"] != generation
+            or current_project["status"] != "ready"
+            or current_project["lease_id"] is not None
+        ):
             raise ServiceError("artifact_conflict")
         if hashlib.sha256(chunks).hexdigest() != expected_hash:
             raise ServiceError("artifact_conflict")
@@ -1076,7 +1109,7 @@ class SandboxService:
 
         _parts(path)
         self._live(actor)
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if project["status"] != "ready" or project["lease_id"] is not None:
             raise ServiceError("workspace_busy")
         result = await self.read_file(actor, project_id, path=path, offset=0, limit=1)
@@ -1102,7 +1135,7 @@ class SandboxService:
         from krim_agent.sandbox.filesystem import validate_glob
 
         validate_glob(include_glob)
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
             raise ServiceError("sandbox_backend_unavailable", 503)
         result = await self.broker.call(
@@ -1115,13 +1148,17 @@ class SandboxService:
             offset=offset,
         )
         self._live(actor)
-        current = await self.project(actor, project_id)
+        current = await self._project_state(actor, project_id)
         return {
             **result,
             "project_id": project_id,
             "generation": current["generation"],
             "may_change": (
-                current["generation"] != project["generation"] or project["status"] != "ready"
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
+                or current["generation"] != project["generation"]
             ),
         }
 
@@ -1140,7 +1177,7 @@ class SandboxService:
         from krim_agent.sandbox.filesystem import _parts
 
         _parts(path)
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if project["status"] != "ready" or project["lease_id"] is not None:
             raise ServiceError("workspace_busy")
         if project["generation"] != expected_generation:
@@ -1154,7 +1191,14 @@ class SandboxService:
         ):
             raise ServiceError("invalid_input", 422)
         try:
-            current = await self.read_file(actor, project_id, path=path, offset=0, limit=65536)
+            current = await self.read_file(
+                actor,
+                project_id,
+                path=path,
+                offset=0,
+                limit=65536,
+                _include_stat_token=True,
+            )
         except ServiceError as error:
             if error.code == "artifact_limit":
                 raise ServiceError("sandbox_limit") from None
@@ -1163,11 +1207,22 @@ class SandboxService:
             raise ServiceError("input_revision_conflict")
         if current["size"] > 4 * 1024**2:
             raise ServiceError("sandbox_limit")
+        if current["sha256"] != expected_sha256:
+            raise ServiceError("source_changed")
         raw_parts = [base64.b64decode(current["data"], validate=True)]
         offset = len(raw_parts[0])
+        expected_stat = list(current["stat_token"])
         while offset < current["size"]:
             try:
-                chunk = await self.read_file(actor, project_id, path=path, offset=offset, limit=65536)
+                chunk = await self.read_file(
+                    actor,
+                    project_id,
+                    path=path,
+                    offset=offset,
+                    limit=65536,
+                    expected_sha256=expected_sha256,
+                    expected_stat=expected_stat,
+                )
             except ServiceError as error:
                 if error.code == "artifact_limit":
                     raise ServiceError("sandbox_limit") from None
@@ -1236,7 +1291,9 @@ class SandboxService:
 
         old_context, old_clipped = context_window(source, char_offset, char_offset + len(find))
         new_context, new_clipped = context_window(
-            updated, char_offset, char_offset + len(replacement)
+            updated,
+            char_offset,
+            char_offset + len(replacement),
         )
         diff = "".join(difflib.unified_diff(
             old_context.splitlines(keepends=True),
@@ -1284,7 +1341,7 @@ class SandboxService:
         before: int = 0,
         after: int = 0,
     ) -> dict[str, Any]:
-        project = await self.project(actor, project_id)
+        project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {
             "ready",
             "running",
@@ -1307,14 +1364,16 @@ class SandboxService:
             after=after,
         )
         self._live(actor)
-        current = await self.project(actor, project_id)
+        current = await self._project_state(actor, project_id)
         return {
             **result,
             "project_id": project_id,
             "generation": current["generation"],
             "may_change": (
-                project["status"] in {"running", "blocked", "restoring"}
-                or current["status"] in {"running", "blocked", "restoring"}
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
                 or current["generation"] != project["generation"]
             ),
         }

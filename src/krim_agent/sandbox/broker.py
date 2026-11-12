@@ -276,6 +276,14 @@ class StorageBroker:
             values = {**values, "offset": 0}
         if action == "find" and "limit" not in values:
             values = {**values, "limit": 100}
+        if action == "read":
+            values = {
+                "expected_sha256": None,
+                "expected_stat": None,
+                "offset": 0,
+                "limit": 65536,
+                **values,
+            }
         if action == "search":
             values = {
                 "offset": 0,
@@ -296,7 +304,10 @@ class StorageBroker:
                 "environment_id", "project_id", "path", "query", "limit", "offset",
                 "include_glob", "mode", "case_sensitive", "before", "after",
             },
-            "read": {"environment_id", "project_id", "path", "offset", "limit"},
+            "read": {
+                "environment_id", "project_id", "path", "offset", "limit",
+                "expected_sha256", "expected_stat",
+            },
             "claim": {"environment_id", "project_id", "lease_id", "deadline"},
             "release": {"environment_id", "project_id", "lease_id", "clean"},
             "file_start": {"environment_id", "project_id", "operation_id", "mutation", "kind"},
@@ -348,7 +359,13 @@ class StorageBroker:
             )
         if action == "read":
             return self.files.read(
-                environment_id, project_id, values["path"], values["offset"], values["limit"]
+                environment_id,
+                project_id,
+                values["path"],
+                values["offset"],
+                values["limit"],
+                expected_sha256=values["expected_sha256"],
+                expected_stat=values["expected_stat"],
             )
         if action.startswith("command_") or action == "file_start":
             if self.jobs is None:

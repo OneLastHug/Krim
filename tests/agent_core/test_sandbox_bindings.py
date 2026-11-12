@@ -333,6 +333,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
                     "size": 5,
                     "eof": True,
                     "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                    "stat_token": [1, 2, 5, 3, 4],
                     "data": "aGVsbG8=",
                 }
             return {"status": "ready"}
@@ -376,6 +377,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         downloaded = await client.get(route + "/export-file", params={"path": "note.txt"})
         assert downloaded.status_code == 200 and downloaded.content == b"hello"
         assert downloaded.headers["etag"] == '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
+        file_read = await client.get(route + "/file", params={"path": "note.txt"})
+        assert file_read.status_code == 200 and "stat_token" not in file_read.json()
         assert downloaded.headers["x-content-type-options"] == "nosniff"
         digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
         assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
@@ -397,20 +400,65 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
             find="ell", replacement="x", occurrence=1,
         )
         assert unicode_preview["patch"]["offset"] == 1
-        class LongFileBroker(Broker):
-            async def call(self, action, **arguments):
-                if action == "read":
-                    body = (b"line\n" * 5000)
-                    if arguments["offset"] >= len(body):
-                        return {"path": arguments["path"], "offset": arguments["offset"], "size": len(body), "eof": True, "sha256": sha256(body), "data": ""}
-                    chunk = body[arguments["offset"]:arguments["offset"] + arguments["limit"]]
-                    return {"path": arguments["path"], "offset": arguments["offset"], "size": len(body), "eof": arguments["offset"] + len(chunk) >= len(body), "sha256": sha256(body), "data": base64.b64encode(chunk).decode()}
-                return await super().call(action, **arguments)
 
-        long_source = b"line\n" * 5000
-        app.sandbox.broker = LongFileBroker()
-        long_preview = await app.sandbox.preview_replace(
-            actor, project["project_id"], path="note.txt", expected_generation=0,
-            expected_sha256=sha256(long_source), find="line", replacement="LONG", occurrence=2500,
+        large_lines = [f"é line-{index:05d}\n" for index in range(20000)]
+        large_source = "".join(large_lines).encode()
+        large_digest = sha256(large_source)
+        stat_token = [1, 2, len(large_source), 3, 4]
+
+        class ChunkBroker(Broker):
+            def __init__(self):
+                super().__init__()
+                self.read_calls = []
+
+            async def call(self, action, **arguments):
+                if action != "read":
+                    return await super().call(action, **arguments)
+                self.read_calls.append(arguments)
+                offset = arguments["offset"]
+                block = large_source[offset:offset + arguments["limit"]]
+                return {
+                    "path": arguments["path"],
+                    "offset": offset,
+                    "size": len(large_source),
+                    "eof": offset + len(block) >= len(large_source),
+                    "sha256": large_digest,
+                    "stat_token": stat_token,
+                    "data": base64.b64encode(block).decode(),
+                }
+
+        chunk_broker = ChunkBroker()
+        app.sandbox.broker = chunk_broker
+        downloaded, digest = await app.sandbox.download_file(
+            actor, project["project_id"], path="large.txt"
         )
-        assert "LONG" in long_preview["diff"] and long_preview["diff_truncated"] is False
+        assert downloaded == large_source and digest == large_digest
+        assert len(chunk_broker.read_calls) > 1
+        assert chunk_broker.read_calls[0]["expected_sha256"] is None
+        assert all(
+            call["expected_sha256"] == large_digest
+            and call["expected_stat"] == stat_token
+            for call in chunk_broker.read_calls[1:]
+        )
+
+        chunk_broker.read_calls.clear()
+        large_preview = await app.sandbox.preview_replace(
+            actor,
+            project["project_id"],
+            path="large.txt",
+            expected_generation=0,
+            expected_sha256=large_digest,
+            find="line-10000",
+            replacement="LONG",
+        )
+        expected_offset = len("".join(large_lines[:10000]).encode()) + len("é ".encode())
+        assert large_preview["patch"]["offset"] == expected_offset
+        assert "-é line-10000" in large_preview["diff"]
+        assert "+é LONG" in large_preview["diff"]
+        assert large_preview["diff_truncated"] is False
+        assert len(chunk_broker.read_calls) > 1
+        assert all(
+            call["expected_sha256"] == large_digest
+            and call["expected_stat"] == stat_token
+            for call in chunk_broker.read_calls[1:]
+        )
