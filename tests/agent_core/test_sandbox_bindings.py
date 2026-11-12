@@ -379,6 +379,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert downloaded.headers["etag"] == '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
         file_read = await client.get(route + "/file", params={"path": "note.txt"})
         assert file_read.status_code == 200 and "stat_token" not in file_read.json()
+        assert "expected_sha256" not in calls[-1][1]
+        assert "expected_stat" not in calls[-1][1]
         assert downloaded.headers["x-content-type-options"] == "nosniff"
         digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
         assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
@@ -441,7 +443,45 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
             for call in chunk_broker.read_calls[1:]
         )
 
+        class LegacyChunkBroker(ChunkBroker):
+            async def call(self, action, **arguments):
+                result = await super().call(action, **arguments)
+                if action == "read":
+                    result.pop("stat_token", None)
+                return result
+
+        legacy_broker = LegacyChunkBroker()
+        app.sandbox.broker = legacy_broker
+        legacy_download, legacy_digest = await app.sandbox.download_file(
+            actor, project["project_id"], path="legacy.txt"
+        )
+        assert legacy_download == large_source and legacy_digest == large_digest
+        assert len(legacy_broker.read_calls) > 1
+        assert all(
+            "expected_sha256" not in call and "expected_stat" not in call
+            for call in legacy_broker.read_calls
+        )
+
+        legacy_broker.read_calls.clear()
+        legacy_preview = await app.sandbox.preview_replace(
+            actor,
+            project["project_id"],
+            path="legacy.txt",
+            expected_generation=0,
+            expected_sha256=large_digest,
+            find="line-10000",
+            replacement="OLD",
+        )
+        assert legacy_preview["patch"]["offset"] == expected_offset
+        assert "-é line-10000" in legacy_preview["diff"]
+        assert "+é OLD" in legacy_preview["diff"]
+        assert all(
+            "expected_sha256" not in call and "expected_stat" not in call
+            for call in legacy_broker.read_calls
+        )
+
         chunk_broker.read_calls.clear()
+        app.sandbox.broker = chunk_broker
         large_preview = await app.sandbox.preview_replace(
             actor,
             project["project_id"],
