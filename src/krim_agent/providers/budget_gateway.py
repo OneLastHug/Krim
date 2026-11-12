@@ -1251,6 +1251,28 @@ async def _send_chat_nonstream(
             await _safe_close_response(response)
 
 
+def _drop_repeated_tool_metadata(
+    call: dict[str, Any],
+    function: dict[str, Any],
+    buffer: dict[str, str],
+    key: str,
+    value: str,
+) -> bool:
+    """Report and strip a delta that re-sends the complete id/name buffered for its index.
+
+    Some upstreams repeat the full id/name on every frame of one tool call instead of
+    sending them only on the first frame. That exact repeat is idempotent: the buffered
+    values stay unchanged and the repeated fields are removed from the forwarded delta so
+    downstream first-frame reassembly and the incremental redactor see each value once.
+    Dissimilar fragments always append (tool name and id stay splittable), and arguments
+    are a strict append-only character stream that is never deduplicated.
+    """
+    if key == "arguments" or buffer[key] != value:
+        return False
+    (call if key == "id" else function).pop(key, None)
+    return True
+
+
 def _validate_stream_event(
     event: Any,
     finish_seen: bool,
@@ -1300,10 +1322,13 @@ def _validate_stream_event(
         name = function.get("name")
         arguments = function.get("arguments")
         for key, value in (("id", identifier), ("name", name), ("arguments", arguments)):
-            if value is not None:
-                if not isinstance(value, str):
-                    raise _GatewayFault("GW_UPSTREAM_PROTOCOL", 502)
-                buffer[key] += value
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise _GatewayFault("GW_UPSTREAM_PROTOCOL", 502)
+            if _drop_repeated_tool_metadata(call, function, buffer, key, value):
+                continue
+            buffer[key] += value
         if (
             len(buffer["id"]) > 128
             or len(buffer["name"]) > 64

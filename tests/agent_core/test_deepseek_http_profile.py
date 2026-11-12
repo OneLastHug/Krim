@@ -30,11 +30,12 @@ _ASYNC_CLIENT = httpx.AsyncClient
 
 
 def mock_provider(monkeypatch, handler, *, thinking=None):
-    def make_client(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return _ASYNC_CLIENT(*args, **kwargs)
+    class MockClient(_ASYNC_CLIENT):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    monkeypatch.setattr(httpx, "AsyncClient", MockClient)
     return OpenAICompatibleProvider(
         OpenAICompatibleConfig(
             base_url="https://api.deepseek.com",

@@ -57,13 +57,11 @@ def mock_provider(monkeypatch, responder, *, max_tool_calls=4, max_request_bytes
             stream=StreamBody(responder(len(requests))),
         )
 
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: original_client(
-            *args, transport=httpx.MockTransport(handler), **kwargs
-        ),
-    )
+    class MockClient(original_client):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockClient)
     provider = OpenAICompatibleProvider(
         OpenAICompatibleConfig(
             base_url="https://api.example.com/v1",
