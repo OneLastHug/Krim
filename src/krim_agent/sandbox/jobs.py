@@ -555,7 +555,12 @@ class CommandJobs:
                 raise ServiceError("not_found", 404)
             active = self.active.get(operation_id)
             if active is None and row.get("status") == "intent":
-                if row.get("environment_id") != environment_id or row.get("generation") is None:
+                project = self.broker._project(environment_id, project_id)
+                if (
+                    row.get("environment_id") != environment_id
+                    or row.get("generation") is None
+                    or project.get("generation") != row.get("generation")
+                ):
                     raise ServiceError("sandbox_operation_unknown")
                 lease = self.broker.leases.status(project_id)
                 if lease.get("lease_id") == operation_id:
@@ -625,8 +630,9 @@ class CommandJobs:
                 raise ServiceError("not_found", 404)
             if row.get("project_blocked"):
                 project = self.broker._project(environment_id, project_id)
-                project["status"] = "blocked"
-                self.broker._save("project-" + project_id + ".json", project)
+                if project.get("status") != "blocked":
+                    project["status"] = "blocked"
+                    self.broker._save("project-" + project_id + ".json", project)
             if row["status"] == "finished" and row.get("reconciled"):
                 return row
             if row["status"] == "finished" and row.get("receipt", {}).get("cleanup") == "clean":

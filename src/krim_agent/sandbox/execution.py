@@ -218,7 +218,13 @@ async def execute_command(
             scope.check()
             submission_attempted = True
             if isinstance(values, SandboxCommand):
-                result = await broker.call("command_start", **args, command=payload)
+                result = await broker.call(
+                    "command_start",
+                    **args,
+                    command=payload,
+                    runtime_image=intent["image"],
+                    runtime_fingerprint=intent["runtime_fingerprint"],
+                )
             else:
                 kind = (
                     "patch"
