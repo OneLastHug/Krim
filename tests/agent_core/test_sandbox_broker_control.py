@@ -42,6 +42,8 @@ class FakeBroker:
         return {
             "status": "ready",
             "environment_id": arguments["environment_id"],
+            "configured_programs": ["python"],
+            "executable_programs": ["python"],
             "available_programs": ["python"],
             "runtimes": {},
         }

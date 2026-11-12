@@ -266,6 +266,8 @@ class StorageBroker:
                 "execution_available": bool(self.jobs and self.jobs.available_programs()),
                 "image": self.jobs.image if self.jobs else None,
                 "image_id": self.jobs.runner.identity if self.jobs and self.jobs.runner else None,
+                "configured_programs": self.jobs.configured_programs() if self.jobs else [],
+                "executable_programs": self.jobs.available_programs() if self.jobs else [],
                 "available_programs": self.jobs.available_programs() if self.jobs else [],
                 "runtimes": self.jobs.runtime_info() if self.jobs else {},
                 "enforcement": "xfs_project_quota",

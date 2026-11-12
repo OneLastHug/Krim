@@ -117,6 +117,7 @@ class RuntimeProfile(StrictModel):
     @model_validator(mode="after")
     def _bounded(self) -> Self:
         _container_path(self.interpreter, max_depth=6)
+        # Interpreter paths are inside the runtime container; host OS is irrelevant.
         allowed_interpreters = {
             "python": {"/usr/bin/python3.12"},
             "node": {"/usr/local/bin/node"},

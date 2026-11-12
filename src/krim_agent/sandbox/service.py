@@ -191,7 +191,9 @@ class SandboxService:
                 result["runtime_available"] = (
                     health.get("execution_available") is True
                     and health.get("image") == self.configuration.command_image
-                    and "python" in health.get("available_programs", ["python"])
+                    and "python" in health.get(
+                        "executable_programs", health.get("available_programs", ["python"])
+                    )
                 )
                 await self._read(actor, read, admin=require_admin or target != actor.principal_id)
         if self.store.schema_version >= 10:
