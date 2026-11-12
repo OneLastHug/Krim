@@ -384,7 +384,9 @@ def _mcp_egress_policy(server: MCPServerConfig) -> EgressPolicy:
         if host is None:
             raise ValueError("MCP endpoint is missing a host")
         policy_type = EgressPolicy.authorize_loopback if parsed.scheme == "http" else EgressPolicy
-        return policy_type({host}, {port})
+        # The host list is an explicit redirect boundary. Keep every configured
+        # host, but pin all of them to the endpoint's configured port.
+        return policy_type(server.allowed_hosts, {port})
     except (EgressViolation, ValueError):
         raise ServiceError("invalid_input", 422) from None
 

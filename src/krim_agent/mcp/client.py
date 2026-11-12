@@ -31,8 +31,8 @@ def _policy_for_http_config(config: MCPServerConfig) -> EgressPolicy:
     if host is None:
         raise ValueError("MCP HTTP URL is missing a host")
     if parsed.scheme == "http":
-        return EgressPolicy.authorize_loopback({host}, {port})
-    return EgressPolicy({host}, {port})
+        return EgressPolicy.authorize_loopback(config.allowed_hosts, {port})
+    return EgressPolicy(config.allowed_hosts, {port})
 
 
 _STDIO_ENV_ALLOWLIST = frozenset(
