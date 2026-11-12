@@ -14,7 +14,8 @@
 | `@KRIM_SOCKET_DIR@` | 上一项的父目录 | `/run/krim-sandbox` |
 | `@KRIM_CONTROL_UID@` / `@KRIM_CONTROL_USER@` / `@KRIM_CONTROL_GROUP@` | 非root控制面用户 | 专用系统账号 |
 | `@KRIM_SOCKET_GID@` | socket 0660的组gid | 控制面专用组 |
-| `@KRIM_COMMAND_IMAGE@` | 固定镜像 `sha256:…` 或 `repo@sha256:…` | 不用浮动tag |
+| `@KRIM_COMMAND_IMAGE@` | manifest中已核验的固定镜像 `sha256:…` 或 `repo@sha256:…` | 不用浮动tag |
+| `@KRIM_RUNTIME_MANIFEST@` | 只读安装前缀中的runtime-manifest.json绝对路径 | 由发布物提供 |
 | `@KRIM_DB_PATH@` / `@KRIM_DB_DIR@` | 控制面SQLite库及所在目录 | admin自有目录 |
 | `@KRIM_API_PORT@` | API监听端口 | 防火墙内端口 |
 | `@KRIM_WORKSPACE_ROOT@` | 控制面可写工作区根 | admin自有目录 |
@@ -25,6 +26,8 @@
 
 - **数据根只在F盘承载的原生Linux文件系统**：不把镜像层或容器数据放`/mnt/f`的Windows文件系统；不格式化任何现有磁盘。承载关系用`scripts/sandbox_admin.py`核对：Windows上`host-evidence --wsl-distro <名称>`读注册表Lxss BasePath生成证据JSON，Linux上`preflight --evidence <该文件>`比对findmnt结果。
 - **root Broker与非root API分离**：Broker以root运行（XFS配额管理），控制面API以专用非root用户运行，仅经socket的SO_PEERCRED uid校验接入；业务用户与模型不获得Docker socket。
+- **运行时按manifest启用**：Broker按镜像引用与program解析normal_job profile；release只允许已构建且digest固定的条目。`--allow-dev-runtimes`只用于明确授权的开发环境，不得加入生产unit；开发版配置在可信sandbox配置中设置`allow_dev_runtimes=true`并固定同一manifest。Python/Node命令均由固定解释器启动监管门，模型只能提供有界argv，不接收宿主路径、环境、挂载、容器或网络参数；每个容器继续使用runsc、cgroup限额、只读根、network=none与审批/checkpoint流程。
+- **依赖安装保持关闭**：dependency_install profile在镜像构建与受控artifact下载尚未交付前保持`not_built`。不得在容器内开放通用网络或运行任意pip/npm安装命令；后续实现须由宿主按allowlist从HTTPS取固定摘要产物并核验lockfile，再在network=none容器中离线安装。
 - **不用systemd .socket单元**：Broker自行创建并校验socket（拒绝已存在路径、O_NOFOLLOW、创建后chown root:gid 0660），systemd预创建会与该检查冲突。
 - **配额强制**：数据根必须XFS且挂载带`prjquota`；Broker启动与`preflight`都核对`xfs_quota state`的Accounting/Enforcement为ON。
 

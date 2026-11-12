@@ -22,7 +22,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = REPO_ROOT / "deployment" / "sandbox"
-IMAGE_PATTERN = re.compile(r"(?:sha256:[0-9a-f]{64}|[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64})\Z")
+IMAGE_PATTERN = re.compile(r"(?:sha256:[0-9a-f]{64}|(?:docker\.io/library/(?:python|node))@sha256:[0-9a-f]{64})\Z")
 PLACEHOLDER_PATTERN = re.compile(r"@KRIM_[A-Z0-9_]+@")
 SECRET_KEY_PATTERN = re.compile(
     r"(secret|password|token|passphrase|api_?key|master|credential)", re.IGNORECASE

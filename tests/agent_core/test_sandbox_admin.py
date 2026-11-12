@@ -159,6 +159,13 @@ def test_configuration_check_passes_private_file_and_rejects_open_mode(tmp_path)
     assert sa.check_sandbox_configuration(config)["status"] == "fail"
 
 
+def test_admin_image_pattern_matches_catalog_digest_rules() -> None:
+    assert sa.IMAGE_PATTERN.fullmatch("sha256:" + "a" * 64)
+    assert sa.IMAGE_PATTERN.fullmatch("docker.io/library/node@sha256:" + "b" * 64)
+    assert not sa.IMAGE_PATTERN.fullmatch("docker.io/library/python:3.12@sha256:" + "b" * 64)
+    assert not sa.IMAGE_PATTERN.fullmatch("registry.example.com/python@sha256:" + "b" * 64)
+
+
 def test_preflight_reports_unprovisioned_roots_as_unknown(tmp_path) -> None:
         args = argparse.Namespace(
             config=None,
@@ -515,6 +522,7 @@ ALL_PLACEHOLDERS = {
     "@KRIM_CONTROL_GROUP@": "svc-krim",
     "@KRIM_SOCKET_GID@": "1600",
     "@KRIM_COMMAND_IMAGE@": "sha256:" + "a" * 64,
+    "@KRIM_RUNTIME_MANIFEST@": "/opt/krim/share/krim/runtime-manifest.json",
     "@KRIM_DB_PATH@": "/var/lib/krim/control.sqlite3",
     "@KRIM_DB_DIR@": "/var/lib/krim",
     "@KRIM_API_PORT@": "8765",
@@ -544,6 +552,8 @@ def test_templates_reference_installed_module_without_machine_paths() -> None:
 
     broker_exec = next(line for line in broker.splitlines() if line.startswith("ExecStart="))
     assert "-m krim_agent.sandbox.broker" in broker_exec
+    assert "--runtime-manifest @KRIM_RUNTIME_MANIFEST@" in broker_exec
+    assert "--allow-dev-runtimes" not in broker_exec
     assert "User=root" in broker
     assert "CAP_SYS_ADMIN" in broker
     assert "ReadWritePaths=@KRIM_STORAGE_ROOT@ @KRIM_STATE_ROOT@ @KRIM_SOCKET_DIR@" in broker

@@ -24,11 +24,11 @@ from krim_agent.sandbox.port_adapters import AcceptedProjectMutation
 from krim_agent.sandbox.ports import ProjectRef
 from krim_agent.sandbox.quota import QuotaLimits
 from krim_agent.sandbox.runner import RunscRunner
+from krim_agent.sandbox.runtime_profiles import RuntimeCatalog, ResolvedRuntime
 from krim_agent.sandbox.xfs import internal_id
 
 if TYPE_CHECKING:
     from krim_agent.sandbox.broker import StorageBroker
-    from krim_agent.sandbox.runtime_profiles import ResolvedRuntime
 
 
 class _FileEditJournal:
@@ -61,25 +61,80 @@ class _FileEditJournal:
 
 class CommandJobs:
     def __init__(
-        self, broker: StorageBroker, image: str, runtime: ResolvedRuntime | None = None
+        self,
+        broker: StorageBroker,
+        image: str,
+        runtime: ResolvedRuntime | None = None,
+        *,
+        catalog: RuntimeCatalog | None = None,
+        allow_dev: bool = False,
     ) -> None:
         self.broker = broker
+        self.image = image
+        self.catalog = catalog
+        self.allow_dev = allow_dev
         installation = broker._read("execution-installation.json")
         if installation is None:
             import uuid
 
             installation = {"id": str(uuid.uuid4())}
             broker._save("execution-installation.json", installation)
-        self.runner = (
-            RunscRunner(image, installation["id"])
-            if runtime is None
-            else RunscRunner(image, installation["id"], runtime)
-        )
+        self.installation_id = installation["id"]
+        self.runners: dict[str, RunscRunner] = {}
+        self.runtime = runtime
+        self.runner: RunscRunner | None = None
+        if catalog is not None:
+            python_entry = catalog.entry("python", "normal_job")
+            if python_entry.availability == "dev_verified" and python_entry.image != image:
+                raise ServiceError("sandbox_config_invalid", 422)
+            for program in ("python", "node"):
+                try:
+                    selected = catalog.resolve(program, "normal_job", allow_dev=allow_dev)
+                except ServiceError:
+                    continue
+                if program == "python" and selected.image != image:
+                    continue
+                try:
+                    self.runners[program] = RunscRunner(
+                        selected.image, self.installation_id, selected
+                    )
+                except ServiceError as error:
+                    if error.code != "sandbox_backend_unavailable":
+                        raise
+            self.runner = self.runners.get("python")
+        elif runtime is not None:
+            self.runner = RunscRunner(image, self.installation_id, runtime)
+            self.runners[runtime.program] = self.runner
+        else:
+            self.runner = RunscRunner(image, self.installation_id)
+            self.runners["python"] = self.runner
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="krim-command")
         self.lock = threading.RLock()
         self.active: dict[str, dict[str, Any]] = {}
         self.prepare_locks: dict[str, threading.Lock] = {}
         self.closed = False
+
+    def _runner_for(self, program: str) -> RunscRunner:
+        runner = self.runners.get(program)
+        if runner is not None:
+            return runner
+        if self.catalog is None:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        raise ServiceError("sandbox_backend_unavailable", 503)
+
+    def available_programs(self) -> list[str]:
+        return sorted(self.runners)
+
+    def runtime_info(self) -> dict[str, dict[str, str | None]]:
+        info: dict[str, dict[str, str | None]] = {}
+        for program, runner in self.runners.items():
+            runtime = getattr(runner, "runtime", None)
+            info[program] = {
+                "image": runtime.image if runtime is not None else self.image,
+                "image_id": runner.identity,
+                "fingerprint": getattr(runner, "runtime_fingerprint", None),
+            }
+        return info
 
     @staticmethod
     def filename(operation_id: str) -> str:
@@ -110,6 +165,13 @@ class CommandJobs:
             values: Any = models[kind].model_validate(command)
             if values.project_id != project_id:
                 raise ServiceError("invalid_input", 422)
+            runner = (
+                self._runner_for(values.program)
+                if isinstance(values, SandboxCommand)
+                else self.runner
+            )
+            if isinstance(values, SandboxCommand) and runner is None:
+                raise ServiceError("sandbox_backend_unavailable", 503)
             env_state = self.broker._environment(environment_id)
             if env_state.get("quota_operation"):
                 raise ServiceError("workspace_busy")
@@ -120,8 +182,11 @@ class CommandJobs:
                 {
                     "environment": environment_id,
                     "command": command,
-                    "image": self.runner.identity,
-                    "runtime_fingerprint": getattr(self.runner, "runtime_fingerprint", None),
+                    "image": runner.identity if runner is not None else None,
+                    "runtime_fingerprint": (
+                        getattr(runner, "runtime_fingerprint", None) if runner is not None else None
+                    ),
+                    "program": values.program if isinstance(values, SandboxCommand) else "python",
                     "kind": kind,
                 }
             )
@@ -142,6 +207,7 @@ class CommandJobs:
                 "environment_id": environment_id,
                 "project_id": project_id,
                 "request_hash": digest,
+                "program": values.program if isinstance(values, SandboxCommand) else "python",
                 "kind": kind,
                 "status": "accepted",
                 "generation": values.expected_generation,
@@ -250,7 +316,7 @@ class CommandJobs:
                     raise ServiceError("cancelled")
                 attempted = True
                 if isinstance(values, SandboxCommand):
-                    receipt = self.runner.run(
+                    receipt = self._runner_for(values.program).run(
                         operation_id,
                         content,
                         values.argv,
@@ -332,7 +398,7 @@ class CommandJobs:
                 state["lease"].release(clean=receipt["cleanup"] == "clean")
                 if receipt["cleanup"] == "clean" and record.get("kind", "command") == "command":
                     try:
-                        self.runner.remove(operation_id)
+                        self._runner_for(record.get("program", "python")).remove(operation_id)
                     except ServiceError:
                         pass  # 回执已保存，清理失败保留已停止容器供核实。
         except BaseException as error:
@@ -397,7 +463,7 @@ class CommandJobs:
                 # Broker重启不能把旧命令当成没执行：只核实并停止原容器。
                 try:
                     if row.get("kind", "command") == "command":
-                        stopped = self.runner.stop(operation_id)
+                        stopped = self._runner_for(row.get("program", "python")).stop(operation_id)
                     else:
                         stopped = {"State": {"ExitCode": None}}
                     row["receipt"] = {
@@ -441,7 +507,7 @@ class CommandJobs:
             if row["status"] == "finished" and row.get("receipt", {}).get("cleanup") == "clean":
                 stopped = {"State": {"ExitCode": row["receipt"]["exit_code"]}}
             elif row.get("kind", "command") == "command":
-                stopped = self.runner.stop(operation_id)
+                stopped = self._runner_for(row.get("program", "python")).stop(operation_id)
             else:
                 stopped = {"State": {"ExitCode": None}}
             lease = self.broker.leases.status(project_id)
@@ -473,7 +539,7 @@ class CommandJobs:
             self.broker._save(self.filename(operation_id), row)
             if row.get("kind", "command") == "command":
                 try:
-                    self.runner.remove(operation_id)
+                    self._runner_for(row.get("program", "python")).remove(operation_id)
                 except ServiceError:
                     pass
             return row

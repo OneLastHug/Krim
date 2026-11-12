@@ -162,6 +162,9 @@ def test_strict_types_reject_bools_strings_and_extra_fields():
         {"dropped_capabilities": "ALL,SYS_ADMIN"},
         {"no_new_privileges": False},
         {"host_path": "/"},
+        {"env": {"PATH": "/tmp"}},
+        {"mount": "/etc"},
+        {"network_mode": "host"},
         {"privileged": True},
     ]:
         with pytest.raises(ValidationError):
@@ -243,7 +246,7 @@ def test_resource_and_path_boundaries():
             TmpfsMount(destination=destination, size_bytes=134217728)
 
 
-def test_node_profile_generates_safe_flags_and_refuses_unwired_gate():
+def test_node_profile_generates_safe_flags_and_rejects_untrusted_gate():
     node = catalog().profile("node", "normal_job")
     assert node.safe_flags == (
         "--disallow-code-generation-from-strings",
@@ -258,6 +261,12 @@ def test_node_profile_generates_safe_flags_and_refuses_unwired_gate():
     ]
     with pytest.raises(ServiceError):
         node.gate_entry("trusted-gate")
+    with pytest.raises(ServiceError):
+        node.validate_argv(["--eval"])
+    with pytest.raises(ServiceError):
+        node.validate_argv(["/etc/passwd"])
+    with pytest.raises(ServiceError):
+        node.validate_argv(["../outside.js"])
 
 
 def test_benign_payloads_pass_profile_argv_bounds():
@@ -290,6 +299,19 @@ def json_duplicate_purpose() -> str:
     first = template.replace("ENTRY", "first-dup")
     second = template.replace("ENTRY", "second-dup")
     return f'{{"schema_version":1,"profiles":[{first},{second}]}}'
+
+
+def test_catalog_resolve_image_requires_registered_digest_and_scope():
+    cat = catalog()
+    assert cat.resolve_image(
+        DEV_IMAGE, "python", allow_dev=True
+    ).name == "python-normal-job-dev"
+    with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+        cat.resolve_image("sha256:" + "a" * 64, "python", allow_dev=True)
+    with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+        cat.resolve_image(DEV_IMAGE, "python")
+    with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+        cat.resolve("node", "normal_job", allow_dev=True)
 
 
 def test_malformed_manifest_and_catalog_fail_closed(tmp_path: Path):

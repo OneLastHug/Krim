@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 from test_sandbox_broker import FakeQuota
@@ -12,6 +13,7 @@ from krim_agent.sandbox import jobs as jobs_module
 from krim_agent.sandbox.broker import StorageBroker
 from krim_agent.sandbox.jobs import CommandJobs
 from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.runtime_profiles import RuntimeCatalog
 
 
 class Runner:
@@ -107,6 +109,26 @@ def wait_result(jobs, environment, project, operation):
             return result
         assert time.monotonic() < until
         time.sleep(0.01)
+
+
+def test_catalog_mode_truthfully_hides_dev_profile_without_explicit_gate(command_jobs, monkeypatch):
+    broker, jobs, env, project = command_jobs
+    jobs.close()
+    manifest = RuntimeCatalog.load(
+        Path(__file__).resolve().parents[2] / "runtime_images" / "runtime-manifest.json"
+    )
+    monkeypatch.setattr(jobs_module, "RunscRunner", Runner)
+    selected = CommandJobs(
+        broker,
+        "sha256:d163eadaea1f779baca092829e2c6969e7514bf284880f8637d8204320ff505b",
+        catalog=manifest,
+    )
+    try:
+        assert selected.available_programs() == []
+        with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+            selected.submit(env, project, str(uuid.uuid4()), command(project))
+    finally:
+        selected.close()
 
 
 def test_original_operation_is_never_executed_twice(command_jobs):

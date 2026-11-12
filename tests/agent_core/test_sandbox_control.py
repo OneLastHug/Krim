@@ -1,6 +1,7 @@
 """沙箱管理地基：归属、三级配额、幂等和未就绪状态的真实表达。"""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -286,6 +287,51 @@ async def test_api_creates_metadata_and_rejects_invalid_mutations(tmp_path):
                 },
             )
             assert unknown.status_code == 422, unknown.text
+
+
+def test_configuration_manifest_requires_matching_image_and_dev_gate(tmp_path):
+    from pydantic import ValidationError
+
+    manifest = Path(__file__).resolve().parents[2] / "runtime_images" / "runtime-manifest.json"
+    image = "sha256:d163eadaea1f779baca092829e2c6969e7514bf284880f8637d8204320ff505b"
+    common = {
+        "broker_socket": tmp_path / "broker.sock",
+        "command_image": image,
+        "runtime_manifest": manifest,
+    }
+    with pytest.raises(ValidationError):
+        SandboxConfiguration.model_validate(common)
+    selected = SandboxConfiguration.model_validate({**common, "allow_dev_runtimes": True})
+    assert selected.resolve_runtime("python").image == image
+    with pytest.raises(ServiceError, match="sandbox_backend_unavailable"):
+        selected.resolve_runtime("node")
+    with pytest.raises(ValidationError):
+        SandboxConfiguration.model_validate(
+            {**common, "allow_dev_runtimes": True, "command_image": "sha256:" + "a" * 64}
+        )
+
+
+def test_configuration_accepts_only_fixed_image_references(tmp_path):
+    from pydantic import ValidationError
+
+    for image in [
+        "sha256:" + "a" * 64,
+        "docker.io/library/python@sha256:" + "b" * 64,
+    ]:
+        config = SandboxConfiguration.model_validate(
+            {"broker_socket": tmp_path / "broker.sock", "command_image": image}
+        )
+        assert config.command_image == image
+    for image in [
+        "python:latest",
+        "docker.io/library/python:3.12@sha256:" + "b" * 64,
+        "docker.io/library/python@sha256:" + "b" * 63,
+        "docker.io/library/node@sha256:" + "b" * 64,
+    ]:
+        with pytest.raises(ValidationError):
+            SandboxConfiguration.model_validate(
+                {"broker_socket": tmp_path / "broker.sock", "command_image": image}
+            )
 
 
 def test_trusted_configuration_limits_permissions_and_symlinks(tmp_path):

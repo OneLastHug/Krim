@@ -49,12 +49,20 @@ async def execute_command(
         raise ServiceError("sandbox_backend_unavailable", 503)
     scope.check()
     payload = values.model_dump(mode="json")
+    program = values.program if isinstance(values, SandboxCommand) else "python"
+    selected_runtime = service.configuration.resolve_runtime(program)
+    expected_runtime = {
+        "image": selected_runtime.image if selected_runtime is not None
+        else service.configuration.command_image,
+        "fingerprint": selected_runtime.fingerprint if selected_runtime is not None else None,
+    }
     digest = fingerprint(
         {
             "run": invocation.run_id,
             "call": invocation.call_id,
             "tool_hash": invocation.tool_hash,
             "command": payload,
+            "runtime": expected_runtime,
         }
     )
 
@@ -143,7 +151,9 @@ async def execute_command(
             "tool_hash": invocation.tool_hash,
             "command": payload,
             "authorization_generation": actor.generation,
-            "image": service.configuration.command_image,
+            "image": expected_runtime["image"],
+            "runtime_fingerprint": expected_runtime["fingerprint"],
+            "program": program,
         }
         now = time.time()
         await conn.execute(
@@ -184,7 +194,20 @@ async def execute_command(
         scope.check()
         if accepted.get("new"):
             health = await broker.call("health")
-            if not health.get("execution_available") or health.get("image") != intent["image"]:
+            raw_runtime_health = health.get("runtimes", {}).get(program, {})
+            runtime_health = raw_runtime_health if isinstance(raw_runtime_health, dict) else {}
+            runtime_image = (
+                runtime_health.get("image")
+                if runtime_health
+                else health.get("image") if program == "python" else None
+            )
+            if (
+                not health.get("execution_available")
+                or program not in health.get("available_programs", ["python"])
+                or runtime_image != intent["image"]
+                or intent["runtime_fingerprint"] is not None
+                and runtime_health.get("fingerprint") != intent["runtime_fingerprint"]
+            ):
                 raise ServiceError("target_binding_changed")
             scope.check()
             submission_attempted = True

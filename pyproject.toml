@@ -61,6 +61,7 @@ only-include = [
   "src/krim_agent/sandbox/edit_models.py",
   "src/krim_agent/sandbox/file_editing.py",
   "src/krim_agent/sandbox/runtime_profiles.py",
+  "src/krim_agent/sandbox/dependencies.py",
   "src/krim_agent/sandbox/quota_retirement.py",
   "src/krim_agent/sandbox/quota_retirement_adapter.py",
   "src/krim_agent/account_mcp/__init__.py",

@@ -39,7 +39,12 @@ class FakeBroker:
                 "size": 5,
                 "eof": True,
             }
-        return {"status": "ready", "environment_id": arguments["environment_id"]}
+        return {
+            "status": "ready",
+            "environment_id": arguments["environment_id"],
+            "available_programs": ["python"],
+            "runtimes": {},
+        }
 
 
 async def test_project_provision_is_durable_and_files_use_broker(tmp_path):

@@ -1,13 +1,15 @@
 """固定运行时镜像与启动规格；未核验镜像一律拒绝解析，失败即关闭。
 
-C1交付：本模块声明规格与校验；RunscRunner按注入的ResolvedRuntime生成docker
-参数、容器入口与cgroup核对值（python监管门已接线）。node监管门尚未存在于
-runner，注入node runtime仍fail-closed拒绝，不编造镜像或监管行为。
+Runner只消费catalog解析后的profile；模型只提供有界argv，所有sandbox与宿主参数
+均由可信profile和Broker生成。
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
 from pathlib import Path
 from posixpath import basename
 from typing import Literal, Self
@@ -23,6 +25,9 @@ ProfilePurpose = Literal["normal_job", "dependency_install", "connector"]
 # repo段不允许':'，因此tag/latest写法在本模块无法通过校验。
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 DIGEST_IMAGE = re.compile(r"[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}\Z")
+IMAGE_REFERENCE = re.compile(
+    r"(?:sha256:[0-9a-f]{64}|docker\.io/library/(?:python|node)@sha256:[0-9a-f]{64})\Z"
+)
 PROGRAM_IMAGE_REPOS: dict[str, frozenset[str]] = {
     "python": frozenset({"docker.io/library/python"}),
     "node": frozenset({"docker.io/library/node"}),
@@ -155,7 +160,16 @@ class RuntimeProfile(StrictModel):
             type(argv) is not list
             or not 1 <= len(argv) <= ARGV_ITEM_LIMIT
             or any(type(item) is not str or "\0" in item for item in argv)
-            or sum(len(item.encode()) for item in argv) > self.argv_bytes_limit
+            or sum(len(item.encode("utf-8")) for item in argv) > self.argv_bytes_limit
+            or self.program == "node"
+            and (
+                argv[0] in {"-e", "--eval"}
+                and len(argv) < 2
+                or argv[0].startswith(("-", "/"))
+                and argv[0] not in {"-e", "--eval"}
+                or argv[0] not in {"-e", "--eval"}
+                and ("\\" in argv[0] or any(segment == ".." for segment in argv[0].split("/")))
+            )
         ):
             raise ServiceError("invalid_input", 422)
         return list(argv)
@@ -165,11 +179,17 @@ class RuntimeProfile(StrictModel):
         return [self.interpreter, *self.safe_flags, *self.validate_argv(argv)]
 
     def gate_entry(self, gate_source: str) -> list[str]:
-        """容器入口数组。python与RunscRunner历史入口逐项一致；node监管门
-        尚未实现，runner在构造时同样拒绝node runtime，未接线前一律拒绝。"""
+        """固定解释器监管门入口；模型argv仅作为数据交给监管门。"""
         if self.program == "python":
             return [self.interpreter, "-I", "-u", "-c", gate_source]
-        raise ServiceError("sandbox_backend_unavailable", 503)
+        if "__KRIM_NODE_GATE__" not in gate_source:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        flags = json.dumps(self.safe_flags, separators=(",", ":"))
+        workdir = json.dumps(self.workdir)
+        source = gate_source.replace("__KRIM_RUNTIME_FLAGS__", flags).replace(
+            "__KRIM_WORKDIR__", workdir
+        )
+        return [self.interpreter, "-e", source, "--"]
 
 
 # RunscRunner两参构造的兼容默认：逐字段等于profile化之前runner的固定参数
@@ -253,12 +273,30 @@ class RuntimeCatalog(StrictModel):
     @classmethod
     def load(cls, path: Path) -> RuntimeCatalog:
         try:
-            raw = path.read_bytes()
+            path = path.absolute()
+            for parent in path.parents:
+                parent_mode = parent.lstat().st_mode
+                if not stat.S_ISDIR(parent_mode) or stat.S_ISLNK(parent_mode):
+                    raise ValueError("manifest父链无效")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or os.name == "posix" and info.st_mode & 0o022
+                    or info.st_size > MANIFEST_MAX_BYTES
+                ):
+                    raise ValueError("manifest类型、权限或大小无效")
+                raw = os.read(fd, MANIFEST_MAX_BYTES + 1)
+                if len(raw) != info.st_size:
+                    raise ValueError("manifest读取不完整")
+            finally:
+                os.close(fd)
             if len(raw) > MANIFEST_MAX_BYTES:
                 raise ValueError("manifest超出大小上限")
             value = parse_json(raw.decode())
             return cls.model_validate(value)
-        except (OSError, ValueError, ValidationError):
+        except (OSError, ValueError, ValidationError, ServiceError):
             raise ServiceError("sandbox_config_invalid", 422) from None
 
     def entry(self, program: ProfileProgram, purpose: ProfilePurpose) -> RuntimeProfileEntry:
@@ -266,6 +304,28 @@ class RuntimeCatalog(StrictModel):
             if entry.profile.program == program and entry.profile.purpose == purpose:
                 return entry
         raise ServiceError("invalid_input", 422)
+
+    def resolve_image(
+        self,
+        image: str,
+        program: ProfileProgram,
+        purpose: ProfilePurpose = "normal_job",
+        *,
+        allow_dev: bool = False,
+    ) -> ResolvedRuntime:
+        entry = next(
+            (
+                candidate
+                for candidate in self.profiles
+                if candidate.image == image
+                and candidate.profile.program == program
+                and candidate.profile.purpose == purpose
+            ),
+            None,
+        )
+        if entry is None:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        return self.resolve(program, purpose, allow_dev=allow_dev)
 
     def profile(self, program: ProfileProgram, purpose: ProfilePurpose) -> RuntimeProfile:
         """只要规格存在即返回，构建状态由resolve把关；供负载定义与适配预检使用。"""

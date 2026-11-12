@@ -7,8 +7,8 @@ After=krim-sandbox-data.mount
 [Service]
 Type=simple
 # ExecStart指向admin自有安装前缀内的模块，不是业务可写的工作树；
-# 路径含空格时按systemd规则加引号。镜像必须为固定digest或本地image ID。
-ExecStart=@KRIM_INSTALL_ROOT@/bin/python -m krim_agent.sandbox.broker --socket @KRIM_BROKER_SOCKET@ --storage @KRIM_STORAGE_ROOT@ --state @KRIM_STATE_ROOT@ --allow-uid @KRIM_CONTROL_UID@ --socket-gid @KRIM_SOCKET_GID@ --image @KRIM_COMMAND_IMAGE@
+# manifest固定到同一安装前缀。生产unit不启用dev_only镜像。
+ExecStart=@KRIM_INSTALL_ROOT@/bin/python -m krim_agent.sandbox.broker --socket @KRIM_BROKER_SOCKET@ --storage @KRIM_STORAGE_ROOT@ --state @KRIM_STATE_ROOT@ --allow-uid @KRIM_CONTROL_UID@ --socket-gid @KRIM_SOCKET_GID@ --image @KRIM_COMMAND_IMAGE@ --runtime-manifest @KRIM_RUNTIME_MANIFEST@
 User=root
 Group=root
 UMask=0077
