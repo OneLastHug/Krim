@@ -347,6 +347,26 @@ def test_independent_projects_of_one_account_can_run_concurrently(command_jobs):
     assert wait_result(jobs, env, other, second)["status"] == "finished"
 
 
+def test_reconcile_reenters_reconciling_record_without_replaying(command_jobs, monkeypatch):
+    broker, jobs, env, project = command_jobs
+    operation = str(uuid.uuid4())
+    broker._save(
+        jobs.filename(operation),
+        {
+            "operation_id": operation,
+            "environment_id": env,
+            "project_id": project,
+            "status": "reconciling",
+            "generation": 0,
+            "reconcile_generation": 1,
+            "kind": "file",
+            "receipt": {"cleanup": "clean", "exit_code": None},
+        },
+    )
+    result = jobs.reconcile(env, project, operation)
+    assert result["reconciled"] and result["generation"] == 1
+
+
 def test_reconcile_uses_durable_clean_receipt_after_container_cleanup(command_jobs, monkeypatch):
     broker, jobs, env, project = command_jobs
     operation = str(uuid.uuid4())

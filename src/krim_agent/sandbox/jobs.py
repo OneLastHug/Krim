@@ -265,6 +265,19 @@ class CommandJobs:
                 if isinstance(values, SandboxCommand)
                 else self.runner
             )
+            if isinstance(values, SandboxCommand) and self.catalog is not None:
+                probe = self.broker._read("probe-" + operation_id + ".json")
+                runtime = probe.get("runtime", {}) if isinstance(probe, dict) else {}
+                if (
+                    probe is None
+                    or probe.get("environment_id") != environment_id
+                    or probe.get("project_id") != project_id
+                    or probe.get("program") != requested_program
+                    or not isinstance(runtime, dict)
+                    or runtime.get("image_id") != runner.identity
+                    or runtime.get("fingerprint") != getattr(runner, "runtime_fingerprint", None)
+                ):
+                    raise ServiceError("target_binding_changed")
             digest = self._request_digest(
                 environment_id,
                 command,
@@ -542,9 +555,13 @@ class CommandJobs:
                 raise ServiceError("not_found", 404)
             active = self.active.get(operation_id)
             if active is None and row.get("status") == "intent":
+                if row.get("environment_id") != environment_id or row.get("generation") is None:
+                    raise ServiceError("sandbox_operation_unknown")
                 lease = self.broker.leases.status(project_id)
                 if lease.get("lease_id") == operation_id:
                     self.broker.leases.reconcile(project_id, operation_id, stopped=True)
+                elif lease.get("status") != "idle":
+                    raise ServiceError("sandbox_operation_unknown")
                 row["status"] = "finished"
                 row["lease_claimed"] = False
                 row["receipt"] = {
@@ -609,8 +626,12 @@ class CommandJobs:
             if row["status"] == "finished" and row.get("reconciled"):
                 return row
             if row["status"] == "finished" and row.get("receipt", {}).get("cleanup") == "clean":
-                stopped = {"State": {"ExitCode": row["receipt"]["exit_code"]}}
-            elif row.get("kind", "command") == "command":
+                return row
+            if row.get("status") != "reconciling":
+                row["status"] = "reconciling"
+                row["reconcile_generation"] = row["generation"] + 1
+                self.broker._save(self.filename(operation_id), row)
+            if row.get("kind", "command") == "command":
                 stopped = self._runner_for(row.get("program", "python")).stop(operation_id)
             else:
                 stopped = {"State": {"ExitCode": None}}
@@ -618,7 +639,9 @@ class CommandJobs:
             if lease["status"] != "idle":
                 self.broker.leases.reconcile(project_id, operation_id, stopped=True)
             project = self.broker._project(environment_id, project_id)
-            project["generation"] = max(project.get("generation", 0), row["generation"] + 1)
+            project["generation"] = max(
+                project.get("generation", 0), row.get("reconcile_generation", row["generation"] + 1)
+            )
             project["status"] = "ready"
             self.broker._save("project-" + project_id + ".json", project)
             receipt = row.get("receipt") or {}
@@ -640,6 +663,7 @@ class CommandJobs:
             row["status"] = "finished"
             row["reconciled"] = True
             row["generation"] = project["generation"]
+            row.pop("reconcile_generation", None)
             self.broker._save(self.filename(operation_id), row)
             if row.get("kind", "command") == "command":
                 try:

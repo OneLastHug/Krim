@@ -259,20 +259,45 @@ class StorageBroker:
             from krim_agent.sandbox.maintenance import dispatch_maintenance
 
             return dispatch_maintenance(self, action, values)
-        if action == "runtime_probe" and set(values) == {"program"}:
-            if self.jobs is None:
-                raise ServiceError("sandbox_backend_unavailable", 503)
+        if action == "runtime_probe":
+            required = {"environment_id", "project_id", "operation_id", "program"}
+            if set(values) != required or self.jobs is None:
+                raise ServiceError("invalid_input", 422)
+            environment_id = internal_id(values["environment_id"])
+            project_id = internal_id(values["project_id"])
+            operation_id = internal_id(values["operation_id"])
             program = values["program"]
-            if program not in {"python", "node"} or program not in self.jobs.configured_programs():
+            if type(program) is not str or program not in {"python", "node"}:
+                raise ServiceError("invalid_input", 422)
+            project = self._project(environment_id, project_id)
+            if project["status"] != "ready" or program not in self.jobs.configured_programs():
                 raise ServiceError("sandbox_backend_unavailable", 503)
+            probe = self._read("probe-" + operation_id + ".json")
+            if probe is not None:
+                if probe.get("environment_id") != environment_id or probe.get("project_id") != project_id:
+                    raise ServiceError("target_binding_changed")
+                if probe.get("program") != program:
+                    raise ServiceError("key_conflict")
+                return probe["runtime"]
             runner = self.jobs._runner_for(program)
             runtime = getattr(runner, "runtime", None)
-            return {
+            result = {
                 "program": program,
                 "image": runtime.image if runtime is not None else self.jobs.image,
                 "image_id": runner.identity,
                 "fingerprint": getattr(runner, "runtime_fingerprint", None),
             }
+            self._save(
+                "probe-" + operation_id + ".json",
+                {
+                    "environment_id": environment_id,
+                    "project_id": project_id,
+                    "program": program,
+                    "runtime": result,
+                    "status": "probed",
+                },
+            )
+            return result
         if action == "health" and not values:
             self.quota.current()
             return {
@@ -301,7 +326,7 @@ class StorageBroker:
             "command_start": {"environment_id", "project_id", "operation_id", "command"},
             "command_reconcile": {"environment_id", "project_id", "operation_id"},
             "command_status": {"environment_id", "project_id", "operation_id", "renew", "cancel"},
-            "runtime_probe": {"program"},
+            "runtime_probe": {"environment_id", "project_id", "operation_id", "program"},
         }
         if action not in fields or set(values) != fields[action]:
             raise ServiceError("invalid_input", 422)
