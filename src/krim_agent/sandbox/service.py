@@ -928,16 +928,21 @@ class SandboxService:
             "restoring",
         }:
             raise ServiceError("sandbox_backend_unavailable", 503)
-        result = await self.broker.call(
-            "read",
-            environment_id=project["environment_id"],
-            project_id=project_id,
-            path=path,
-            offset=offset,
-            limit=limit,
-            expected_sha256=expected_sha256,
-            expected_stat=expected_stat,
-        )
+        arguments = {
+            "environment_id": project["environment_id"],
+            "project_id": project_id,
+            "path": path,
+            "offset": offset,
+            "limit": limit,
+        }
+        if (expected_sha256 is None) != (expected_stat is None):
+            raise ServiceError("invalid_input", 422)
+        if expected_sha256 is not None:
+            arguments.update(
+                expected_sha256=expected_sha256,
+                expected_stat=expected_stat,
+            )
+        result = await self.broker.call("read", **arguments)
         self._live(actor)
         current = await self._project_state(actor, project_id)
         response = {
@@ -1069,7 +1074,7 @@ class SandboxService:
                 path=path,
                 offset=offset,
                 limit=65536,
-                expected_sha256=expected_hash,
+                expected_sha256=expected_hash if expected_stat is not None else None,
                 expected_stat=expected_stat,
                 _include_stat_token=True,
             )
@@ -1077,7 +1082,9 @@ class SandboxService:
                 raise ServiceError("input_revision_conflict")
             if expected_hash is None:
                 expected_hash = result["sha256"]
-                expected_stat = list(result["stat_token"])
+                stat_token = result.get("stat_token")
+                if stat_token is not None:
+                    expected_stat = stat_token
                 generation = result["generation"]
             elif result["sha256"] != expected_hash or result["generation"] != generation:
                 raise ServiceError("artifact_conflict")
@@ -1211,7 +1218,7 @@ class SandboxService:
             raise ServiceError("source_changed")
         raw_parts = [base64.b64decode(current["data"], validate=True)]
         offset = len(raw_parts[0])
-        expected_stat = list(current["stat_token"])
+        expected_stat = current.get("stat_token")
         while offset < current["size"]:
             try:
                 chunk = await self.read_file(
@@ -1220,7 +1227,7 @@ class SandboxService:
                     path=path,
                     offset=offset,
                     limit=65536,
-                    expected_sha256=expected_sha256,
+                    expected_sha256=expected_sha256 if expected_stat is not None else None,
                     expected_stat=expected_stat,
                 )
             except ServiceError as error:
