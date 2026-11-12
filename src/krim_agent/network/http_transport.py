@@ -165,6 +165,10 @@ class PinnedAsyncTransport(httpx.AsyncBaseTransport):
             raise EgressViolation("request extension sni_hostname is not allowed")
         addresses = await self._resolve_addresses(target)
         approved = self._policy.approve_addresses(addresses)
+        if target.scheme == "http" and not all(
+            ipaddress.ip_address(address).is_loopback for address in approved
+        ):
+            raise EgressViolation("cleartext http requires loopback addresses")
         for key in self._pin_keys(request.url, target):
             self._backend.pin(key, approved)
         core_request = httpcore.Request(

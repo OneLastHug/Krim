@@ -151,6 +151,23 @@ def test_config_validates_transport_security_and_digest_redacts_secret_values():
     assert base.configuration_digest != other_endpoint.configuration_digest
     assert "secret-one" not in base.configuration_digest
 
+    env_one = MCPServerConfig(
+        name="stdio-env",
+        transport="stdio",
+        command="fixture",
+        env={"MCP_TOKEN": "token-one", "MODE": "one"},
+    )
+    env_two = MCPServerConfig(
+        name="stdio-env",
+        transport="stdio",
+        command="fixture",
+        env={"MCP_TOKEN": "token-two", "MODE": "two"},
+    )
+    assert env_one.configuration_digest == env_two.configuration_digest
+    assert "token-one" not in env_one.configuration_digest
+    assert "token-two" not in env_two.configuration_digest
+    assert '"environment"' not in env_one.configuration_digest
+
 
 async def test_mock_discovery_selects_only_approved_tools_and_defensively_copies_schema(
     monkeypatch,
@@ -348,6 +365,26 @@ async def test_real_official_sdk_stdio_fixture_connects_calls_and_closes():
     finally:
         await asyncio.create_task(connection.close())
     assert connection.closed
+
+
+async def test_stdio_configuration_rejects_control_characters():
+    with pytest.raises(ValidationError):
+        _stdio_config(command="fixture\nmalicious")
+    with pytest.raises(ValidationError):
+        _stdio_config(args=("--value\x7f",))
+    with pytest.raises(ValidationError):
+        _stdio_config(env={"SAFE": "value\nextra"})
+
+
+def test_stdio_environment_clears_unapproved_inherited_values(monkeypatch):
+    from krim_agent.mcp.client import _stdio_environment
+
+    monkeypatch.setenv("PATH", "/trusted/bin")
+    monkeypatch.setenv("KRIM_AGENT_API_KEY", "private-model-key")
+    result = _stdio_environment({"MCP_TOKEN": "explicit-secret"})
+    assert result["PATH"] == "/trusted/bin"
+    assert result["KRIM_AGENT_API_KEY"] == ""
+    assert result["MCP_TOKEN"] == "explicit-secret"
 
 
 @pytest.mark.skipif(

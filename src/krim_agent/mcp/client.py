@@ -7,15 +7,14 @@ import os
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TextIO, cast
-
-if TYPE_CHECKING:
-    from krim_agent.network.egress_policy import EgressPolicy
+from typing import Any, TextIO, cast
+from urllib.parse import urlsplit
 
 from pydantic import JsonValue
 
 from krim_agent.contracts import ServiceError
 from krim_agent.mcp.types import MCPServerConfig, MCPTool, _encode_json
+from krim_agent.network.egress_policy import EgressPolicy
 
 _MAX_DISCOVERED_TOOLS = 256
 _MAX_DISCOVERY_PAGES = 32
@@ -23,6 +22,51 @@ _MAX_RESULT_BYTES = 64 * 1024
 _MAX_QUEUED_CALLS = 64
 _WORKER_COUNT = 8
 _STOP = object()
+
+
+def _policy_for_http_config(config: MCPServerConfig) -> EgressPolicy:
+    parsed = urlsplit(config.url or "")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if host is None:
+        raise ValueError("MCP HTTP URL is missing a host")
+    if parsed.scheme == "http":
+        return EgressPolicy.authorize_loopback({host}, {port})
+    return EgressPolicy({host}, {port})
+
+
+_STDIO_ENV_ALLOWLIST = frozenset(
+    {
+        "APPDATA",
+        "COMSPEC",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TZ",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+
+
+def _stdio_environment(configured: dict[str, str] | None) -> dict[str, str]:
+    """Retain runtime variables, clear inherited secrets, then add host values."""
+    environment = {name: "" for name in os.environ}
+    environment.update(
+        (name, value)
+        for name, value in os.environ.items()
+        if name.upper() in _STDIO_ENV_ALLOWLIST
+    )
+    environment.update(configured or {})
+    return environment
 
 
 def _stderr_sink() -> TextIO:
@@ -118,8 +162,14 @@ class MCPConnection:
     ) -> None:
         if egress_policy is not None and config.transport != "streamable_http":
             raise ValueError("HTTP出站策略不能约束stdio子进程")
-        self._egress_policy = egress_policy
         self._config = config.model_copy(deep=True)
+        self._egress_policy = (
+            egress_policy
+            if self._config.transport == "streamable_http" and egress_policy is not None
+            else _policy_for_http_config(self._config)
+            if self._config.transport == "streamable_http"
+            else None
+        )
         self._ready = asyncio.Event()
         self._shutdown = asyncio.Event()
         self._queue: asyncio.Queue[_CallRequest | object] = asyncio.Queue(maxsize=_MAX_QUEUED_CALLS)
@@ -251,10 +301,13 @@ class MCPConnection:
 
             async with AsyncExitStack() as stack:
                 if self._config.transport == "stdio":
+                    # Trusted-host argv boundary: the official MCP SDK starts
+                    # command + args without a shell. These values must come
+                    # from host configuration, never from model input.
                     params = StdioServerParameters(
                         command=self._config.command,
                         args=list(self._config.args),
-                        env=copy.deepcopy(self._config.env),
+                        env=_stdio_environment(copy.deepcopy(self._config.env)),
                     )
                     # 子进程原始stderr可能含凭据，不进入公共应用日志。
                     stderr_sink = stack.enter_context(_stderr_sink())
@@ -266,25 +319,15 @@ class MCPConnection:
                         key: value.get_secret_value() for key, value in self._config.headers.items()
                     }
 
-                    import httpx
+                    from krim_agent.network.http_transport import make_http_client
 
-                    if self._egress_policy is not None:
-                        from krim_agent.network.http_transport import make_http_client
-
-                        self._egress_policy.validate_target(self._config.url or "")
-                        http_client = make_http_client(
-                            self._egress_policy,
-                            headers=secret_headers,
-                            timeout=self._config.timeout_seconds,
-                        )
-                    else:
-                        # 已有宿主MCP配置保持原行为；个人连接必须由可信装配注入策略。
-                        http_client = httpx.AsyncClient(
-                            headers=secret_headers,
-                            timeout=self._config.timeout_seconds,
-                            trust_env=False,
-                            follow_redirects=False,
-                        )
+                    assert self._egress_policy is not None
+                    self._egress_policy.validate_target(self._config.url or "")
+                    http_client = make_http_client(
+                        self._egress_policy,
+                        headers=secret_headers,
+                        timeout=self._config.timeout_seconds,
+                    )
                     client = await stack.enter_async_context(http_client)
                     streams = await stack.enter_async_context(
                         streamablehttp_client(

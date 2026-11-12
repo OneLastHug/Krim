@@ -26,6 +26,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NoReturn, cast
 
 from pydantic import JsonValue
@@ -155,6 +156,26 @@ class MasterKeyring:
     active_key_id: str
     keys: Mapping[str, bytes] = field(repr=False)
 
+    def __post_init__(self) -> None:
+        if type(self.active_key_id) is not str or KEY_ID.fullmatch(self.active_key_id) is None:
+            raise ServiceError("invalid_input", 422)
+        if not isinstance(self.keys, Mapping) or not self.keys or len(self.keys) > MAX_KEYS:
+            raise ServiceError("invalid_input", 422)
+        copied: dict[str, bytes] = {}
+        for key_id, raw in self.keys.items():
+            if (
+                type(key_id) is not str
+                or KEY_ID.fullmatch(key_id) is None
+                or type(raw) is not bytes
+                or len(raw) != KEY_BYTES
+                or _key_id(raw) != key_id
+            ):
+                raise ServiceError("invalid_input", 422)
+            copied[key_id] = raw
+        if self.active_key_id not in copied:
+            raise ServiceError("invalid_input", 422)
+        object.__setattr__(self, "keys", MappingProxyType(copied))
+
     @classmethod
     def create(cls, raw: bytes) -> MasterKeyring:
         key = _checked_key(raw)
@@ -167,6 +188,8 @@ class MasterKeyring:
         key_id = _key_id(key)
         if key_id in self.keys:
             raise ServiceError("invalid_input", 422)
+        if len(self.keys) >= MAX_KEYS:
+            raise ServiceError("input_limit", 422)
         merged = dict(self.keys)
         merged[key_id] = key
         return MasterKeyring(key_id, merged)
@@ -235,12 +258,15 @@ class MasterKeyring:
                 raw = _decode_payload(encoded)
             except ServiceError:
                 _reject_keyring()
-            if len(raw) != KEY_BYTES:
+            if len(raw) != KEY_BYTES or _key_id(raw) != key_id:
                 _reject_keyring()
             keys[key_id] = raw
         if active not in keys:
             _reject_keyring()
-        return cls(active, keys)
+        try:
+            return cls(active, keys)
+        except ServiceError:
+            _reject_keyring()
 
 
 def _read_trusted_json(path: Path) -> JsonValue:

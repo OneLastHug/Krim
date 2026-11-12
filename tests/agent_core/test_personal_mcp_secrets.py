@@ -112,6 +112,21 @@ def test_key_id_derivation_is_stable_and_distinct():
     assert krim_secrets.KEY_ID.match(first.active_key_id)
 
 
+def test_keyring_rejects_mismatched_key_material_and_caps_rotation():
+    raw = os.urandom(32)
+    key_id = MasterKeyring.create(raw).active_key_id
+    with pytest.raises(ServiceError) as raised:
+        MasterKeyring(key_id, {key_id: os.urandom(32)})
+    assert raised.value.code == "invalid_input"
+
+    ring = MasterKeyring.create(raw)
+    for _ in range(krim_secrets.MAX_KEYS - 1):
+        ring = ring.rotate(os.urandom(32))
+    with pytest.raises(ServiceError) as raised:
+        ring.rotate(os.urandom(32))
+    assert (raised.value.code, raised.value.status) == ("input_limit", 422)
+
+
 def test_rotate_keeps_old_keys():
     raw_old = os.urandom(32)
     ring = MasterKeyring.create(raw_old)
@@ -206,6 +221,14 @@ def test_load_rejects_untrusted_keyring_files(tmp_path):
     _write(loose, document.encode(), 0o644)
     with pytest.raises(ServiceError) as raised:
         MasterKeyring.load(loose)
+    assert raised.value.code == "storage_unavailable"
+
+    mismatched_id = tmp_path / "mismatched-id.json"
+    mismatched = json.loads(document)
+    mismatched["keys"]["AAAAAAAAAAAAAAAA"] = encoded
+    _write(mismatched_id, json.dumps(mismatched).encode())
+    with pytest.raises(ServiceError) as raised:
+        MasterKeyring.load(mismatched_id)
     assert raised.value.code == "storage_unavailable"
 
     linked = tmp_path / "linked.json"

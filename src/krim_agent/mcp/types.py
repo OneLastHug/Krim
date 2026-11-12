@@ -23,7 +23,16 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class MCPServerConfig(BaseModel):
-    """可信宿主提供的 MCP 连接配置。配置不会暴露给模型。"""
+    """可信宿主提供的 MCP 连接配置。配置不会暴露给模型。
+
+    ``stdio`` is a trusted-host execution boundary: ``command`` and ``args``
+    are passed to the official MCP SDK as an argv vector, never as a shell
+    command. Callers must source this configuration from a trusted host file;
+    models and account-scoped request data must not be allowed to construct it.
+    The child process runs with the service account's permissions. The caller
+    supplies only a small OS runtime environment plus explicitly configured
+    values; models and account-scoped requests must not construct this config.
+    """
 
     model_config = ConfigDict(
         extra="forbid",
@@ -64,14 +73,26 @@ class MCPServerConfig(BaseModel):
     @field_validator("command")
     @classmethod
     def _validate_command(cls, value: str | None) -> str | None:
-        if value is not None and (not value.strip() or "\x00" in value):
+        if value is not None and (
+            not value.strip()
+            or len(value) > 4096
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+        ):
             raise ValueError("MCP stdio command is invalid")
         return value
 
     @field_validator("args")
     @classmethod
     def _validate_args(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any("\x00" in arg for arg in value):
+        if (
+            len(value) > 64
+            or sum(len(arg) for arg in value) > 32768
+            or any(
+                len(arg) > 4096
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in arg)
+                for arg in value
+            )
+        ):
             raise ValueError("MCP stdio arguments are invalid")
         return value
 
@@ -81,8 +102,17 @@ class MCPServerConfig(BaseModel):
         if value is None:
             return None
         copied = dict(value)
+        if len(copied) > 64:
+            raise ValueError("MCP stdio environment is invalid")
         for key, item in copied.items():
-            if not key or "=" in key or "\x00" in key or "\x00" in item:
+            if (
+                not key
+                or len(key) > 256
+                or len(item) > 8192
+                or "=" in key
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in item)
+            ):
                 raise ValueError("MCP stdio environment is invalid")
         return copied
 
@@ -170,14 +200,10 @@ class MCPServerConfig(BaseModel):
             "version": self.version,
             "command": self.command,
             "args": list(self.args),
+            # Environment values are deliberately absent. Even a value that
+            # does not look secret today may become one after a host config
+            # change; names are sufficient for a stable public binding digest.
             "env_names": sorted(self.env or {}),
-            "environment": {
-                name: None
-                if name in self.secret_env_names
-                or re.search(r"key|token|secret|password|credential|auth", name, re.I)
-                else value
-                for name, value in sorted((self.env or {}).items())
-            },
             "url": self.url,
             "allowed_hosts": sorted(self.allowed_hosts),
             "header_names": sorted(self.headers),

@@ -9,7 +9,11 @@ from krim_agent.contracts import ServiceError
 from .core import ToolSpec
 
 
+MAX_TOOLS = 16
+
+
 class ToolRegistry:
+<<<<<<< HEAD
     def __init__(self, specs: tuple[ToolSpec, ...], *, max_tools: int = 16) -> None:
         if (
             type(max_tools) is not int
@@ -18,6 +22,13 @@ class ToolRegistry:
             or len(specs) > max_tools
         ):
             raise ValueError("工具名称冲突或目录超限")
+=======
+    def __init__(self, specs: tuple[ToolSpec, ...]) -> None:
+        if len({item.name for item in specs}) != len(specs):
+            raise ValueError("工具名称冲突")
+        if len(specs) > MAX_TOOLS:
+            raise ServiceError("tool_limit", 422)
+>>>>>>> 44d24bf1b (MCP安全：固定HTTP出站并收紧配置边界)
         self._items = MappingProxyType({item.name: item for item in specs})
         self._frozen = tuple((item, item.fingerprint) for item in specs)
 
