@@ -465,8 +465,8 @@ async def test_response_streams_body_and_close_is_preserved() -> None:
             chunks = [chunk async for chunk in response.aiter_bytes()]
         assert b"".join(chunks) == body
         stream = backend.streams[0]
-        assert stream.closed is False  # 响应读完但连接仍在池中
-    # client 关闭后连接被回收关闭。
+        # Connection reuse is disabled so the next request must use its fresh DNS pin.
+        assert stream.closed is True
     assert backend.streams[0].closed is True
 
 
