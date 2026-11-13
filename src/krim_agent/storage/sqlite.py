@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import importlib
 import json
 import os
 import secrets
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from pydantic import JsonValue
-from sqlalchemy import UniqueConstraint, delete, event, func, insert, select, update
+from sqlalchemy import Table, UniqueConstraint, delete, event, func, insert, select, update
 from sqlalchemy.engine import URL, RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
@@ -52,9 +53,23 @@ from .models import (
 )
 from .sandbox_models import SANDBOX_TABLE_NAMES, SANDBOX_TABLES
 
+MCP_TABLE_NAMES: frozenset[str]
+MCP_TABLES: tuple[Table, ...]
+try:
+    _mcp_models = importlib.import_module(".mcp_models", __package__)
+except ModuleNotFoundError as error:
+    if error.name != __package__ + ".mcp_models":
+        raise
+    # The standalone branch omits the independently implemented schema-v12 module.
+    MCP_TABLE_NAMES = frozenset()
+    MCP_TABLES = ()
+else:
+    MCP_TABLE_NAMES = _mcp_models.MCP_TABLE_NAMES
+    MCP_TABLES = _mcp_models.MCP_TABLES
+
 APPLICATION_ID = 0x4B4C4331
-# 12：沙箱Turn completion契约；11：扩展资源与会话扩展表；10：沙箱配额状态
-SCHEMA_VERSION = 12
+# 13：沙箱Turn completion契约；12：账号MCP配置与secret表；11：扩展资源和Turn扩展表
+SCHEMA_VERSION = 13
 T = TypeVar("T")
 
 
@@ -133,6 +148,7 @@ class SQLiteStore:
                     *ACCOUNT_TABLES,
                     *SANDBOX_TABLES,
                     *EXTENSION_TABLES,
+                    *MCP_TABLES,
                 ],
             )
         )
@@ -217,13 +233,12 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA application_id={APPLICATION_ID}")
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
-                    legacy = (
-                        set(metadata.tables)
-                        - ACCOUNT_TABLE_NAMES
-                        - SANDBOX_TABLE_NAMES
-                        - EXTENSION_TABLE_NAMES
-                    )
-                    without_extensions = set(metadata.tables) - EXTENSION_TABLE_NAMES
+                    current_tables = set(metadata.tables) | set(TABLES)
+                    schema12 = current_tables - {"sandbox_turn_contracts"}
+                    schema11 = schema12 - MCP_TABLE_NAMES
+                    schema10 = schema11 - EXTENSION_TABLE_NAMES
+                    schema7 = schema10 - SANDBOX_TABLE_NAMES
+                    legacy = schema7 - ACCOUNT_TABLE_NAMES - set(TABLES)
                     expected = {
                         1: {"runs", "run_events"},
                         2: {
@@ -246,30 +261,17 @@ class SQLiteStore:
                         4: legacy - {"park_checkpoints"},
                         5: (legacy | set(TABLES)) - {"park_checkpoints"},
                         6: legacy | set(TABLES),
-                        7: (without_extensions - SANDBOX_TABLE_NAMES) | set(TABLES),
-                        8: (
-                            without_extensions
-                            - {
-                                "sandbox_turn_contracts",
-                                "sandbox_session_bindings",
-                                "sandbox_quota_state",
-                            }
-                            | set(TABLES)
-                        ),
-                        9: (
-                            without_extensions - {"sandbox_quota_state"}
-                            | {"sandbox_turn_contracts"}
-                            | set(TABLES)
-                        ),
-                        10: (without_extensions - {"sandbox_turn_contracts"}) | set(TABLES),
-                        11: (
-                            (set(metadata.tables) - {"sandbox_turn_contracts"}) | set(TABLES)
-                        ),
-                        12: set(metadata.tables) | set(TABLES),
+                        7: schema7,
+                        8: schema10 - {"sandbox_session_bindings", "sandbox_quota_state"},
+                        9: schema10 - {"sandbox_quota_state"},
+                        10: schema10,
+                        11: schema11,
+                        12: schema12,
+                        13: current_tables,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+                        or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
@@ -474,7 +476,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, status, code)
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13}
                     else None
                 )
                 terminal_data: dict[str, JsonValue] = {
@@ -499,7 +501,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -543,7 +545,7 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
-            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12}:
+            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13}:
                 from . import observation_outbox as hot_sql
 
                 try:
@@ -738,7 +740,7 @@ class SQLiteStore:
             ),
             (
                 await work_sql.load(conn, run_id)
-                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12}
+                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
                 else None
             ),
         )
@@ -755,7 +757,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1255,7 +1257,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13}
                     else None
                 )
                 recovered_code = (
@@ -1290,7 +1292,7 @@ class SQLiteStore:
                         finished_at=time.time(),
                     )
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -1342,7 +1344,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 

@@ -12,9 +12,10 @@ from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.account_models import ACCOUNT_TABLES
+from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.models import runs, turns
 from krim_agent.storage.sandbox_models import SANDBOX_TABLES
-from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
+from krim_agent.storage.sqlite import MCP_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
 
 
 async def test_eval_consumers_use_actual_validated_schema(tmp_path):
@@ -30,7 +31,13 @@ async def test_eval_consumers_use_actual_validated_schema(tmp_path):
 def downgrade(path, version):
     conn = sqlite3.connect(path)
     try:
-        for table in [*reversed(SANDBOX_TABLES), *reversed(ACCOUNT_TABLES)]:
+        for name in sorted(MCP_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
+        for table in [
+            *reversed(EXTENSION_TABLES),
+            *reversed(SANDBOX_TABLES),
+            *reversed(ACCOUNT_TABLES),
+        ]:
             conn.execute('DROP TABLE "' + table.name + '"')
         for name in [
             "park_checkpoints",

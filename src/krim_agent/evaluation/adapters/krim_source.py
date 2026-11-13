@@ -66,7 +66,7 @@ class KrimSourceReader:
             guard()
             if exists is None:
                 raise ServiceError("not_found", 404)
-            if self.store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10}:
+            if self.store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
                 return None
             row = (
                 await conn.execute(

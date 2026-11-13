@@ -609,7 +609,7 @@ class RunService:
                                             updated_at=now,
                                         )
                                     )
-                            await self.store._write(mark_tasks_unknown)
+                            await base.loop.sandbox.service.store._write(mark_tasks_unknown)
                             if status == "completed":
                                 status, code = "failed", error.code
                     if parked:
