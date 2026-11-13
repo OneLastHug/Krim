@@ -174,7 +174,7 @@ def test_lock_rejects_artifact_larger_than_policy_before_network(monkeypatch):
         fetch_locked_bundle(
             lock,
             b"lock",
-            DependencyPolicy(allowed_hosts=["packages.example.test"], max_artifact_bytes=1),
+            DependencyPolicy(allowed_hosts=["packages.example.test"], max_artifact_bytes=1024),
         )
     assert called is False
 
