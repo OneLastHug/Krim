@@ -122,6 +122,11 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
           </button>}
           {paused && <button type="button" role="menuitem" className="menu-item" disabled={!chatSession.canWrite || chatSession.controlling} onClick={() => { setMoreOpen(false); void chatSession.control(null, "resume"); }}>恢复分发</button>}
           {canCloseSession && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.control(null, "close"); }}>关闭对话</button>}
+          {chatSession?.ready && chatSession.canWrite && chatSession.session?.status === "closed" && !chatSession.controlling && <>
+            {chatSession.listView !== "trash" && !chatSession.session.deleted_at && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle(chatSession.session?.archived_at ? "unarchive" : "archive"); }}>{chatSession.session.archived_at ? "取消归档对话" : "归档对话"}</button>}
+            {chatSession.listView !== "trash" && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle("trash"); }}>移入回收站</button>}
+            {chatSession.listView === "trash" && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle("restore"); }}>恢复对话</button>}
+          </>}
           <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); setInspectorOpen(open => !open); }}>
             {inspectorOpen ? "关闭详情面板" : "打开详情面板"}
           </button>

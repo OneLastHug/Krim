@@ -51,7 +51,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -64,6 +64,16 @@ async def session_row(conn: AsyncConnection, session_id: str) -> Any:
     return row
 
 
+async def session_lifecycle_row(conn: AsyncConnection, session_id: str) -> Any | None:
+    from .session_lifecycle_models import session_lifecycle
+
+    return (
+        await conn.execute(
+            select(session_lifecycle).where(session_lifecycle.c.session_id == session_id)
+        )
+    ).mappings().first()
+
+
 async def turn_row(conn: AsyncConnection, turn_id: str) -> Any:
     row = (await conn.execute(select(turns).where(turns.c.id == turn_id))).mappings().first()
     if row is None:
@@ -72,9 +82,30 @@ async def turn_row(conn: AsyncConnection, turn_id: str) -> Any:
 
 
 def session_view(row: Any) -> SessionView:
-    values = {k: row[k] for k in SessionView.model_fields if k != "target_fingerprint"}
+    lifecycle_fields = {"archived_at", "deleted_at", "lifecycle_revision"}
+    values = {
+        key: row[key]
+        for key in SessionView.model_fields
+        if key != "target_fingerprint" and key not in lifecycle_fields
+    }
     values["target_fingerprint"] = fingerprint(row["target"])
+    values.update(archived_at=None, deleted_at=None, lifecycle_revision=0)
     return SessionView.model_validate_json(encoded(values))
+
+
+async def lifecycle_view(
+    conn: AsyncConnection, view: SessionView, *, enabled: bool = True
+) -> SessionView:
+    if not enabled:
+        return view
+    row = await session_lifecycle_row(conn, view.id)
+    return view.model_copy(
+        update={
+            "archived_at": row["archived_at"] if row is not None else None,
+            "deleted_at": row["deleted_at"] if row is not None else None,
+            "lifecycle_revision": row["revision"] if row is not None else 0,
+        }
+    )
 
 
 def turn_view(row: Any) -> TurnView:
@@ -85,7 +116,11 @@ async def get_session(store: SQLiteStore, session_id: str) -> SessionView:
     require(store)
 
     async def operation(conn: AsyncConnection) -> SessionView:
-        return session_view(await session_row(conn, session_id))
+        return await lifecycle_view(
+            conn,
+            session_view(await session_row(conn, session_id)),
+            enabled=store.schema_version >= 14,
+        )
 
     return await read(store, operation)
 
@@ -109,32 +144,90 @@ async def by_key(store: SQLiteStore, workspace: str, owner: str, key: str) -> Se
         )
         if row is None:
             raise ServiceError("not_found", 404)
-        return session_view(row)
+        return await lifecycle_view(
+            conn,
+            session_view(row),
+            enabled=store.schema_version >= 14,
+        )
 
     return await read(store, operation)
 
 
 async def list_sessions(
-    store: SQLiteStore, workspace: str, owner: str, admin: bool, offset: int, limit: int
+    store: SQLiteStore,
+    workspace: str,
+    owner: str,
+    admin: bool,
+    offset: int,
+    limit: int,
+    *,
+    view: str = "active",
 ) -> list[SessionView]:
     require(store)
+    if view not in {"active", "archived", "trash"}:
+        raise ServiceError("invalid_input", 422)
+    if store.schema_version < 14 and view != "active":
+        raise ServiceError("schema_upgrade_required")
+    if store.schema_version >= 14:
+        from .session_lifecycle_models import session_lifecycle
 
     async def operation(conn: AsyncConnection) -> list[SessionView]:
-        query = select(sessions).where(sessions.c.workspace_id == workspace)
-        if not admin:
-            query = query.where(sessions.c.owner_id == owner)
-        rows = (
-            (
+        if store.schema_version < 14:
+            query = select(sessions).where(sessions.c.workspace_id == workspace)
+            if not admin:
+                query = query.where(sessions.c.owner_id == owner)
+            rows = (
                 await conn.execute(
                     query.order_by(sessions.c.created_at.desc(), sessions.c.id)
                     .offset(offset)
                     .limit(limit)
                 )
-            )
-            .mappings()
-            .all()
+            ).mappings().all()
+            return [session_view(row) for row in rows]
+
+        lifecycle_join = sessions.outerjoin(
+            session_lifecycle, session_lifecycle.c.session_id == sessions.c.id
         )
-        return [session_view(row) for row in rows]
+        query = select(
+            sessions,
+            session_lifecycle.c.archived_at.label("lifecycle_archived_at"),
+            session_lifecycle.c.deleted_at.label("lifecycle_deleted_at"),
+            session_lifecycle.c.revision.label("lifecycle_revision"),
+        ).select_from(lifecycle_join).where(sessions.c.workspace_id == workspace)
+        if not admin:
+            query = query.where(sessions.c.owner_id == owner)
+        if view == "active":
+            query = query.where(
+                session_lifecycle.c.deleted_at.is_(None),
+                session_lifecycle.c.archived_at.is_(None),
+            )
+        elif view == "archived":
+            query = query.where(
+                session_lifecycle.c.deleted_at.is_(None),
+                session_lifecycle.c.archived_at.is_not(None),
+            )
+        else:
+            query = query.where(session_lifecycle.c.deleted_at.is_not(None))
+        rows = (
+            await conn.execute(
+                query.order_by(sessions.c.created_at.desc(), sessions.c.id)
+                .offset(offset)
+                .limit(limit)
+            )
+        ).mappings().all()
+        results = []
+        for row in rows:
+            value = session_view(row)
+            results.append(
+                value.model_copy(
+                    update={
+                        "archived_at": row["lifecycle_archived_at"],
+                        "deleted_at": row["lifecycle_deleted_at"],
+                        "lifecycle_revision": row["lifecycle_revision"] or 0,
+                    }
+                )
+            )
+        return results
 
     return await read(store, operation)
 
@@ -168,7 +261,15 @@ async def create_session(
         if old is not None:
             if old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
-            return session_view(old)
+            if store.schema_version >= 14:
+                lifecycle = await session_lifecycle_row(conn, old["id"])
+                if lifecycle is not None and lifecycle["deleted_at"] is not None:
+                    raise ServiceError("session_in_trash", 409)
+            return await lifecycle_view(
+                conn,
+                session_view(old),
+                enabled=store.schema_version >= 14,
+            )
         count = await conn.scalar(
             select(func.count())
             .select_from(sessions)
@@ -196,7 +297,11 @@ async def create_session(
         if body.target_key == "target-workspace":
             work_sql.require(store)
             await work_sql.initialize(conn, row, target)
-        return session_view(row)
+        return await lifecycle_view(
+            conn,
+            session_view(row),
+            enabled=store.schema_version >= 14,
+        )
 
     async def confirm() -> SessionView | None:
         found = await by_key(store, workspace, owner, body.request_key)

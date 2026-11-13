@@ -322,8 +322,10 @@ def create_app(
     mount_accounts(app)
 
     from .extensions import mount_extensions
+    from .session_lifecycle import mount_session_lifecycle
 
     mount_extensions(app)
+    mount_session_lifecycle(app)
 
     from .sandbox import mount_sandbox
 

@@ -258,14 +258,30 @@ class SessionService:
         return await sql.by_key(self.store, workspace, principal.principal_id, key)
 
     async def list(
-        self, principal: PrincipalContext, workspace: str, offset: int = 0, limit: int = 20
+        self,
+        principal: PrincipalContext,
+        workspace: str,
+        offset: int = 0,
+        limit: int = 20,
+        *,
+        view: Literal["active", "archived", "trash"] = "active",
     ) -> list[SessionView]:
         principal = self._live_principal(principal)
         membership = principal.member(workspace)
-        if not 0 <= offset <= 100000 or not 1 <= limit <= 50:
+        if (
+            not 0 <= offset <= 100000
+            or not 1 <= limit <= 50
+            or view not in {"active", "archived", "trash"}
+        ):
             raise ServiceError("invalid_input", 422)
         return await sql.list_sessions(
-            self.store, workspace, principal.principal_id, membership.role == "admin", offset, limit
+            self.store,
+            workspace,
+            principal.principal_id,
+            membership.role == "admin",
+            offset,
+            limit,
+            view=view,
         )
 
     async def traces(

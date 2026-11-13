@@ -39,6 +39,11 @@ class ControlRequest(StrictModel):
     title: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class SessionLifecycleRequest(StrictModel):
+    request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    expected_revision: int = Field(ge=0)
+
+
 class SessionView(StrictModel):
     id: str
     workspace_id: str
@@ -53,6 +58,9 @@ class SessionView(StrictModel):
     dispatch_paused: bool
     created_at: float
     closed_at: float | None
+    archived_at: float | None = None
+    deleted_at: float | None = None
+    lifecycle_revision: int = Field(default=0, ge=0)
 
 
 class TurnView(StrictModel):
