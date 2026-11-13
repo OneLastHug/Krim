@@ -16,7 +16,6 @@ from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.extension_models import EXTENSION_TABLES
-from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
