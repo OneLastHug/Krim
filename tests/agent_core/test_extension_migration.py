@@ -17,6 +17,46 @@ def rows(path, name):
         return conn.execute(f'SELECT * FROM "{name}"').fetchall()
 
 
+# Historical table sets are explicit so this fixture does not share the production
+# ladder's metadata subtraction and cannot accidentally validate the same mistake.
+HISTORICAL_TABLES = {
+    1: {"runs", "run_events"},
+}
+for version, additions in (
+    (2, {"dataset_revisions", "evaluations", "eval_items"}),
+    (3, {"sessions", "turns", "session_controls"}),
+    (4, {"work_sessions", "work_turns", "compactions", "tool_effects", "artifact_revisions"}),
+    (5, {"capture_meta", "capture_policies", "observation_outbox"}),
+    (6, {"park_checkpoints"}),
+    (
+        7,
+        {
+            "accounts",
+            "access_keys",
+            "account_workspaces",
+            "workspace_profiles",
+            "account_events",
+            "account_meta",
+        },
+    ),
+    (8, {"sandbox_environments", "sandbox_projects", "sandbox_operations"}),
+    (9, {"sandbox_session_bindings"}),
+    (10, {"sandbox_quota_state"}),
+):
+    HISTORICAL_TABLES[version] = HISTORICAL_TABLES[version - 1] | additions
+
+
+def downgrade_to_version(path, version):
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        names = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for name in sorted(names - HISTORICAL_TABLES[version]):
+            conn.execute(f'DROP TABLE "{name}"')
+        conn.execute(f"PRAGMA user_version={version}")
+
+
 def downgrade_to_10(path):
     with sqlite3.connect(path) as conn:
         for table in reversed(EXTENSION_TABLES):
@@ -80,6 +120,51 @@ async def test_readonly_schema10_does_not_migrate(tmp_path):
     finally:
         await store.close()
     assert database.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", range(1, 11))
+async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
+    database = tmp_path / f"historical-v{version}.sqlite"
+    run = await seed_run(database)
+    downgrade_to_version(database, version)
+    expected = HISTORICAL_TABLES[version]
+    assert table_names(database) == expected
+    before_rows = {name: rows(database, name) for name in expected}
+    with sqlite3.connect(database) as conn:
+        before_schema = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+    before_bytes = database.read_bytes()
+
+    reader = await SQLiteStore.open(database, readonly=True)
+    try:
+        assert reader.schema_version == version
+        assert (await reader.snapshot(run.id)).request.text == "保留的运行"
+        assert table_names(database) == expected
+    finally:
+        await reader.close()
+    assert database.read_bytes() == before_bytes
+
+    writer = await SQLiteStore.open(database)
+    try:
+        assert writer.schema_version == SCHEMA_VERSION == 11
+        assert table_names(database) == HISTORICAL_TABLES[10] | EXTENSION_TABLE_NAMES
+        assert (await writer.snapshot(run.id)).request.text == "保留的运行"
+        for name in expected:
+            assert rows(database, name) == before_rows[name]
+        with sqlite3.connect(database) as conn:
+            after_schema = dict(
+                conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")
+            )
+        assert {name: after_schema[name] for name in expected} == before_schema
+    finally:
+        await writer.close()
+
+    reader = await SQLiteStore.open(database, readonly=True)
+    try:
+        assert reader.schema_version == 11
+        assert (await reader.snapshot(run.id)).run.id == run.id
+    finally:
+        await reader.close()
 
 
 @pytest.mark.asyncio
