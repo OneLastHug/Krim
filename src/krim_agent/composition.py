@@ -12,6 +12,8 @@ from typing import cast
 
 from pydantic import JsonValue
 
+from krim_agent.account_mcp.secrets import AuthenticatedSecretVault, MasterKeyring
+from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
@@ -71,6 +73,7 @@ class Application:
     identities: IdentityService | None = field(default=None, repr=False)
     sandbox: SandboxService | None = None
     extensions: ExtensionService | None = None
+    account_mcp: AccountMCPService | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -363,6 +366,13 @@ async def open_application(
     tool_runtime: ToolRuntime | None = None
     try:
         identities = await IdentityService.open(store)
+        if config.personal_mcp_key_file is not None and not identities.managed:
+            raise ServiceError("accounts_not_initialized", 422)
+        personal_mcp_vault = (
+            AuthenticatedSecretVault(MasterKeyring.load(config.personal_mcp_key_file))
+            if config.personal_mcp_key_file is not None
+            else None
+        )
         if identities.managed and (
             config.identity_mode == "legacy"
             or active_access is not None
@@ -386,7 +396,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10}:
+                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -406,7 +416,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
@@ -532,6 +542,12 @@ async def open_application(
                 "target-http", sandbox_loop, sandbox_settings
             )
         service = RunService(store, loop, config, target, bindings)
+        account_mcp = AccountMCPService(
+            store,
+            identities if identities.managed else None,
+            personal_mcp_vault,
+        )
+        service.account_mcp = account_mcp if identities.managed else None
         application = Application(
             store,
             service,
@@ -541,7 +557,11 @@ async def open_application(
             tuple({id(p): p for p in owned}.values()),
             EvaluationService(store, service),
             SessionService(
-                store, service, config, identities=identities if identities.managed else None
+                store,
+                service,
+                config,
+                identities=identities if identities.managed else None,
+                account_mcp=account_mcp if identities.managed else None,
             ),
             active_access,
             work=operations,
@@ -551,6 +571,7 @@ async def open_application(
             identities=identities,
             sandbox=sandbox_service,
             extensions=ExtensionService(store, identities if identities.managed else None),
+            account_mcp=account_mcp if identities.managed else None,
         )
         if evaluation_path is not None:
             adapters = {

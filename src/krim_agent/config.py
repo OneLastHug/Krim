@@ -37,6 +37,7 @@ class Settings(BaseModel):
     sandbox_config_file: Path | None = None
     workspace_profile_file: Path | None = None
     tool_config_file: Path | None = None
+    personal_mcp_key_file: Path | None = None
     product_eval_enabled: bool = False
     product_eval_database: Path | None = None
     evaluation_automation_enabled: bool = False
@@ -87,6 +88,7 @@ SESSION_FIELDS = frozenset(
         "workspace_profile_file",
         "sandbox_config_file",
         "tool_config_file",
+        "personal_mcp_key_file",
         "product_eval_enabled",
         "product_eval_database",
         "evaluation_automation_enabled",
