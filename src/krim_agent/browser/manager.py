@@ -36,6 +36,7 @@ class BrowserManager:
         self.worker = worker
         self.egress = egress
         self.timeout_seconds = timeout_seconds
+        self._cleanup_timeout = min(5.0, timeout_seconds)
         self._lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -54,33 +55,54 @@ class BrowserManager:
         return await self._dispatch(BrowserCommand("screenshot"))
 
     async def close(self) -> None:
-        if self._close_task is None:
-            self._closed = True
-            self._close_task = asyncio.create_task(self._close_worker())
+        task = self._start_cleanup("close")
         try:
-            await asyncio.shield(self._close_task)
+            done, _ = await asyncio.wait({task}, timeout=self._cleanup_timeout * 2)
         except asyncio.CancelledError:
-            await asyncio.gather(self._close_task, return_exceptions=True)
+            task.add_done_callback(self._consume_cleanup_result)
+            task.cancel()
             raise
-        except Exception:
+        if not done:
+            task.add_done_callback(self._consume_cleanup_result)
+            task.cancel()
+            raise ServiceError("browser_worker_failed", 503)
+        try:
+            task.result()
+        except BaseException:
             raise ServiceError("browser_worker_failed", 503) from None
 
+    def _start_cleanup(self, mode: str) -> asyncio.Task[None]:
+        if self._close_task is None:
+            self._closed = True
+            cleanup = self._close_worker if mode == "close" else self._dispose_worker
+            self._close_task = asyncio.create_task(cleanup())
+            self._close_task.add_done_callback(self._consume_cleanup_result)
+        return self._close_task
+
+    @staticmethod
+    def _consume_cleanup_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
     async def _close_worker(self) -> None:
-        failure: BaseException | None = None
-        async with self._lock:
-            try:
-                async with asyncio.timeout(self.timeout_seconds):
+        failure: Exception | None = None
+        try:
+            async with asyncio.timeout(self._cleanup_timeout):
+                async with self._lock:
                     raw = await self.worker.command(BrowserCommand("close").wire())
                 if not isinstance(raw, Mapping):
                     raise ServiceError("browser_protocol", 502)
                 result_from_wire("close", raw)
-            except BaseException as error:
-                failure = error
-            try:
+        except BaseException as error:
+            failure = error
+        try:
+            async with asyncio.timeout(self._cleanup_timeout):
                 await self.worker.close()
-            except BaseException as error:
-                if failure is None:
-                    failure = error
+        except BaseException as error:
+            if failure is None:
+                failure = error
         if failure is not None:
             raise failure
 
@@ -88,7 +110,8 @@ class BrowserManager:
         if self._closed:
             raise ServiceError("browser_closed", 409)
         if command.operation == "navigate":
-            assert command.url is not None
+            if command.url is None:
+                raise ServiceError("browser_invalid_input", 422)
             self.egress.authorize_url(command.url)
         try:
             async with self._lock:
@@ -99,13 +122,21 @@ class BrowserManager:
                 if not isinstance(raw, Mapping):
                     raise ServiceError("browser_protocol", 502)
                 result = result_from_wire(command.operation, raw)
-                if command.operation == "navigate":
-                    if result.final_url is None:
-                        raise ServiceError("browser_protocol", 502)
+                if command.operation == "navigate" and result.final_url is None:
+                    raise ServiceError("browser_protocol", 502)
+                if result.final_url is not None:
                     self.egress.authorize_url(result.final_url)
                 return result
         except asyncio.CancelledError:
-            await asyncio.shield(self._dispose())
+            cleanup = asyncio.create_task(self._dispose())
+            cleanup.add_done_callback(self._consume_cleanup_result)
+            try:
+                async with asyncio.timeout(self._cleanup_timeout):
+                    await asyncio.shield(cleanup)
+            except TimeoutError:
+                cleanup.cancel()
+            except asyncio.CancelledError:
+                cleanup.cancel()
             raise
         except TimeoutError:
             await self._dispose()
@@ -118,7 +149,21 @@ class BrowserManager:
             raise ServiceError("browser_worker_failed", 503) from None
 
     async def _dispose(self) -> None:
-        if self._close_task is None:
-            self._closed = True
-            self._close_task = asyncio.create_task(self.worker.close())
-        await asyncio.shield(self._close_task)
+        task = self._start_cleanup("dispose")
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._cleanup_timeout)
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+            raise
+        if not done:
+            task.cancel()
+        # A failed or stalled cleanup must never replace the original tool result.
+
+    async def _dispose_worker(self) -> None:
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                await self.worker.close()
+        except BaseException:
+            # Preserve the initiating operation error/cancellation; cleanup is best effort.
+            return

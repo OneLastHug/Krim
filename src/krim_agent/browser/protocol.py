@@ -93,7 +93,7 @@ def validate_png(data: bytes) -> None:
             if (
                 color not in {2, 6} or depth != 8
                 or channels is None
-                or compression != 0 or filtering != 0 or interlace not in {0, 1}
+                or compression != 0 or filtering != 0 or interlace != 0
                 or not 1 <= width <= 4096 or not 1 <= height <= 4096
                 or width * height > 8_000_000
             ):
@@ -187,14 +187,25 @@ def result_from_wire(expected: str, value: Mapping[str, object]) -> BrowserResul
     allowed = {
         "navigate": {"operation", "final_url", "title"},
         "snapshot": {"operation", "final_url", "title", "text", "truncated"},
-        "screenshot": {"operation", "screenshot_png_base64"},
+        "screenshot": {
+            "operation", "screenshot_png_base64", "final_url", "title"
+        },
         "close": {"operation"},
     }.get(expected)
     if allowed is None or set(value) - allowed or value.get("operation") != expected:
         raise ServiceError("browser_protocol", 502)
     if expected == "screenshot":
         png = decode_png(value.get("screenshot_png_base64"))
-        return BrowserResult("screenshot", screenshot_png=png)
+        for key in ("final_url", "title"):
+            child = value.get(key)
+            if child is not None and not isinstance(child, str):
+                raise ServiceError("browser_protocol", 502)
+        return BrowserResult(
+            "screenshot",
+            final_url=value.get("final_url"),
+            title=value.get("title"),
+            screenshot_png=png,
+        )
     for key in ("final_url", "title", "text"):
         child = value.get(key)
         if child is not None and not isinstance(child, str):
