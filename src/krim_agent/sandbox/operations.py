@@ -22,9 +22,9 @@ from krim_agent.sandbox.file_models import (
     FileList,
     FilePatch,
     FileRead,
-    FileReplacePreview,
     FileRemove,
     FileRename,
+    FileReplacePreview,
     FileSearch,
     FileWrite,
 )
@@ -347,7 +347,10 @@ class SandboxOperations:
                                             "path": {"type": "string"},
                                             "line": {"type": "integer"},
                                             "preview": {"type": "string"},
-                                            "before": {"type": "array", "items": {"type": "string"}},
+                                            "before": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
                                             "after": {"type": "array", "items": {"type": "string"}},
                                         },
                                         "required": ["path", "line", "preview", "before", "after"],
