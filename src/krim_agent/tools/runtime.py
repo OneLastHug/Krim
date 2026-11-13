@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 import re
 import stat
@@ -66,8 +67,8 @@ class ToolRuntimeConfig:
         """JSON只引用凭据变量名，不接受浏览器上传或配置内的明文Key。"""
         environment = os.environ if environment is None else environment
         try:
-            raw = _read_runtime_config(path)
-            body = parse_json(raw.decode("utf-8"))
+            config_bytes = _read_runtime_config(path)
+            body = parse_json(config_bytes.decode("utf-8"))
             if not isinstance(body, dict) or set(body) - {
                 "web",
                 "mcp_servers",
@@ -92,11 +93,11 @@ class ToolRuntimeConfig:
             raw_servers = body.get("mcp_servers", [])
             if not isinstance(raw_servers, list) or len(raw_servers) > 8:
                 raise ValueError("MCP配置无效")
-            servers = []
-            for raw in raw_servers:
-                if not isinstance(raw, dict) or set(raw) & {"headers", "env"}:
+            servers: list[MCPServerConfig] = []
+            for raw_server in raw_servers:
+                if not isinstance(raw_server, dict) or set(raw_server) & {"headers", "env"}:
                     raise ValueError("配置须引用凭据名而非明文值")
-                values: dict[str, Any] = dict(raw)
+                values: dict[str, Any] = dict(raw_server)
                 headers = _credential_map(values.pop("headers_env", {}), environment)
                 env = _credential_map(values.pop("env_env", {}), environment)
                 bearer = values.pop("bearer_env", None)
@@ -144,11 +145,12 @@ def _validate_windows_acl(descriptor: int) -> None:
     if os.name != "nt":
         return
     import ctypes
-    import msvcrt
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
-    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    win_dll = cast(Any, getattr(ctypes, "WinDLL"))
+    msvcrt = cast(Any, importlib.import_module("msvcrt"))
+    advapi32 = win_dll("Advapi32.dll", use_last_error=True)
+    kernel32 = win_dll("Kernel32.dll", use_last_error=True)
     security_descriptor = ctypes.c_void_p()
     owner_sid = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
@@ -165,7 +167,7 @@ def _validate_windows_acl(descriptor: int) -> None:
     ]
     get_security_info.restype = wintypes.DWORD
     result = get_security_info(
-        wintypes.HANDLE(msvcrt.get_osfhandle(descriptor)),
+        wintypes.HANDLE(cast(int, msvcrt.get_osfhandle(descriptor))),
         1,  # SE_FILE_OBJECT
         0x00000001 | 0x00000004,  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
         ctypes.byref(owner_sid),
@@ -380,7 +382,10 @@ def _mcp_egress_policy(server: MCPServerConfig) -> EgressPolicy:
     try:
         parsed = urlsplit(server.url or "")
         host = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        configured_port = parsed.port
+        port = configured_port if configured_port is not None else (
+            443 if parsed.scheme == "https" else 80
+        )
         if host is None:
             raise ValueError("MCP endpoint is missing a host")
         policy_type = EgressPolicy.authorize_loopback if parsed.scheme == "http" else EgressPolicy
