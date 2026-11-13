@@ -16,6 +16,12 @@ from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.network.egress_policy import EgressPolicy, EgressViolation
 
 
+_REJECT_IPV6_LITERALS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("::ffff:0:0/96", "64:ff9b::/96", "2002::/16")
+)
+
+
 class BrowserEgressPolicy:
     """HTTPS-only exact origins; validates destination URLs and all DNS answers."""
 
@@ -41,6 +47,8 @@ class BrowserEgressPolicy:
     def _host(value: str) -> str:
         if not value or any(unicodedata.category(ch) == "Cc" for ch in value):
             raise ValueError("browser origin host invalid")
+        if value.endswith("..") or value.endswith(".") and value[:-1].endswith("."):
+            raise ValueError("browser origin host invalid")
         try:
             address = ipaddress.ip_address(value)
         except ValueError:
@@ -50,14 +58,13 @@ class BrowserEgressPolicy:
                 decoded = host.encode("ascii").decode("idna")
                 if not normalized.isascii() and decoded != normalized:
                     raise ValueError("browser origin host invalid")
-                if normalized.isascii() and not normalized.startswith("xn--") and decoded != normalized:
-                    raise ValueError("browser origin host invalid")
             except UnicodeError:
                 raise ValueError("browser origin host invalid") from None
             labels = host.split(".")
             if (
                 not host
                 or len(host) > 253
+                or re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", labels[-1]) is not None
                 or len(labels) < 2
                 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", x)
                        for x in labels)
@@ -66,8 +73,12 @@ class BrowserEgressPolicy:
             ):
                 raise ValueError("browser origin host invalid")
             return host
-        if not address.is_global:
+        if any(address in network for network in _REJECT_IPV6_LITERALS):
             raise ValueError("browser origin address must be globally routable")
+        try:
+            EgressPolicy({address.compressed}, {443}).approve_addresses([address.compressed])
+        except EgressViolation:
+            raise ValueError("browser origin address must be globally routable") from None
         return address.compressed.lower()
 
     @classmethod
