@@ -224,18 +224,15 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA application_id={APPLICATION_ID}")
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
-                    legacy = (
-                        set(metadata.tables)
-                        - ACCOUNT_TABLE_NAMES
-                        - SANDBOX_TABLE_NAMES
-                        - EXTENSION_TABLE_NAMES
-                        - MCP_TABLE_NAMES
-                        - SESSION_LIFECYCLE_TABLE_NAMES
-                    )
-                    without_extensions = set(metadata.tables) - EXTENSION_TABLE_NAMES
-                    without_mcp = set(metadata.tables) - MCP_TABLE_NAMES
-                    without_extensions_and_mcp = without_mcp - EXTENSION_TABLE_NAMES
-                    without_session_lifecycle = set(metadata.tables) - SESSION_LIFECYCLE_TABLE_NAMES
+                    current_tables = set(metadata.tables) | set(TABLES)
+                    schema14 = current_tables
+                    schema13 = schema14 - SESSION_LIFECYCLE_TABLE_NAMES
+                    schema12 = schema13 - {"sandbox_turn_contracts"}
+                    schema11 = schema12 - MCP_TABLE_NAMES
+                    schema10 = schema11 - EXTENSION_TABLE_NAMES
+                    schema7 = schema10 - SANDBOX_TABLE_NAMES
+                    legacy = schema7 - ACCOUNT_TABLE_NAMES - set(TABLES)
+
                     expected = {
                         1: {"runs", "run_events"},
                         2: {
@@ -258,34 +255,19 @@ class SQLiteStore:
                         4: legacy - {"park_checkpoints"},
                         5: (legacy | set(TABLES)) - {"park_checkpoints"},
                         6: legacy | set(TABLES),
-                        7: (
-                            without_extensions_and_mcp
-                            - SANDBOX_TABLE_NAMES
-                            - SESSION_LIFECYCLE_TABLE_NAMES
-                        )
-                        | set(TABLES),
-                        8: (
-                            without_extensions_and_mcp
-                            - {"sandbox_session_bindings", "sandbox_quota_state"}
-                            - SESSION_LIFECYCLE_TABLE_NAMES
-                            | set(TABLES)
-                        ),
-                        9: (
-                            without_extensions_and_mcp - {"sandbox_quota_state"}
-                            - SESSION_LIFECYCLE_TABLE_NAMES
-                            | set(TABLES)
-                        ),
-                        10: without_extensions_and_mcp
-                        - SESSION_LIFECYCLE_TABLE_NAMES
-                        | set(TABLES),
-                        11: without_mcp - SESSION_LIFECYCLE_TABLE_NAMES | set(TABLES),
-                        12: without_session_lifecycle - SANDBOX_TABLE_NAMES | set(TABLES),
-                        13: without_session_lifecycle | set(TABLES),
-                        14: set(metadata.tables) | set(TABLES),
+                        7: schema7,
+                        8: schema10 - {"sandbox_session_bindings", "sandbox_quota_state"},
+                        9: schema10 - {"sandbox_quota_state"},
+                        10: schema10,
+                        11: schema11,
+                        12: schema12,
+                        13: schema13,
+                        14: schema14,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
                         or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")

@@ -3,8 +3,9 @@ import sqlite3
 import pytest
 
 from krim_agent.contracts import RunRequest, ServiceError
-from krim_agent.storage.extension_models import EXTENSION_TABLE_NAMES, EXTENSION_TABLES
-from krim_agent.storage.mcp_models import MCP_TABLE_NAMES, MCP_TABLES
+from krim_agent.storage.extension_models import EXTENSION_TABLE_NAMES
+from krim_agent.storage.mcp_models import MCP_TABLE_NAMES
+from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLE_NAMES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
@@ -18,11 +19,16 @@ def rows(path, name):
         return conn.execute(f'SELECT * FROM "{name}"').fetchall()
 
 
-# Historical table sets are explicit so this fixture does not share the production
-# ladder's metadata subtraction and cannot accidentally validate the same mistake.
-HISTORICAL_TABLES = {
-    1: {"runs", "run_events"},
-}
+MCP_V12_TABLE_NAMES = {"mcp_connections", "session_mcp", "turn_mcp", "mcp_requests"}
+
+
+def test_integrated_feature_metadata():
+    assert MCP_TABLE_NAMES == MCP_V12_TABLE_NAMES
+    assert SESSION_LIFECYCLE_TABLE_NAMES == {"session_lifecycle", "session_lifecycle_requests"}
+
+
+# Historical sets are explicit and independent of the production subtraction ladder.
+HISTORICAL_TABLES = {1: {"runs", "run_events"}}
 for version, additions in (
     (2, {"dataset_revisions", "evaluations", "eval_items"}),
     (3, {"sessions", "turns", "session_controls"}),
@@ -31,22 +37,15 @@ for version, additions in (
     (6, {"park_checkpoints"}),
     (
         7,
-        {
-            "accounts",
-            "access_keys",
-            "account_workspaces",
-            "workspace_profiles",
-            "account_events",
-            "account_meta",
-        },
+        {"accounts", "access_keys", "account_workspaces", "workspace_profiles", "account_events", "account_meta"},
     ),
     (8, {"sandbox_environments", "sandbox_projects", "sandbox_operations"}),
     (9, {"sandbox_session_bindings"}),
     (10, {"sandbox_quota_state"}),
-    (11, {
-        "skills", "skill_versions", "memories", "memory_preferences",
-        "session_extensions", "turn_extensions", "extension_requests",
-    }),
+    (11, {"skills", "skill_versions", "memories", "memory_preferences", "session_extensions", "turn_extensions", "extension_requests"}),
+    (12, MCP_V12_TABLE_NAMES),
+    (13, {"sandbox_turn_contracts"}),
+    (14, {"session_lifecycle", "session_lifecycle_requests"}),
 ):
     HISTORICAL_TABLES[version] = HISTORICAL_TABLES[version - 1] | additions
 
@@ -54,22 +53,10 @@ for version, additions in (
 def downgrade_to_version(path, version):
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=OFF")
-        names = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for name in sorted(names - HISTORICAL_TABLES[version]):
             conn.execute(f'DROP TABLE "{name}"')
         conn.execute(f"PRAGMA user_version={version}")
-
-
-def downgrade_to_10(path):
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys=OFF")
-        for table in reversed(MCP_TABLES):
-            conn.execute(f'DROP TABLE "{table.name}"')
-        for table in reversed(EXTENSION_TABLES):
-            conn.execute(f'DROP TABLE "{table.name}"')
-        conn.execute("PRAGMA user_version=10")
 
 
 async def seed_run(path):
@@ -86,61 +73,37 @@ async def seed_run(path):
 
 
 @pytest.mark.asyncio
-async def test_fresh_schema12_registers_extension_and_mcp_tables(tmp_path):
+async def test_fresh_schema14_registers_all_feature_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 12
-        assert store.schema_version == 12
+        assert store.schema_version == SCHEMA_VERSION == 14
+        assert table_names(database) == HISTORICAL_TABLES[14]
         assert EXTENSION_TABLE_NAMES <= table_names(database)
-        assert MCP_TABLE_NAMES <= table_names(database)
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_schema11_upgrade_adds_mcp_tables_and_preserves_data(tmp_path):
-    database = tmp_path / "upgrade.sqlite"
+@pytest.mark.parametrize("version", [11, 12, 13])
+async def test_feature_upgrade_preserves_data(tmp_path, version):
+    database = tmp_path / f"feature-{version}.sqlite"
     run = await seed_run(database)
     before = rows(database, "runs")
-    with sqlite3.connect(database) as conn:
-        conn.execute("PRAGMA foreign_keys=OFF")
-        for table in reversed(MCP_TABLES):
-            conn.execute(f'DROP TABLE "{table.name}"')
-        conn.execute("PRAGMA user_version=11")
-        conn.commit()
-    before_tables = table_names(database)
-
+    downgrade_to_version(database, version)
+    assert table_names(database) == HISTORICAL_TABLES[version]
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 12
-        assert table_names(database) == before_tables | MCP_TABLE_NAMES
-        assert EXTENSION_TABLE_NAMES <= table_names(database)
-        assert MCP_TABLE_NAMES <= table_names(database)
+        assert store.schema_version == SCHEMA_VERSION == 14
+        assert table_names(database) == HISTORICAL_TABLES[14]
         assert rows(database, "runs") == before
+        assert (await store.snapshot(run.id)).request.text == "保留的运行"
     finally:
         await store.close()
-    assert run.id == before[0][0]
 
 
 @pytest.mark.asyncio
-async def test_readonly_schema10_does_not_migrate(tmp_path):
-    database = tmp_path / "readonly10.sqlite"
-    await seed_run(database)
-    downgrade_to_10(database)
-    before = database.read_bytes()
-
-    store = await SQLiteStore.open(database, readonly=True)
-    try:
-        assert store.schema_version == 10
-        assert not ((EXTENSION_TABLE_NAMES | MCP_TABLE_NAMES) & table_names(database))
-    finally:
-        await store.close()
-    assert database.read_bytes() == before
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("version", range(1, 12))
+@pytest.mark.parametrize("version", range(1, 15))
 async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
     database = tmp_path / f"historical-v{version}.sqlite"
     run = await seed_run(database)
@@ -163,58 +126,38 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 12
-        assert table_names(database) == HISTORICAL_TABLES[11] | MCP_TABLE_NAMES
+        assert writer.schema_version == SCHEMA_VERSION == 14
+        assert table_names(database) == HISTORICAL_TABLES[14]
         assert (await writer.snapshot(run.id)).request.text == "保留的运行"
         for name in expected:
             assert rows(database, name) == before_rows[name]
         with sqlite3.connect(database) as conn:
-            after_schema = dict(
-                conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")
-            )
+            after_schema = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
         assert {name: after_schema[name] for name in expected} == before_schema
     finally:
         await writer.close()
 
     reader = await SQLiteStore.open(database, readonly=True)
     try:
-        assert reader.schema_version == 12
+        assert reader.schema_version == 14
         assert (await reader.snapshot(run.id)).run.id == run.id
     finally:
         await reader.close()
 
 
 @pytest.mark.asyncio
-async def test_readonly_schema12_works(tmp_path):
-    database = tmp_path / "readonly12.sqlite"
-    writer = await SQLiteStore.open(database)
-    await writer.close()
-    before = database.read_bytes()
-
-    reader = await SQLiteStore.open(database, readonly=True)
-    try:
-        assert reader.schema_version == SCHEMA_VERSION == 12
-        assert EXTENSION_TABLE_NAMES <= table_names(database)
-        assert MCP_TABLE_NAMES <= table_names(database)
-    finally:
-        await reader.close()
-    assert database.read_bytes() == before
-
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize("version,table", [(11, "skills"), (12, "mcp_connections"), (13, "sandbox_turn_contracts"), (14, "session_lifecycle")])
 @pytest.mark.parametrize("damage", ["missing", "extra"])
-async def test_invalid_extension_table_set_is_rejected(tmp_path, damage):
-    database = tmp_path / f"invalid-{damage}.sqlite"
-    writer = await SQLiteStore.open(database)
-    await writer.close()
+async def test_invalid_historical_table_set_is_rejected(tmp_path, version, table, damage):
+    database = tmp_path / f"invalid-v{version}-{damage}.sqlite"
+    await seed_run(database)
+    downgrade_to_version(database, version)
     with sqlite3.connect(database) as conn:
         if damage == "missing":
-            conn.execute('DROP TABLE "skills"')
+            conn.execute(f'DROP TABLE "{table}"')
         else:
             conn.execute("CREATE TABLE extension_surprise(value TEXT)")
-        conn.commit()
     before = database.read_bytes()
-
     with pytest.raises(ServiceError, match="database_invalid"):
         await SQLiteStore.open(database)
     assert database.read_bytes() == before

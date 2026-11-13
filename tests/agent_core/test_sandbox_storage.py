@@ -12,7 +12,7 @@ from krim_agent.storage.account_models import ACCOUNT_TABLE_NAMES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.models import metadata
 from krim_agent.storage.sandbox_models import SANDBOX_TABLE_NAMES
-from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
+from krim_agent.storage.sqlite import MCP_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
 
 
 def raw(path, names):
@@ -35,12 +35,16 @@ def downgrade(path, version):
     """从当前完整表集逐层删除到目标版本的白名单集合；只读门与升级测试共用。"""
     conn = sqlite3.connect(path)
     try:
+        for name in sorted(MCP_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
         for table in reversed(EXTENSION_TABLES):
             conn.execute(f'DROP TABLE "{table.name}"')
         conn.execute('DROP TABLE "sandbox_quota_state"')
         conn.execute('DROP TABLE "sandbox_session_bindings"')
         for name in ("sandbox_operations", "sandbox_projects", "sandbox_environments"):
             conn.execute(f'DROP TABLE "{name}"')
+        if version < 13:
+            conn.execute('DROP TABLE "sandbox_turn_contracts"')
         if version < 7:
             for name in sorted(ACCOUNT_TABLE_NAMES):
                 conn.execute(f'DROP TABLE "{name}"')
@@ -82,7 +86,7 @@ async def test_fresh_store_has_current_schema_with_sandbox_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 11
+        assert SCHEMA_VERSION == 13
         assert store.schema_version == SCHEMA_VERSION
         assert SANDBOX_TABLE_NAMES <= set(metadata.tables)
         assert SANDBOX_TABLE_NAMES <= table_names(database)
@@ -272,7 +276,7 @@ async def test_damaged_sandbox_schema_is_rejected(tmp_path, damage):
         elif damage == "unknown_table":
             conn.execute("CREATE TABLE surprise(value TEXT)")
         else:
-            conn.execute("PRAGMA user_version=12")
+            conn.execute("PRAGMA user_version=99")
         conn.commit()
     finally:
         conn.close()
@@ -378,6 +382,9 @@ async def test_schema9_readonly_and_quota_upgrade_preserve_binding(tmp_path):
     store = await SQLiteStore.open(database)
     await store.close()
     with sqlite3.connect(database) as conn:
+        for name in sorted(MCP_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
+        conn.execute('DROP TABLE "sandbox_turn_contracts"')
         for table in reversed(EXTENSION_TABLES):
             conn.execute(f'DROP TABLE "{table.name}"')
         conn.execute("DROP TABLE sandbox_quota_state")

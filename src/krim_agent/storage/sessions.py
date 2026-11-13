@@ -31,6 +31,7 @@ from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 from . import work as work_sql
 from .models import runs, session_controls, sessions, turns, work_turns
 from .mcp_models import turn_mcp
+from .sandbox_models import sandbox_turn_contracts
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
@@ -474,6 +475,8 @@ async def submit(
     if isinstance(body, WorkspaceTurnRequest):
         # frozen字段仍可包含可变JSON；首个await前验证并脱离调用者的完整嵌套对象。
         body = WorkspaceTurnRequest.model_validate_json(body.model_dump_json())
+    elif isinstance(body, TurnRequest) and body.completion is not None:
+        body = TurnRequest.model_validate_json(body.model_dump_json())
     digest = fingerprint(body.model_dump(mode="json"))
 
     async def operation(conn: AsyncConnection) -> TurnView:
@@ -484,6 +487,12 @@ async def submit(
             if access is None or not isinstance(body, WorkspaceTurnRequest):
                 raise ServiceError("workspace_contract_required")
             await work_sql.row(conn, session_id, access, write=True)
+        elif isinstance(body, TurnRequest) and body.completion is not None:
+            if (
+                session["target_key"] != "target-http"
+                or session["target"].get("sandbox") is None
+            ):
+                raise ServiceError("workspace_contract_required")
         rows = (
             (
                 await conn.execute(
@@ -542,7 +551,21 @@ async def submit(
             started_at=None,
             finished_at=None,
         )
+        if isinstance(body, TurnRequest) and body.completion is not None:
+            if (
+                session["target_key"] != "target-http"
+                or session["target"].get("sandbox") is None
+            ):
+                raise ServiceError("workspace_contract_required")
         await conn.execute(insert(turns).values(**row))
+        if isinstance(body, TurnRequest) and body.completion is not None:
+            completion = body.completion.model_dump(mode="json")
+            await conn.execute(insert(sandbox_turn_contracts).values(
+                turn_id=row["id"],
+                completion=completion,
+                fingerprint=fingerprint(completion),
+                created_at=time.time(),
+            ))
         if actor is not None and extension_service is not None:
             await extension_service.freeze(
                 conn, session, row["id"], row["text"], actor, turn_admitted=True
@@ -726,6 +749,17 @@ async def begin_run(
         context_descriptor["extensions"] = fingerprint(extension_snapshot)
         if account_mcp is not None and account_mcp["snapshot"]["connections"]:
             context_descriptor["account_mcp"] = account_mcp["fingerprint"]
+        contract = (
+            await conn.execute(
+                select(sandbox_turn_contracts).where(
+                    sandbox_turn_contracts.c.turn_id == turn_id
+                )
+            )
+        ).mappings().first()
+        if contract is not None and session["target_key"] == "target-http":
+            if fingerprint(contract["completion"]) != contract["fingerprint"]:
+                raise ServiceError("facts_corrupt")
+            context_descriptor["sandbox_completion_fingerprint"] = contract["fingerprint"]
         effective = target | {"context": context_descriptor}
         digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
         run = await store._insert_run(conn, request, effective, run_id, digest)
@@ -843,6 +877,23 @@ async def source(
             raise ValueError("账号MCP快照缺失")
         elif mcp is not None and mcp["snapshot"]["connections"]:
             raise ValueError("账号MCP上下文标记缺失")
+        if session["target_key"] == "target-http" and isinstance(target_context, dict):
+            if target_context.get("sandbox_completion_fingerprint"):
+                store_version = target_context
+                contract = (
+                    await conn.execute(
+                        select(sandbox_turn_contracts).where(
+                            sandbox_turn_contracts.c.turn_id == row["id"]
+                        )
+                    )
+                ).mappings().first()
+                if (
+                    contract is None
+                    or contract["fingerprint"] != store_version["sandbox_completion_fingerprint"]
+                    or fingerprint(contract["completion"]) != contract["fingerprint"]
+                ):
+                    raise ValueError("沙箱完成契约关联损坏")
+                expected["sandbox_completion_fingerprint"] = contract["fingerprint"]
         if fingerprint(target.get("context")) != fingerprint(expected):
             raise ValueError("内部上下文身份损坏")
         return SessionContext(

@@ -396,7 +396,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -416,7 +416,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))

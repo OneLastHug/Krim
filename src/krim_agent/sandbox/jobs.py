@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -172,17 +173,19 @@ class CommandJobs:
         runtime_fingerprint: str | None,
         program: str,
         kind: str,
+        background: bool = False,
     ) -> str:
-        return fingerprint(
-            {
-                "environment": environment_id,
-                "command": command,
-                "image": image,
-                "runtime_fingerprint": runtime_fingerprint,
-                "program": program,
-                "kind": kind,
-            }
-        )
+        value: dict[str, Any] = {
+            "environment": environment_id,
+            "command": command,
+            "image": image,
+            "runtime_fingerprint": runtime_fingerprint,
+            "program": program,
+            "kind": kind,
+        }
+        if background:
+            value["background"] = True
+        return fingerprint(value)
 
     def submit(
         self,
@@ -192,6 +195,9 @@ class CommandJobs:
         command: dict[str, Any],
         *,
         kind: str = "command",
+        background: bool = False,
+        expected_image: str | None = None,
+        expected_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.closed:
@@ -207,6 +213,8 @@ class CommandJobs:
             if kind not in models:
                 raise ServiceError("invalid_input", 422)
             values: Any = models[kind].model_validate(command)
+            if type(background) is not bool or background and kind != "command":
+                raise ServiceError("invalid_input", 422)
             if values.project_id != project_id:
                 raise ServiceError("invalid_input", 422)
             requested_program = values.program if isinstance(values, SandboxCommand) else "python"
@@ -242,6 +250,7 @@ class CommandJobs:
                     stored_fingerprint,
                     requested_program,
                     kind,
+                    background=previous.get("background") is True,
                 )
                 if previous.get("request_hash") != digest:
                     raise ServiceError("key_conflict")
@@ -257,6 +266,7 @@ class CommandJobs:
                         getattr(current_runner, "runtime_fingerprint", None),
                         requested_program,
                         kind,
+                        background=previous.get("background") is True,
                     )
                     if current_digest != digest:
                         raise ServiceError("key_conflict")
@@ -286,6 +296,7 @@ class CommandJobs:
                     getattr(runner, "runtime_fingerprint", None) if runner is not None else None,
                     requested_program,
                     kind,
+                    background=previous.get("background") is True,
                 )
                 if previous["request_hash"] != digest:
                     raise ServiceError("key_conflict")
@@ -295,7 +306,19 @@ class CommandJobs:
                 if isinstance(values, SandboxCommand)
                 else self.runner
             )
-            if isinstance(values, SandboxCommand) and self.catalog is not None:
+            if (
+                expected_image is not None
+                and runner is not None
+                and runner.identity != expected_image
+            ):
+                raise ServiceError("target_binding_changed")
+            if (
+                expected_fingerprint is not None
+                and runner is not None
+                and getattr(runner, "runtime_fingerprint", None) != expected_fingerprint
+            ):
+                raise ServiceError("target_binding_changed")
+            if isinstance(values, SandboxCommand) and self.catalog is not None and not background:
                 probe = self.broker._read("probe-" + operation_id + ".json")
                 runtime = probe.get("runtime", {}) if isinstance(probe, dict) else {}
                 if (
@@ -316,6 +339,7 @@ class CommandJobs:
                 getattr(runner, "runtime_fingerprint", None) if runner is not None else None,
                 requested_program,
                 kind,
+                background=background,
             )
             if len(self.active) >= 2:
                 raise ServiceError("capacity", 429)
@@ -342,6 +366,8 @@ class CommandJobs:
             }
             if kind == "command":
                 record.update(
+                    background=background,
+                    logs={"stdout": "", "stderr": ""},
                     command=command,
                     image=runner.identity if runner is not None else None,
                     runtime_fingerprint=(
@@ -354,10 +380,13 @@ class CommandJobs:
             record["status"] = "accepted"
             record["lease_claimed"] = True
             self.broker._save(self.filename(operation_id), record)
+            permit_deadline = time.time() + (values.wall_seconds + 45 if background else 5)
             state = {
                 "environment_id": environment_id,
                 "cancel": cancel,
-                "permit": time.time() + 5,
+                "permit": permit_deadline,
+                "permit_deadline": permit_deadline,
+                "background": background,
                 "lease": lease,
                 "record": record,
                 "prepare_lock": self.prepare_locks.setdefault(environment_id, threading.Lock()),
@@ -413,6 +442,16 @@ class CommandJobs:
         def phase(name: str, result: dict[str, Any]) -> None:
             with self.lock:
                 state["lease"].check()
+                if state.get("background") is True:
+                    logs = result.get("logs")
+                    if isinstance(logs, dict):
+                        remaining = max(0, 65000 - len(json.dumps(record).encode()))
+                        current = record.setdefault("logs", {"stdout": "", "stderr": ""})
+                        for stream in ("stdout", "stderr"):
+                            value = logs.get(stream)
+                            if isinstance(value, str):
+                                current[stream] = value[-max(128, min(4096, remaining // 3)):]
+                        result = {key: value for key, value in result.items() if key != "logs"}
                 record["status"] = name
                 record.update(result)
                 self.broker._save(self.filename(operation_id), record)
@@ -617,10 +656,17 @@ class CommandJobs:
                 self.broker._save(self.filename(operation_id), row)
                 return row
             if active is not None:
-                if renew:
+                if renew and active.get("background") is not True:
                     active["permit"] = time.time() + 5
                 if cancel:
                     active["cancel"].set()
+                if active.get("background") is True:
+                    status_record = dict(row)
+                    status_record["status"] = row["status"]
+                    status_record["executor_started"] = row.get("executor_started") is True or row[
+                        "status"
+                    ] in {"creating", "created", "gate_verified", "started", "output"}
+                    return status_record
             elif row["status"] not in {"finished", "unknown"}:
                 # Broker重启不能把旧命令当成没执行：只核实并停止原容器。
                 try:

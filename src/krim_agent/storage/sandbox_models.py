@@ -74,7 +74,7 @@ sandbox_session_bindings = Table(
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
-SANDBOX_TABLES = (*SANDBOX_V8_TABLES, sandbox_session_bindings)
+SANDBOX_TABLES: tuple[Table, ...] = (*SANDBOX_V8_TABLES, sandbox_session_bindings)
 SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)
 
 sandbox_quota_state = Table(
@@ -97,4 +97,15 @@ sandbox_quota_state = Table(
     Column("updated_at", Float, nullable=False),
 )
 SANDBOX_TABLES = (*SANDBOX_TABLES, sandbox_quota_state)
+SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)
+
+sandbox_turn_contracts = Table(
+    "sandbox_turn_contracts",
+    metadata,
+    Column("turn_id", String(36), ForeignKey("turns.id"), primary_key=True),
+    Column("completion", JSON, nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("created_at", Float, nullable=False),
+)
+SANDBOX_TABLES = (*SANDBOX_TABLES, sandbox_turn_contracts)
 SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)
