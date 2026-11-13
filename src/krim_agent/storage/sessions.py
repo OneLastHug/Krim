@@ -372,8 +372,6 @@ async def submit(
         session = await session_row(conn, session_id)
         if actor is not None and extension_service is not None:
             extension_service.actor(actor)
-        if session["status"] != "open" or await closing(conn, session_id):
-            raise ServiceError("session_closed")
         if session["target_key"] == "target-workspace":
             if access is None or not isinstance(body, WorkspaceTurnRequest):
                 raise ServiceError("workspace_contract_required")

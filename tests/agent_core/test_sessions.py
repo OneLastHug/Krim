@@ -44,7 +44,8 @@ async def test_fifo_context_and_shared_capacity_with_eval(tmp_path, wire):
         first = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="A"))
         other = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="B"))
         a = await submit(app, first, "请记住基数17", "one")
-        await wire.wait_requests(1)
+        async with asyncio.timeout(15), wire.changed:
+            await wire.changed.wait_for(lambda: bool(wire.requests))
         b = await submit(app, first, "与3相加", "two")
         c = await submit(app, other, "/add 9 1", "one")
         again = await app.sessions.submit(
@@ -408,7 +409,16 @@ async def test_pending_close_fences_new_revision_and_joins_cleanup(tmp_path, ope
         await asyncio.sleep(0)
         assert not caller.done() and not duplicate.done()
         # 原已接受请求先于closing/revision判断，仍返回原身份。
-        assert (await app.sessions.submit(LOCAL, "local", session.id, original)).id == active.id
+        accepted_duplicate = await app.sessions.submit(LOCAL, "local", session.id, original)
+        assert accepted_duplicate.id == active.id
+        assert accepted_duplicate.request_key == original.request_key
+        with pytest.raises(ServiceError, match="key_conflict"):
+            await app.sessions.submit(
+                LOCAL,
+                "local",
+                session.id,
+                TurnRequest(text="不同请求", request_key="accepted", expected_revision=0),
+            )
         request, _ = await app.store.turn_request(queued.id)
         with pytest.raises(ServiceError, match="session_closed"):
             await sql.begin_run(
