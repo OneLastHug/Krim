@@ -28,6 +28,7 @@ from krim_agent.sandbox.file_models import (
     FileSearch,
     FileWrite,
 )
+from krim_agent.sandbox.tasks import TaskCancel, TaskLog, TaskReference, TaskStart, TaskWait
 from krim_agent.security import PrincipalContext
 from krim_agent.storage.models import sessions
 from krim_agent.tools.core import Decision, Invocation, ToolSpec
@@ -153,8 +154,25 @@ class SandboxOperations:
         if invocation.name == "sandbox_project":
             return "allow"
         values = self.selected(scope, parsed)
-        write = isinstance(values, (SandboxCommand, DirectoryCreate, FilePatch, FileRename))
+        if isinstance(values, (TaskReference, TaskWait, TaskLog)) and not isinstance(
+            values, TaskCancel
+        ):
+            if values.project_id is None:
+                raise ServiceError("invalid_input", 422)
+            await self.service.project(scope.actor, values.project_id)
+            scope.check()
+            return "allow"
+        write = isinstance(
+            values, (SandboxCommand, TaskStart, TaskCancel, DirectoryCreate, FilePatch, FileRename)
+        )
         project = await self.service.project(scope.actor, values.project_id, write=write)
+        if isinstance(values, TaskCancel):
+            if project["workspace_id"] != scope.workspace_id:
+                raise ServiceError("permission_denied")
+            if project["generation"] != values.expected_generation:
+                raise ServiceError("input_revision_conflict")
+            scope.check()
+            return "ask"
         if project["workspace_id"] != scope.workspace_id:
             raise ServiceError("permission_denied")
         if write:
@@ -181,9 +199,17 @@ class SandboxOperations:
             return cast(JsonValue, binding)
         values = self.selected(scope, parameters)
         project_id = values.project_id
-        if isinstance(values, (DirectoryCreate, SandboxCommand, FilePatch, FileRename)):
+        if isinstance(values, (DirectoryCreate, SandboxCommand, TaskStart, FilePatch, FileRename)):
             from krim_agent.sandbox.execution import execute_command
+            from krim_agent.sandbox.tasks import start_task
 
+            background = isinstance(values, TaskStart)
+            if background:
+                if values.wall_seconds + 10 > scope.deadline - time.monotonic():
+                    raise ServiceError("run_timeout")
+                result = await start_task(self.service, scope.actor, values, invocation, scope)
+                scope.check()
+                return cast(JsonValue, result)
             if isinstance(values, SandboxCommand) and values.wall_seconds + 5 > min(
                 30, scope.deadline - time.monotonic()
             ):
@@ -191,6 +217,24 @@ class SandboxOperations:
             result = await execute_command(self.service, scope.actor, values, invocation, scope)
             if result.get("code") is not None:
                 raise ServiceError(result["code"])
+        elif isinstance(values, (TaskReference, TaskWait, TaskLog, TaskCancel)):
+            from krim_agent.sandbox import tasks
+
+            if isinstance(values, TaskCancel):
+                project = await self.service.project(scope.actor, project_id, write=True)
+                if project["generation"] != values.expected_generation:
+                    raise ServiceError("input_revision_conflict")
+                result = await tasks.cancel(self.service, scope, values, invocation)
+                scope.check()
+                return cast(JsonValue, result)
+            if isinstance(values, TaskWait):
+                result = await tasks.wait(self.service, scope, values, invocation)
+            elif isinstance(values, TaskLog):
+                result = await tasks.log(self.service, scope, values, invocation)
+            else:
+                result = await tasks.status(self.service, scope, values, invocation)
+            scope.check()
+            return cast(JsonValue, result)
         elif isinstance(values, FileFind):
             result = await self.service.find_files(
                 scope.actor,
@@ -250,6 +294,11 @@ class SandboxOperations:
         return {
             "sandbox_project": StrictModel,
             "sandbox_command_run": SandboxCommand,
+            "sandbox_task_start": TaskStart,
+            "sandbox_task_status": TaskReference,
+            "sandbox_task_log": TaskLog,
+            "sandbox_task_wait": TaskWait,
+            "sandbox_task_cancel": TaskCancel,
             "sandbox_read": FileRead,
             "sandbox_list": FileList,
             "sandbox_find": FileFind,
@@ -308,11 +357,17 @@ class SandboxOperations:
                 }
             return {"type": "object"}
 
-        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        from krim_agent.sandbox import tasks as task_module
+
+        digest = hashlib.sha256(
+            Path(__file__).read_bytes() + Path(task_module.__file__).read_bytes()
+        ).hexdigest()
         result = []
         for name, model in self.models().items():
             write = name in {
                 "sandbox_command_run",
+                "sandbox_task_start",
+                "sandbox_task_cancel",
                 "sandbox_write",
                 "sandbox_mkdir",
                 "sandbox_remove",
@@ -320,7 +375,11 @@ class SandboxOperations:
                 "sandbox_rename",
             }
             capability = (
-                "command" if name == "sandbox_command_run" else "write" if write else "read"
+                "command"
+                if name in {"sandbox_command_run", "sandbox_task_start"}
+                else "write"
+                if write
+                else "read"
             )
             risk: Literal["read", "write", "exec"] = (
                 "exec" if capability == "command" else "write" if write else "read"
@@ -383,7 +442,11 @@ class SandboxOperations:
                     risk,
                     self.execute,
                     capability,
-                    description="访问会话绑定的持久项目；写操作需批准，失败和取消保留已发生改动。",
+                    description=(
+                        "访问会话绑定的持久项目；后台任务需批准，取消可能不能撤销已发生改动。"
+                        if name.startswith("sandbox_task_")
+                        else "访问会话绑定的持久项目；写操作需批准，失败和取消保留已发生改动。"
+                    ),
                 )
             )
         return ToolRegistry(tuple(result), max_tools=24)

@@ -9,9 +9,10 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import cast
+from typing import Any, cast
 
 from pydantic import JsonValue
+from sqlalchemy import select, update
 
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.context import builder
@@ -31,6 +32,7 @@ from krim_agent.contracts import (
 from krim_agent.observability import TraceView, project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.source_fingerprints import source_digest
+from krim_agent.storage.sandbox_models import sandbox_operations
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.pipeline import _owns, _producing
 
@@ -118,17 +120,33 @@ class RunBinding:
             )
             result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
         if loop.sandbox is not None:
-            result += (id(loop.sandbox), id(loop.sandbox.service),
-                       id(loop.sandbox.service.broker), id(loop.sandbox.service.identities),
-                       hash(loop.sandbox.service.configuration.model_dump_json(exclude_unset=True)),
-                       id(function(loop.sandbox.scope)), id(function(loop.sandbox.execute)))
+            result += (
+                id(loop.sandbox),
+                id(loop.sandbox.service),
+                id(loop.sandbox.service.broker),
+                id(loop.sandbox.service.identities),
+                hash(loop.sandbox.service.configuration.model_dump_json(exclude_unset=True)),
+                id(function(loop.sandbox.scope)),
+                id(function(loop.sandbox.execute)),
+            )
+            from krim_agent.sandbox import bindings as sandbox_bindings
             from krim_agent.sandbox import command as sandbox_command
             from krim_agent.sandbox import execution as sandbox_execution
-            from krim_agent.sandbox import operations as sandbox_operations
-            from krim_agent.sandbox import bindings as sandbox_bindings
             from krim_agent.sandbox import file_models as sandbox_file_models
-            result += tuple(source_digest(module.__file__) for module in (
-                sandbox_command, sandbox_execution, sandbox_operations, sandbox_bindings, sandbox_file_models))
+            from krim_agent.sandbox import operations as sandbox_operations
+            from krim_agent.sandbox import tasks as sandbox_tasks
+
+            result += tuple(
+                source_digest(module.__file__)
+                for module in (
+                    sandbox_command,
+                    sandbox_execution,
+                    sandbox_operations,
+                    sandbox_bindings,
+                    sandbox_file_models,
+                    sandbox_tasks,
+                )
+            )
         from krim_agent import config as config_module
         from krim_agent.tools import executor as executor_module
         from krim_agent.tools import pipeline as pipeline_module
@@ -258,7 +276,7 @@ class RunBinding:
         if loop.sandbox is not None:
             descriptor["sandbox"] = {"version": "sandbox/1",
                 "image": loop.sandbox.service.configuration.command_image,
-                "completion": "command_receipt_not_project_verification",
+                "completion": "sandbox-completion/1-when-declared-otherwise-receipt-only",
                 "implementation": implementation(loop.sandbox)}
         return descriptor
 
@@ -535,6 +553,65 @@ class RunService:
                     self._execution_budgets.pop(run.id, None)
                 self._finalizing.add(run.id)
                 try:
+                    if not parked and base.loop.sandbox is not None:
+                        from krim_agent.sandbox.tasks import cancel_run_tasks
+
+                        try:
+                            await cancel_run_tasks(base.loop.sandbox.service, run.id)
+                        except ServiceError as error:
+                            failure_code = error.code
+
+                            async def mark_tasks_unknown(conn: Any) -> None:
+                                rows = (
+                                    await conn.execute(
+                                        select(sandbox_operations).where(
+                                            sandbox_operations.c.kind == "command"
+                                        )
+                                    )
+                                ).mappings().all()
+                                now = time.time()
+                                for operation in rows:
+                                    saved = operation["result"]
+                                    if (
+                                        saved.get("background") is not True
+                                        or saved.get("run_id") != run.id
+                                    ):
+                                        continue
+                                    receipt = saved.get("receipt")
+                                    if isinstance(receipt, dict):
+                                        receipt = {
+                                            **receipt,
+                                            "cleanup": "unknown",
+                                            "output_complete": False,
+                                            "code": failure_code,
+                                            "verification": "unknown",
+                                        }
+                                    if not isinstance(receipt, dict):
+                                        receipt = {
+                                            "executor_started": None,
+                                            "exit_code": None,
+                                            "stdout": "",
+                                            "stderr": "",
+                                            "cleanup": "unknown",
+                                            "output_complete": False,
+                                            "code": failure_code,
+                                            "verification": "unknown",
+                                        }
+                                    await conn.execute(
+                                        update(sandbox_operations)
+                                        .where(
+                                            sandbox_operations.c.operation_id
+                                            == operation["operation_id"]
+                                        )
+                                        .values(
+                                            status="unknown",
+                                            result={**saved, "receipt": receipt},
+                                            updated_at=now,
+                                        )
+                                    )
+                            await self.store._write(mark_tasks_unknown)
+                            if status == "completed":
+                                status, code = "failed", error.code
                     if parked:
                         await self.store.set_awaiting(run.id)
                     else:

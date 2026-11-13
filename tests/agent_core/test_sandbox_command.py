@@ -6,7 +6,7 @@ import json
 from contextlib import asynccontextmanager
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from test_account_api import initialize
 
 from krim_agent.composition import open_application
@@ -26,6 +26,8 @@ class CommandBroker:
         self.polls = 0
         self.cancelled = False
         self.waiting = False
+        self.exit_code = 0
+        self.statuses = []
         self.entered = asyncio.Event()
 
     async def call(self, action, **arguments):
@@ -41,24 +43,27 @@ class CommandBroker:
                     "python": {"image": IMAGE, "fingerprint": None, "image_id": IMAGE}
                 },
             }
-        if action == "command_start":
-            self.starts.append(arguments)
+        if action in {"command_start", "command_start_background"}:
+            self.starts.append({"action": action, **arguments})
             return {"status": "accepted"}
         if action == "file_start":
             self.starts.append(arguments)
             return {"status": "accepted"}
+        if action == "command_logs":
+            return {"stdout": "", "stderr": ""}
         if action == "command_status":
             self.polls += 1
+            self.statuses.append(dict(arguments))
             self.entered.set()
             self.cancelled |= arguments["cancel"]
             if self.waiting and not self.cancelled:
                 return {"status": "started", "executor_started": True}
             return {
                 "status": "finished",
-                "generation": 1,
+                "generation": 0 if self.waiting and not self.cancelled else 1,
                 "receipt": {
                     "executor_started": True,
-                    "exit_code": 143 if self.cancelled else 0,
+                    "exit_code": 143 if self.cancelled else self.exit_code,
                     "cleanup": "clean",
                     "output_complete": True,
                     "stdout": base64.b64encode(b"approved output").decode(),
@@ -82,6 +87,7 @@ async def command_app(
     tool_body=None,
     bind_session=False,
     omit_project=False,
+    completion=None,
     park=True,
 ):
     database = tmp_path / "app.sqlite"
@@ -178,14 +184,23 @@ async def command_app(
             actor,
             workspace,
             session.id,
-            TurnRequest(request_key="turn", text="执行命令", expected_revision=session_revision),
+            TurnRequest(
+                request_key="turn",
+                text="执行命令",
+                expected_revision=session_revision,
+                completion=completion,
+            ),
         )
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(30):
             while True:
                 current = await app.sessions.turn(actor, workspace, session.id, turn.id)
+                if current.run_id is None and current.status in {
+                    "failed", "cancelled", "interrupted"
+                }:
+                    raise AssertionError(current)
                 if current.run_id:
                     view = await app.service.get(current.run_id)
-                    if not park and view.status == "completed":
+                    if not park and view.status in {"failed", "completed", "aborted"}:
                         break
                     if view.status == "awaiting":
                         break
@@ -208,7 +223,7 @@ def approval(request, allow=True):
 
 
 async def finished(app, run_id):
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(30):
         while True:
             view = await app.service.get(run_id)
             if view.status not in {"running", "queued", "awaiting"}:
@@ -231,6 +246,7 @@ async def test_command_parks_then_executes_once_after_approval(tmp_path, wire, m
         view = await finished(app, run)
         assert view.status == "completed", view
         assert len(broker.starts) == 1
+        assert broker.starts[0]["action"] == "command_start"
         events = await app.service.events(run)
         ends = [e.data for e in events if e.kind == "tool_end"]
         assert ends[0]["decision"] == "ask"
@@ -242,6 +258,41 @@ async def test_command_parks_then_executes_once_after_approval(tmp_path, wire, m
         assert (await app.sandbox.project(actor, project["project_id"]))["status"] == "ready"
         await app.service.reply_approval(run, request["request_id"], approval(request))
         assert len(broker.starts) == 1
+
+
+async def test_background_task_start_returns_handle_and_finalizes_worker(
+    tmp_path, wire, monkeypatch
+):
+    async with command_app(
+        tmp_path,
+        wire,
+        monkeypatch,
+        tool_name="sandbox_task_start",
+        bind_session=True,
+        park=True,
+    ) as (app, broker, actor, project, run, request):
+        await app.service.reply_approval(run, request["request_id"], approval(request))
+        view = await finished(app, run)
+        assert view.status == "completed"
+        assert len(broker.starts) == 1
+        assert broker.starts[0]["action"] == "command_start_background"
+        assert broker.polls >= 1
+        assert all(status["renew"] is False for status in broker.statuses)
+        events = await app.service.events(run)
+        started = next(event.data for event in events if event.kind == "sandbox_task_started")
+        finished_task = next(
+            event.data for event in events if event.kind == "sandbox_task_finished"
+        )
+        assert started["status"] == "accepted"
+        assert finished_task["task_status"] == "finished"
+        async with app.store.lock, app.store.engine.connect() as conn:
+            generation = await conn.scalar(
+                select(sandbox_projects.c.generation).where(
+                    sandbox_projects.c.project_id == project["project_id"]
+                )
+            )
+        assert generation == 1
+        assert (await app.sandbox.project(actor, project["project_id"]))["status"] == "ready"
 
 
 async def test_rejected_command_never_reaches_broker(tmp_path, wire, monkeypatch):

@@ -6,6 +6,7 @@ from pydantic import Field, JsonValue, field_validator
 
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import Message, StrictModel
+from krim_agent.sandbox.tasks import SandboxCompletion
 
 TargetKey = Literal[
     "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
@@ -24,6 +25,7 @@ class TurnRequest(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     text: str = Field(min_length=1, max_length=32768)
     expected_revision: int = Field(ge=0)
+    completion: SandboxCompletion | None = None
 
     @field_validator("text")
     @classmethod

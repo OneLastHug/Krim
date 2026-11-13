@@ -452,5 +452,12 @@ class RunscRunner:
                         if len(chunk) > remaining:
                             observed["code"] = "output_limit"
                             return
+                        if observed["started"]:
+                            phase("output", {
+                                "logs": {
+                                    "stdout": base64.b64encode(stdout[-4096:]).decode(),
+                                    "stderr": base64.b64encode(stderr[-4096:]).decode(),
+                                }
+                            })
         if not observed["started"] and observed["code"] is None:
             observed["code"] = "sandbox_setup"

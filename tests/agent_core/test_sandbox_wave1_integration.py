@@ -266,7 +266,7 @@ def test_search_tools_fit_in_sandbox_registry_and_remain_private():
     with pytest.raises(ValueError):
         FileSearch(query="needle", offset=4095, limit=2)
     registry = SandboxOperations(None).registry()
-    assert len(registry.schemas()) == 12
+    assert len(registry.schemas()) == 17
     find_schema = registry.get("sandbox_find").descriptor()["output_schema"]
     assert find_schema["properties"]["files"]
     preview_schema = registry.get("sandbox_preview_replace").descriptor()["output_schema"]
@@ -274,6 +274,10 @@ def test_search_tools_fit_in_sandbox_registry_and_remain_private():
     for name in ("sandbox_find", "sandbox_search", "sandbox_preview_replace"):
         spec = registry.get(name)
         assert spec.risk == "read" and spec.capability == "read"
+    assert registry.get("sandbox_task_start").risk == "exec"
+    assert registry.get("sandbox_task_status").capability == "read"
+    assert registry.get("sandbox_task_wait").risk == "read"
+    assert registry.get("sandbox_task_cancel").risk == "write"
 
 
 @pytest.mark.parametrize("name,kind,body", [
