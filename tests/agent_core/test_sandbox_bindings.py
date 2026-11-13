@@ -370,11 +370,20 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert calls[-1][1]["offset"] == 4 and calls[-1][1]["before"] == 1
         names = await client.get(route + "/search", params={"query": "answer", "mode": "regex"})
         assert names.status_code == 200 and calls[-1][1]["mode"] == "regex"
-        assert "regex_limit_bytes" in names.json()
+        assert names.json()["max_result_bytes"] == 64 * 1024
+        assert names.json()["regex_limit_bytes"] == 64
+        assert names.json()["max_regex_scan_bytes"] == 512 * 1024
+        assert names.json()["max_regex_line_chars"] == 1024
+        literal = await client.get(route + "/search", params={"query": "answer"})
+        assert literal.status_code == 200
+        assert literal.json()["max_result_bytes"] == 64 * 1024
+        assert "regex_limit_bytes" not in literal.json()
         lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
         assert lookup.status_code == 422
-        over_limit = await client.get(route + "/search", params={"offset": 4050, "query": "x"})
-        assert over_limit.status_code == 422
+        over_limit_page = await client.get(
+            route + "/search", params={"offset": 4050, "query": "x"}
+        )
+        assert over_limit_page.status_code == 422
         search_last_page = await client.get(
             route + "/search", params={"offset": 4095, "limit": 1, "query": "answer"}
         )
@@ -394,9 +403,13 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
             )
         ).status_code == 422
         assert (await client.get(route + "/files", params={"offset": -1})).status_code == 422
-        invalid_export = await client.get(route + "/export-file", params={"path": "../secret"})
+        assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
+        invalid_export = await client.get(
+            route + "/export-file", params={"path": "../secret"}
+        )
         assert invalid_export.status_code == 422
         downloaded = await client.get(route + "/export-file", params={"path": "note.txt"})
+        assert downloaded.status_code == 200 and downloaded.content == b"hello"
         assert downloaded.headers["etag"] == (
             '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
         )
@@ -405,7 +418,11 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert "expected_sha256" not in calls[-1][1]
         assert "expected_stat" not in calls[-1][1]
         assert downloaded.headers["x-content-type-options"] == "nosniff"
-        invalid_glob = await client.get(route + "/find", params={"include_glob": "../*"})
+        digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
+        assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
+        invalid_glob = await client.get(
+            route + "/find", params={"include_glob": "../*"}
+        )
         assert invalid_glob.status_code == 422
         plain_glob = await client.get(route + "/find", params={"include_glob": "src"})
         assert plain_glob.status_code == 422
@@ -488,6 +505,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         )
 
         legacy_broker.read_calls.clear()
+        expected_offset = len("".join(large_lines[:10000]).encode()) + len("é ".encode())
         legacy_preview = await app.sandbox.preview_replace(
             actor,
             project["project_id"],
@@ -516,6 +534,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
             find="line-10000",
             replacement="LONG",
         )
+        assert large_preview["patch"]["offset"] == expected_offset
+        assert "-é line-10000" in large_preview["diff"]
         assert "+é LONG" in large_preview["diff"]
         assert large_preview["diff_truncated"] is False
         assert len(chunk_broker.read_calls) > 1
