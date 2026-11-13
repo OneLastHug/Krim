@@ -334,7 +334,10 @@ def test_find_and_search_mark_overlong_candidate_paths_incomplete(files):
     request_path = "s" * 240 + "/" + "t" * 240
 
     found = fs.find(env, project, path=request_path, include_glob="**/*")
-    assert found["files"] == [{"path": request_path + "/visible.txt", "size": len(b"needle visible")}]
+    assert found["files"] == [{
+        "path": request_path + "/visible.txt",
+        "size": len(b"needle visible"),
+    }]
     assert found["truncated"] is True
     assert found["depth_cap_reached"] is True
     assert found["total"] is None
