@@ -266,12 +266,13 @@ class AgentLoop:
                             verify_completion,
                         )
                         from krim_agent.storage.sandbox_models import sandbox_turn_contracts
-                        context = snapshot.session_context
-                        async with self.store.lock, self.store.engine.connect() as conn:
+                        session_context = snapshot.session_context
+                        sandbox_store = self.sandbox.service.store
+                        async with sandbox_store.lock, sandbox_store.engine.connect() as conn:
                             contract_row = (
                                 await conn.execute(
                                     select(sandbox_turn_contracts).where(
-                                        sandbox_turn_contracts.c.turn_id == context.turn_id
+                                        sandbox_turn_contracts.c.turn_id == session_context.turn_id
                                     )
                                 )
                             ).mappings().first()
@@ -281,13 +282,15 @@ class AgentLoop:
                             or fingerprint(contract_row["completion"]) != completion_hash
                         ):
                             raise ServiceError("target_binding_changed")
-                        contract = SandboxCompletion.model_validate(contract_row["completion"])
-                        verdict = await verify_completion(
-                            self.sandbox.service, run_id, context.session_id, contract,
+                        contract = SandboxCompletion.model_validate_json(
+                            encoded(contract_row["completion"])
+                        )
+                        completion_result = await verify_completion(
+                            self.sandbox.service, run_id, session_context.session_id, contract,
                             deadline=scope.deadline,
                             check=scope.check,
                         )
-                        if verdict["state"] != "passed":
+                        if completion_result["state"] != "passed":
                             raise ServiceError("completion_unverified")
                 return
             conversation.append(

@@ -559,7 +559,11 @@ def test_gate_handshake_cgroup_and_output_collection(
 
     operation = str(uuid.uuid4())
     receipt = runner.run(operation, content, ["-c", "print('x')"], 5, threading.Event(), record)
-    assert [name for name, _ in phases] == ["creating", "created", "gate_verified", "started"]
+    assert [name for name, _ in phases[:4]] == [
+        "creating", "created", "gate_verified", "started"
+    ]
+    assert phases[4:] and all(name == "output" for name, _ in phases[4:])
+    assert base64.b64decode(dict(phases)["output"]["logs"]["stdout"]) == b"x" * 5
     assert dict(phases)["gate_verified"]["cgroup"] == legacy_values()
     assert receipt["executor_started"] is True
     assert receipt["exit_code"] == 0 and receipt["code"] is None

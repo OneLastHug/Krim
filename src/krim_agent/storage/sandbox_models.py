@@ -74,7 +74,7 @@ sandbox_session_bindings = Table(
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
-SANDBOX_TABLES = (*SANDBOX_V8_TABLES, sandbox_session_bindings)
+SANDBOX_TABLES: tuple[Table, ...] = (*SANDBOX_V8_TABLES, sandbox_session_bindings)
 SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)
 
 sandbox_quota_state = Table(

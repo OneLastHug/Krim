@@ -6,6 +6,7 @@ import asyncio
 import base64
 import time
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import Field, JsonValue, model_validator
@@ -28,6 +29,7 @@ from krim_agent.workspace.types import CompletionCondition, path_parts
 if TYPE_CHECKING:
     from krim_agent.sandbox.operations import SessionCommandScope
     from krim_agent.sandbox.service import SandboxService
+    from krim_agent.tools.core import Invocation
 
 
 class TaskStart(SandboxCommand):
@@ -118,7 +120,7 @@ async def start_task(
     service: SandboxService,
     actor: PrincipalContext,
     values: TaskStart,
-    invocation: Any,
+    invocation: Invocation,
     scope: SessionCommandScope,
 ) -> dict[str, Any]:
     """Persist and submit exactly one run-scoped job; never wait or renew its permit."""
@@ -130,7 +132,8 @@ async def start_task(
         or scope.operations.service is not service
     ):
         raise ServiceError("workspace_contract_required")
-    if service.broker is None or service.configuration.command_image is None:
+    broker = service.broker
+    if broker is None or service.configuration.command_image is None:
         raise ServiceError("sandbox_backend_unavailable", 503)
     scope.check()
     payload = values.model_dump(mode="json")
@@ -240,7 +243,7 @@ async def start_task(
         "operation_id": operation_id,
     }
     try:
-        health = await service.broker.call("health")
+        health = await broker.call("health")
         runtime_health = health.get("runtimes", {}).get(values.program, {})
         if not isinstance(runtime_health, dict):
             runtime_health = {}
@@ -255,7 +258,7 @@ async def start_task(
         ):
             raise ServiceError("target_binding_changed")
         scope.check()
-        await service.broker.call(
+        await broker.call(
             "command_start_background",
             **args,
             command=payload,
@@ -266,7 +269,7 @@ async def start_task(
     except asyncio.CancelledError:
         async def settle_cancelled() -> None:
             try:
-                result = await service.broker.call(
+                result = await broker.call(
                     "command_status", **args, renew=False, cancel=True
                 )
                 if result.get("status") in {"finished", "unknown"}:
@@ -275,7 +278,7 @@ async def start_task(
                 deadline = time.monotonic() + 18
                 while time.monotonic() < deadline:
                     await asyncio.sleep(0.2)
-                    result = await service.broker.call(
+                    result = await broker.call(
                         "command_status", **args, renew=False, cancel=True
                     )
                     if result.get("status") in {"finished", "unknown"}:
@@ -331,7 +334,7 @@ async def start_task(
             raise
         # An ambiguous submit is treated as an existing job and immediately stopped.
         try:
-            result = await service.broker.call("command_status", **args, renew=False, cancel=True)
+            result = await broker.call("command_status", **args, renew=False, cancel=True)
             if result.get("status") not in {"finished", "unknown"}:
                 raise ServiceError("sandbox_operation_unknown")
             await _settle(service, operation, result)
@@ -371,7 +374,7 @@ async def _operation(
 
 
 async def _settle(
-    service: Any, operation: dict[str, Any], record: dict[str, Any]
+    service: SandboxService, operation: dict[str, Any], record: dict[str, Any]
 ) -> dict[str, Any]:
     operation_id = operation["operation_id"]
     project_id = operation["project_id"]
@@ -427,22 +430,23 @@ async def _settle(
 
 
 async def _observe(
-    service: Any,
+    service: SandboxService,
     actor: PrincipalContext,
     operation: dict[str, Any],
     session_id: str,
     run_id: str,
-    check: Any,
+    check: Callable[[], None],
     *,
     cancel: bool = False,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     check()
     project_id = operation["project_id"]
     project = await service._project_state(actor, project_id, write=cancel)
-    if service.broker is None:
+    broker = service.broker
+    if broker is None:
         raise ServiceError("sandbox_backend_unavailable", 503)
     async def observe() -> dict[str, Any]:
-        return await service.broker.call(
+        return await broker.call(
             "command_status",
             environment_id=project["environment_id"],
             project_id=project_id,
@@ -506,7 +510,10 @@ def _view(
 
 
 async def status(
-    service: Any, scope: SessionCommandScope, values: TaskReference, invocation: Any
+    service: SandboxService,
+    scope: SessionCommandScope,
+    values: TaskReference,
+    invocation: Invocation,
 ) -> dict[str, JsonValue]:
     operation = await _operation(service, scope.actor, values.operation_id, scope.session_id)
     if operation["project_id"] != values.project_id:
@@ -518,7 +525,7 @@ async def status(
 
 
 async def log(
-    service: Any, scope: SessionCommandScope, values: TaskLog, invocation: Any
+    service: SandboxService, scope: SessionCommandScope, values: TaskLog, invocation: Invocation
 ) -> dict[str, JsonValue]:
     operation = await _operation(service, scope.actor, values.operation_id, scope.session_id)
     if operation["project_id"] != values.project_id:
@@ -528,7 +535,10 @@ async def log(
     )
     if receipt is None:
         project = await service._project_state(scope.actor, operation["project_id"])
-        logs = await service.broker.call(
+        broker = service.broker
+        if broker is None:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        logs = await broker.call(
             "command_logs",
             environment_id=project["environment_id"],
             project_id=operation["project_id"],
@@ -554,7 +564,7 @@ async def log(
 
 
 async def wait(
-    service: Any, scope: SessionCommandScope, values: TaskWait, invocation: Any
+    service: SandboxService, scope: SessionCommandScope, values: TaskWait, invocation: Invocation
 ) -> dict[str, JsonValue]:
     deadline = min(scope.deadline, time.monotonic() + values.seconds)
     operation = await _operation(service, scope.actor, values.operation_id, scope.session_id)
@@ -572,12 +582,12 @@ async def wait(
 
 
 async def cancel(
-    service: Any, scope: SessionCommandScope, values: TaskCancel, invocation: Any
+    service: SandboxService, scope: SessionCommandScope, values: TaskCancel, invocation: Invocation
 ) -> dict[str, JsonValue]:
     operation = await _operation(service, scope.actor, values.operation_id, scope.session_id)
     if operation["project_id"] != values.project_id:
         raise ServiceError("permission_denied")
-    project = await service.project(scope.actor, values.project_id, write=True)
+    project = await service.project(scope.actor, operation["project_id"], write=True)
     if project["generation"] != values.expected_generation:
         raise ServiceError("input_revision_conflict")
     deadline = time.monotonic() + 18
@@ -604,7 +614,7 @@ async def cancel(
         await asyncio.sleep(0.2)
 
 
-async def _run_operations(service: Any, run_id: str) -> list[dict[str, Any]]:
+async def _run_operations(service: SandboxService, run_id: str) -> list[dict[str, Any]]:
     async with service.store.lock, service.store.engine.connect() as conn:
         rows = (
             await conn.execute(
@@ -646,13 +656,13 @@ async def cancel_run_tasks(service: SandboxService, run_id: str) -> None:
 
 
 async def verify_completion(
-    service: Any,
+    service: SandboxService,
     run_id: str,
     session_id: str,
     contract: SandboxCompletion,
     *,
     deadline: float,
-    check: Any,
+    check: Callable[[], None],
 ) -> dict[str, JsonValue]:
     """Evaluate receipts and bounded file checks; polling never renews job permits."""
     rows = await _run_operations(service, run_id)
@@ -766,7 +776,7 @@ async def verify_completion(
 
 
 async def _record_verification(
-    service: Any,
+    service: SandboxService,
     rows: list[dict[str, Any]],
     state: str,
     verification: dict[str, JsonValue],

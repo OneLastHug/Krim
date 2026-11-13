@@ -47,6 +47,7 @@ only-include = [
   "src/krim_agent/sandbox/command.py",
   "src/krim_agent/sandbox/runner.py",
   "src/krim_agent/sandbox/jobs.py",
+  "src/krim_agent/sandbox/tasks.py",
   "src/krim_agent/sandbox/operations.py",
   "src/krim_agent/sandbox/execution.py",
   "src/krim_agent/sandbox/quota_control.py",

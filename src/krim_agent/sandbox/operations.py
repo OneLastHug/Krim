@@ -203,8 +203,7 @@ class SandboxOperations:
             from krim_agent.sandbox.execution import execute_command
             from krim_agent.sandbox.tasks import start_task
 
-            background = isinstance(values, TaskStart)
-            if background:
+            if isinstance(values, TaskStart):
                 if values.wall_seconds + 10 > scope.deadline - time.monotonic():
                     raise ServiceError("run_timeout")
                 result = await start_task(self.service, scope.actor, values, invocation, scope)
