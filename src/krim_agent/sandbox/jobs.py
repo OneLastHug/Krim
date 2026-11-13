@@ -80,7 +80,7 @@ class CommandJobs:
             installation = {"id": str(uuid.uuid4())}
             broker._save("execution-installation.json", installation)
         self.installation_id = installation["id"]
-        self.runners: dict[str, RunscRunner] = {}
+        self.runners: dict[ProfileProgram, RunscRunner] = {}
         self.runtime = runtime
         self.runner: RunscRunner | None = None
         if catalog is not None:
@@ -131,12 +131,11 @@ class CommandJobs:
             return None
         return runtime
 
-    def configured_programs(self) -> list[str]:
+    def configured_programs(self) -> list[ProfileProgram]:
         if self.catalog is None:
             return sorted(self.runners)
-        return [
-            program for program in ("python", "node") if self._resolved(program) is not None
-        ]
+        programs: tuple[ProfileProgram, ...] = ("python", "node")
+        return [program for program in programs if self._resolved(program) is not None]
 
     def available_programs(self) -> list[str]:
         return sorted(self.runners)
@@ -305,6 +304,7 @@ class CommandJobs:
                     or probe.get("project_id") != project_id
                     or probe.get("program") != requested_program
                     or not isinstance(runtime, dict)
+                    or runner is None
                     or runtime.get("image_id") != runner.identity
                     or runtime.get("fingerprint") != getattr(runner, "runtime_fingerprint", None)
                 ):

@@ -365,7 +365,9 @@ def test_supervisor_and_command_inputs_are_bounded():
             SandboxCommand.model_validate({**good, **patch})
 
 
-async def test_command_start_failure_before_execution_does_not_block_project(tmp_path, wire, monkeypatch):
+async def test_command_start_failure_before_execution_does_not_block_project(
+    tmp_path, wire, monkeypatch
+):
     async with command_app(tmp_path, wire, monkeypatch) as (
         app,
         broker,

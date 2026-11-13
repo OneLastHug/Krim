@@ -9,6 +9,7 @@ from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
     ProviderError,
+    _StreamBoundary,
 )
 from krim_agent.providers.types import ModelText, ModelToolCall
 
@@ -72,12 +73,12 @@ class WaitingBody(httpx.AsyncByteStream):
         self.closed = True
 
 
-async def test_disabled_thinking_projects_tools_and_followup_history(monkeypatch):
+async def test_reasoning_is_stripped_and_tool_history_round_trips(monkeypatch):
     records = []
     bodies = [
         StreamBody(
             [
-                frame(event({"reasoning_content": None})),
+                frame(event({"reasoning_content": "private reasoning chunk"})),
                 frame(
                     event(
                         {
@@ -139,6 +140,9 @@ async def test_disabled_thinking_projects_tools_and_followup_history(monkeypatch
         first = [item async for item in provider.stream([user], [tool])]
         call = next(item for item in first if isinstance(item, ModelToolCall))
         assert call.id == "call-1" and call.arguments == {"left": 2, "right": 3}
+        assert not any(
+            "private reasoning chunk" in repr(item) for item in first
+        )
 
         history = [
             user,
@@ -176,16 +180,17 @@ async def test_disabled_thinking_projects_tools_and_followup_history(monkeypatch
     [
         ("disabled", {"reasoning_content": None}, True),
         ("disabled", {"reasoning_content": ""}, True),
-        (None, {"reasoning_content": None}, False),
-        (None, {"reasoning_content": ""}, False),
-        ("disabled", {"reasoning_content": "private reasoning"}, False),
+        (None, {"reasoning_content": None}, True),
+        (None, {"reasoning_content": ""}, True),
+        (None, {"reasoning_content": "private reasoning"}, True),
+        ("disabled", {"reasoning_content": "private reasoning"}, True),
         ("disabled", {"reasoning_content": []}, False),
+        (None, {"reasoning_content": []}, False),
+        (None, {"reasoning_content": None, "audio": {"data": "unknown"}}, False),
         ("disabled", {"audio": {"data": "unknown"}}, False),
     ],
 )
-async def test_reasoning_content_is_only_accepted_empty_when_disabled(
-    monkeypatch, thinking, delta, accepted
-):
+async def test_auxiliary_reasoning_is_discarded_before_sdk(monkeypatch, thinking, delta, accepted):
     body = StreamBody([frame(event(delta)), frame(event(finish="stop")), frame("[DONE]")])
 
     async def handler(_request):
@@ -194,7 +199,11 @@ async def test_reasoning_content_is_only_accepted_empty_when_disabled(
     provider = mock_provider(monkeypatch, handler, thinking=thinking)
     try:
         if accepted:
-            [item async for item in provider.stream([Message(role="user", content="hi")], [])]
+            items = [
+                item
+                async for item in provider.stream([Message(role="user", content="hi")], [])
+            ]
+            assert not any("private reasoning" in repr(item) for item in items)
         else:
             with pytest.raises(ProviderError) as error:
                 [item async for item in provider.stream([Message(role="user", content="hi")], [])]
@@ -202,6 +211,29 @@ async def test_reasoning_content_is_only_accepted_empty_when_disabled(
         assert body.closed
     finally:
         await provider.close()
+
+
+def test_reasoning_is_removed_from_normalized_delta_and_usage_frames():
+    config = OpenAICompatibleConfig(base_url="https://provider.invalid", model="test")
+    boundary = _StreamBoundary(config, 1)
+    normalized = json.loads(
+        boundary.accept(
+            json.dumps(event({"content": "visible", "reasoning_content": "private"}))
+        )
+    )
+    delta = normalized["choices"][0]["delta"]
+    assert delta == {"content": "visible"}
+
+    boundary.finish = "stop"
+    boundary.prior = None
+    usage_frame = {
+        "choices": [],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "reasoning_content": "private usage annotation",
+    }
+    normalized_usage = json.loads(boundary.accept(json.dumps(usage_frame)))
+    assert "reasoning_content" not in normalized_usage
+    assert usage_frame["reasoning_content"] == "private usage annotation"
 
 
 async def test_provider_error_and_cancellation_close_mock_http_stream(monkeypatch):

@@ -147,7 +147,7 @@ def _validate_windows_acl(descriptor: int) -> None:
     import ctypes
     from ctypes import wintypes
 
-    win_dll = cast(Any, getattr(ctypes, "WinDLL"))
+    win_dll = cast(Any, importlib.import_module("ctypes")).WinDLL
     msvcrt = cast(Any, importlib.import_module("msvcrt"))
     advapi32 = win_dll("Advapi32.dll", use_last_error=True)
     kernel32 = win_dll("Kernel32.dll", use_last_error=True)
@@ -296,18 +296,19 @@ def _validate_windows_acl(descriptor: int) -> None:
 
         for index in range(acl.ace_count):
             ace = ctypes.c_void_p()
-            if not get_ace(dacl, index, ctypes.byref(ace)):
+            if not get_ace(dacl, index, ctypes.byref(ace)) or ace.value is None:
                 raise ValueError("无法读取配置文件ACE")
+            address = ace.value
             header = ctypes.cast(ace, ctypes.POINTER(_AceHeader)).contents
             if header.ace_type not in allowed_ace_types:
                 if header.ace_type in known_non_grant_types:
                     continue
                 raise ValueError("配置文件ACL含未知ACE类型")
-            mask = ctypes.c_uint32.from_address(ace.value + ctypes.sizeof(_AceHeader)).value
+            mask = ctypes.c_uint32.from_address(address + ctypes.sizeof(_AceHeader)).value
             if not mask & write_mask:
                 continue
             sid_offset = 8
-            ace_sid = ctypes.c_void_p(ace.value + sid_offset)
+            ace_sid = ctypes.c_void_p(address + sid_offset)
             if not any(equal_sid(ace_sid, permitted) for permitted in permitted_sids):
                 raise ValueError("配置文件ACL允许不可信主体写入")
     finally:
