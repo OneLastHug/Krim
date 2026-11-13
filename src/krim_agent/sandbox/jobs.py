@@ -24,7 +24,7 @@ from krim_agent.sandbox.port_adapters import AcceptedProjectMutation
 from krim_agent.sandbox.ports import ProjectRef
 from krim_agent.sandbox.quota import QuotaLimits
 from krim_agent.sandbox.runner import RunscRunner
-from krim_agent.sandbox.runtime_profiles import ResolvedRuntime, RuntimeCatalog
+from krim_agent.sandbox.runtime_profiles import ProfileProgram, ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.xfs import internal_id
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ class CommandJobs:
         self.prepare_locks: dict[str, threading.Lock] = {}
         self.closed = False
 
-    def _runner_for(self, program: str) -> RunscRunner:
+    def _runner_for(self, program: ProfileProgram) -> RunscRunner:
         runner = self.runners.get(program)
         if runner is not None:
             return runner
@@ -120,7 +120,7 @@ class CommandJobs:
             self.runner = runner
         return runner
 
-    def _resolved(self, program: str) -> ResolvedRuntime | None:
+    def _resolved(self, program: ProfileProgram) -> ResolvedRuntime | None:
         if self.catalog is None:
             return None
         try:
@@ -213,22 +213,53 @@ class CommandJobs:
             requested_program = values.program if isinstance(values, SandboxCommand) else "python"
             previous = self.broker._read(self.filename(operation_id))
             if previous is not None and previous.get("status") in {"finished", "unknown"}:
-                if previous.get("project_id") != project_id:
+                if (
+                    previous.get("project_id") != project_id
+                    or previous.get("environment_id") != environment_id
+                ):
                     raise ServiceError("not_found", 404)
                 if previous.get("kind", "command") != kind:
                     raise ServiceError("key_conflict")
-                if not all(key in previous for key in ("command", "image", "runtime_fingerprint")):
-                    raise ServiceError("sandbox_operation_unknown")
-                if all(key in previous for key in ("command", "image", "runtime_fingerprint")):
-                    digest = self._request_digest(
+                payload_hash = previous.get("request_payload_hash")
+                stored_program = previous.get("program", "python")
+                stored_image = previous.get("request_image", previous.get("image"))
+                stored_fingerprint = previous.get(
+                    "request_runtime_fingerprint", previous.get("runtime_fingerprint")
+                )
+                if (
+                    payload_hash is None
+                    and kind == "command"
+                    and isinstance(previous.get("command"), dict)
+                ):
+                    payload_hash = fingerprint(previous["command"])
+                if payload_hash is None or payload_hash != fingerprint(command):
+                    raise ServiceError("key_conflict")
+                if stored_program != requested_program:
+                    raise ServiceError("key_conflict")
+                digest = self._request_digest(
+                    environment_id,
+                    command,
+                    stored_image,
+                    stored_fingerprint,
+                    requested_program,
+                    kind,
+                )
+                if previous.get("request_hash") != digest:
+                    raise ServiceError("key_conflict")
+                if kind == "command":
+                    try:
+                        current_runner = self._runner_for(requested_program)
+                    except ServiceError:
+                        return previous
+                    current_digest = self._request_digest(
                         environment_id,
                         command,
-                        previous.get("image"),
-                        previous.get("runtime_fingerprint"),
+                        current_runner.identity,
+                        getattr(current_runner, "runtime_fingerprint", None),
                         requested_program,
                         kind,
                     )
-                    if previous.get("request_hash") != digest:
+                    if current_digest != digest:
                         raise ServiceError("key_conflict")
                 return previous
             env_state = self.broker._environment(environment_id)
@@ -297,6 +328,11 @@ class CommandJobs:
                 "environment_id": environment_id,
                 "project_id": project_id,
                 "request_hash": digest,
+                "request_payload_hash": fingerprint(command),
+                "request_image": runner.identity if runner is not None else None,
+                "request_runtime_fingerprint": (
+                    getattr(runner, "runtime_fingerprint", None) if runner is not None else None
+                ),
                 "program": requested_program,
                 "kind": kind,
                 "status": "intent",
@@ -636,6 +672,9 @@ class CommandJobs:
             if row["status"] == "finished" and row.get("reconciled"):
                 return row
             if row["status"] == "finished" and row.get("receipt", {}).get("cleanup") == "clean":
+                if not row.get("reconciled"):
+                    row["reconciled"] = True
+                    self.broker._save(self.filename(operation_id), row)
                 return row
             if row.get("status") != "reconciling":
                 row["status"] = "reconciling"

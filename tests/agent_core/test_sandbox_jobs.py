@@ -8,7 +8,7 @@ import pytest
 from test_runtime_profiles import catalog as runtime_catalog
 from test_sandbox_broker import FakeQuota
 
-from krim_agent.contracts import ServiceError
+from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.sandbox import broker as broker_module
 from krim_agent.sandbox import jobs as jobs_module
 from krim_agent.sandbox.broker import StorageBroker
@@ -227,6 +227,83 @@ def test_intent_record_reconciles_orphaned_lease_without_execution(command_jobs)
     assert result["status"] == "unknown"
     assert result["receipt"]["executor_started"] is False
     assert broker.leases.status(project)["status"] == "idle"
+
+
+def test_finished_file_job_replay_uses_payload_hash_without_runner_identity(command_jobs):
+    broker, jobs, env, project = command_jobs
+    operation = str(uuid.uuid4())
+    body = {
+        "project_id": project,
+        "expected_generation": 0,
+        "path": "persisted.txt",
+        "expected_sha256": None,
+        "content": "saved",
+    }
+    payload_hash = fingerprint(body)
+    image = Runner.identity
+    request_hash = jobs._request_digest(env, body, image, None, "python", "write")
+    row = {
+        "operation_id": operation,
+        "environment_id": env,
+        "project_id": project,
+        "request_hash": request_hash,
+        "request_payload_hash": payload_hash,
+        "request_image": image,
+        "request_runtime_fingerprint": None,
+        "program": "python",
+        "kind": "write",
+        "status": "finished",
+        "generation": 1,
+        "receipt": {"cleanup": "clean", "file": {"path": "persisted.txt"}},
+    }
+    broker._save(jobs.filename(operation), row)
+    assert jobs.submit(env, project, operation, body, kind="write") == row
+    with pytest.raises(ServiceError, match="key_conflict"):
+        jobs.submit(env, project, operation, {**body, "content": "changed"}, kind="write")
+
+
+def test_terminal_command_replay_checks_current_fingerprint_but_survives_probe_failure(
+    command_jobs, monkeypatch
+):
+    broker, jobs, env, project = command_jobs
+    operation = str(uuid.uuid4())
+    body = command(project)
+    image = jobs.runner.identity
+    original_fingerprint = getattr(jobs.runner, "runtime_fingerprint", None)
+    request_hash = jobs._request_digest(env, body, image, original_fingerprint, "python", "command")
+    row = {
+        "operation_id": operation,
+        "environment_id": env,
+        "project_id": project,
+        "request_hash": request_hash,
+        "request_payload_hash": fingerprint(body),
+        "request_image": image,
+        "request_runtime_fingerprint": original_fingerprint,
+        "command": body,
+        "image": image,
+        "runtime_fingerprint": original_fingerprint,
+        "program": "python",
+        "kind": "command",
+        "status": "finished",
+        "generation": 1,
+        "receipt": {"cleanup": "clean", "code": None},
+    }
+    project_row = broker._project(env, project)
+    project_row["generation"] = 1
+    broker._save("project-" + project + ".json", project_row)
+    broker._save(jobs.filename(operation), row)
+    runner_identity = jobs.runner.identity
+    monkeypatch.setattr(jobs, "_runner_for", lambda _program: jobs.runner)
+    jobs.runner.identity = "sha256:" + "f" * 64
+    with pytest.raises(ServiceError, match="key_conflict"):
+        jobs.submit(env, project, operation, body)
+    jobs.runner.identity = runner_identity
+    monkeypatch.setattr(
+        jobs,
+        "_runner_for",
+        lambda _program: (_ for _ in ()).throw(ServiceError("sandbox_backend_unavailable", 503)),
+    )
+    assert jobs.submit(env, project, operation, body) == row
 
 
 def test_original_operation_is_never_executed_twice(command_jobs):
