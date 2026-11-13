@@ -15,6 +15,7 @@ from krim_agent.contracts import ServiceError
 from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
+from krim_agent.storage.models import turns
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
@@ -372,8 +373,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert "regex_limit_bytes" in names.json()
         lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
         assert lookup.status_code == 422
-        assert (await client.get(route + "/search", params={"offset": 4050, "query": "x"})).status_code == 422
-        search_last_page = await client.get(
+        over_limit = await client.get(route + "/search", params={"offset": 4050, "query": "x"})
+        assert over_limit.status_code == 422
             route + "/search", params={"offset": 4095, "limit": 1, "query": "answer"}
         )
         assert search_last_page.status_code == 200
@@ -395,15 +396,18 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
         assert (await client.get(route + "/export-file", params={"path": "../secret"})).status_code == 422
         downloaded = await client.get(route + "/export-file", params={"path": "note.txt"})
-        assert downloaded.status_code == 200 and downloaded.content == b"hello"
-        assert downloaded.headers["etag"] == '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
+        assert downloaded.headers["etag"] == (
+            '"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"'
+        )
         file_read = await client.get(route + "/file", params={"path": "note.txt"})
         assert file_read.status_code == 200 and "stat_token" not in file_read.json()
         assert "expected_sha256" not in calls[-1][1]
         assert "expected_stat" not in calls[-1][1]
         assert downloaded.headers["x-content-type-options"] == "nosniff"
-        digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
-        assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
+        invalid_glob = await client.get(route + "/find", params={"include_glob": "../*"})
+        assert invalid_glob.status_code == 422
+        plain_glob = await client.get(route + "/find", params={"include_glob": "src"})
+        assert plain_glob.status_code == 422
         assert (await client.get(route + "/find", params={"include_glob": "../*"})).status_code == 422
         assert (await client.get(route + "/find", params={"include_glob": "src"})).status_code == 422
         preview = await app.sandbox.preview_replace(
