@@ -8,7 +8,6 @@ from krim_agent.contracts import ServiceError
 
 from .core import ToolSpec
 
-
 MAX_TOOLS = 16
 
 

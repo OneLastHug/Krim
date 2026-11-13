@@ -405,6 +405,11 @@ class _StreamBoundary:
         event = parse_json(payload)
         if not isinstance(event, dict) or "error" in event:
             raise ProviderError("provider_protocol")
+        event_reasoning = event.get("reasoning_content")
+        if event_reasoning is not None and not isinstance(event_reasoning, str):
+            raise ProviderError("provider_protocol")
+        if "reasoning_content" in event:
+            event.pop("reasoning_content")
         usage = _usage(event.get("usage"))
         if usage is not None:
             if self.prior is not None and not usage.follows(self.prior):
@@ -416,6 +421,8 @@ class _StreamBoundary:
         if choices == []:
             if self.finish is None or usage is None:
                 raise ProviderError("provider_protocol")
+            if "reasoning_content" in event:
+                event.pop("reasoning_content")
             return encoded(event)
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
             raise ProviderError("provider_protocol")
@@ -428,11 +435,10 @@ class _StreamBoundary:
             or self.finish is not None
         ):
             raise ProviderError("provider_protocol")
-        allowed = {"role", "content", "tool_calls", "refusal"}
-        if self.config.thinking == "disabled":
-            allowed.add("reasoning_content")
-            if delta.get("reasoning_content") not in (None, ""):
-                raise ProviderError("provider_protocol")
+        allowed = {"role", "content", "tool_calls", "refusal", "reasoning_content"}
+        reasoning = delta.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise ProviderError("provider_protocol")
         if (
             set(delta) - allowed
             or delta.get("role", "assistant") != "assistant"
@@ -470,6 +476,9 @@ class _StreamBoundary:
             if reason not in ("stop", "tool_calls"):
                 raise ProviderError("provider_protocol")
             self.finish = reason
+        # Auxiliary reasoning is validated but never forwarded to the SDK or user-facing events.
+        if "reasoning_content" in delta:
+            delta.pop("reasoning_content")
         return encoded(event)
 
     def complete(self) -> list[ModelToolCall]:

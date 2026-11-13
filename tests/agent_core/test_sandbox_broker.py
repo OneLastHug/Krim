@@ -89,6 +89,70 @@ def test_provision_does_not_accept_host_paths_and_projects_are_bound(storage):
     )
 
 
+def test_command_start_accepts_runtime_binding_fields_and_rejects_legacy_shape(
+    tmp_path, monkeypatch
+):
+    mount, state = tmp_path / "disk", tmp_path / "state"
+    mount.mkdir(mode=0o700)
+    state.mkdir(mode=0o700)
+    monkeypatch.setattr(module, "XfsAccounts", FakeQuota)
+    monkeypatch.setattr(module.os, "chown", lambda *a, **k: None)
+    from krim_agent.sandbox import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "RunscRunner", lambda *args, **kwargs: object())
+    image = "sha256:" + "a" * 64
+    broker = StorageBroker(mount, state, image=image)
+    try:
+        env, project, operation = (str(uuid.uuid4()) for _ in range(3))
+        runtime_fingerprint = "b" * 64
+        broker.provision_environment(env, QuotaLimits().model_dump(mode="json"))
+        broker.provision_project(env, project)
+        command = {
+            "project_id": project,
+            "expected_generation": 0,
+            "argv": ["-c", "print(1)"],
+            "wall_seconds": 1,
+        }
+        record = {
+            "environment_id": env,
+            "project_id": project,
+            "status": "accepted",
+            "command": command,
+            "image": image,
+            "runtime_fingerprint": runtime_fingerprint,
+        }
+        command_filename = broker.jobs.filename(operation)
+        broker._save(command_filename, record)
+        monkeypatch.setattr(
+            broker.jobs,
+            "submit",
+            lambda *args, **kwargs: {"status": "accepted", "kind": "command"},
+        )
+        arguments = {
+            "environment_id": env,
+            "project_id": project,
+            "operation_id": operation,
+            "command": command,
+            "runtime_image": image,
+            "runtime_fingerprint": runtime_fingerprint,
+        }
+        assert broker.dispatch("command_start", arguments) == {
+            "status": "accepted",
+            "kind": "command",
+        }
+        with pytest.raises(ServiceError, match="invalid_input"):
+            broker.dispatch(
+                "command_start",
+                {
+                    key: value
+                    for key, value in arguments.items()
+                    if key not in {"runtime_image", "runtime_fingerprint"}
+                },
+            )
+    finally:
+        broker.close()
+
+
 def test_same_project_cannot_be_double_claimed(storage):
     env, project, lease = (str(uuid.uuid4()) for _ in range(3))
     storage.provision_environment(env, QuotaLimits().model_dump(mode="json"))

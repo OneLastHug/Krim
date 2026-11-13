@@ -19,7 +19,6 @@ from krim_agent.contracts import ServiceError
 from krim_agent.runtime.contracts import settled
 from krim_agent.sandbox.broker_client import MAX_MESSAGE
 from krim_agent.sandbox.filesystem import ProjectFiles
-from krim_agent.sandbox.runtime_profiles import ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.jobs import CommandJobs
 from krim_agent.sandbox.leases import ProjectLeases
 from krim_agent.sandbox.quota import QuotaLimits
@@ -27,6 +26,7 @@ from krim_agent.sandbox.quota_management import QuotaChanges
 from krim_agent.sandbox.quota_retirement import QuotaRetirement
 from krim_agent.sandbox.quota_retirement_adapter import BrokerRetirementPort
 from krim_agent.sandbox.recovery import Recovery
+from krim_agent.sandbox.runtime_profiles import ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.xfs import XfsAccounts, internal_id, private_directory
 
 
@@ -311,7 +311,14 @@ class StorageBroker:
             "claim": {"environment_id", "project_id", "lease_id", "deadline"},
             "release": {"environment_id", "project_id", "lease_id", "clean"},
             "file_start": {"environment_id", "project_id", "operation_id", "mutation", "kind"},
-            "command_start": {"environment_id", "project_id", "operation_id", "command"},
+            "command_start": {
+                "environment_id",
+                "project_id",
+                "operation_id",
+                "command",
+                "runtime_image",
+                "runtime_fingerprint",
+            },
             "command_reconcile": {"environment_id", "project_id", "operation_id"},
             "command_status": {"environment_id", "project_id", "operation_id", "renew", "cancel"},
         }
@@ -380,7 +387,7 @@ class StorageBroker:
                 )
             if action == "command_start":
                 operation_id = internal_id(values["operation_id"])
-                record = self._read(self.jobs.filename(operation_id))
+                command_record = self._read(self.jobs.filename(operation_id))
                 command = values["command"]
                 if set(values) != {
                     "environment_id", "project_id", "operation_id", "command",
@@ -388,13 +395,13 @@ class StorageBroker:
                 }:
                     raise ServiceError("invalid_input", 422)
                 if (
-                    record is None
-                    or record.get("environment_id") != environment_id
-                    or record.get("project_id") != project_id
-                    or record.get("status") not in {"accepted", "intent"}
-                    or record.get("command") != command
-                    or record.get("image") != values["runtime_image"]
-                    or record.get("runtime_fingerprint") != values["runtime_fingerprint"]
+                    command_record is None
+                    or command_record.get("environment_id") != environment_id
+                    or command_record.get("project_id") != project_id
+                    or command_record.get("status") not in {"accepted", "intent"}
+                    or command_record.get("command") != command
+                    or command_record.get("image") != values["runtime_image"]
+                    or command_record.get("runtime_fingerprint") != values["runtime_fingerprint"]
                 ):
                     raise ServiceError("target_binding_changed")
                 return self.jobs.submit(
