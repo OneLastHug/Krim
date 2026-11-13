@@ -13,22 +13,13 @@ MAX_TOOLS = 16
 
 
 class ToolRegistry:
-<<<<<<< HEAD
     def __init__(self, specs: tuple[ToolSpec, ...], *, max_tools: int = 16) -> None:
-        if (
-            type(max_tools) is not int
-            or not 16 <= max_tools <= 32
-            or len({item.name for item in specs}) != len(specs)
-            or len(specs) > max_tools
-        ):
-            raise ValueError("工具名称冲突或目录超限")
-=======
-    def __init__(self, specs: tuple[ToolSpec, ...]) -> None:
+        if type(max_tools) is not int or not 16 <= max_tools <= 32:
+            raise ValueError("工具目录容量无效")
         if len({item.name for item in specs}) != len(specs):
             raise ValueError("工具名称冲突")
-        if len(specs) > MAX_TOOLS:
+        if len(specs) > max_tools:
             raise ServiceError("tool_limit", 422)
->>>>>>> 44d24bf1b (MCP安全：固定HTTP出站并收紧配置边界)
         self._items = MappingProxyType({item.name: item for item in specs})
         self._frozen = tuple((item, item.fingerprint) for item in specs)
 
