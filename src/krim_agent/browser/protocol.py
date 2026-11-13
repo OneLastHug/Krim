@@ -65,7 +65,11 @@ class BrowserResult:
 def validate_png(data: bytes) -> None:
     """Accept a bounded PNG only after checking its chunks, CRCs and pixels."""
     signature = b"\x89PNG\r\n\x1a\n"
-    if type(data) is not bytes or not 33 <= len(data) <= 1_048_576 or not data.startswith(signature):
+    if (
+        type(data) is not bytes
+        or not 33 <= len(data) <= 1_048_576
+        or not data.startswith(signature)
+    ):
         raise ServiceError("browser_artifact_invalid", 422)
     offset = len(signature)
     width = height = 0
@@ -75,11 +79,11 @@ def validate_png(data: bytes) -> None:
         if offset + 12 > len(data):
             raise ServiceError("browser_artifact_invalid", 422)
         length = struct.unpack_from(">I", data, offset)[0]
-        kind = data[offset + 4:offset + 8]
+        kind = data[offset + 4 : offset + 8]
         end = offset + 12 + length
         if length > 1_048_576 or end > len(data):
             raise ServiceError("browser_artifact_invalid", 422)
-        chunk = data[offset + 8:offset + 8 + length]
+        chunk = data[offset + 8 : offset + 8 + length]
         expected_crc = struct.unpack_from(">I", data, offset + 8 + length)[0]
         if zlib.crc32(kind + chunk) & 0xFFFFFFFF != expected_crc:
             raise ServiceError("browser_artifact_invalid", 422)
@@ -91,10 +95,14 @@ def validate_png(data: bytes) -> None:
             )
             channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color)
             if (
-                color not in {2, 6} or depth != 8
+                color not in {2, 6}
+                or depth != 8
                 or channels is None
-                or compression != 0 or filtering != 0 or interlace != 0
-                or not 1 <= width <= 4096 or not 1 <= height <= 4096
+                or compression != 0
+                or filtering != 0
+                or interlace != 0
+                or not 1 <= width <= 4096
+                or not 1 <= height <= 4096
                 or width * height > 8_000_000
             ):
                 raise ServiceError("browser_artifact_invalid", 422)
@@ -187,27 +195,28 @@ def result_from_wire(expected: str, value: Mapping[str, object]) -> BrowserResul
     allowed = {
         "navigate": {"operation", "final_url", "title"},
         "snapshot": {"operation", "final_url", "title", "text", "truncated"},
-        "screenshot": {
-            "operation", "screenshot_png_base64", "final_url", "title"
-        },
+        "screenshot": {"operation", "screenshot_png_base64", "final_url", "title"},
         "close": {"operation"},
     }.get(expected)
     if allowed is None or set(value) - allowed or value.get("operation") != expected:
         raise ServiceError("browser_protocol", 502)
     if expected == "screenshot":
         png = decode_png(value.get("screenshot_png_base64"))
-        for key in ("final_url", "title"):
-            child = value.get(key)
+        final_url = value.get("final_url")
+        title = value.get("title")
+        for child in (final_url, title):
             if child is not None and not isinstance(child, str):
                 raise ServiceError("browser_protocol", 502)
         return BrowserResult(
             "screenshot",
-            final_url=value.get("final_url"),
-            title=value.get("title"),
+            final_url=final_url if isinstance(final_url, str) else None,
+            title=title if isinstance(title, str) else None,
             screenshot_png=png,
         )
-    for key in ("final_url", "title", "text"):
-        child = value.get(key)
+    final_url = value.get("final_url")
+    title = value.get("title")
+    text = value.get("text")
+    for child in (final_url, title, text):
         if child is not None and not isinstance(child, str):
             raise ServiceError("browser_protocol", 502)
     truncated = value.get("truncated", False)
@@ -215,9 +224,9 @@ def result_from_wire(expected: str, value: Mapping[str, object]) -> BrowserResul
         raise ServiceError("browser_protocol", 502)
     return BrowserResult(
         expected,  # type: ignore[arg-type]
-        final_url=value.get("final_url"),
-        title=value.get("title"),
-        text=value.get("text"),
+        final_url=final_url if isinstance(final_url, str) else None,
+        title=title if isinstance(title, str) else None,
+        text=text if isinstance(text, str) else None,
         truncated=truncated,
     )
 

@@ -16,8 +16,10 @@ from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.extension_models import EXTENSION_TABLES
+from krim_agent.storage.mcp_models import MCP_TABLES
 from krim_agent.storage.models import turns
-from krim_agent.storage.sandbox_models import sandbox_projects
+from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_turn_contracts
+from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
@@ -231,7 +233,12 @@ async def test_schema8_readonly_and_upgrade_add_only_bindings(tmp_path):
     with sqlite3.connect(database) as conn:
         conn.execute("DROP TABLE sandbox_quota_state")
         conn.execute("DROP TABLE sandbox_session_bindings")
-        for table in reversed(EXTENSION_TABLES):
+        for table in [
+            *reversed(SESSION_LIFECYCLE_TABLES),
+            *reversed(MCP_TABLES),
+            sandbox_turn_contracts,
+            *reversed(EXTENSION_TABLES),
+        ]:
             conn.execute(f'DROP TABLE "{table.name}"')
         conn.execute("PRAGMA user_version=8")
         before = conn.execute("SELECT * FROM sandbox_projects").fetchall()
@@ -353,18 +360,20 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         found = await client.get(route + "/search", params={"query": "answer", "limit": 3})
         assert found.status_code == 200 and found.json()["matches"][0]["path"] == "src/code.py"
         assert calls[-1][0] == "search" and calls[-1][1]["limit"] == 3
-        listed = await client.get(
-            route + "/find", params={"include_glob": "**/*.py", "limit": 10}
-        )
+        listed = await client.get(route + "/find", params={"include_glob": "**/*.py", "limit": 10})
         assert listed.status_code == 200 and calls[-1][0] == "find"
-        protected_glob = await client.get(
-            route + "/find", params={"include_glob": "**/.git*"}
-        )
+        protected_glob = await client.get(route + "/find", params={"include_glob": "**/.git*"})
         assert protected_glob.status_code == 403
         found_page = await client.get(
             route + "/search",
-            params={"query": "answer", "mode": "regex", "include_glob": "**/*.py",
-                    "offset": 4, "before": 1, "after": 2},
+            params={
+                "query": "answer",
+                "mode": "regex",
+                "include_glob": "**/*.py",
+                "offset": 4,
+                "before": 1,
+                "after": 2,
+            },
         )
         assert found_page.status_code == 200
         assert calls[-1][1]["offset"] == 4 and calls[-1][1]["before"] == 1
@@ -380,9 +389,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert "regex_limit_bytes" not in literal.json()
         lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
         assert lookup.status_code == 422
-        over_limit_page = await client.get(
-            route + "/search", params={"offset": 4050, "query": "x"}
-        )
+        over_limit_page = await client.get(route + "/search", params={"offset": 4050, "query": "x"})
         assert over_limit_page.status_code == 422
         search_last_page = await client.get(
             route + "/search", params={"offset": 4095, "limit": 1, "query": "answer"}
@@ -404,9 +411,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         ).status_code == 422
         assert (await client.get(route + "/files", params={"offset": -1})).status_code == 422
         assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
-        invalid_export = await client.get(
-            route + "/export-file", params={"path": "../secret"}
-        )
+        invalid_export = await client.get(route + "/export-file", params={"path": "../secret"})
         assert invalid_export.status_code == 422
         downloaded = await client.get(route + "/export-file", params={"path": "note.txt"})
         assert downloaded.status_code == 200 and downloaded.content == b"hello"
@@ -420,16 +425,18 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert downloaded.headers["x-content-type-options"] == "nosniff"
         digest = await client.get(route + "/file-digest", params={"path": "note.txt"})
         assert digest.status_code == 200 and digest.json()["sha256"].startswith("2cf24dba")
-        invalid_glob = await client.get(
-            route + "/find", params={"include_glob": "../*"}
-        )
+        invalid_glob = await client.get(route + "/find", params={"include_glob": "../*"})
         assert invalid_glob.status_code == 422
         plain_glob = await client.get(route + "/find", params={"include_glob": "src"})
         assert plain_glob.status_code == 422
         preview = await app.sandbox.preview_replace(
-            actor, project["project_id"], path="note.txt", expected_generation=0,
+            actor,
+            project["project_id"],
+            path="note.txt",
+            expected_generation=0,
             expected_sha256="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            find="ell", replacement="世界",
+            find="ell",
+            replacement="世界",
         )
         assert preview["patch"]["offset"] == 1
         assert preview["patch"]["delete_length"] == 3
@@ -437,9 +444,14 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert preview["preview_only"] is True
         assert "-hello" in preview["diff"] and "+h世界o" in preview["diff"]
         unicode_preview = await app.sandbox.preview_replace(
-            actor, project["project_id"], path="note.txt", expected_generation=0,
+            actor,
+            project["project_id"],
+            path="note.txt",
+            expected_generation=0,
             expected_sha256="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            find="ell", replacement="x", occurrence=1,
+            find="ell",
+            replacement="x",
+            occurrence=1,
         )
         assert unicode_preview["patch"]["offset"] == 1
 
@@ -459,7 +471,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
                     return await super().call(action, **arguments)
                 self.read_calls.append(arguments)
                 offset = arguments["offset"]
-                block = large_source[offset:offset + arguments["limit"]]
+                block = large_source[offset : offset + arguments["limit"]]
                 return {
                     "path": arguments["path"],
                     "offset": offset,
@@ -480,8 +492,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert "expected_sha256" not in chunk_broker.read_calls[0]
         assert "expected_stat" not in chunk_broker.read_calls[0]
         assert all(
-            call["expected_sha256"] == large_digest
-            and call["expected_stat"] == stat_token
+            call["expected_sha256"] == large_digest and call["expected_stat"] == stat_token
             for call in chunk_broker.read_calls[1:]
         )
 
@@ -540,7 +551,6 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert large_preview["diff_truncated"] is False
         assert len(chunk_broker.read_calls) > 1
         assert all(
-            call["expected_sha256"] == large_digest
-            and call["expected_stat"] == stat_token
+            call["expected_sha256"] == large_digest and call["expected_stat"] == stat_token
             for call in chunk_broker.read_calls[1:]
         )

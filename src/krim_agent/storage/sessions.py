@@ -11,6 +11,7 @@ from pydantic import JsonValue
 from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.config import Settings
 from krim_agent.context import builder
 from krim_agent.context.types import (
@@ -21,7 +22,6 @@ from krim_agent.context.types import (
     WorkspaceSessionContext,
 )
 from krim_agent.contracts import Message, RunRequest, RunView, ServiceError, encoded, fingerprint
-from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.extensions import ExtensionService, extension_messages, load_turn_extensions
 from krim_agent.runtime.contracts import RunSnapshot, settled
 from krim_agent.security import PrincipalContext
@@ -29,8 +29,8 @@ from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, T
 from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
 from . import work as work_sql
-from .models import runs, session_controls, sessions, turns, work_turns
 from .mcp_models import turn_mcp
+from .models import runs, session_controls, sessions, turns, work_turns
 from .sandbox_models import sandbox_turn_contracts
 
 if TYPE_CHECKING:
@@ -71,10 +71,14 @@ async def session_lifecycle_row(conn: AsyncConnection, session_id: str) -> Any |
     from .session_lifecycle_models import session_lifecycle
 
     return (
-        await conn.execute(
-            select(session_lifecycle).where(session_lifecycle.c.session_id == session_id)
+        (
+            await conn.execute(
+                select(session_lifecycle).where(session_lifecycle.c.session_id == session_id)
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
 
 
 async def turn_row(conn: AsyncConnection, turn_id: str) -> Any:
@@ -180,23 +184,31 @@ async def list_sessions(
             if not admin:
                 query = query.where(sessions.c.owner_id == owner)
             rows = (
-                await conn.execute(
-                    query.order_by(sessions.c.created_at.desc(), sessions.c.id)
-                    .offset(offset)
-                    .limit(limit)
+                (
+                    await conn.execute(
+                        query.order_by(sessions.c.created_at.desc(), sessions.c.id)
+                        .offset(offset)
+                        .limit(limit)
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             return [session_view(row) for row in rows]
 
         lifecycle_join = sessions.outerjoin(
             session_lifecycle, session_lifecycle.c.session_id == sessions.c.id
         )
-        query = select(
-            sessions,
-            session_lifecycle.c.archived_at.label("lifecycle_archived_at"),
-            session_lifecycle.c.deleted_at.label("lifecycle_deleted_at"),
-            session_lifecycle.c.revision.label("lifecycle_revision"),
-        ).select_from(lifecycle_join).where(sessions.c.workspace_id == workspace)
+        query = (
+            select(
+                sessions,
+                session_lifecycle.c.archived_at.label("lifecycle_archived_at"),
+                session_lifecycle.c.deleted_at.label("lifecycle_deleted_at"),
+                session_lifecycle.c.revision.label("lifecycle_revision"),
+            )
+            .select_from(lifecycle_join)
+            .where(sessions.c.workspace_id == workspace)
+        )
         if not admin:
             query = query.where(sessions.c.owner_id == owner)
         if view == "active":
@@ -212,12 +224,16 @@ async def list_sessions(
         else:
             query = query.where(session_lifecycle.c.deleted_at.is_not(None))
         rows = (
-            await conn.execute(
-                query.order_by(sessions.c.created_at.desc(), sessions.c.id)
-                .offset(offset)
-                .limit(limit)
+            (
+                await conn.execute(
+                    query.order_by(sessions.c.created_at.desc(), sessions.c.id)
+                    .offset(offset)
+                    .limit(limit)
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         results = []
         for row in rows:
             value = session_view(row)
@@ -488,10 +504,7 @@ async def submit(
                 raise ServiceError("workspace_contract_required")
             await work_sql.row(conn, session_id, access, write=True)
         elif isinstance(body, TurnRequest) and body.completion is not None:
-            if (
-                session["target_key"] != "target-http"
-                or session["target"].get("sandbox") is None
-            ):
+            if session["target_key"] != "target-http" or session["target"].get("sandbox") is None:
                 raise ServiceError("workspace_contract_required")
         rows = (
             (
@@ -552,20 +565,19 @@ async def submit(
             finished_at=None,
         )
         if isinstance(body, TurnRequest) and body.completion is not None:
-            if (
-                session["target_key"] != "target-http"
-                or session["target"].get("sandbox") is None
-            ):
+            if session["target_key"] != "target-http" or session["target"].get("sandbox") is None:
                 raise ServiceError("workspace_contract_required")
         await conn.execute(insert(turns).values(**row))
         if isinstance(body, TurnRequest) and body.completion is not None:
             completion = body.completion.model_dump(mode="json")
-            await conn.execute(insert(sandbox_turn_contracts).values(
-                turn_id=row["id"],
-                completion=completion,
-                fingerprint=fingerprint(completion),
-                created_at=time.time(),
-            ))
+            await conn.execute(
+                insert(sandbox_turn_contracts).values(
+                    turn_id=row["id"],
+                    completion=completion,
+                    fingerprint=fingerprint(completion),
+                    created_at=time.time(),
+                )
+            )
         if actor is not None and extension_service is not None:
             await extension_service.freeze(
                 conn, session, row["id"], row["text"], actor, turn_admitted=True
@@ -750,12 +762,16 @@ async def begin_run(
         if account_mcp is not None and account_mcp["snapshot"]["connections"]:
             context_descriptor["account_mcp"] = account_mcp["fingerprint"]
         contract = (
-            await conn.execute(
-                select(sandbox_turn_contracts).where(
-                    sandbox_turn_contracts.c.turn_id == turn_id
+            (
+                await conn.execute(
+                    select(sandbox_turn_contracts).where(
+                        sandbox_turn_contracts.c.turn_id == turn_id
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if contract is not None and session["target_key"] == "target-http":
             if fingerprint(contract["completion"]) != contract["fingerprint"]:
                 raise ServiceError("facts_corrupt")
@@ -790,7 +806,11 @@ async def begin_run(
 
 
 async def load_turn_mcp(conn: AsyncConnection, turn_id: str) -> dict[str, Any] | None:
-    found = (await conn.execute(select(turn_mcp).where(turn_mcp.c.turn_id == turn_id))).mappings().first()
+    found = (
+        (await conn.execute(select(turn_mcp).where(turn_mcp.c.turn_id == turn_id)))
+        .mappings()
+        .first()
+    )
     if found is None:
         return None
     snapshot = cast(dict[str, Any], found["snapshot"])
@@ -867,11 +887,7 @@ async def source(
         elif isinstance(target_context, dict) and "extensions" in target_context:
             expected["extensions"] = fingerprint(context.extensions)
         mcp = await load_turn_mcp(conn, row["id"]) if version >= 12 else None
-        if (
-            mcp is not None
-            and mcp["snapshot"]["connections"]
-            and isinstance(target_context, dict)
-        ):
+        if mcp is not None and mcp["snapshot"]["connections"] and isinstance(target_context, dict):
             expected["account_mcp"] = mcp["fingerprint"]
         elif isinstance(target_context, dict) and "account_mcp" in target_context:
             raise ValueError("账号MCP快照缺失")
@@ -881,12 +897,16 @@ async def source(
             if target_context.get("sandbox_completion_fingerprint"):
                 store_version = target_context
                 contract = (
-                    await conn.execute(
-                        select(sandbox_turn_contracts).where(
-                            sandbox_turn_contracts.c.turn_id == row["id"]
+                    (
+                        await conn.execute(
+                            select(sandbox_turn_contracts).where(
+                                sandbox_turn_contracts.c.turn_id == row["id"]
+                            )
                         )
                     )
-                ).mappings().first()
+                    .mappings()
+                    .first()
+                )
                 if (
                     contract is None
                     or contract["fingerprint"] != store_version["sandbox_completion_fingerprint"]

@@ -169,6 +169,118 @@ async def test_lifecycle_rejects_open_sessions_and_enforces_revision_idempotency
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_request_key_conflicts_across_sessions_and_authorizes(tmp_path):
+    database = tmp_path / "lifecycle-cross-key.sqlite"
+    async with await open_application(database) as host:
+        store, service = host.store, host.sessions
+        assert service is not None
+        from krim_agent.storage.session_lifecycle import apply, request_by_key
+
+        async def closed(key: str) -> str:
+            session = await service.create(LOCAL, "local", SessionCreate(request_key=key))
+            await service.control(
+                LOCAL,
+                "local",
+                session.id,
+                "close",
+                ControlRequest(request_key=key + "-close", expected_revision=0),
+            )
+            return session.id
+
+        first = await closed("cross-a")
+        second = await closed("cross-b")
+        archived = await apply(
+            store,
+            principal_id=LOCAL.principal_id,
+            workspace="local",
+            session_id=first,
+            request_key="shared-key",
+            expected_revision=0,
+            action="archive",
+        )
+        # 同一主体把请求键复用到另一会话：键冲突 409，而不是主键冲突包装成的 503。
+        with pytest.raises(ServiceError, match="key_conflict"):
+            await apply(
+                store,
+                principal_id=LOCAL.principal_id,
+                workspace="local",
+                session_id=second,
+                request_key="shared-key",
+                expected_revision=0,
+                action="archive",
+            )
+        assert store.healthy
+        with pytest.raises(ServiceError, match="not_found"):
+            await request_by_key(store, LOCAL.principal_id, "local", second, "shared-key")
+        second_view = await apply(
+            store,
+            principal_id=LOCAL.principal_id,
+            workspace="local",
+            session_id=second,
+            request_key="cross-b-archive",
+            expected_revision=0,
+            action="archive",
+        )
+        assert second_view.archived_at is not None
+        replay = await apply(
+            store,
+            principal_id=LOCAL.principal_id,
+            workspace="local",
+            session_id=first,
+            request_key="shared-key",
+            expected_revision=0,
+            action="archive",
+        )
+        assert replay == archived
+        # 非归属主体先得 404；归属/工作区核对先于幂等键查找。
+        with pytest.raises(ServiceError, match="not_found"):
+            await apply(
+                store,
+                principal_id="someone-else",
+                workspace="local",
+                session_id=first,
+                request_key="shared-key",
+                expected_revision=0,
+                action="archive",
+            )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_requires_schema_14_and_stays_readonly_below(tmp_path):
+    database = tmp_path / "lifecycle-schema13-gate.sqlite"
+    async with await open_application(database) as host:
+        session = await host.sessions.create(
+            LOCAL, "local", SessionCreate(request_key="lifecycle-schema13-gate")
+        )
+        await host.close()
+    with sqlite3.connect(database) as connection:
+        for table in reversed(SESSION_LIFECYCLE_TABLES):
+            connection.execute(f'DROP TABLE "{table.name}"')
+        connection.execute("PRAGMA user_version=13")
+    unchanged = database.read_bytes()
+    reader = await SQLiteStore.open(database, readonly=True)
+    try:
+        assert reader.schema_version == 13
+        from krim_agent.storage.session_lifecycle import apply, request_by_key
+
+        with pytest.raises(ServiceError, match="schema_upgrade_required"):
+            await request_by_key(reader, LOCAL.principal_id, "local", session.id, "any-key")
+        with pytest.raises(ServiceError, match="schema_upgrade_required"):
+            await apply(
+                reader,
+                principal_id=LOCAL.principal_id,
+                workspace="local",
+                session_id=session.id,
+                request_key="any-key",
+                expected_revision=0,
+                action="archive",
+            )
+    finally:
+        await reader.close()
+    assert database.read_bytes() == unchanged
+
+
+@pytest.mark.asyncio
 async def test_session_lifecycle_api_lists_and_restores_trash(tmp_path):
     database = tmp_path / "lifecycle-api.sqlite"
     token = await initialize(database)
@@ -190,6 +302,12 @@ async def test_session_lifecycle_api_lists_and_restores_trash(tmp_path):
         )
         assert trash.status_code == 200, trash.text
         assert trash.json()["deleted_at"] is not None
+        # 请求台账恢复：按键取回已提交请求的原始结果；未提交键404可安全重试。
+        replayed = await client.get(f"{path}/{session.id}/lifecycle/by-key/api-trash")
+        assert replayed.status_code == 200, replayed.text
+        assert replayed.json()["id"] == session.id and replayed.json()["deleted_at"] is not None
+        missing = await client.get(f"{path}/{session.id}/lifecycle/by-key/api-absent")
+        assert missing.status_code == 404, missing.text
         assert (await client.get(path)).json() == []
         contents = await client.get(path + "/lifecycle/trash")
         assert contents.status_code == 200, contents.text
@@ -202,6 +320,9 @@ async def test_session_lifecycle_api_lists_and_restores_trash(tmp_path):
         assert restore.json()["deleted_at"] is None
         assert (await client.get(path)).json()[0]["id"] == session.id
         assert (await client.get(path + "/lifecycle/trash")).json() == []
+        # 台账不可变：状态推进后按键仍取回当时请求的原始结果。
+        stale = await client.get(f"{path}/{session.id}/lifecycle/by-key/api-trash")
+        assert stale.status_code == 200 and stale.json()["deleted_at"] is not None
 
 
 @pytest.mark.asyncio

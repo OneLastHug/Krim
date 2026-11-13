@@ -66,9 +66,7 @@ def mount_account_mcp(app: FastAPI) -> None:
     base = "/v2/workspaces/{workspace_id}/sessions/{session_id}/mcp"
 
     @router.get(base)
-    async def read_selection(
-        workspace_id: str, session_id: str, request: Request
-    ) -> JSONResponse:
+    async def read_selection(workspace_id: str, session_id: str, request: Request) -> JSONResponse:
         service = _service(request)
         actor = principal(request)
         service.actor(actor)

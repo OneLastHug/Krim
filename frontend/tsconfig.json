@@ -42,6 +42,7 @@
     "contracts/eval-ui.test.tsx",
     "contracts/session-ui.test.tsx",
     "contracts/session-adapter-ui.test.tsx",
+    "contracts/session-lifecycle-ui.test.tsx",
     "contracts/session-presentation.test.ts",
     "contracts/message-ui.test.tsx",
     "contracts/agent-workspace-ui.test.tsx",

@@ -11,8 +11,8 @@ from krim_agent.account_mcp.service import (
     ConnectionCreate,
     ConnectionDelete,
     ConnectionUpdate,
-    SessionMCPSelection,
     SessionConnection,
+    SessionMCPSelection,
 )
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import Settings
@@ -39,7 +39,9 @@ async def managed(path):
 
 
 async def create_owner(identities: IdentityService, admin: PrincipalContext, name: str):
-    account = await identities.create_account(admin, {"display_name": name}, request_key="account-" + name)
+    account = await identities.create_account(
+        admin, {"display_name": name}, request_key="account-" + name
+    )
     issued = await identities.issue_key(
         admin, account.account.principal_id, {}, request_key="key-" + name
     )
@@ -167,7 +169,7 @@ async def test_session_selection_is_owner_only_and_turn_snapshot_is_immutable(tm
         turn = await session_sql.submit(
             store,
             session.id,
-            TurnRequest(request_key="turn", text="find docs", expected_revision=1),
+            TurnRequest(request_key="turn", text="find docs", expected_revision=0),
             Settings(),
             actor=actor,
             account_mcp_service=service,
@@ -196,15 +198,25 @@ async def test_session_selection_is_owner_only_and_turn_snapshot_is_immutable(tm
         assert frozen[0].headers["Authorization"].get_secret_value() == "secret-marker"
 
         async with store.lock, store.engine.begin() as conn:
-            persisted = (await conn.execute(
-                select(turn_mcp).where(turn_mcp.c.turn_id == turn.id)
-            )).mappings().one()
+            persisted = (
+                (await conn.execute(select(turn_mcp).where(turn_mcp.c.turn_id == turn.id)))
+                .mappings()
+                .one()
+            )
             assert persisted["fingerprint"]
             assert "secret-marker" not in str(persisted["snapshot"])
-            row = (await conn.execute(
-                select(mcp_connections).where(mcp_connections.c.id == created["id"])
-            )).mappings().one()
+            row = (
+                (
+                    await conn.execute(
+                        select(mcp_connections).where(mcp_connections.c.id == created["id"])
+                    )
+                )
+                .mappings()
+                .one()
+            )
             assert "secret-marker" not in str(row["credential_envelope"])
-            assert (await conn.execute(
-                select(session_mcp).where(session_mcp.c.session_id == session.id)
-            )).mappings().one()["revision"] == 1
+            assert (
+                await conn.execute(
+                    select(session_mcp).where(session_mcp.c.session_id == session.id)
+                )
+            ).mappings().one()["revision"] == 1

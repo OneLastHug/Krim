@@ -37,12 +37,30 @@ for version, additions in (
     (6, {"park_checkpoints"}),
     (
         7,
-        {"accounts", "access_keys", "account_workspaces", "workspace_profiles", "account_events", "account_meta"},
+        {
+            "accounts",
+            "access_keys",
+            "account_workspaces",
+            "workspace_profiles",
+            "account_events",
+            "account_meta",
+        },
     ),
     (8, {"sandbox_environments", "sandbox_projects", "sandbox_operations"}),
     (9, {"sandbox_session_bindings"}),
     (10, {"sandbox_quota_state"}),
-    (11, {"skills", "skill_versions", "memories", "memory_preferences", "session_extensions", "turn_extensions", "extension_requests"}),
+    (
+        11,
+        {
+            "skills",
+            "skill_versions",
+            "memories",
+            "memory_preferences",
+            "session_extensions",
+            "turn_extensions",
+            "extension_requests",
+        },
+    ),
     (12, MCP_V12_TABLE_NAMES),
     (13, {"sandbox_turn_contracts"}),
     (14, {"session_lifecycle", "session_lifecycle_requests"}),
@@ -53,7 +71,9 @@ for version, additions in (
 def downgrade_to_version(path, version):
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=OFF")
-        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        names = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         for name in sorted(names - HISTORICAL_TABLES[version]):
             conn.execute(f'DROP TABLE "{name}"')
         conn.execute(f"PRAGMA user_version={version}")
@@ -132,7 +152,9 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
         for name in expected:
             assert rows(database, name) == before_rows[name]
         with sqlite3.connect(database) as conn:
-            after_schema = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+            after_schema = dict(
+                conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")
+            )
         assert {name: after_schema[name] for name in expected} == before_schema
     finally:
         await writer.close()
@@ -146,7 +168,15 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version,table", [(11, "skills"), (12, "mcp_connections"), (13, "sandbox_turn_contracts"), (14, "session_lifecycle")])
+@pytest.mark.parametrize(
+    "version,table",
+    [
+        (11, "skills"),
+        (12, "mcp_connections"),
+        (13, "sandbox_turn_contracts"),
+        (14, "session_lifecycle"),
+    ],
+)
 @pytest.mark.parametrize("damage", ["missing", "extra"])
 async def test_invalid_historical_table_set_is_rejected(tmp_path, version, table, damage):
     database = tmp_path / f"invalid-v{version}-{damage}.sqlite"

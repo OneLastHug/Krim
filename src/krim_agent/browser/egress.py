@@ -15,10 +15,8 @@ from urllib.parse import urlsplit
 from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.network.egress_policy import EgressPolicy, EgressViolation
 
-
 _REJECT_IPV6_LITERALS = tuple(
-    ipaddress.ip_network(value)
-    for value in ("::ffff:0:0/96", "64:ff9b::/96", "2002::/16")
+    ipaddress.ip_network(value) for value in ("::ffff:0:0/96", "64:ff9b::/96", "2002::/16")
 )
 
 
@@ -39,9 +37,9 @@ class BrowserEgressPolicy:
             self._address_policy = EgressPolicy(self._hosts, self._ports)
         except EgressViolation:
             raise ValueError("browser origin allowlist invalid") from None
-        self._digest = fingerprint({"version": "browser-egress/1", "origins": list(
-            self.allowed_origins
-        )})
+        self._digest = fingerprint(
+            {"version": "browser-egress/1", "origins": list(self.allowed_origins)}
+        )
 
     @staticmethod
     def _host(value: str) -> str:
@@ -66,12 +64,11 @@ class BrowserEgressPolicy:
                 or len(host) > 253
                 or re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", labels[-1]) is not None
                 or len(labels) < 2
-                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", x)
-                       for x in labels)
+                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", x) for x in labels)
                 or host == "localhost"
                 or host.endswith((".localhost", ".local", ".internal", ".test"))
             ):
-                raise ValueError("browser origin host invalid")
+                raise ValueError("browser origin host invalid") from None
             return host
         if any(address in network for network in _REJECT_IPV6_LITERALS):
             raise ValueError("browser origin address must be globally routable")
