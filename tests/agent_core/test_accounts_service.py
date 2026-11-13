@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from krim_agent.accounts import IdentityService
 from krim_agent.contracts import RunRequest, ServiceError
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
+from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import SANDBOX_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
@@ -33,6 +34,8 @@ def raw(path, names):
 def drop_accounts(path):
     conn = sqlite3.connect(path)
     try:
+        for table in reversed(EXTENSION_TABLES):
+            conn.execute('DROP TABLE "' + table.name + '"')
         for table in reversed(SANDBOX_TABLES):
             conn.execute('DROP TABLE "' + table.name + '"')
         for name in ACCOUNT_TABLES:
