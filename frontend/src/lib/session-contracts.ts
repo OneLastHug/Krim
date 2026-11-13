@@ -1,7 +1,7 @@
 import { object } from "../api.ts";
 
 export interface Actor { principal_id: string; generation: number; legacy: boolean; target_keys?: string[]; workspaces: { workspace_id: string; role: string; approve: boolean }[] }
-export interface Session { id: string; workspace_id: string; owner_id: string; create_key: string; title: string; target_key: string; target_fingerprint: string; context_policy: { max_bytes: number; max_messages: number; reserved_output_tokens: number; counter_version: string }; revision: number; status: "open" | "closed"; dispatch_paused: boolean; created_at: number; closed_at: number | null }
+export interface Session { id: string; workspace_id: string; owner_id: string; create_key: string; title: string; target_key: string; target_fingerprint: string; context_policy: { max_bytes: number; max_messages: number; reserved_output_tokens: number; counter_version: string }; revision: number; status: "open" | "closed"; dispatch_paused: boolean; created_at: number; closed_at: number | null; archived_at: number | null; deleted_at: number | null; lifecycle_revision: number }
 export interface HistoryMessage { role: string; content: string; call_id: string | null; tool_calls: Record<string, unknown>[] }
 export interface Turn { id: string; session_id: string; workspace_id: string; owner_id: string; ordinal: number; request_key: string; text: string; accepted_revision: number; status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted"; run_id: string | null; context_fingerprint: string | null; transcript: HistoryMessage[] | null; code: string | null; created_at: number; started_at: number | null; finished_at: number | null }
 const integer = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
@@ -18,11 +18,16 @@ export function parseActor(raw: unknown): Actor {
 }
 export function parseSession(raw: unknown): Session {
   const value = object(raw);
-  exact(value, ["id", "workspace_id", "owner_id", "create_key", "title", "target_key", "target_fingerprint", "context_policy", "revision", "status", "dispatch_paused", "created_at", "closed_at"]);
-  for (const key of ["id", "workspace_id", "owner_id", "create_key", "title", "target_key"]) if (!text(value[key])) throw new Error("对话身份无效");
-  const policy = object(value.context_policy); exact(policy, ["max_bytes", "max_messages", "reserved_output_tokens", "counter_version"]);
-  if (!integer(policy.max_bytes) || !integer(policy.max_messages) || !integer(policy.reserved_output_tokens) || policy.counter_version !== "approx-utf8/1" || !integer(value.revision) || !["open", "closed"].includes(String(value.status)) || typeof value.dispatch_paused !== "boolean" || !time(value.created_at) || value.created_at === null || !time(value.closed_at) || !/^[a-f0-9]{64}$/.test(String(value.target_fingerprint))) throw new Error("对话响应无效");
-  return value as unknown as Session;
+  const fields = ["id", "workspace_id", "owner_id", "create_key", "title", "target_key", "target_fingerprint", "context_policy", "revision", "status", "dispatch_paused", "created_at", "closed_at"];
+  const lifecycle = ["archived_at", "deleted_at", "lifecycle_revision"];
+  if (Object.keys(value).some(key => !fields.includes(key) && !lifecycle.includes(key)) || fields.some(key => !(key in value))) throw new Error("响应结构无效");
+  const hasLifecycle = lifecycle.some(key => key in value);
+  if (hasLifecycle && lifecycle.some(key => !(key in value))) throw new Error("响应结构无效");
+  const normalized = hasLifecycle ? value : { ...value, archived_at: null, deleted_at: null, lifecycle_revision: 0 };
+  for (const key of ["id", "workspace_id", "owner_id", "create_key", "title", "target_key"]) if (!text(normalized[key])) throw new Error("对话身份无效");
+  const policy = object(normalized.context_policy); exact(policy, ["max_bytes", "max_messages", "reserved_output_tokens", "counter_version"]);
+  if (!integer(policy.max_bytes) || !integer(policy.max_messages) || !integer(policy.reserved_output_tokens) || policy.counter_version !== "approx-utf8/1" || !integer(normalized.revision) || !["open", "closed"].includes(String(normalized.status)) || typeof normalized.dispatch_paused !== "boolean" || !time(normalized.created_at) || normalized.created_at === null || !time(normalized.closed_at) || !time(normalized.archived_at) || !time(normalized.deleted_at) || !integer(normalized.lifecycle_revision) || (!!normalized.deleted_at && normalized.status !== "closed") || (!!normalized.deleted_at && !!normalized.archived_at) || !/^[a-f0-9]{64}$/.test(String(normalized.target_fingerprint))) throw new Error("对话响应无效");
+  return normalized as unknown as Session;
 }
 export function parseTurn(raw: unknown): Turn {
   const value = object(raw); exact(value, ["id", "session_id", "workspace_id", "owner_id", "ordinal", "request_key", "text", "accepted_revision", "status", "run_id", "context_fingerprint", "transcript", "code", "created_at", "started_at", "finished_at"]);

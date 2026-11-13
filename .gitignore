@@ -1,6 +1,7 @@
 .venv/
 .tools/
 .cache/
+.vite/
 .data/
 __pycache__/
 *.py[cod]
