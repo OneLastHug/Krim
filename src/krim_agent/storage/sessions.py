@@ -21,7 +21,9 @@ from krim_agent.context.types import (
     WorkspaceSessionContext,
 )
 from krim_agent.contracts import Message, RunRequest, RunView, ServiceError, encoded, fingerprint
+from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.extensions import ExtensionService, extension_messages, load_turn_extensions
+from krim_agent.storage.mcp_models import turn_mcp
 from krim_agent.runtime.contracts import RunSnapshot, settled
 from krim_agent.security import PrincipalContext
 from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, TurnRequest, TurnView
@@ -51,7 +53,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -361,6 +363,7 @@ async def submit(
     access: ExecutionAccess | None = None,
     actor: PrincipalContext | None = None,
     extension_service: ExtensionService | None = None,
+    account_mcp_service: AccountMCPService | None = None,
 ) -> TurnView:
     require(store)
     if isinstance(body, WorkspaceTurnRequest):
@@ -401,6 +404,8 @@ async def submit(
             raise ServiceError("workspace_contract_required")
         if session["status"] != "open" or await closing(conn, session_id):
             raise ServiceError("session_closed")
+        if actor is not None and account_mcp_service is not None:
+            account_mcp_service.actor(actor)
         if session["revision"] != body.expected_revision:
             raise ServiceError("revision_conflict")
         if (
@@ -437,6 +442,8 @@ async def submit(
             await extension_service.freeze(
                 conn, session, row["id"], row["text"], actor, turn_admitted=True
             )
+        if actor is not None and account_mcp_service is not None:
+            await account_mcp_service.freeze(conn, session, row["id"], actor)
         if session["target_key"] == "target-workspace":
             assert isinstance(body, WorkspaceTurnRequest) and access is not None
             await work_sql.enqueue(conn, row, body, access)
@@ -594,6 +601,7 @@ async def begin_run(
             else {"version": "extensions/2", "revision": 0, "items": []}
         )
         extension_snapshot = cast(dict[str, JsonValue], ext)
+        account_mcp = await load_turn_mcp(conn, turn["id"]) if store.schema_version >= 12 else None
         context = builder.prepare(
             settings.system_prompt,
             history,
@@ -611,6 +619,8 @@ async def begin_run(
             "builder": context.builder_fingerprint,
         }
         context_descriptor["extensions"] = fingerprint(extension_snapshot)
+        if account_mcp is not None and account_mcp["snapshot"]["connections"]:
+            context_descriptor["account_mcp"] = account_mcp["fingerprint"]
         effective = target | {"context": context_descriptor}
         digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
         run = await store._insert_run(conn, request, effective, run_id, digest)
@@ -640,6 +650,17 @@ async def begin_run(
     return await store._eval_write(operation, confirm)
 
 
+async def load_turn_mcp(conn: AsyncConnection, turn_id: str) -> dict[str, Any] | None:
+    row = (await conn.execute(select(turn_mcp).where(turn_mcp.c.turn_id == turn_id)))
+    found = row.mappings().first()
+    if found is None:
+        return None
+    snapshot = cast(dict[str, Any], found["snapshot"])
+    if fingerprint(snapshot) != found["fingerprint"]:
+        raise ServiceError("facts_corrupt")
+    return {"snapshot": snapshot, "fingerprint": found["fingerprint"]}
+
+
 async def source(
     conn: AsyncConnection,
     run_id: str,
@@ -647,7 +668,7 @@ async def source(
     version: int,
     target: dict[str, JsonValue],
 ) -> SessionContext | WorkspaceSessionContext | None:
-    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
@@ -707,6 +728,17 @@ async def source(
             expected["extensions"] = fingerprint(context.extensions)
         elif isinstance(target_context, dict) and "extensions" in target_context:
             expected["extensions"] = fingerprint(context.extensions)
+        mcp = await load_turn_mcp(conn, row["id"]) if version >= 12 else None
+        if (
+            mcp is not None
+            and mcp["snapshot"]["connections"]
+            and isinstance(target_context, dict)
+        ):
+            expected["account_mcp"] = mcp["fingerprint"]
+        elif isinstance(target_context, dict) and "account_mcp" in target_context:
+            raise ValueError("账号MCP快照缺失")
+        elif mcp is not None and mcp["snapshot"]["connections"]:
+            raise ValueError("账号MCP上下文标记缺失")
         if fingerprint(target.get("context")) != fingerprint(expected):
             raise ValueError("内部上下文身份损坏")
         return SessionContext(
