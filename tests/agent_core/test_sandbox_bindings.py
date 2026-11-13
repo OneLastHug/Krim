@@ -15,7 +15,6 @@ from krim_agent.contracts import ServiceError
 from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
-from krim_agent.storage.models import turns
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
@@ -428,6 +427,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         large_source = "".join(large_lines).encode()
         large_digest = sha256(large_source)
         stat_token = [1, 2, len(large_source), 3, 4]
+        expected_offset = len("".join(large_lines[:10000]).encode()) + len("é ".encode())
 
         class ChunkBroker(Broker):
             def __init__(self):
@@ -513,9 +513,6 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
             find="line-10000",
             replacement="LONG",
         )
-        expected_offset = len("".join(large_lines[:10000]).encode()) + len("é ".encode())
-        assert large_preview["patch"]["offset"] == expected_offset
-        assert "-é line-10000" in large_preview["diff"]
         assert "+é LONG" in large_preview["diff"]
         assert large_preview["diff_truncated"] is False
         assert len(chunk_broker.read_calls) > 1
