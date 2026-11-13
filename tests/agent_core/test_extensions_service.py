@@ -29,6 +29,7 @@ from krim_agent.security import Membership, PrincipalContext
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.extension_models import memories, skill_versions, turn_extensions
+from krim_agent.storage.models import sessions
 from krim_agent.storage.sqlite import SQLiteStore
 
 DOCUMENT = """---
@@ -126,6 +127,14 @@ async def test_identity_isolation_and_owner_only_mutations(tmp_path):
         assert [item["id"] for item in owner_catalog[1:]] == [imported["id"]]
         assert owner_catalog[1]["source"] == "private"
         assert [item["id"] for item in await service.catalog(other)] == [BUILTIN_ID]
+        personal = await personal_workspace(identities, owner)
+        owner_session = await new_session(store, owner, personal, "owner-session")
+        await service.session_config(
+            owner,
+            personal,
+            owner_session.id,
+            SessionExtensions(request_key="owner-config", expected_revision=0),
+        )
         with pytest.raises(ServiceError, match="not_found"):
             await service.skill(other, imported["id"])
         with pytest.raises(ServiceError, match="not_found"):
@@ -467,6 +476,12 @@ async def test_session_extensions_and_private_memory_workspace_gate(tmp_path):
             memberships=[{"workspace_id": "shared-ext", "role": "member", "approve": True}],
         )
         other = await account_of(identities, admin, "other")
+        workspace_admin = await account_of(
+            identities,
+            admin,
+            "workspace-admin",
+            memberships=[{"workspace_id": "shared-ext", "role": "admin", "approve": True}],
+        )
         service = ExtensionService(store, identities)
         personal = await personal_workspace(identities, owner)
         imported = await service.import_skill(
@@ -513,6 +528,17 @@ async def test_session_extensions_and_private_memory_workspace_gate(tmp_path):
             ),
         )
         assert shared == {"session_id": shared_session.id, "revision": 1}
+        admin_config = await service.session_config(
+            workspace_admin, "shared-ext", shared_session.id
+        )
+        assert admin_config["revision"] == 1 and admin_config["skills"]
+        with pytest.raises(ServiceError, match="permission_denied"):
+            await service.session_config(
+                workspace_admin,
+                "shared-ext",
+                shared_session.id,
+                SessionExtensions(request_key="admin-write", expected_revision=1),
+            )
 
         with pytest.raises(ServiceError, match="not_found"):
             await service.session_config(
@@ -632,6 +658,27 @@ async def test_session_extensions_and_private_memory_workspace_gate(tmp_path):
         ]
         assert current["memory_enabled"] is True and current["revision"] == 1
 
+        await service.delete_skill(
+            owner,
+            imported["id"],
+            SkillRemove(request_key="remove-selected", expected_revision=1),
+        )
+        after_remove = await service.session_config(owner, personal, personal_session.id)
+        assert after_remove["skills"] == []
+        assert after_remove["revision"] == 2
+        with pytest.raises(ServiceError, match="revision_conflict"):
+            await service.session_config(
+                owner,
+                personal,
+                personal_session.id,
+                SessionExtensions(
+                    request_key="restore-deleted",
+                    expected_revision=1,
+                    skills=selected.skills,
+                    memory_enabled=True,
+                ),
+            )
+
         with pytest.raises(ServiceError, match="not_found"):
             await service.session_config(other, personal, personal_session.id)
         other_personal = await personal_workspace(identities, other)
@@ -653,6 +700,49 @@ async def test_session_extensions_and_private_memory_workspace_gate(tmp_path):
                     ),
                 ),
             )
+
+
+@pytest.mark.asyncio
+async def test_turn_admission_rejects_closed_or_pending_close_before_snapshot(tmp_path):
+    async with managed_extensions(tmp_path / "close-race.sqlite") as (store, identities, admin):
+        owner = await account_of(identities, admin, "owner")
+        service = ExtensionService(store, identities)
+        personal = await personal_workspace(identities, owner)
+        session = await new_session(store, owner, personal, "session")
+        await service.session_config(
+            owner,
+            personal,
+            session.id,
+            SessionExtensions(request_key="enable", expected_revision=0, memory_enabled=True),
+        )
+        close = await session_sql.begin_control(
+            store,
+            session.id,
+            "close-request",
+            "close",
+            owner.principal_id,
+            session.revision,
+            {},
+        )
+        assert close.status == "pending"
+        with pytest.raises(ServiceError, match="session_closed"):
+            await submit_turn(store, owner, service, session, "after-close", "coffee", 1)
+        assert await session_sql.list_turns(store, session.id, 0, 10) == []
+        assert await stored_turn_ids(store) == set()
+
+        async with store.lock, store.engine.begin() as conn:
+            closed = await session_sql.session_row(conn, session.id)
+            await conn.execute(
+                update(sessions)
+                .where(sessions.c.id == session.id)
+                .values(status="closed", closed_at=1.0)
+            )
+            closed = await session_sql.session_row(conn, session.id)
+            with pytest.raises(ServiceError, match="session_closed"):
+                await service.freeze(
+                    conn, closed, "closed-turn", "coffee", owner, turn_admitted=True
+                )
+        assert await stored_turn_ids(store) == set()
 
 
 @pytest.mark.asyncio
@@ -689,7 +779,8 @@ async def test_turn_freeze_pins_skill_snapshot(tmp_path):
 
         turn = await submit_turn(store, owner, service, session, "one", "第一步", 0)
         snapshot = await snapshot_of(store, turn.id)
-        assert snapshot["version"] == "extensions/1"
+        assert snapshot["version"] == "extensions/2"
+        assert snapshot["revision"] == 1
         assert len(snapshot["items"]) == 1
         item = snapshot["items"][0]
         assert item["kind"] == "skill"
@@ -725,20 +816,23 @@ async def test_turn_freeze_pins_skill_snapshot(tmp_path):
             imported["id"],
         )
         third = await submit_turn(store, owner, service, session, "three", "第三步", 2)
-        assert (await snapshot_of(store, third.id))["items"] == []
+        empty_snapshot = await snapshot_of(store, third.id)
+        assert empty_snapshot["items"] == []
+        assert empty_snapshot["revision"] == 1
         assert turn.id in await stored_turn_ids(store)
-        assert third.id not in await stored_turn_ids(store)
+        assert third.id in await stored_turn_ids(store)
 
         bare = await new_session(store, owner, personal, "bare-session")
         bare_turn = await submit_turn(store, owner, service, bare, "bare", "无配置", 0)
         assert await snapshot_of(store, bare_turn.id) == {
-            "version": "extensions/1",
+            "version": "extensions/2",
+            "revision": 0,
             "items": [],
         }
-        assert bare_turn.id not in await stored_turn_ids(store)
+        assert bare_turn.id in await stored_turn_ids(store)
 
         with pytest.raises(ServiceError, match="facts_corrupt"):
-            extension_messages({"version": "extensions/2", "items": []})
+            extension_messages({"version": "extensions/1", "items": []})
 
         async with store.lock, store.engine.begin() as conn:
             row = await session_sql.session_row(conn, session.id)
@@ -770,7 +864,7 @@ async def test_turn_freeze_memory_opt_in_relevance_and_removal(tmp_path):
 
         first = await submit_turn(store, owner, service, session, "one", "coffee", 0)
         assert (await snapshot_of(store, first.id))["items"] == []
-        assert first.id not in await stored_turn_ids(store)
+        assert first.id in await stored_turn_ids(store)
 
         await service.preference(
             owner, Preference(request_key="enable", expected_revision=0, enabled=True)
@@ -808,7 +902,7 @@ async def test_turn_freeze_memory_opt_in_relevance_and_removal(tmp_path):
         )
         plain_turn = await submit_turn(store, owner, service, plain, "off", "coffee", 0)
         assert (await snapshot_of(store, plain_turn.id))["items"] == []
-        assert plain_turn.id not in await stored_turn_ids(store)
+        assert plain_turn.id in await stored_turn_ids(store)
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import Field, model_validator
 from sqlalchemy import delete, func, insert, select, update
@@ -26,7 +26,7 @@ from krim_agent.storage.extension_models import (
     skills,
     turn_extensions,
 )
-from krim_agent.storage.models import sessions
+from krim_agent.storage.models import session_controls, sessions
 
 if TYPE_CHECKING:
     from krim_agent.accounts.service import IdentityService
@@ -110,9 +110,28 @@ def body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def extension_messages(snapshot: dict[str, Any]) -> list[Message]:
-    if snapshot.get("version") != "extensions/1":
+def _extension_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    items = snapshot.get("items")
+    if (
+        snapshot.get("version") != "extensions/2"
+        or type(snapshot.get("revision")) is not int
+        or snapshot["revision"] < 0
+        or not isinstance(items, list)
+        or any(
+            not isinstance(item, dict)
+            or item.get("kind") not in {"skill", "memory"}
+            or not isinstance(item.get("id"), str)
+            or type(item.get("revision")) is not int
+            or not isinstance(item.get("content_hash"), str)
+            for item in items
+        )
+    ):
         raise ServiceError("facts_corrupt")
+    return snapshot
+
+
+def extension_messages(snapshot: dict[str, Any]) -> list[Message]:
+    snapshot = _extension_snapshot(snapshot)
     return [
         Message(
             role="user",
@@ -134,10 +153,10 @@ async def load_turn_extensions(conn: AsyncConnection, turn_id: str) -> dict[str,
         .first()
     )
     if row is None:
-        return {"version": "extensions/1", "items": []}
+        return {"version": "extensions/2", "revision": 0, "items": []}
     if fingerprint(row["snapshot"]) != row["fingerprint"]:
         raise ServiceError("facts_corrupt")
-    return dict(row["snapshot"])
+    return _extension_snapshot(dict(row["snapshot"]))
 
 
 T = TypeVar("T")
@@ -151,6 +170,31 @@ class ExtensionService:
         if self.store.schema_version < 11:
             raise ServiceError("schema_upgrade_required", 409)
         return self.identities.validate(actor) if self.identities is not None else actor
+
+    async def _session(
+        self,
+        conn: AsyncConnection,
+        actor: PrincipalContext,
+        workspace: str,
+        session_id: str,
+        *,
+        write: bool = False,
+    ) -> Any:
+        membership = self.actor(actor).member(workspace, write=write)
+        row = (
+            await conn.execute(
+                select(sessions).where(
+                    sessions.c.id == session_id, sessions.c.workspace_id == workspace
+                )
+            )
+        ).mappings().first()
+        if row is None or (row["owner_id"] != actor.principal_id and membership.role != "admin"):
+            raise ServiceError("not_found", 404)
+        if write and row["owner_id"] != actor.principal_id:
+            raise ServiceError("permission_denied", 403)
+        if write and row["status"] != "open":
+            raise ServiceError("session_closed", 409)
+        return row
 
     async def _read(
         self, actor: PrincipalContext, operation: Callable[[AsyncConnection], Awaitable[T]]
@@ -373,6 +417,26 @@ class ExtensionService:
                 raise ServiceError("not_found", 404)
             if row["revision"] != body.expected_revision:
                 raise ServiceError("revision_conflict", 409)
+            refs = (
+                await conn.execute(
+                    select(
+                        session_extensions.c.session_id,
+                        session_extensions.c.revision,
+                        session_extensions.c.skills,
+                    )
+                    .join(sessions, sessions.c.id == session_extensions.c.session_id)
+                    .where(sessions.c.owner_id == actor.principal_id)
+                )
+            ).mappings().all()
+            for ref_row in refs:
+                raw_skills = cast(list[dict[str, Any]], ref_row["skills"])
+                selected = [item for item in raw_skills if item.get("skill_id") != skill_id]
+                if len(selected) != len(raw_skills):
+                    await conn.execute(
+                        update(session_extensions)
+                        .where(session_extensions.c.session_id == ref_row["session_id"])
+                        .values(skills=selected, revision=ref_row["revision"] + 1)
+                    )
             await conn.execute(delete(skill_versions).where(skill_versions.c.skill_id == skill_id))
             await conn.execute(
                 delete(skills).where(
@@ -531,35 +595,6 @@ class ExtensionService:
 
         return await self._mutate(actor, body, "memory-preference", write)
 
-    async def _session(
-        self,
-        conn: AsyncConnection,
-        actor: PrincipalContext,
-        workspace: str,
-        session_id: str,
-        *,
-        write: bool = False,
-    ) -> Any:
-        self.actor(actor).member(workspace, write=write)
-        row = (
-            (
-                await conn.execute(
-                    select(sessions).where(
-                        sessions.c.id == session_id,
-                        sessions.c.workspace_id == workspace,
-                        sessions.c.owner_id == actor.principal_id,
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
-        if row is None:
-            raise ServiceError("not_found", 404)
-        if write and row["status"] != "open":
-            raise ServiceError("session_closed", 409)
-        return row
-
     async def personal(self, conn: AsyncConnection, owner: str, workspace: str) -> bool:
         query = select(workspace_profiles.c.workspace_id).where(
             workspace_profiles.c.workspace_id == workspace,
@@ -633,12 +668,33 @@ class ExtensionService:
         return await self._mutate(actor, body, "session-extensions:" + session_id, write)
 
     async def freeze(
-        self, conn: AsyncConnection, session: Any, turn_id: str, text: str, actor: PrincipalContext
+        self,
+        conn: AsyncConnection,
+        session: Any,
+        turn_id: str,
+        text: str,
+        actor: PrincipalContext,
+        *,
+        turn_admitted: bool = False,
     ) -> None:
         """Called inside the turn admission transaction, not at dispatch time."""
         self.actor(actor)
         if actor.principal_id != session["owner_id"]:
             return
+        if turn_admitted:
+            if session["status"] != "open":
+                raise ServiceError("session_closed", 409)
+            pending_close = await conn.scalar(
+                select(session_controls.c.id)
+                .where(
+                    session_controls.c.session_id == session["id"],
+                    session_controls.c.kind == "close",
+                    session_controls.c.status == "pending",
+                )
+                .limit(1)
+            )
+            if pending_close is not None:
+                raise ServiceError("session_closed", 409)
         config = (
             (
                 await conn.execute(
@@ -650,16 +706,12 @@ class ExtensionService:
             .mappings()
             .first()
         )
+        revision = config["revision"] if config is not None else 0
         items: list[dict[str, Any]] = []
         if config is not None:
             for raw in config["skills"]:
                 ref = SkillSelection.model_validate_json(encoded(raw))
-                try:
-                    skill = await self._skill(conn, actor.principal_id, ref.skill_id, ref.revision)
-                except ServiceError as error:
-                    if error.code == "not_found":
-                        continue
-                    raise
+                skill = await self._skill(conn, actor.principal_id, ref.skill_id, ref.revision)
                 if not skill["enabled"]:
                     continue
                 if skill["content_hash"] != ref.content_hash:
@@ -726,10 +778,9 @@ class ExtensionService:
                 if selected >= 8:
                     break
         self.actor(actor)
-        if items:
-            snapshot = dict(version="extensions/1", items=items)
-            await conn.execute(
-                insert(turn_extensions).values(
-                    turn_id=turn_id, snapshot=snapshot, fingerprint=fingerprint(snapshot)
-                )
+        snapshot = dict(version="extensions/2", revision=revision, items=items)
+        await conn.execute(
+            insert(turn_extensions).values(
+                turn_id=turn_id, snapshot=snapshot, fingerprint=fingerprint(snapshot)
             )
+        )

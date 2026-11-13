@@ -372,6 +372,8 @@ async def submit(
         session = await session_row(conn, session_id)
         if actor is not None and extension_service is not None:
             extension_service.actor(actor)
+        if session["status"] != "open" or await closing(conn, session_id):
+            raise ServiceError("session_closed")
         if session["target_key"] == "target-workspace":
             if access is None or not isinstance(body, WorkspaceTurnRequest):
                 raise ServiceError("workspace_contract_required")
@@ -434,7 +436,9 @@ async def submit(
         )
         await conn.execute(insert(turns).values(**row))
         if actor is not None and extension_service is not None:
-            await extension_service.freeze(conn, session, row["id"], row["text"], actor)
+            await extension_service.freeze(
+                conn, session, row["id"], row["text"], actor, turn_admitted=True
+            )
         if session["target_key"] == "target-workspace":
             assert isinstance(body, WorkspaceTurnRequest) and access is not None
             await work_sql.enqueue(conn, row, body, access)
@@ -589,7 +593,7 @@ async def begin_run(
         ext = (
             await load_turn_extensions(conn, turn["id"])
             if store.schema_version >= 11
-            else {"version": "extensions/1", "items": []}
+            else {"version": "extensions/2", "revision": 0, "items": []}
         )
         extension_snapshot = cast(dict[str, JsonValue], ext)
         context = builder.prepare(
@@ -608,8 +612,7 @@ async def begin_run(
             "policy": policy.model_dump(mode="json"),
             "builder": context.builder_fingerprint,
         }
-        if extension_snapshot["items"]:
-            context_descriptor["extensions"] = fingerprint(extension_snapshot)
+        context_descriptor["extensions"] = fingerprint(extension_snapshot)
         effective = target | {"context": context_descriptor}
         digest = fingerprint({"request": request.model_dump(mode="json"), "target": effective})
         run = await store._insert_run(conn, request, effective, run_id, digest)
@@ -700,7 +703,11 @@ async def source(
             "builder": context.builder_fingerprint,
         }
         target_context = target.get("context")
-        if isinstance(target_context, dict) and "extensions" in target_context:
+        if context.extensions:
+            if not isinstance(target_context, dict) or "extensions" not in target_context:
+                raise ValueError("扩展上下文身份缺失")
+            expected["extensions"] = fingerprint(context.extensions)
+        elif isinstance(target_context, dict) and "extensions" in target_context:
             expected["extensions"] = fingerprint(context.extensions)
         if fingerprint(target.get("context")) != fingerprint(expected):
             raise ValueError("内部上下文身份损坏")
