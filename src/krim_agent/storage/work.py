@@ -10,7 +10,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import ServiceError, encoded, fingerprint
-from krim_agent.extensions import load_turn_extensions
+from krim_agent.extensions import _extension_snapshot, load_turn_extensions
 from krim_agent.workspace.types import (
     ArtifactRevision,
     EffectIntent,
@@ -233,7 +233,7 @@ async def bind(
         for k, v in target.items()
         if k not in {"workspace_profile", "limits", "limits_fingerprint", "workspace_verification"}
     }
-    extensions = await load_turn_extensions(conn, turn["id"])
+    extensions = _extension_snapshot(await load_turn_extensions(conn, turn["id"]))
     conditions = {
         "runtime": profile.runtime.model_dump(mode="json")
         | {

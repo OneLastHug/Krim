@@ -18,7 +18,7 @@ from krim_agent.context import builder
 from krim_agent.context.manifest import Category, ItemMetadata
 from krim_agent.context.types import CompactionPolicy, ContextPolicy, HistorySource, PreparedContext
 from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
-from krim_agent.extensions import extension_messages
+from krim_agent.extensions import _extension_snapshot, extension_messages
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.model_step import ModelStep
 from krim_agent.source_fingerprints import source_digest
@@ -64,8 +64,11 @@ class Compactor:
         self.producer = asyncio.current_task()
         self.extension_snapshot = cast(
             dict[str, JsonValue],
-            context.get("extensions", {"version": "extensions/1", "items": []}),
+            context.get(
+                "extensions", {"version": "extensions/2", "revision": 0, "items": []}
+            ),
         )
+        _extension_snapshot(self.extension_snapshot)
         self.record_policy = {
             "context": self.policy.model_dump(mode="json"),
             "extensions": fingerprint(self.extension_snapshot),
