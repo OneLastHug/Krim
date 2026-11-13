@@ -198,9 +198,12 @@ def test_finished_record_can_be_read_when_runtime_probe_is_unavailable(command_j
     }
     broker._save(jobs.filename(operation), row)
     monkeypatch.setattr(
-        jobs, "_runner_for", lambda _program: (_ for _ in ()).throw(AssertionError())
+        jobs,
+        "_runner_for",
+        lambda _program: (_ for _ in ()).throw(ServiceError("sandbox_backend_unavailable", 503)),
     )
     assert jobs.submit(env, project, operation, command_body) == row
+    assert Runner.executions == 0
 
 
 def test_intent_record_reconciles_orphaned_lease_without_execution(command_jobs):
