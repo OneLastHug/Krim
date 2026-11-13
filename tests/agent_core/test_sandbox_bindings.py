@@ -15,7 +15,7 @@ from krim_agent.contracts import ServiceError
 from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
-from krim_agent.storage.models import turns
+from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
@@ -408,6 +408,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         invalid_glob = await client.get(route + "/find", params={"include_glob": "../*"})
         assert invalid_glob.status_code == 422
         plain_glob = await client.get(route + "/find", params={"include_glob": "src"})
+        assert plain_glob.status_code == 422
         preview = await app.sandbox.preview_replace(
             actor, project["project_id"], path="note.txt", expected_generation=0,
             expected_sha256="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
