@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import fcntl
 import json
 import os
@@ -319,6 +320,15 @@ class StorageBroker:
                 "runtime_image",
                 "runtime_fingerprint",
             },
+            "command_start_background": {
+                "environment_id",
+                "project_id",
+                "operation_id",
+                "command",
+                "runtime_image",
+                "runtime_fingerprint",
+            },
+            "command_logs": {"environment_id", "project_id", "operation_id", "max_bytes"},
             "command_reconcile": {"environment_id", "project_id", "operation_id"},
             "command_status": {"environment_id", "project_id", "operation_id", "renew", "cancel"},
         }
@@ -385,17 +395,30 @@ class StorageBroker:
                     values["mutation"],
                     kind=values["kind"],
                 )
-            if action == "command_start":
+            if action in {"command_start", "command_start_background"}:
                 operation_id = internal_id(values["operation_id"])
+                background = action == "command_start_background"
                 command_record = self._read(self.jobs.filename(operation_id))
                 command = values["command"]
-                if set(values) != {
+                expected_fields = {
                     "environment_id", "project_id", "operation_id", "command",
                     "runtime_image", "runtime_fingerprint",
-                }:
+                }
+                if set(values) != expected_fields:
                     raise ServiceError("invalid_input", 422)
+                if background and command_record is None:
+                    return self.jobs.submit(
+                        environment_id,
+                        project_id,
+                        operation_id,
+                        command,
+                        background=True,
+                        expected_image=values["runtime_image"],
+                        expected_fingerprint=values["runtime_fingerprint"],
+                    )
                 if (
                     command_record is None
+                    or command_record.get("background", False) is not background
                     or command_record.get("environment_id") != environment_id
                     or command_record.get("project_id") != project_id
                     or command_record.get("status") not in {"accepted", "intent"}
@@ -405,8 +428,40 @@ class StorageBroker:
                 ):
                     raise ServiceError("target_binding_changed")
                 return self.jobs.submit(
-                    environment_id, project_id, operation_id, command
+                    environment_id,
+                    project_id,
+                    operation_id,
+                    command,
+                    background=background,
+                    expected_image=values["runtime_image"],
+                    expected_fingerprint=values["runtime_fingerprint"],
                 )
+            if action == "command_logs":
+                if type(values["max_bytes"]) is not int or not 1 <= values["max_bytes"] <= 8192:
+                    raise ServiceError("invalid_input", 422)
+                row = self._read(self.jobs.filename(internal_id(values["operation_id"])))
+                if (
+                    row is None
+                    or row.get("environment_id") != environment_id
+                    or row.get("project_id") != project_id
+                ):
+                    raise ServiceError("not_found", 404)
+                logs = row.get("logs", {})
+                if not isinstance(logs, dict):
+                    logs = {}
+                result = {}
+                for name in ("stdout", "stderr"):
+                    value = logs.get(name, "")
+                    try:
+                        raw = (
+                            base64.b64decode(value, validate=True)
+                            if isinstance(value, str)
+                            else b""
+                        )
+                    except ValueError:
+                        raw = b""
+                    result[name] = base64.b64encode(raw[-values["max_bytes"]:]).decode()
+                return result
             if action == "command_reconcile":
                 return self.jobs.reconcile(environment_id, project_id, values["operation_id"])
             if type(values["renew"]) is not bool or type(values["cancel"]) is not bool:

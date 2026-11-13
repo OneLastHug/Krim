@@ -98,3 +98,14 @@ sandbox_quota_state = Table(
 )
 SANDBOX_TABLES = (*SANDBOX_TABLES, sandbox_quota_state)
 SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)
+
+sandbox_turn_contracts = Table(
+    "sandbox_turn_contracts",
+    metadata,
+    Column("turn_id", String(36), ForeignKey("turns.id"), primary_key=True),
+    Column("completion", JSON, nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("created_at", Float, nullable=False),
+)
+SANDBOX_TABLES = (*SANDBOX_TABLES, sandbox_turn_contracts)
+SANDBOX_TABLE_NAMES = frozenset(table.name for table in SANDBOX_TABLES)

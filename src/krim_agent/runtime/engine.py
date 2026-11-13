@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, cast
 
 from pydantic import JsonValue
+from sqlalchemy import select
 
 from krim_agent.config import Settings
 from krim_agent.context import builder, compaction
@@ -251,6 +252,43 @@ class AgentLoop:
                     scope.check()
                     if verdict.state != "passed":
                         raise ServiceError("completion_unverified")
+                elif self.sandbox is not None and snapshot.session_context is not None:
+                    descriptor = snapshot.target.get("context", {})
+                    completion_hash = (
+                        descriptor.get("sandbox_completion_fingerprint")
+                        if isinstance(descriptor, dict) else None
+                    )
+                    if completion_hash is not None:
+                        if scope is None:
+                            raise ServiceError("workspace_contract_required")
+                        from krim_agent.sandbox.tasks import (
+                            SandboxCompletion,
+                            verify_completion,
+                        )
+                        from krim_agent.storage.sandbox_models import sandbox_turn_contracts
+                        context = snapshot.session_context
+                        async with self.store.lock, self.store.engine.connect() as conn:
+                            contract_row = (
+                                await conn.execute(
+                                    select(sandbox_turn_contracts).where(
+                                        sandbox_turn_contracts.c.turn_id == context.turn_id
+                                    )
+                                )
+                            ).mappings().first()
+                        if (
+                            contract_row is None
+                            or contract_row["fingerprint"] != completion_hash
+                            or fingerprint(contract_row["completion"]) != completion_hash
+                        ):
+                            raise ServiceError("target_binding_changed")
+                        contract = SandboxCompletion.model_validate(contract_row["completion"])
+                        verdict = await verify_completion(
+                            self.sandbox.service, run_id, context.session_id, contract,
+                            deadline=scope.deadline,
+                            check=scope.check,
+                        )
+                        if verdict["state"] != "passed":
+                            raise ServiceError("completion_unverified")
                 return
             conversation.append(
                 Message(
