@@ -15,8 +15,8 @@ from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import (
-    HTTPSHandler,
     HTTPRedirectHandler,
+    HTTPSHandler,
     OpenerDirector,
     ProxyHandler,
     Request,
