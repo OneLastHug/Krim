@@ -24,7 +24,7 @@ from krim_agent.sandbox.port_adapters import AcceptedProjectMutation
 from krim_agent.sandbox.ports import ProjectRef
 from krim_agent.sandbox.quota import QuotaLimits
 from krim_agent.sandbox.runner import RunscRunner
-from krim_agent.sandbox.runtime_profiles import RuntimeCatalog, ResolvedRuntime
+from krim_agent.sandbox.runtime_profiles import ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.xfs import internal_id
 
 if TYPE_CHECKING:
