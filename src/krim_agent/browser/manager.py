@@ -28,7 +28,9 @@ class BrowserManager:
         *,
         timeout_seconds: float = 30.0,
     ) -> None:
-        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", run_id):
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", run_id
+        ):
             raise ValueError("browser run id invalid")
         if not 0.1 <= timeout_seconds <= 90:
             raise ValueError("browser timeout invalid")
@@ -87,7 +89,7 @@ class BrowserManager:
             pass
 
     async def _close_worker(self) -> None:
-        failure: Exception | None = None
+        failure: BaseException | None = None
         try:
             async with asyncio.timeout(self._cleanup_timeout):
                 async with self._lock:

@@ -4,4 +4,10 @@ from .egress import BrowserEgressPolicy
 from .manager import BrowserManager
 from .protocol import BrowserCommand, BrowserResult, BrowserWorker
 
-__all__ = ["BrowserCommand", "BrowserEgressPolicy", "BrowserManager", "BrowserResult", "BrowserWorker"]
+__all__ = [
+    "BrowserCommand",
+    "BrowserEgressPolicy",
+    "BrowserManager",
+    "BrowserResult",
+    "BrowserWorker",
+]

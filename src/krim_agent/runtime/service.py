@@ -68,16 +68,16 @@ class RunBinding:
     loop: AgentLoop
     settings: Settings
     descriptor_json: str
-    identities: tuple[int, ...]
+    identities: tuple[int | str, ...]
     tool_identities: tuple[int, ...]
     _http_token: tuple[object, ...] | None = field(default=None, repr=False)
 
     @staticmethod
-    def runtime_identities(loop: AgentLoop) -> tuple[int, ...]:
+    def runtime_identities(loop: AgentLoop) -> tuple[int | str, ...]:
         def function(value: object) -> object:
             return getattr(value, "__func__", value)
 
-        result = tuple(
+        result: tuple[int | str, ...] = tuple(
             map(
                 id,
                 (
@@ -138,7 +138,7 @@ class RunBinding:
             from krim_agent.sandbox import tasks as sandbox_tasks
 
             result += tuple(
-                source_digest(module.__file__)
+                source_digest(cast(str, module.__file__))
                 for module in (
                     sandbox_command,
                     sandbox_execution,
@@ -163,16 +163,16 @@ class RunBinding:
             ExecutionBudget.bind,
             ExecutionBudget.pause,
             ExecutionBudget.finish,
-            ExecutionBudget.deadline.fget,
+            cast(property, ExecutionBudget.deadline).fget,
             engine_module.AgentLoop.run,
             model_step_module.ModelStep.call,
             executor_module.ToolExecutor.execute,
-            pipeline_module.Scope.deadline.fget,
+            cast(property, pipeline_module.Scope.deadline).fget,
             operations_module.WorkspaceOperations.scope,
             RunService._drive,
             RunService._approval_request,
         )))
-        result += tuple(source_digest(module.__file__) for module in (
+        result += tuple(source_digest(cast(str, module.__file__)) for module in (
             config_module,
             contracts_module,
             engine_module,
@@ -659,7 +659,9 @@ class RunService:
                                 rows = (
                                     await conn.execute(
                                         select(sandbox_operations).where(
-                                            sandbox_operations.c.kind == "command"
+                                            sandbox_operations.c.kind == "command",
+                                            sandbox_operations.c.result["run_id"].as_string()
+                                            == run.id,
                                         )
                                     )
                                 ).mappings().all()
@@ -667,7 +669,8 @@ class RunService:
                                 for operation in rows:
                                     saved = operation["result"]
                                     if (
-                                        saved.get("background") is not True
+                                        not isinstance(saved, dict)
+                                        or saved.get("background") is not True
                                         or saved.get("run_id") != run.id
                                     ):
                                         continue

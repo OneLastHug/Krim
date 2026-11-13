@@ -27,7 +27,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install Python development dependencies
-        run: uv sync --locked --python 3.12 --group dev
+        run: uv sync --locked --python 3.12 --group dev --extra personal-mcp
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
       - name: Run fixture and frontend checks

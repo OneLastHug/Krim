@@ -179,6 +179,7 @@ async def test_workspace_scope_moves_while_another_tool_keeps_its_timer():
         actor_id="local", grant=access.grant(), session_id="scope-session"
     )
     operations = object.__new__(WorkspaceOperations)
+    operations.identities = None
     operations.profile = SimpleNamespace(model_dump=lambda mode: profile_data)
     operations._profile_hash = fingerprint(profile_data)
     operations.closed = False
@@ -292,6 +293,7 @@ async def test_workspace_terminal_handoff_keeps_finite_deadline_after_timer_exit
         actor_id="local", grant=access.grant(), session_id="handoff-session"
     )
     operations = object.__new__(WorkspaceOperations)
+    operations.identities = None
     operations.profile = SimpleNamespace(model_dump=lambda mode: profile_data)
     operations._profile_hash = fingerprint(profile_data)
     operations.closed = False

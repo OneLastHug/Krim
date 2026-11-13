@@ -172,6 +172,7 @@ class AgentLoop:
                     _no_inprocess_wait, tool_timeout, check, scope, approval_timeout),
                 check,
                 emit,
+                active_executor,
             )
         while stepper.index < max_steps:
             check()
@@ -446,6 +447,7 @@ class AgentLoop:
         context: ToolContext,
         check: Callable[[], None],
         emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
+        active_executor: ToolExecutor,
     ) -> None:
         """恢复时收尾停靠批：指纹漂移拒绝续跑；批准的执行、拒绝的记观察回传。"""
         from pydantic import ValidationError

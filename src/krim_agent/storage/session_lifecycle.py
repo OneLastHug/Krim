@@ -17,12 +17,18 @@ from krim_agent.sessions.types import SessionView
 
 from .models import session_controls, turns
 from .session_lifecycle_models import session_lifecycle, session_lifecycle_requests
-from .sessions import read, require, session_lifecycle_row, session_row, session_view
+from .sessions import read, session_lifecycle_row, session_row, session_view
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
 
 LifecycleAction = Literal["archive", "unarchive", "trash", "restore"]
+LIFECYCLE_SCHEMA = 14  # session_lifecycle* 表自 schema 14 引入；更早版本整组能力不存在
+
+
+def require(store: SQLiteStore) -> None:
+    if store.schema_version < LIFECYCLE_SCHEMA:
+        raise ServiceError("schema_upgrade_required")
 
 
 def _with_state(view: SessionView, row: Any | None) -> SessionView:
@@ -92,26 +98,28 @@ async def apply(
     digest = fingerprint(payload)
 
     async def operation(conn: AsyncConnection) -> SessionView:
+        # 与 request_by_key 相同顺序：先核归属（404），再查幂等键，避免借回放路径绕过授权。
+        session = await session_row(conn, session_id)
+        if session["workspace_id"] != workspace or session["owner_id"] != principal_id:
+            raise ServiceError("not_found", 404)
+        # 请求键按 (principal_id, request_key) 全局唯一；跨会话复用同键必须报键冲突，
+        # 否则落到 insert 主键冲突被包装成 storage_unavailable 并误标存储不健康。
         old = (
             await conn.execute(
                 select(session_lifecycle_requests).where(
                     session_lifecycle_requests.c.principal_id == principal_id,
                     session_lifecycle_requests.c.request_key == request_key,
-                    session_lifecycle_requests.c.session_id == session_id,
                 )
             )
         ).mappings().first()
         if old is not None:
-            if old["request_hash"] != digest:
+            if old["session_id"] != session_id or old["request_hash"] != digest:
                 raise ServiceError("key_conflict")
             try:
                 return SessionView.model_validate(old["result"])
             except ValueError:
                 raise ServiceError("facts_corrupt") from None
 
-        session = await session_row(conn, session_id)
-        if session["workspace_id"] != workspace or session["owner_id"] != principal_id:
-            raise ServiceError("not_found", 404)
         state = await session_lifecycle_row(conn, session_id)
         current = dict(
             session_id=session_id,

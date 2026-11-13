@@ -10,6 +10,7 @@ from krim_agent.security import PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.sessions.types import SessionLifecycleRequest, SessionView
 from krim_agent.storage.session_lifecycle import apply as apply_lifecycle
+from krim_agent.storage.session_lifecycle import request_by_key as read_lifecycle_request
 
 
 def _application(request: Request) -> Application:
@@ -52,6 +53,17 @@ def mount_session_lifecycle(app: FastAPI) -> None:
     ) -> list[SessionView]:
         return await _service(request).list(
             _principal(request), workspace_id, offset, limit, view="trash"
+        )
+
+    @router.get(base + "/{session_id}/lifecycle/by-key/{key}")
+    async def lifecycle_by_key(
+        workspace_id: str, session_id: str, key: str, request: Request
+    ) -> SessionView:
+        # 恢复已提交的lifecycle请求结果；未完成/非归属/键不存在统一404，客户端可原键重试。
+        actor = _principal(request)
+        await _service(request).get(actor, workspace_id, session_id)
+        return await read_lifecycle_request(
+            _application(request).store, actor.principal_id, workspace_id, session_id, key
         )
 
     @router.post(base + "/{session_id}/lifecycle/{action}")
