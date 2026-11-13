@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {4, 5, 6, 7, 8, 9, 10, 11, 12}:
+    if store.schema_version not in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
         raise ServiceError("schema_upgrade_required")
 
 

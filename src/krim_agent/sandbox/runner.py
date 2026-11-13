@@ -440,8 +440,15 @@ class RunscRunner:
                             elif ready and line == b"KRIM_PAYLOAD_START":
                                 observed["started"] = True
                                 phase("started", {"executor_started": True})
-                                target.extend(pending)
+                                remaining = (
+                                    self.profile.output_limit_bytes - len(stdout) - len(stderr)
+                                )
+                                target.extend(pending[: max(0, remaining)])
+                                truncated = len(pending) > remaining
                                 pending.clear()
+                                if truncated:
+                                    observed["code"] = "output_limit"
+                                    return
                             else:
                                 raise ServiceError("sandbox_setup")
                         if len(pending) > 256:
@@ -452,5 +459,12 @@ class RunscRunner:
                         if len(chunk) > remaining:
                             observed["code"] = "output_limit"
                             return
+                    if observed["started"]:
+                        phase("output", {
+                            "logs": {
+                                "stdout": base64.b64encode(stdout[-4096:]).decode(),
+                                "stderr": base64.b64encode(stderr[-4096:]).decode(),
+                            }
+                        })
         if not observed["started"] and observed["code"] is None:
             observed["code"] = "sandbox_setup"

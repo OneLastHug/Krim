@@ -322,6 +322,23 @@ def test_original_operation_is_never_executed_twice(command_jobs):
         jobs.submit(env, project, operation, {**command(project), "argv": ["-c", "different"]})
 
 
+def test_background_status_polling_cannot_extend_worker_permit(command_jobs):
+    _, jobs, env, project = command_jobs
+    Runner.hold = True
+    operation = str(uuid.uuid4())
+    jobs.submit(env, project, operation, command(project), background=True)
+    with jobs.lock:
+        original_deadline = jobs.active[operation]["permit_deadline"]
+    for _ in range(3):
+        jobs.status(env, project, operation, renew=True)
+    with jobs.lock:
+        assert jobs.active[operation]["permit_deadline"] == original_deadline
+        assert jobs.active[operation]["permit"] == original_deadline
+        jobs.active[operation]["permit"] = 0
+    result = wait_result(jobs, env, project, operation)
+    assert result["receipt"]["code"] == "cancelled"
+
+
 def test_permit_expiry_cancels_and_preserves_result(command_jobs):
     _, jobs, env, project = command_jobs
     Runner.hold = True
