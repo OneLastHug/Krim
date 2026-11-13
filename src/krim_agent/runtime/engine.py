@@ -79,7 +79,10 @@ class AgentLoop:
         assert_target_current: Callable[[], None] = lambda: None,
         execution_budget: ExecutionBudget | None = None,
         resume: RecoveryState | None = None,
+        executor: ToolExecutor | None = None,
     ) -> None:
+        active_executor = executor or self.executor
+
         def check() -> None:
             assert_target_current()
             if self._d3_seal != (compaction.binding_token(), model_step.binding_token(),
@@ -171,8 +174,8 @@ class AgentLoop:
             )
         while stepper.index < max_steps:
             check()
-            self.executor.registry.assert_current()
-            schemas = self.executor.registry.schemas()
+            active_executor.registry.assert_current()
+            schemas = active_executor.registry.schemas()
             remaining_tools = max_calls-tool_count
             if compressor is not None:
                 messages = await compressor.prepare(
@@ -270,7 +273,7 @@ class AgentLoop:
             def build(call: ModelToolCall, step: int = step) -> Invocation:
                 check()
                 try:
-                    spec = self.executor.registry.get(call.name)
+                    spec = active_executor.registry.get(call.name)
                     digest = spec.fingerprint
                 except ServiceError as error:
                     if error.code != "unknown_tool":
@@ -298,7 +301,7 @@ class AgentLoop:
             for invocation in invocations:  # 声明序：先受理、再判定，全部通过后统一执行
                 await emit("tool_start", observation(invocation, status="unknown", code=None))
                 try:
-                    admission = await self.executor.admit(
+                    admission = await active_executor.admit(
                         invocation, context, timeout_seconds=tool_timeout)
                 except ServiceError as error:
                     # 入场硬失败：如实补失败观察（保持既有事实形状），整次运行失败。
@@ -336,11 +339,11 @@ class AgentLoop:
                 results: list[ToolObservation | BaseException]
                 if len(group) == 1:
                     # 串行写与单调用沿原producer Task；只有真实并行读创建有界子Task。
-                    results = [await self.executor.execute(
+                    results = [await active_executor.execute(
                         group[0][0], context, group[0][1])]
                 else:
                     tasks = [asyncio.create_task(
-                        self.executor.execute(invocation, context, admission))
+                        active_executor.execute(invocation, context, admission))
                         for invocation, admission in group]
                     try:
                         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -408,8 +411,8 @@ class AgentLoop:
 
         for item in pending:
             check()
-            self.executor.registry.assert_current()
-            spec = self.executor.registry.get(item.invocation.name)
+            active_executor.registry.assert_current()
+            spec = active_executor.registry.get(item.invocation.name)
             if spec.fingerprint != item.invocation.tool_hash:
                 raise ServiceError("tool_binding_changed")  # 停靠期间工具被换
             if not item.allow:
@@ -438,7 +441,7 @@ class AgentLoop:
                 raise ServiceError("invalid_input") from None
             admission = replace(
                 Admission(spec, parsed, "ask"), start_emitted=True, approved=True)
-            result = await self.executor.execute(item.invocation, context, admission)
+            result = await active_executor.execute(item.invocation, context, admission)
             if result.status != "ok":
                 raise ServiceError(result.code or "tool_error")
             conversation.append(Message(role="tool", content=encoded(result.value),
