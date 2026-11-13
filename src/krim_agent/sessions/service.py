@@ -9,7 +9,7 @@ import builtins
 import json
 import math
 import re
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import JsonValue
@@ -200,10 +200,12 @@ class SessionService:
         settings: Settings,
         *,
         identities: IdentityService | None = None,
+        account_mcp: Any | None = None,
     ) -> None:
         self.store, self.runs, self.settings = store, runs, settings
         # 稳定身份服务引用；托管模式由composition注入，legacy保持None。
         self.identities = identities
+        self.account_mcp = account_mcp
         self.closed = False
         self.failure: str | None = None
         self.controls: dict[str, asyncio.Task[ControlView]] = {}
@@ -407,6 +409,7 @@ class SessionService:
                 if self.identities is not None and self.identities.managed
                 else None,
             ),
+            account_mcp_service=getattr(self, "account_mcp", None),
         )
         self.runs.slot_changed.set()
         return result

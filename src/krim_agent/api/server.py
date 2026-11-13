@@ -327,6 +327,10 @@ def create_app(
     mount_extensions(app)
     mount_session_lifecycle(app)
 
+    from .account_mcp import mount_account_mcp
+
+    mount_account_mcp(app)
+
     from .sandbox import mount_sandbox
 
     mount_sandbox(app)

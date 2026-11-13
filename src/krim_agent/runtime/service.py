@@ -32,6 +32,7 @@ from krim_agent.observability import TraceView, project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.tools.core import Invocation
+from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.pipeline import _owns, _producing
 
 from . import model_step as model_step_module
@@ -299,6 +300,8 @@ class RunBinding:
 class TurnBinding:
     base: RunBinding
     context_token: tuple[object, ...]
+    executor: ToolExecutor | None = None
+    account_mcp_connections: tuple[Any, ...] = ()
 
     @property
     def loop(self) -> AgentLoop:
@@ -312,6 +315,8 @@ class TurnBinding:
         self.base.assert_current()
         if builder.binding_token() != self.context_token:
             raise ServiceError("context_binding_changed")
+        if self.executor is not None:
+            self.executor.registry.assert_current()
 
 
 class RunService:
@@ -334,6 +339,7 @@ class RunService:
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
         self._execution_budgets: dict[str, ExecutionBudget] = {}
+        self.account_mcp: Any | None = None
         self._cancelled: set[str] = set()
         self._finalizing: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
@@ -430,14 +436,51 @@ class RunService:
             raise ServiceError("capacity", 429)
         descriptor = cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
         executing: RunBinding | TurnBinding = binding
+        provisional_connections: tuple[Any, ...] = ()
         if turn_id is None:
             run, created = await self.store.begin(request, descriptor)
         else:
-            executing = TurnBinding(binding, builder.binding_token())
-            run, created = await self.store.begin_turn_run(
-                turn_id, request, descriptor, binding.settings
-            )
+            executor = None
+            try:
+                if self.account_mcp is not None:
+                    configs = await self.account_mcp.configurations_for_turn(turn_id)
+                    if configs:
+                        executor, provisional_connections = await self.account_mcp.build_runtime(
+                            configs, binding.loop.executor.registry, binding.loop.executor.policy
+                        )
+                run, created = await self.store.begin_turn_run(
+                    turn_id, request, descriptor, binding.settings
+                )
+            except BaseException:
+                if provisional_connections:
+                    await asyncio.gather(
+                        *(item.close() for item in provisional_connections),
+                        return_exceptions=True,
+                    )
+                raise
+            if created:
+                executing = TurnBinding(
+                    binding,
+                    builder.binding_token(),
+                    executor=executor,
+                    account_mcp_connections=provisional_connections,
+                )
+            elif provisional_connections:
+                await asyncio.gather(
+                    *(item.close() for item in provisional_connections),
+                    return_exceptions=True,
+                )
         if created:
+            if isinstance(executing, TurnBinding):
+                try:
+                    executing.assert_current()
+                except BaseException:
+                    if executing.account_mcp_connections:
+                        await asyncio.gather(
+                            *(item.close() for item in executing.account_mcp_connections),
+                            return_exceptions=True,
+                        )
+                    raise
             self.tasks[run.id] = asyncio.create_task(
                 self._drive(run, executing), name="krim-run-" + run.id
             )
@@ -507,7 +550,31 @@ class RunService:
                         if snapshot.session_context is not None:
                             from krim_agent.context import builder as context_builder
 
-                            executing = TurnBinding(base, context_builder.binding_token())
+                            try:
+                                executing = TurnBinding(base, context_builder.binding_token())
+                                if self.account_mcp is not None:
+                                    configs = await self.account_mcp.configurations_for_turn(
+                                        snapshot.session_context.turn_id
+                                    )
+                                    if configs:
+                                        executor, connections = await self.account_mcp.build_runtime(
+                                            configs,
+                                            base.loop.executor.registry,
+                                            base.loop.executor.policy,
+                                        )
+                                        executing = TurnBinding(
+                                            base,
+                                            context_builder.binding_token(),
+                                            executor,
+                                            connections,
+                                        )
+                            except BaseException:
+                                if isinstance(executing, TurnBinding) and executing.account_mcp_connections:
+                                    await asyncio.gather(
+                                        *(item.close() for item in executing.account_mcp_connections),
+                                        return_exceptions=True,
+                                    )
+                                raise
                         replies = {
                             str(cast(dict[str, JsonValue], event.data["reply"])["call_id"]):
                             bool(cast(dict[str, JsonValue], event.data["reply"])["allow"])
@@ -516,9 +583,22 @@ class RunService:
                         }
                         data, stored = recovery_checkpoint
                         recovery = load_checkpoint(run.id, data, stored, replies)
-                    await executing.loop.run(run.id, self._approval_request,
-                                             executing.assert_current,
-                                             execution_budget=budget, resume=recovery)
+                    try:
+                        await executing.loop.run(
+                            run.id,
+                            self._approval_request,
+                            executing.assert_current,
+                            execution_budget=budget,
+                            resume=recovery,
+                            executor=executing.executor if isinstance(executing, TurnBinding) else None,
+                        )
+                    except BaseException:
+                        if isinstance(executing, TurnBinding) and executing.account_mcp_connections:
+                            await asyncio.gather(
+                                *(connection.close() for connection in executing.account_mcp_connections),
+                                return_exceptions=True,
+                            )
+                        raise
             except Parked:
                 parked = True  # 停靠：恢复点已由引擎写入，状态转 awaiting
             except asyncio.CancelledError:
@@ -530,6 +610,20 @@ class RunService:
             except Exception:
                 status, code = "failed", "execution_error"
             finally:
+                if isinstance(binding, TurnBinding) and binding.account_mcp_connections:
+                    await asyncio.gather(
+                        *(connection.close() for connection in binding.account_mcp_connections),
+                        return_exceptions=True,
+                    )
+                if (
+                    isinstance(executing, TurnBinding)
+                    and executing is not binding
+                    and executing.account_mcp_connections
+                ):
+                    await asyncio.gather(
+                        *(connection.close() for connection in executing.account_mcp_connections),
+                        return_exceptions=True,
+                    )
                 if budget is not None:
                     budget.finish()
                     self._execution_budgets.pop(run.id, None)

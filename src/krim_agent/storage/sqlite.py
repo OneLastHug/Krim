@@ -38,6 +38,7 @@ from . import sessions as session_sql
 from . import work as work_sql
 from .account_models import ACCOUNT_TABLE_NAMES, ACCOUNT_TABLES
 from .extension_models import EXTENSION_TABLE_NAMES, EXTENSION_TABLES
+from .mcp_models import MCP_TABLE_NAMES, MCP_TABLES
 from .models import (
     dataset_revisions,
     eval_items,
@@ -137,6 +138,7 @@ class SQLiteStore:
                     *ACCOUNT_TABLES,
                     *SANDBOX_TABLES,
                     *EXTENSION_TABLES,
+                    *MCP_TABLES,
                     *SESSION_LIFECYCLE_TABLES,
                 ],
             )
@@ -227,12 +229,13 @@ class SQLiteStore:
                         - ACCOUNT_TABLE_NAMES
                         - SANDBOX_TABLE_NAMES
                         - EXTENSION_TABLE_NAMES
+                        - MCP_TABLE_NAMES
                         - SESSION_LIFECYCLE_TABLE_NAMES
                     )
                     without_extensions = set(metadata.tables) - EXTENSION_TABLE_NAMES
-                    without_session_lifecycle = (
-                        set(metadata.tables) - SESSION_LIFECYCLE_TABLE_NAMES
-                    )
+                    without_mcp = set(metadata.tables) - MCP_TABLE_NAMES
+                    without_extensions_and_mcp = without_mcp - EXTENSION_TABLE_NAMES
+                    without_session_lifecycle = set(metadata.tables) - SESSION_LIFECYCLE_TABLE_NAMES
                     expected = {
                         1: {"runs", "run_events"},
                         2: {
@@ -256,25 +259,27 @@ class SQLiteStore:
                         5: (legacy | set(TABLES)) - {"park_checkpoints"},
                         6: legacy | set(TABLES),
                         7: (
-                            without_extensions
+                            without_extensions_and_mcp
                             - SANDBOX_TABLE_NAMES
                             - SESSION_LIFECYCLE_TABLE_NAMES
                         )
                         | set(TABLES),
                         8: (
-                            without_extensions
+                            without_extensions_and_mcp
                             - {"sandbox_session_bindings", "sandbox_quota_state"}
                             - SESSION_LIFECYCLE_TABLE_NAMES
                             | set(TABLES)
                         ),
                         9: (
-                            without_extensions - {"sandbox_quota_state"}
+                            without_extensions_and_mcp - {"sandbox_quota_state"}
                             - SESSION_LIFECYCLE_TABLE_NAMES
                             | set(TABLES)
                         ),
-                        10: without_extensions - SESSION_LIFECYCLE_TABLE_NAMES | set(TABLES),
-                        11: without_session_lifecycle | set(TABLES),
-                        12: without_session_lifecycle | set(TABLES),
+                        10: without_extensions_and_mcp
+                        - SESSION_LIFECYCLE_TABLE_NAMES
+                        | set(TABLES),
+                        11: without_mcp - SESSION_LIFECYCLE_TABLE_NAMES | set(TABLES),
+                        12: without_session_lifecycle - SANDBOX_TABLE_NAMES | set(TABLES),
                         13: without_session_lifecycle | set(TABLES),
                         14: set(metadata.tables) | set(TABLES),
                     }.get(version, set())
