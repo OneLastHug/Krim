@@ -1372,7 +1372,7 @@ class SandboxService:
         )
         self._live(actor)
         current = await self._project_state(actor, project_id)
-        return {
+        response = {
             **result,
             "project_id": project_id,
             "generation": current["generation"],
@@ -1383,4 +1383,12 @@ class SandboxService:
                 or current["lease_id"] is not None
                 or current["generation"] != project["generation"]
             ),
+            "max_result_bytes": 64 * 1024,
         }
+        if mode == "regex":
+            response.update(
+                regex_limit_bytes=64,
+                max_regex_scan_bytes=512 * 1024,
+                max_regex_line_chars=1024,
+            )
+        return response
