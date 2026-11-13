@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import fnmatch
 import hashlib
 import json
@@ -366,7 +367,7 @@ class ProjectFiles:
         limit: int = 65536,
         *,
         expected_sha256: str | None = None,
-        expected_stat: list[int] | tuple[int, int, int, int, int] | None = None,
+        expected_stat: builtins.list[int] | tuple[int, int, int, int, int] | None = None,
     ) -> dict[str, Any]:
         names = _parts(path)
         if (
@@ -382,7 +383,7 @@ class ProjectFiles:
             )
             or expected_stat is not None
             and (
-                type(expected_stat) not in {list, tuple}
+                (type(expected_stat) is not list and type(expected_stat) is not tuple)
                 or len(expected_stat) != 5
                 or any(type(value) is not int for value in expected_stat)
                 or any(value < 0 for value in expected_stat[:3])

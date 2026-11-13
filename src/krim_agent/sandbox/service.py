@@ -1055,7 +1055,12 @@ class SandboxService:
         self, actor: PrincipalContext, project_id: str, *, path: str
     ) -> tuple[bytes, str]:
         project = await self._project_state(actor, project_id)
-        if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
             raise ServiceError("sandbox_backend_unavailable", 503)
         if project["status"] != "ready" or project["lease_id"] is not None:
             raise ServiceError("workspace_busy")
@@ -1143,7 +1148,12 @@ class SandboxService:
 
         validate_glob(include_glob)
         project = await self._project_state(actor, project_id)
-        if self.broker is None or project["status"] not in {"ready", "running", "blocked", "restoring"}:
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
             raise ServiceError("sandbox_backend_unavailable", 503)
         result = await self.broker.call(
             "find",

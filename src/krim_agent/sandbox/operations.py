@@ -351,7 +351,10 @@ class SandboxOperations:
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
-                                            "after": {"type": "array", "items": {"type": "string"}},
+                                            "after": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
                                         },
                                         "required": ["path", "line", "preview", "before", "after"],
                                         "additionalProperties": False,
