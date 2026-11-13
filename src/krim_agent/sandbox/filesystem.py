@@ -337,7 +337,10 @@ class ProjectFiles:
                 if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and matches_glob:
                     found.append({"path": full, "size": info.st_size})
 
-        with self._content(environment_id, project_id) as content, self._parent(content, names) as fd:
+        with (
+            self._content(environment_id, project_id) as content,
+            self._parent(content, names) as fd,
+        ):
             walk(fd, "/".join(names) + "/" if names else "", 0)
         page = found[offset : offset + limit]
         return {
