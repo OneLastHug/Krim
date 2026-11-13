@@ -16,6 +16,7 @@ from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.models import turns
+from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
@@ -230,6 +231,8 @@ async def test_schema8_readonly_and_upgrade_add_only_bindings(tmp_path):
     with sqlite3.connect(database) as conn:
         conn.execute("DROP TABLE sandbox_quota_state")
         conn.execute("DROP TABLE sandbox_session_bindings")
+        for table in reversed(EXTENSION_TABLES):
+            conn.execute(f'DROP TABLE "{table.name}"')
         conn.execute("PRAGMA user_version=8")
         before = conn.execute("SELECT * FROM sandbox_projects").fetchall()
     reader = await SQLiteStore.open(database, readonly=True)
@@ -454,7 +457,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         )
         assert downloaded == large_source and digest == large_digest
         assert len(chunk_broker.read_calls) > 1
-        assert chunk_broker.read_calls[0]["expected_sha256"] is None
+        assert "expected_sha256" not in chunk_broker.read_calls[0]
+        assert "expected_stat" not in chunk_broker.read_calls[0]
         assert all(
             call["expected_sha256"] == large_digest
             and call["expected_stat"] == stat_token
