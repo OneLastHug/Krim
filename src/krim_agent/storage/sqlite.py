@@ -37,6 +37,7 @@ from krim_agent.runtime.contracts import RunEventPage, RunSnapshot, settled
 from . import sessions as session_sql
 from . import work as work_sql
 from .account_models import ACCOUNT_TABLE_NAMES, ACCOUNT_TABLES
+from .development_models import DEVELOPMENT_TABLE_NAMES, DEVELOPMENT_TABLES
 from .extension_models import EXTENSION_TABLE_NAMES, EXTENSION_TABLES
 from .mcp_models import MCP_TABLE_NAMES, MCP_TABLES
 from .models import (
@@ -51,6 +52,7 @@ from .models import (
     sessions,
     turns,
 )
+from .preview_models import PREVIEW_TABLE_NAMES, PREVIEW_TABLES
 from .sandbox_models import SANDBOX_TABLE_NAMES, SANDBOX_TABLES
 from .session_lifecycle_models import (
     SESSION_LIFECYCLE_TABLE_NAMES,
@@ -58,8 +60,8 @@ from .session_lifecycle_models import (
 )
 
 APPLICATION_ID = 0x4B4C4331
-# 14：可恢复会话归档与回收站状态；13：长任务；12：账号 MCP
-SCHEMA_VERSION = 14
+# 15：开发环境、统一操作回执与进程；14：会话归档；13：长任务；12：账号MCP
+SCHEMA_VERSION = 16
 T = TypeVar("T")
 
 
@@ -140,6 +142,8 @@ class SQLiteStore:
                     *EXTENSION_TABLES,
                     *MCP_TABLES,
                     *SESSION_LIFECYCLE_TABLES,
+                    *DEVELOPMENT_TABLES,
+                    *PREVIEW_TABLES,
                 ],
             )
         )
@@ -204,7 +208,8 @@ class SQLiteStore:
 
         @event.listens_for(engine.sync_engine, "begin")
         def begin(connection: Any) -> None:
-            connection.exec_driver_sql("BEGIN")
+            immediate = connection.get_execution_options().get("krim_immediate", False)
+            connection.exec_driver_sql("BEGIN IMMEDIATE" if immediate else "BEGIN")
 
         store = cls(engine, fd, readonly, max_events)
         try:
@@ -225,7 +230,9 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
                     current_tables = set(metadata.tables) | set(TABLES)
-                    schema14 = current_tables
+                    schema16 = current_tables
+                    schema15 = schema16 - PREVIEW_TABLE_NAMES
+                    schema14 = schema15 - DEVELOPMENT_TABLE_NAMES
                     schema13 = schema14 - SESSION_LIFECYCLE_TABLE_NAMES
                     schema12 = schema13 - {"sandbox_turn_contracts"}
                     schema11 = schema12 - MCP_TABLE_NAMES
@@ -263,10 +270,12 @@ class SQLiteStore:
                         12: schema12,
                         13: schema13,
                         14: schema14,
+                        15: schema15,
+                        16: schema16,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+                        or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
                         or tables != expected
                     ):
@@ -472,7 +481,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, status, code)
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
                     else None
                 )
                 terminal_data: dict[str, JsonValue] = {
@@ -497,7 +506,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -541,7 +550,7 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
-            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                 from . import observation_outbox as hot_sql
 
                 try:
@@ -741,7 +750,7 @@ class SQLiteStore:
             ),
             (
                 await work_sql.load(conn, run_id)
-                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
                 else None
             ),
         )
@@ -758,7 +767,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1258,7 +1267,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
                     else None
                 )
                 recovered_code = (
@@ -1293,7 +1302,7 @@ class SQLiteStore:
                         finished_at=time.time(),
                     )
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -1345,7 +1354,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 

@@ -7,7 +7,7 @@ version = "0.4.0a1"
 description = "Krim Agent: persistent sessions, controlled runs and rule evaluations"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115,<1", "pydantic>=2.13,<3", "sqlalchemy>=2.0,<2.1", "aiosqlite>=0.20,<1", "uvicorn>=0.30,<1", "jsonschema>=4.23,<5", "referencing>=0.37,<0.38", "httpx>=0.27,<1", "ai[openai]==0.9.0", "openai==2.34.0", "PyYAML>=6,<7"]
+dependencies = ["fastapi>=0.115,<1", "pydantic>=2.13,<3", "sqlalchemy>=2.0,<2.1", "aiosqlite>=0.20,<1", "uvicorn>=0.30,<1", "jsonschema>=4.23,<5", "referencing>=0.37,<0.38", "httpx>=0.27,<1", "httpcore==1.0.9", "websockets==15.0.1", "ai[openai]==0.9.0", "openai==2.34.0", "PyYAML>=6,<7"]
 [project.optional-dependencies]
 mcp = ["mcp==1.30.0"]
 personal-mcp = ["mcp==1.30.0", "cryptography==50.0.2"]
@@ -98,6 +98,56 @@ only-include = [
   "src/krim_agent/context/compaction.py",
   "src/krim_agent/context/types.py",
   "src/krim_agent/contracts.py",
+  "src/krim_agent/development/__init__.py",
+  "src/krim_agent/development/contracts.py",
+  "src/krim_agent/development/ports.py",
+  "src/krim_agent/development/preview_ports.py",
+  "src/krim_agent/development/configuration.py",
+  "src/krim_agent/development/service.py",
+  "src/krim_agent/api/development.py",
+  "src/krim_agent/runtime/sdk_loop.py",
+  "src/krim_agent/dev_environment/__init__.py",
+  "src/krim_agent/dev_environment/backend.py",
+  "src/krim_agent/dev_environment/bootstrap.py",
+  "src/krim_agent/dev_environment/docker.py",
+  "src/krim_agent/dev_environment/execution.py",
+  "src/krim_agent/dev_environment/locking.py",
+  "src/krim_agent/dev_environment/model.py",
+  "src/krim_agent/dev_environment/preview.py",
+  "src/krim_agent/dev_environment/preview_control.py",
+  "src/krim_agent/dev_environment/preview_relay.py",
+  "src/krim_agent/dev_environment/preview_transport.py",
+  "src/krim_agent/dev_preview/__init__.py",
+  "src/krim_agent/dev_preview/app.py",
+  "src/krim_agent/dev_preview/boundary.py",
+  "src/krim_agent/dev_preview/http_transport.py",
+  "src/krim_agent/dev_preview/repository.py",
+  "src/krim_agent/dev_preview/service.py",
+  "src/krim_agent/dev_preview/websockets_client.py",
+  "src/krim_agent/storage/development_models.py",
+  "src/krim_agent/storage/development.py",
+  "src/krim_agent/storage/project_access.py",
+  "src/krim_agent/storage/preview.py",
+  "src/krim_agent/storage/preview_models.py",
+  "src/krim_agent/project_access/__init__.py",
+  "src/krim_agent/project_access/types.py",
+  "src/krim_agent/project_access/repository.py",
+  "src/krim_agent/project_access/service.py",
+  "src/krim_agent/project_access/secrets.py",
+  "src/krim_agent/project_access/egress.py",
+  "src/krim_agent/project_access/git.py",
+  "src/krim_agent/agent_sdk/__init__.py",
+  "src/krim_agent/agent_sdk/adapter.py",
+  "src/krim_agent/agent_sdk/response.py",
+  "src/krim_agent/agent_sdk/host.py",
+  "src/krim_agent/agent_sdk/model.py",
+  "src/krim_agent/dev_terminal/__init__.py",
+  "src/krim_agent/dev_terminal/backend.py",
+  "src/krim_agent/dev_terminal/byte_log.py",
+  "src/krim_agent/dev_terminal/client.py",
+  "src/krim_agent/dev_terminal/host.py",
+  "src/krim_agent/dev_terminal/wire.py",
+  "src/krim_agent/dev_terminal/worker.py",
   "src/krim_agent/evaluation/__init__.py",
   "src/krim_agent/evaluation/regression.py",
   "src/krim_agent/evaluation/runner.py",
@@ -259,7 +309,7 @@ exclude = [
   "**/*.pyd",
 ]
 [tool.pytest.ini_options]
-testpaths = ["tests/core", "tests/agent_core", "tests/safe_eval"]
+testpaths = ["tests/core", "tests/agent_core", "tests/coding_agent", "tests/safe_eval"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra -p no:cacheprovider"

@@ -1,0 +1,363 @@
+"""C0 ProcessBackend over I's repository, B's runtime and a trusted host worker."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import replace
+from typing import Any
+
+from krim_agent.contracts import ServiceError
+from krim_agent.development.contracts import (
+    CommandRequest,
+    EnvironmentHandle,
+    OutputPage,
+    ProcessHandle,
+    RunOwnership,
+)
+from krim_agent.development.ports import (
+    ExecutionBackend,
+    ProcessRecord,
+    ProcessRepository,
+    RuntimeExecution,
+    RuntimeStatus,
+    command_digest,
+)
+
+from .client import WorkerClient, WorkerError
+
+Authorize = Callable[[CommandRequest, str], Awaitable[None]]
+TERMINAL = {"exited", "cancelled", "failed"}
+
+
+class TerminalBackend:
+    """Authorization is injected by I; matching DTOs are never authorization.
+
+    B enforces process lifetime inside its execution unit, including when this
+    API process is gone. I/B must persist stop fences before calling stop_run or
+    stop_environment; this instance's lock only serializes its own admissions.
+    """
+
+    def __init__(
+        self, repository: ProcessRepository, executions: ExecutionBackend,
+        worker: WorkerClient, *, authorize: Authorize,
+    ) -> None:
+        self.repository = repository
+        self.executions = executions
+        self.worker = worker
+        self.authorize = authorize
+        self._launch_lock = asyncio.Lock()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._tasks: set[asyncio.Task[Any]] = set()
+
+    def _lock(self, process_id: str) -> asyncio.Lock:
+        return self._locks.setdefault(process_id, asyncio.Lock())
+
+    async def _settled(self, operation: Coroutine[Any, Any, Any]) -> Any:
+        # A cancelled HTTP/tool wait must not leave an accepted launch or
+        # requested cancellation halfway through its durable handoff.
+        task = asyncio.create_task(operation)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+                if task.done():
+                    result = task.result()
+                    break
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    @staticmethod
+    def _execution(record: ProcessRecord) -> RuntimeExecution:
+        if record.execution_id is None:
+            raise ValueError("execution identity is missing")
+        return RuntimeExecution(
+            execution_id=record.execution_id, environment=record.request.environment,
+            operation_id=record.request.operation_id, process_id=record.handle.process_id,
+            attach_argv=(), pty=record.request.pty,
+        )
+
+    async def _bound(self, process: ProcessHandle, action: str) -> ProcessRecord:
+        record = await self.repository.get(process.process_id)
+        record.handle.require_binding(process)
+        record.handle.require_binding(record.request)
+        if record.request_digest != command_digest(record.request):
+            raise ValueError("stored command binding changed")
+        await self.authorize(record.request, action)
+        return record
+
+    @staticmethod
+    def _check_runtime(status: RuntimeStatus, execution: RuntimeExecution) -> None:
+        if status.execution_id != execution.execution_id:
+            raise ValueError("runtime execution binding changed")
+        if status.state not in {"created", "running", "exited", "unknown"}:
+            raise ValueError("invalid runtime state")
+
+    async def _save_state(
+        self, record: ProcessRecord, state: str, exit_code: int | None,
+    ) -> ProcessRecord:
+        for _ in range(8):
+            if record.handle.state in TERMINAL:
+                return record
+            if record.handle.state == "unknown" and state in {"accepted", "running"}:
+                return record
+            values = record.handle.model_dump()
+            values.update(state=state, exit_code=exit_code)
+            handle = ProcessHandle.model_validate(values)
+            if handle == record.handle:
+                return record
+            updated = replace(record, handle=handle, revision=record.revision + 1)
+            try:
+                return await self.repository.save(record, updated)
+            except ServiceError as error:
+                if error.code not in {"revision_conflict", "input_revision_conflict"}:
+                    raise
+                current = await self.repository.get(record.handle.process_id)
+                current.handle.require_binding(record.handle)
+                if (current.request_digest != record.request_digest
+                        or current.execution_id != record.execution_id):
+                    raise ValueError("stored process binding changed") from None
+                if current.revision == record.revision:
+                    raise
+                if state not in TERMINAL or current.handle.state in TERMINAL:
+                    # A stale observation never replaces newer state.
+                    return current
+                # A confirmed stop must remain durable even if B has already
+                # removed the unit. Retry over a concurrent nonterminal update
+                # rather than losing the only recoverable terminal receipt.
+                record = current
+        raise ServiceError("revision_conflict")
+
+    async def _refresh(self, record: ProcessRecord) -> ProcessRecord:
+        if record.handle.state in TERMINAL:
+            return record
+        if record.execution_id is None:
+            return await self._save_state(record, "unknown", None)
+        execution = self._execution(record)
+        status = await self.executions.inspect(execution)
+        self._check_runtime(status, execution)
+        if status.state == "exited":
+            if status.exit_code is None:
+                return await self._save_state(record, "unknown", None)
+            return await self._save_state(record, "exited", status.exit_code)
+        if status.state == "running":
+            return await self._save_state(record, "running", None)
+        # Includes created: admission happened, but launch outcome is not
+        # recoverable. Do not run attach_argv again or call prepare again.
+        return await self._save_state(record, "unknown", None)
+
+    async def submit(self, request: CommandRequest) -> ProcessHandle:
+        await self.authorize(request, "submit")
+        record: ProcessRecord = await self._settled(self._admit_and_attach(request))
+        if request.wait_seconds and record.handle.state not in TERMINAL:
+            try:
+                async with asyncio.timeout(request.wait_seconds):
+                    while record.handle.state not in TERMINAL:
+                        await asyncio.sleep(0.025)
+                        handle = await self.inspect(record.handle)
+                        record = replace(record, handle=handle)
+            except TimeoutError:
+                pass
+        return record.handle
+
+    async def _admit_and_attach(self, request: CommandRequest) -> ProcessRecord:
+        async with self._launch_lock:
+            reservation = await self.repository.reserve(request, command_digest(request))
+            record = reservation.record
+            record.handle.require_binding(request)
+            if record.request_digest != command_digest(request):
+                raise ValueError("reservation request binding changed")
+            async with self._lock(record.handle.process_id):
+                if not reservation.execute:
+                    return await self._refresh(record)
+                if record.handle.state != "accepted" or record.execution_id is not None:
+                    raise ValueError("only fresh accepted reservations may launch")
+                execution: RuntimeExecution | None = None
+                try:
+                    async with self.executions.prepare(request, record.handle.process_id) as target:
+                        # Validate all immutable fields before saving or spawning.
+                        if (target.environment.model_dump(exclude={"state"})
+                                != request.environment.model_dump(exclude={"state"})
+                                or target.operation_id != request.operation_id
+                                or target.process_id != record.handle.process_id
+                                or target.pty != request.pty or not target.attach_argv):
+                            raise ValueError("runtime launch binding changed")
+                        execution = target
+                        record = await self.repository.save(
+                            record, replace(
+                                record, execution_id=target.execution_id,
+                                revision=record.revision + 1,
+                            ),
+                        )
+                        local = await self.worker.attach(request, record.handle, target)
+                        if local.get("state") not in {"running", "exited"}:
+                            raise WorkerError("attachment_launch_unknown")
+                        # The worker durably owns the spawned CLI before the
+                        # project fence is released. B.inspect takes that same
+                        # fence, so runtime confirmation must happen outside.
+                    async with asyncio.timeout(5):
+                        while True:
+                            status = await self.executions.inspect(target)
+                            self._check_runtime(status, target)
+                            if status.state in {"running", "exited"}:
+                                break
+                            if status.state == "unknown":
+                                raise WorkerError("runtime_launch_unknown")
+                            await asyncio.sleep(0.02)
+                    state = "running"
+                    if status.state == "exited":
+                        state = "exited" if status.exit_code is not None else "unknown"
+                    return await self._save_state(
+                        record, state, status.exit_code if state == "exited" else None,
+                    )
+                except Exception as error:
+                    # The immutable admission is never undone. Best-effort
+                    # cleanup can prove cancellation; otherwise retain unknown.
+                    record = await self.repository.get(record.handle.process_id)
+                    stopped = False
+                    exit_code = None
+                    if execution is not None:
+                        try:
+                            # Even a save conflict must retire the unit B just
+                            # created, using the validated descriptor in hand.
+                            # Never cancel a different persisted execution.
+                            cleanup = replace(execution, attach_argv=())
+                            status = await self.executions.cancel(cleanup)
+                            self._check_runtime(status, cleanup)
+                            if status.state == "exited" and record.execution_id in {
+                                None, execution.execution_id,
+                            }:
+                                stopped = True
+                                exit_code = status.exit_code
+                                if record.execution_id == execution.execution_id:
+                                    await self._close_attachment(record)
+                        except Exception:
+                            pass
+                    record = await self._save_state(
+                        record, "failed" if stopped else "unknown", exit_code,
+                    )
+                    if isinstance(error, ValueError) or (
+                        isinstance(error, ServiceError) and error.code not in {
+                            "revision_conflict", "input_revision_conflict",
+                        }
+                    ):
+                        raise
+                    return record
+
+    async def inspect(self, process: ProcessHandle) -> ProcessHandle:
+        async with self._lock(process.process_id):
+            record = await self._bound(process, "inspect")
+            record = await self._refresh(record)
+            await self._release_finished(record)
+            return record.handle
+
+    async def _release_finished(self, record: ProcessRecord) -> None:
+        if record.handle.state not in TERMINAL or record.execution_id is None:
+            return
+        try:
+            local = await self.worker.inspect(record.request, record.handle)
+            if local.get("state") not in TERMINAL | {"unknown"}:
+                return  # Preserve the live attachment until output is drained.
+        except (WorkerError, OSError, TimeoutError):
+            pass
+        # Terminal status is durable before removing the runtime resource.
+        # B.release must be idempotent; the host log is retained independently.
+        await self.executions.release(self._execution(record))
+
+    async def read_output(self, process: ProcessHandle, cursor: int) -> OutputPage:
+        if cursor < 0:
+            raise ValueError("negative output cursor")
+        record = await self._bound(process, "read_output")
+        reply = await self.worker.invoke(
+            self.worker.control(record.request, record.handle, "output", cursor=cursor),
+        )
+        if reply.get("state") == "unknown" and reply.get("reason") == "receipt_missing":
+            raise WorkerError("terminal_log_unavailable")
+        page = OutputPage.model_validate(reply)
+        if page.process_id != process.process_id or page.cursor != cursor:
+            raise ValueError("output binding changed")
+        return page
+
+    async def write_stdin(
+        self, process: ProcessHandle, data: str, *, close: bool = False,
+    ) -> None:
+        if len(data.encode()) > 65536:
+            raise ValueError("stdin exceeds limit")
+        async with self._lock(process.process_id):
+            record = await self._bound(process, "write_stdin")
+            record = await self._refresh(record)
+            if record.handle.state != "running":
+                raise ValueError("process is not running")
+            await self.worker.invoke(self.worker.control(
+                record.request, record.handle, "stdin", data=data, close=close,
+            ))
+
+    async def _close_attachment(self, record: ProcessRecord) -> None:
+        try:
+            await self.worker.invoke(self.worker.control(record.request, record.handle, "cancel"))
+        except (WorkerError, OSError, TimeoutError):
+            # B already proved the complete execution stopped. Lost host
+            # attachment/logs do not invalidate that runtime result.
+            pass
+
+    async def _cancel(self, process: ProcessHandle, *, action: str = "cancel") -> ProcessHandle:
+        async with self._lock(process.process_id):
+            record = await self._bound(process, action)
+            if record.handle.state in TERMINAL:
+                return record.handle
+            if record.execution_id is None:
+                return (await self._save_state(record, "unknown", None)).handle
+            execution = self._execution(record)
+            status = await self.executions.cancel(execution)
+            self._check_runtime(status, execution)
+            if status.state != "exited":
+                return (await self._save_state(record, "unknown", None)).handle
+            await self._close_attachment(record)
+            return (await self._save_state(record, "cancelled", status.exit_code)).handle
+
+    async def cancel(self, process: ProcessHandle) -> ProcessHandle:
+        result: ProcessHandle = await self._settled(self._cancel(process))
+        return result
+
+    async def stop_run(self, ownership: RunOwnership) -> None:
+        await self._settled(self._stop(ownership=ownership))
+
+    async def stop_environment(self, environment: EnvironmentHandle) -> None:
+        await self._settled(self._stop(environment=environment))
+
+    async def _stop(
+        self, *, ownership: RunOwnership | None = None,
+        environment: EnvironmentHandle | None = None,
+    ) -> None:
+        async with self._launch_lock:
+            if ownership is not None:
+                records = await self.repository.list_run(ownership)
+                if any(item.handle.ownership != ownership for item in records):
+                    raise ValueError("repository returned a different run")
+                selected = [item for item in records if item.handle.lifecycle == "run"]
+                action = "stop_run"
+            else:
+                assert environment is not None
+                selected = list(await self.repository.list_environment(environment))
+                if any(item.handle.environment.model_dump(exclude={"state"})
+                       != environment.model_dump(exclude={"state"}) for item in selected):
+                    raise ValueError("repository returned a different environment")
+                action = "stop_environment"
+            # Attempt every cleanup even if one fails; report failures rather
+            # than treating a partial environment stop as complete.
+            results = await asyncio.gather(*(
+                self._cancel(item.handle, action=action) for item in selected
+            ), return_exceptions=True)
+            errors = [item for item in results if isinstance(item, Exception)]
+            if errors:
+                raise ExceptionGroup("terminal cleanup failed", errors)
+            if any(isinstance(item, ProcessHandle) and item.state == "unknown" for item in results):
+                raise WorkerError("terminal_cleanup_unknown")

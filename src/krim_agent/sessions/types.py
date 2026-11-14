@@ -9,7 +9,8 @@ from krim_agent.contracts import Message, StrictModel
 from krim_agent.sandbox.tasks import SandboxCompletion
 
 TargetKey = Literal[
-    "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
+    "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace",
+    "target-development"
 ]
 Key = str
 

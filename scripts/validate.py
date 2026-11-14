@@ -15,6 +15,37 @@ ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
 CI_TESTS = (
     "tests/core/test_contracts.py",
+    "tests/coding_agent/test_development_contracts.py",
+    "tests/coding_agent/test_preview_route_contracts.py",
+    "tests/coding_agent/test_sdk_process_recovery.py",
+    "tests/coding_agent/test_sdk_host_bridge.py",
+    "tests/coding_agent/test_sdk_run_service.py",
+    "tests/coding_agent/test_development_entrypoint.py",
+    "tests/agent_core/test_dev_environment_backend.py",
+    "tests/agent_core/test_dev_environment_review.py",
+    "tests/agent_core/test_dev_environment_execution.py",
+    "tests/agent_core/test_dev_environment_fencing.py",
+    "tests/agent_core/test_dev_environment_preview.py",
+    "tests/agent_core/test_dev_environment_preview_control.py",
+    "tests/agent_core/test_dev_environment_preview_relay.py",
+    "tests/agent_core/test_dev_environment_preview_transport.py",
+    "tests/agent_core/test_dev_preview_protocol.py",
+    "tests/agent_core/test_dev_preview_transport.py",
+    "tests/agent_core/test_dev_preview_websockets.py",
+    "tests/coding_agent/test_development_storage.py",
+    "tests/coding_agent/test_project_access_storage.py",
+    "tests/coding_agent/test_preview_storage.py",
+    "tests/coding_agent/test_preview_sqlite_api.py",
+    "tests/agent_core/test_project_access_service.py",
+    "tests/agent_core/test_project_access_egress_git.py",
+    "tests/agent_core/test_sdk_adapter_probe.py",
+    "tests/agent_core/test_dev_terminal_backend.py",
+    "tests/agent_core/test_dev_terminal_client.py",
+    "tests/agent_core/test_dev_terminal_edges.py",
+    "tests/agent_core/test_dev_terminal_host.py",
+    "tests/agent_core/test_dev_terminal_log.py",
+    "tests/agent_core/test_dev_terminal_recovery.py",
+    "tests/agent_core/test_dev_terminal_worker.py",
     "tests/core/test_runtime.py",
     "tests/core/test_tool_boundaries.py",
     "tests/agent_core/test_sessions.py",
@@ -149,8 +180,8 @@ def main() -> int:
     env.setdefault("LD_LIBRARY_PATH", "")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if args.only != "frontend":
-        safe_root = evidence / "safe-eval"
-        safe_root.mkdir()
+        # evidence 本身已独占创建；省去重复嵌套，给 AF_UNIX socket 留出路径长度。
+        safe_root = evidence
         if args.suite == "ci" or not env.get("KRIM_SAFE_EVAL_ROOT"):
             env["KRIM_SAFE_EVAL_ROOT"] = str(safe_root)
         else:
@@ -158,9 +189,12 @@ def main() -> int:
         if not safe_root.is_dir():
             print("KRIM_SAFE_EVAL_ROOT 必须是现有测试证据目录", file=sys.stderr)
             return 2
-        pytest_run = Path(tempfile.mkdtemp(prefix="run-", dir=safe_root))
+        pytest_run = (
+            evidence if safe_root == evidence
+            else Path(tempfile.mkdtemp(prefix="run-", dir=safe_root))
+        )
         command = [sys.executable, "-m", "pytest", "-ra",
-                   f"--basetemp={pytest_run / 'pytest'}", f"--junitxml={evidence / 'pytest.xml'}"]
+                   f"--basetemp={pytest_run / 'p'}", f"--junitxml={evidence / 'pytest.xml'}"]
         if args.suite == "ci":
             command += list(CI_TESTS)
         else:

@@ -67,6 +67,9 @@ async def main(args):
         app = await open_application(
             Path(args.database), provider=provider, registry=ToolRegistry(tuple(specs))
         )
+        save(Path(args.marker).with_suffix(".ready.json"), {
+            "namespace_local_pid": os.getpid(), "phase": args.phase,
+        })
         original = app.store._write
 
         async def write(operation):

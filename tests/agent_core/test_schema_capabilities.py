@@ -24,7 +24,7 @@ from krim_agent.workspace.types import (
 )
 
 
-@pytest.mark.parametrize("version", [11, 12, 13, 14])
+@pytest.mark.parametrize("version", [11, 12, 13, 14, 15])
 async def test_workspace_terminal_attempt_supports_feature_schema_versions(version):
     result = Mock()
     result.scalar_one_or_none.return_value = {"verification": {"schema": verification.SCHEMA}}
@@ -43,7 +43,7 @@ async def test_workspace_terminal_attempt_supports_feature_schema_versions(versi
 @pytest.mark.parametrize("legacy", [False, True])
 async def test_linked_session_source_works_after_current_schema_upgrade(tmp_path, legacy):
     async with await open_application(tmp_path / "source.sqlite") as app:
-        assert app.store.schema_version == SCHEMA_VERSION == 14
+        assert app.store.schema_version == SCHEMA_VERSION == 16
         session = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="source"))
         turn = await app.sessions.submit(
             LOCAL,
