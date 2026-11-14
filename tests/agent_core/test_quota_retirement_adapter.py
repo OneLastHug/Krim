@@ -237,8 +237,19 @@ def clear_history(
     """显式两阶段GC：解除用户引用→过期→cleanup_preview/confirm删引用并物理回收。"""
     store = store_of(storage, environment_id)
     store.pin(environment_id, project_id, checkpoint_id, pinned=False)
-    time.sleep(RETENTION + 0.05)
-    plan = store.cleanup_preview(environment_id, project_id, QuotaLimits(**limits()))
+    # WSL wall-clock correction can move time backwards during the wait. The
+    # fixture must observe actual expiry, not equate a sleep with eligibility.
+    deadline = time.monotonic() + 10
+    while True:
+        row = next(item for item in store.list(environment_id, project_id)
+                   if item["checkpoint_id"] == checkpoint_id)
+        remaining = row["created_at"] + RETENTION - time.time()
+        if remaining <= 0:
+            plan = store.cleanup_preview(environment_id, project_id, QuotaLimits(**limits()))
+            if any(item["checkpoint_id"] == checkpoint_id for item in plan["candidates"]):
+                break
+        assert time.monotonic() < deadline, "checkpoint did not become an expired GC candidate"
+        time.sleep(min(0.1, max(0.02, remaining + 0.01)))
     receipt = store.cleanup_confirm(
         environment_id,
         project_id,
@@ -247,6 +258,7 @@ def clear_history(
         "retire:" + plan["plan_id"],
     )
     assert receipt["status"] == "completed"
+    assert receipt["removed"] == [checkpoint_id]
 
 
 def retirement(storage: StorageBroker) -> QuotaRetirement:

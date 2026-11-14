@@ -87,6 +87,8 @@ class ToolSpec:
         external = self.external_executor is not None
         if external:
             if self.name in {
+                "dev_shell", "dev_process", "dev_output", "dev_stdin", "dev_cancel",
+                "dev_read", "dev_list",
                 "sandbox_project",
                 "sandbox_read",
                 "sandbox_list",
@@ -125,6 +127,8 @@ class ToolSpec:
             or self.capability is None
             or self.capability
             != {
+                "dev_shell": "command", "dev_process": "read", "dev_output": "read",
+                "dev_stdin": "write", "dev_cancel": "write", "dev_read": "read", "dev_list": "read",
                 "sandbox_project": "read",
                 "sandbox_read": "read",
                 "sandbox_list": "read",
@@ -193,6 +197,7 @@ class ToolSpec:
         }
         if self.scoped_executor is not None:
             value.update(risk=self.risk, capability=self.capability, policy_version=(
+                "development/1" if self.name.startswith("dev_") else
                 "sandbox/1" if self.name.startswith("sandbox_") else "workspace/1"))
         if self.source is not None:
             if type(self.source) is not ToolSource or self.external_executor is None:

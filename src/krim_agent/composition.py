@@ -17,6 +17,8 @@ from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.contracts import ServiceError
+from krim_agent.development.configuration import DevelopmentConfiguration
+from krim_agent.development.service import DevelopmentService
 from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
 from krim_agent.evaluation.app import EvalApplication, open_eval
 from krim_agent.evaluation.automation import EvaluationAutomation
@@ -31,6 +33,7 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenA
 from krim_agent.providers.types import ModelProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
+from krim_agent.runtime.sdk_loop import DevelopmentSDKLoop
 from krim_agent.runtime.service import RunBinding, RunService
 from krim_agent.sandbox.configuration import SandboxConfiguration
 from krim_agent.sandbox.operations import SandboxOperations
@@ -74,6 +77,7 @@ class Application:
     sandbox: SandboxService | None = None
     extensions: ExtensionService | None = None
     account_mcp: AccountMCPService | None = None
+    development: DevelopmentService | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -180,6 +184,7 @@ async def open_application(
     workspace_middleware: tuple[Middleware, ...] = (),
     workspace_wrap: Wrap | None = None,
     tool_config: ToolRuntimeConfig | None = None,
+    development_configuration: DevelopmentConfiguration | None = None,
 ) -> Application:
     from sqlalchemy import select
 
@@ -203,6 +208,14 @@ async def open_application(
         if config.sandbox_config_file is not None
         else None
     )
+    if development_configuration is not None and config.development_config_file is not None:
+        raise ServiceError("sandbox_config_invalid", 422)
+    development_configuration = development_configuration or (
+        DevelopmentConfiguration.load(config.development_config_file)
+        if config.development_config_file is not None else None
+    )
+    if development_configuration is not None and sandbox_configuration is None:
+        raise ServiceError("sandbox_config_invalid", 422)
     reset_source_fingerprints()
     if workspace_profile is not None and config.workspace_profile_file is not None:
         raise ServiceError("workspace_unavailable")
@@ -396,7 +409,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -416,7 +429,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
@@ -541,6 +554,34 @@ async def open_application(
             bindings["target-http"] = RunBinding.freeze(
                 "target-http", sandbox_loop, sandbox_settings
             )
+        development = None
+        if development_configuration is not None:
+            if sandbox_service is None or sandbox_service.broker is None:
+                raise ServiceError("sandbox_config_invalid", 422)
+            await asyncio.to_thread(DevelopmentService.prepare_private, development_configuration)
+            development = DevelopmentService(store, identities, sandbox_service,
+                                             development_configuration)
+            await development.start_supervisor()
+            development_settings = config.model_copy(update={
+                "target_version": "development/1", "run_timeout": 300.0, "tool_timeout": 30.0,
+                "system_prompt": (
+                    "你是Krim开发Agent。在已授权项目中使用Shell和文件工具完成任务。"
+                    "检查实际退出码、日志与测试；只有用户明确要求的服务使用project_service。"
+                ),
+            })
+            development_loop = DevelopmentSDKLoop(
+                store, selected,
+                ToolExecutor(development.registry(), development.policy, pre, post),
+                development_settings, resolve_scope=development.scope,
+                repositories=development.repositories, cleanup_run=development.cleanup_run,
+                descriptor={"version": "development/1",
+                            "image_id": development_configuration.image_id,
+                            "runtime": "docker-runsc", "contract": "c0-v1.1"},
+                approval_projection=development.approval_projection,
+            )
+            bindings["target-development"] = RunBinding.freeze(
+                "target-development", development_loop, development_settings,
+            )
         service = RunService(store, loop, config, target, bindings)
         account_mcp = AccountMCPService(
             store,
@@ -572,6 +613,7 @@ async def open_application(
             sandbox=sandbox_service,
             extensions=ExtensionService(store, identities if identities.managed else None),
             account_mcp=account_mcp if identities.managed else None,
+            development=development,
         )
         if evaluation_path is not None:
             adapters = {
@@ -617,6 +659,8 @@ async def open_application(
             assert application is not None and application.sessions is not None
             # 身份快照已提交，先阻断后续派发，再等待已有执行按原取消协议收束。
             await application.sessions.revoke_principal(principal_id)
+            if application.development is not None:
+                await application.development.revoke_owner(principal_id)
             if application.evaluation_automation is not None:
                 await application.evaluation_automation.cancel_principal(principal_id)
             # 兼容数据只有一个显式legacy主体。无Session关联的v1运行与旧评测

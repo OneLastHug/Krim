@@ -12,8 +12,10 @@ from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.account_models import ACCOUNT_TABLES
+from krim_agent.storage.development_models import DEVELOPMENT_TABLES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.models import runs, turns
+from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.sandbox_models import SANDBOX_TABLES
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
 from krim_agent.storage.sqlite import MCP_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
@@ -35,6 +37,7 @@ def downgrade(path, version):
         for name in sorted(MCP_TABLE_NAMES):
             conn.execute(f'DROP TABLE "{name}"')
         for table in [
+            *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
             *reversed(SESSION_LIFECYCLE_TABLES),
             *reversed(EXTENSION_TABLES),
             *reversed(SANDBOX_TABLES),
@@ -297,10 +300,22 @@ async def test_restart_interrupts_and_pauses_queue_without_replay(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
+        # Cold interpreter/import/schema startup is separate from the actual
+        # crash barrier. The second marker still requires the real executor.
+        ready = marker.with_suffix(".ready.json")
+        async with asyncio.timeout(30):
+            while not ready.exists():
+                if child.returncode is not None:
+                    stdout, stderr = await child.communicate()
+                    raise AssertionError(("worker exited before ready", stdout, stderr))
+                await asyncio.sleep(0.005)
+        boot = json.loads(ready.read_text())
+        assert boot["namespace_local_pid"] == child.pid and boot["phase"] == phase
         async with asyncio.timeout(8):
             while not marker.exists():
                 if child.returncode is not None:
-                    raise AssertionError("worker exited before barrier")
+                    stdout, stderr = await child.communicate()
+                    raise AssertionError(("worker exited before barrier", stdout, stderr))
                 await asyncio.sleep(0.005)
         info = json.loads(marker.read_text())
         if phase == "provider":

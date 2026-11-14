@@ -41,7 +41,8 @@ from . import model_step as model_step_module
 from .contracts import ExecutionBudget, RunSnapshot, RunStore, settled
 from .engine import AgentLoop, Parked
 from .facts import project_facts
-from .recovery import load_checkpoint
+from .recovery import RecoveryState, load_checkpoint
+from .sdk_loop import DevelopmentSDKLoop, SDKResume
 
 
 def implementation(value: object | None) -> dict[str, JsonValue]:
@@ -120,6 +121,19 @@ class RunBinding:
                 for token in (id(method), id(getattr(method, "__code__", None)))
             )
             result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        if isinstance(loop, DevelopmentSDKLoop):
+            from krim_agent.agent_sdk import adapter as sdk_adapter
+            from krim_agent.agent_sdk import host as sdk_host
+            from krim_agent.agent_sdk import model as sdk_model
+            from krim_agent.agent_sdk import response as sdk_response
+            from krim_agent.runtime import sdk_loop
+
+            result += (id(function(loop.run)), id(loop.development_store),
+                       id(function(loop.development_scope)), id(function(loop.development_cleanup)),
+                       id(function(loop.development_approval_projection)))
+            result += tuple(source_digest(cast(str, module.__file__)) for module in (
+                sdk_adapter, sdk_host, sdk_model, sdk_response, sdk_loop,
+            ))
         if loop.sandbox is not None:
             result += (
                 id(loop.sandbox),
@@ -227,6 +241,7 @@ class RunBinding:
             provider.update(behavior_version="http-sse/1", config=loop.provider.identity())
         policy_callable = (getattr(loop.executor.policy, "__func__", loop.executor.policy)
                            if loop.work is not None or loop.sandbox is not None
+                           or isinstance(loop, DevelopmentSDKLoop)
                            else loop.executor.policy)
         policy = implementation(policy_callable)
         policy["allowed_names"] = (
@@ -274,6 +289,9 @@ class RunBinding:
             }
             assert loop._verifier is not None
             descriptor["workspace_verification"] = loop._verifier.descriptor()
+        if isinstance(loop, DevelopmentSDKLoop):
+            descriptor["development"] = loop.development_descriptor
+            descriptor["agent_loop"] = "ai-python/0.9.0-host-v1"
         if loop.sandbox is not None:
             descriptor["sandbox"] = {"version": "sandbox/1",
                 "image": loop.sandbox.service.configuration.command_image,
@@ -441,7 +459,8 @@ class RunService:
         if binding is None:
             raise ServiceError("invalid_input", 422)
         binding.assert_current()
-        if binding.loop.sandbox is not None and turn_id is None:
+        if (binding.loop.sandbox is not None or isinstance(binding.loop, DevelopmentSDKLoop)) \
+                and turn_id is None:
             raise ServiceError("workspace_contract_required")
         if expected is not None and fingerprint(parse_json(binding.descriptor_json)) != expected:
             raise ServiceError("target_binding_changed")
@@ -553,7 +572,7 @@ class RunService:
                 budget.bind(timeout_context)
                 async with timeout_context:
                     await self.store.set_running(run.id)
-                    recovery = None
+                    recovery: RecoveryState | SDKResume | None = None
                     if resume:
                         assert recovery_checkpoint is not None
                         snapshot = await self.store.snapshot(run.id)
@@ -606,14 +625,16 @@ class RunService:
                             if event.kind == "approval_reply"
                         }
                         data, stored = recovery_checkpoint
-                        recovery = load_checkpoint(run.id, data, stored, replies)
+                        recovery = (SDKResume(data, stored, replies)
+                                    if isinstance(executing.loop, DevelopmentSDKLoop)
+                                    else load_checkpoint(run.id, data, stored, replies))
                     try:
                         await executing.loop.run(
                             run.id,
                             self._approval_request,
                             executing.assert_current,
                             execution_budget=budget,
-                            resume=recovery,
+                            resume=cast(Any, recovery),
                             executor=(
                                 executing.executor if isinstance(executing, TurnBinding) else None
                             ),
@@ -663,6 +684,11 @@ class RunService:
                         parked = await self.store.set_awaiting(run.id)
                         if not parked:
                             status, code = "aborted", "cancelled"
+                    if not parked and isinstance(base.loop, DevelopmentSDKLoop):
+                        try:
+                            await base.loop.development_cleanup(run.id)
+                        except Exception:
+                            status, code = "failed", "sandbox_cleanup_failed"
                     if not parked and base.loop.sandbox is not None:
                         from krim_agent.sandbox.tasks import cancel_run_tasks
 
@@ -806,6 +832,8 @@ class RunService:
         snapshot = await self.store.snapshot(run_id)
         if snapshot.run.status == "awaiting":
             binding = self.bindings.get(snapshot.request.target)
+            if binding is not None and isinstance(binding.loop, DevelopmentSDKLoop):
+                await binding.loop.development_cleanup(run_id)
             if binding is not None and binding.loop.sandbox is not None:
                 from krim_agent.sandbox.tasks import cancel_run_tasks
 
@@ -862,7 +890,7 @@ class RunService:
             if binding is None:
                 raise ServiceError("target_binding_changed")
             expires = time.time() + binding.settings.approval_timeout
-        return {
+        data: dict[str, JsonValue] = {
             "request_id": secrets.token_hex(16),
             "run_id": invocation.run_id,
             "call_id": invocation.call_id,
@@ -875,6 +903,12 @@ class RunService:
             "budget_remaining": budget_remaining,
             **provenance,
         }
+        selected_binding = self.bindings.get(snapshot.request.target)
+        if selected_binding is not None and isinstance(selected_binding.loop, DevelopmentSDKLoop):
+            projection = selected_binding.loop.development_approval_projection
+            if projection is not None:
+                data = await projection(invocation, data)
+        return data
 
     def _unanswered_requests(self, snapshot: RunSnapshot) -> list[dict[str, JsonValue]]:
         """快照里尚未答复的审批请求（不做过期判断，过期由答复路径处理）。"""

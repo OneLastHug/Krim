@@ -228,7 +228,8 @@ class RunRequest(StrictModel):
     text: str = Field(min_length=1, max_length=32768)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target: Literal[
-        "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
+        "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace",
+        "target-development"
     ] = "demo"
 
     @field_validator("text")

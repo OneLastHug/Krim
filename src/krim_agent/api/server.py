@@ -334,6 +334,9 @@ def create_app(
     from .sandbox import mount_sandbox
 
     mount_sandbox(app)
+    from .development import mount_development
+
+    mount_development(app)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:
