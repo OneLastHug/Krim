@@ -16,7 +16,9 @@ FRONTEND = ROOT / "frontend"
 CI_TESTS = (
     "tests/core/test_contracts.py",
     "tests/core/test_runtime.py",
+    "tests/core/test_tool_boundaries.py",
     "tests/agent_core/test_sessions.py",
+    "tests/agent_core/test_approval_park.py",
     "tests/agent_core/test_session_controls.py",
     "tests/agent_core/test_session_lifecycle.py",
     "tests/agent_core/test_extension_migration.py",
@@ -35,6 +37,7 @@ CI_TESTS = (
     "tests/agent_core/test_sandbox_broker.py",
     "tests/agent_core/test_sandbox_checkpoints.py",
     "tests/agent_core/test_sandbox_command.py",
+    "tests/agent_core/test_sandbox_command_regressions.py",
     "tests/agent_core/test_sandbox_jobs.py",
     "tests/agent_core/test_sandbox_bindings.py",
     "tests/agent_core/test_sandbox_quota_control.py",

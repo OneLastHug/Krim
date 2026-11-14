@@ -21,7 +21,15 @@ from krim_agent.context.types import (
     SessionContext,
     WorkspaceSessionContext,
 )
-from krim_agent.contracts import Message, RunRequest, RunView, ServiceError, encoded, fingerprint
+from krim_agent.contracts import (
+    TERMINAL,
+    Message,
+    RunRequest,
+    RunView,
+    ServiceError,
+    encoded,
+    fingerprint,
+)
 from krim_agent.extensions import ExtensionService, extension_messages, load_turn_extensions
 from krim_agent.runtime.contracts import RunSnapshot, settled
 from krim_agent.security import PrincipalContext
@@ -987,6 +995,20 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
             transcript=[m.model_dump(mode="json") for m in builder.transcript(snapshot)],
         )
     )
+
+
+async def owned_active_runs(store: SQLiteStore, principal_id: str) -> list[str]:
+    """Include parked runs even when their producer has already ended."""
+    async def operation(conn: AsyncConnection) -> list[str]:
+        return list(await conn.scalars(
+            select(runs.c.id)
+            .join(turns, turns.c.run_id == runs.c.id)
+            .join(sessions, sessions.c.id == turns.c.session_id)
+            .where(sessions.c.owner_id == principal_id, runs.c.status.not_in(TERMINAL))
+            .order_by(runs.c.created_at, runs.c.id)
+        ))
+
+    return await read(store, operation)
 
 
 async def queued(store: SQLiteStore) -> list[str]:

@@ -24,7 +24,7 @@ from krim_agent.storage.models import sessions
 from krim_agent.tools.core import Decision, Invocation
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.mcp import mcp_tools
-from krim_agent.tools.registry import ToolRegistry
+from krim_agent.tools.registry import MAX_TOOLS, ToolRegistry
 from krim_agent.tools.runtime import _mcp_egress_policy
 
 if TYPE_CHECKING:
@@ -791,12 +791,13 @@ class AccountMCPService:
         )
 
     async def build_runtime(
-        self, configs: tuple[MCPServerConfig, ...], base: ToolRegistry, base_policy: Any
+        self, configs: tuple[MCPServerConfig, ...], base: ToolExecutor
     ) -> tuple[ToolExecutor, tuple[MCPConnection, ...]]:
-        """Open only the selected servers and compose them outside storage transactions."""
+        """Extend the selected executor without dropping its host pipeline."""
+        base.registry.assert_current()
         if not configs:
-            return ToolExecutor(base, base_policy), ()
-        specs = [spec for spec, _ in base._frozen]
+            return base, ()
+        specs = [spec for spec, _ in base.registry._frozen]
         connections: list[MCPConnection] = []
         try:
             for server in configs:
@@ -804,19 +805,26 @@ class AccountMCPService:
                 connections.append(connection)
                 await connection.connect()
                 specs.extend(mcp_tools(connection))
-            selected_tools = len(specs) - len(base._frozen)
-            if selected_tools > MAX_SELECTED_TOOLS or len(specs) > 16:
+            selected_tools = len(specs) - len(base.registry._frozen)
+            if selected_tools > MAX_SELECTED_TOOLS:
                 raise ServiceError("tool_limit", 422)
-            account_names = frozenset(spec.name for spec in specs[len(base._frozen) :])
+            registry = ToolRegistry(tuple(specs), max_tools=MAX_TOOLS)
+            account_names = frozenset(spec.name for spec in specs[len(base.registry._frozen) :])
 
             async def policy(invocation: Invocation) -> Decision:
                 if invocation.name in account_names:
                     return "ask"
-                if base_policy is None:
+                if base.policy is None:
                     return "deny"
-                return cast(Decision, await base_policy(invocation))
+                return await base.policy(invocation)
 
-            return ToolExecutor(ToolRegistry(tuple(specs)), policy), tuple(connections)
+            return (
+                ToolExecutor(
+                    registry, policy, base.pre, base.post,
+                    middleware=base.middleware, wrap=base.wrap,
+                ),
+                tuple(connections),
+            )
         except BaseException:
             await asyncio.gather(*(item.close() for item in connections), return_exceptions=True)
             raise

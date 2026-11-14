@@ -18,7 +18,7 @@ from krim_agent.runtime.contracts import settled
 from krim_agent.sandbox.command import SandboxCommand
 from krim_agent.sandbox.xfs import internal_id
 from krim_agent.security import PrincipalContext
-from krim_agent.storage.models import runs
+from krim_agent.storage.models import runs, sessions, turns
 from krim_agent.storage.sandbox_models import (
     sandbox_operations,
     sandbox_projects,
@@ -440,15 +440,35 @@ async def _observe(
     cancel: bool = False,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     check()
+    if (
+        operation["principal_id"] != actor.principal_id
+        or operation["result"].get("session_id") != session_id
+    ):
+        raise ServiceError("permission_denied")
+    project = await service._project_state(actor, operation["project_id"], write=cancel)
+    if operation["result"].get("environment_id") != project["environment_id"]:
+        raise ServiceError("facts_corrupt")
+    return await _observe_accepted(service, operation, run_id, check, cancel=cancel)
+
+
+async def _observe_accepted(
+    service: SandboxService,
+    operation: dict[str, Any],
+    run_id: str,
+    check: Callable[[], None],
+    *,
+    cancel: bool = False,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    """Poll a stored operation after the caller has established its authority."""
+    check()
     project_id = operation["project_id"]
-    project = await service._project_state(actor, project_id, write=cancel)
     broker = service.broker
     if broker is None:
         raise ServiceError("sandbox_backend_unavailable", 503)
     async def observe() -> dict[str, Any]:
         return await broker.call(
             "command_status",
-            environment_id=project["environment_id"],
+            environment_id=operation["result"]["environment_id"],
             project_id=project_id,
             operation_id=operation["operation_id"],
             renew=False,
@@ -464,7 +484,6 @@ async def _observe(
     if result.get("status") in {"finished", "unknown"}:
         if operation["status"] not in {"completed", "unknown"}:
             receipt = await _settle(service, operation, result)
-            operation = await _operation(service, actor, operation["operation_id"], session_id)
         else:
             stored = operation["result"].get("receipt")
             receipt = (
@@ -633,20 +652,36 @@ async def cancel_run_tasks(service: SandboxService, run_id: str) -> None:
     for operation in rows:
         if operation["status"] in {"completed", "unknown"}:
             continue
-        actor = service.identities.resolve(operation["principal_id"])
-        session_id = operation["result"].get("session_id")
-        if not isinstance(session_id, str):
+        # Cleanup is host-owned: prove the persisted run/session/project binding
+        # without requiring the revoked account to regain login or membership.
+        intent = operation["result"]
+        session_id = intent.get("session_id")
+        if (
+            not isinstance(session_id, str)
+            or intent.get("run_id") != run_id
+            or intent.get("project_id") != operation["project_id"]
+        ):
+            raise ServiceError("facts_corrupt")
+        async with service.store.lock, service.store.engine.connect() as conn:
+            owned_project = await conn.scalar(
+                select(sandbox_projects.c.project_id)
+                .join(sessions, sessions.c.workspace_id == sandbox_projects.c.workspace_id)
+                .join(turns, turns.c.session_id == sessions.c.id)
+                .where(
+                    sandbox_projects.c.project_id == operation["project_id"],
+                    sandbox_projects.c.principal_id == operation["principal_id"],
+                    sandbox_projects.c.environment_id == intent.get("environment_id"),
+                    sessions.c.id == session_id,
+                    sessions.c.owner_id == operation["principal_id"],
+                    turns.c.run_id == run_id,
+                )
+            )
+        if owned_project is None:
             raise ServiceError("facts_corrupt")
         deadline = time.monotonic() + 18
         while True:
-            state, _receipt, _record = await _observe(
-                service,
-                actor,
-                operation,
-                session_id,
-                run_id,
-                lambda: None,
-                cancel=True,
+            state, _receipt, _record = await _observe_accepted(
+                service, operation, run_id, lambda: None, cancel=True,
             )
             if state in {"finished", "unknown"}:
                 break

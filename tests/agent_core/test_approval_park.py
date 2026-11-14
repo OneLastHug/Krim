@@ -1,6 +1,7 @@
 """审批停靠与无状态恢复专项（ADR-0015）：跨进程存活、指纹硬门、恢复点防篡改。"""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
-from krim_agent.contracts import ApprovalReply
+from krim_agent.contracts import ApprovalReply, RunRequest, ServiceError
 from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
@@ -43,9 +44,7 @@ async def park_application(wire, tmp_path, name, *, settings=None):
 
 
 async def park_echo_turn(app):
-    session = await app.sessions.create(
-        LOCAL, "local", SessionCreate(request_key="park-session")
-    )
+    session = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="park-session"))
     turn = await app.sessions.submit(
         LOCAL,
         "local",
@@ -82,6 +81,171 @@ def allow_reply(request):
         arguments_hash=request["arguments_hash"],
         allow=True,
     )
+
+
+@pytest.mark.parametrize("phase", ["before-awaiting", "after-awaiting"])
+@pytest.mark.parametrize("session_run", [False, True], ids=["direct", "session"])
+async def test_cancel_during_parking_is_terminal_and_cannot_resume(
+    wire, tmp_path, monkeypatch, phase, session_run
+):
+    database = "cancel-transition.sqlite"
+    async with park_application(wire, tmp_path, database) as app:
+        entered, release, stopped = (asyncio.Event() for _ in range(3))
+        captured = {}
+        original_awaiting = app.store.set_awaiting
+        original_stop = app.store.request_stop
+
+        async def held_awaiting(run_id):
+            captured["run_id"] = run_id
+            parked = None
+            if phase == "after-awaiting":
+                parked = await original_awaiting(run_id)
+            entered.set()
+            await release.wait()
+            if phase == "before-awaiting":
+                parked = await original_awaiting(run_id)
+            return parked
+
+        async def observed_stop(run_id):
+            await original_stop(run_id)
+            stopped.set()
+
+        monkeypatch.setattr(app.store, "set_awaiting", held_awaiting)
+        monkeypatch.setattr(app.store, "request_stop", observed_stop)
+        if session_run:
+            session = await app.sessions.create(
+                LOCAL, "local", SessionCreate(request_key="cancel-session")
+            )
+            turn = await app.sessions.submit(
+                LOCAL,
+                "local",
+                session.id,
+                TurnRequest(text="/echo never run", request_key="cancel-turn", expected_revision=0),
+            )
+        else:
+            await app.service.start(RunRequest(text="/echo never run", request_key="cancel-direct"))
+        caller = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            run_id = captured["run_id"]
+            request = next(
+                dict(event.data)
+                for event in await app.service.events(run_id)
+                if event.kind == "approval_request"
+            )
+            assert await app.store.read_checkpoint(run_id) is not None
+            if phase == "before-awaiting":
+                assert await app.service.approvals(run_id) == []
+            caller = asyncio.create_task(app.service.cancel(run_id))
+            await asyncio.wait_for(stopped.wait(), 5)
+            release.set()
+            result = await asyncio.wait_for(caller, 5)
+            assert result.status == "aborted"
+            assert result.code == "cancelled"
+            assert await app.service.approvals(run_id) == []
+            for _ in range(2):
+                with pytest.raises(ServiceError, match="approval_unavailable"):
+                    await app.service.reply_approval(
+                        run_id, request["request_id"], allow_reply(request)
+                    )
+            assert (await app.service.cancel(run_id)).status == "aborted"
+            assert not wire.executions
+            assert len(wire.requests) == 1
+            facts = await app.service.result(run_id)
+            assert sum(event.kind == "terminal" for event in facts.events) == 1
+            assert not any(event.kind == "approval_reply" for event in facts.events)
+            if session_run:
+                saved_turn = await app.sessions.turn(LOCAL, "local", session.id, turn.id)
+                assert saved_turn.status == "cancelled"
+        finally:
+            release.set()
+            if caller is not None:
+                await asyncio.gather(caller, return_exceptions=True)
+
+    async with park_application(wire, tmp_path, database) as reopened:
+        assert (await reopened.service.get(run_id)).status == "aborted"
+        assert await reopened.service.approvals(run_id) == []
+        with pytest.raises(ServiceError, match="approval_unavailable"):
+            await reopened.service.reply_approval(
+                run_id, request["request_id"], allow_reply(request)
+            )
+        assert len(wire.requests) == 1
+        assert not wire.executions
+
+
+@pytest.mark.parametrize("state", ["queued", "awaiting"])
+async def test_stopped_run_cannot_enter_running(state, tmp_path):
+    async with await open_application(tmp_path / "stopped.sqlite") as app:
+        target = json.loads(app.service.bindings["demo"].descriptor_json)
+        run, created = await app.store.begin(
+            RunRequest(text="/echo stopped", request_key="stopped"), target
+        )
+        assert created
+        if state == "awaiting":
+            await app.store.set_running(run.id)
+            assert await app.store.set_awaiting(run.id) is True
+        await app.store.request_stop(run.id)
+        with pytest.raises(ServiceError, match="cancelled"):
+            await app.store.set_running(run.id)
+        saved = await app.service.get(run.id)
+        assert saved.status == state and saved.stop_requested
+        await app.store.finish(run.id, "aborted", "cancelled")
+
+
+@pytest.mark.parametrize("cancel_first", [False, True], ids=["resume-first", "cancel-first"])
+@pytest.mark.asyncio
+async def test_cancel_blocks_replay_of_a_committed_approval_before_resume(
+    wire, tmp_path, monkeypatch, cancel_first
+):
+    async with park_application(wire, tmp_path, "cancel-resume.sqlite") as app:
+        run_id, request = await park_echo_turn(app)
+        await app.service.wait(run_id)
+        entered, release, stopping, stop_release = (asyncio.Event() for _ in range(4))
+        original = app.store.set_running
+        original_stop = app.store.request_stop
+
+        async def hold_resume(selected_run):
+            entered.set()
+            await release.wait()
+            await original(selected_run)
+
+        async def hold_stop(selected_run):
+            stopping.set()
+            await stop_release.wait()
+            await original_stop(selected_run)
+
+        monkeypatch.setattr(app.store, "set_running", hold_resume)
+        caller = None
+        try:
+            if cancel_first:
+                monkeypatch.setattr(app.store, "request_stop", hold_stop)
+                caller = asyncio.create_task(app.service.cancel(run_id))
+                await asyncio.wait_for(stopping.wait(), 5)
+            await app.service.reply_approval(run_id, request["request_id"], allow_reply(request))
+            await asyncio.wait_for(entered.wait(), 5)
+            if caller is None:
+                caller = asyncio.create_task(app.service.cancel(run_id))
+            stop_release.set()
+            result = await asyncio.wait_for(caller, 5)
+            assert result.status == "aborted" and result.code == "cancelled"
+            assert app.service.tasks[run_id].done()
+            release.set()
+            assert (
+                await app.service.reply_approval(
+                    run_id, request["request_id"], allow_reply(request)
+                )
+            )["replayed"] is True
+            assert (await app.service.wait(run_id)).status == "aborted"
+            assert not wire.executions
+            assert len(wire.requests) == 1
+            facts = await app.service.result(run_id)
+            assert sum(event.kind == "approval_reply" for event in facts.events) == 1
+            assert sum(event.kind == "terminal" for event in facts.events) == 1
+        finally:
+            release.set()
+            stop_release.set()
+            if caller is not None:
+                await asyncio.gather(caller, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -161,9 +325,7 @@ async def test_policy_deny_feeds_back_and_run_completes(wire, tmp_path):
         registry=Registry(tuple(spec for spec, _ in wire.registry()._frozen)),
         policy=deny_policy,
     ) as app:
-        session = await app.sessions.create(
-            LOCAL, "local", SessionCreate(request_key="deny-soft")
-        )
+        session = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="deny-soft"))
         turn = await app.sessions.submit(
             LOCAL,
             "local",

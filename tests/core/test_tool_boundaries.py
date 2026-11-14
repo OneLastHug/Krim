@@ -1,6 +1,8 @@
 import asyncio
 import json
 import sqlite3
+import time
+from types import SimpleNamespace
 
 import pytest
 from agent_helpers import EventProvider, pending, registry_for
@@ -8,8 +10,33 @@ from agent_helpers import EventProvider, pending, registry_for
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
 from krim_agent.contracts import ApprovalReply, RunRequest, ServiceError
-from krim_agent.providers.types import ModelToolCall
+from krim_agent.providers.types import ModelText, ModelToolCall
 from krim_agent.tools.output import OutputContract
+
+
+class ToolResultProvider(EventProvider):
+    """Complete after receiving the real tool observation, without repeating its ID."""
+
+    def __init__(self, events):
+        super().__init__(events)
+        self.observations = []
+
+    async def stream(self, messages, tools):
+        observations = [message for message in messages if message.role == "tool"]
+        if not observations:
+            async for event in super().stream(messages, tools):
+                yield event
+            return
+        self.calls += 1
+        self.observations.extend(json.loads(message.content) for message in observations)
+        yield ModelText(text="Tool result received.")
+
+
+async def parked_request(app, run_id):
+    request = await pending(app.service, run_id)
+    assert (await app.service.wait(run_id)).status == "awaiting"
+    assert await app.store.read_checkpoint(run_id) is not None
+    return request
 
 
 class FalseyDeny:
@@ -21,16 +48,39 @@ class FalseyDeny:
 
 
 @pytest.mark.asyncio
-async def test_falsey_policy_and_post_failure_preserve_truth(tmp_path):
-    async with await open_application(tmp_path / "deny.db", policy=FalseyDeny()) as app:
-        run = await app.service.start(RunRequest(text="/add 2 3", request_key="deny"))
+async def test_falsey_policy_denies_without_executor_or_truthiness(tmp_path):
+    calls = []
+
+    async def execute(args):
+        calls.append(args)
+        return "actual"
+
+    provider = ToolResultProvider(
+        [ModelToolCall(id="denied", name="echo", arguments={"text": "x"})]
+    )
+    async with await open_application(
+        tmp_path / "deny.db", policy=FalseyDeny(), provider=provider, registry=registry_for(execute)
+    ) as app:
+        run = await app.service.start(RunRequest(text="request", request_key="deny"))
         await app.service.wait(run.id)
         result = await app.service.result(run.id)
-        assert result.run.status == "failed"
+        assert result.run.status == "completed" and result.run.code is None
+        assert result.tools[0].status == "denied"
         assert result.tools[0].executor_started is False
         assert result.tools[0].code == "permission_denied"
-        assert app.provider.calls == 1
+        assert calls == [] and provider.calls == 2
+        assert provider.observations == [
+            {
+                "call_id": result.tools[0].call_id,
+                "name": "echo",
+                "code": "permission_denied",
+                "status": "denied",
+            }
+        ]
 
+
+@pytest.mark.asyncio
+async def test_post_failure_preserves_actual_result(tmp_path):
     async def broken_post(invocation, outcome):
         raise RuntimeError("SYNTHETIC_SECRET")
 
@@ -79,7 +129,7 @@ async def test_tool_chain_rejects_and_never_invents_success(tmp_path, mode, code
     async def post(invocation, result):
         result.value = "forged"
 
-    provider = EventProvider(
+    provider = ToolResultProvider(
         [
             ModelToolCall(
                 id="c",
@@ -99,11 +149,50 @@ async def test_tool_chain_rejects_and_never_invents_success(tmp_path, mode, code
         run = await app.service.start(RunRequest(text="request", request_key=mode))
         await app.service.wait(run.id)
         facts = await app.service.result(run.id)
-        assert facts.run.status == "failed" and facts.run.code == code
+        if mode == "no-policy":
+            assert facts.run.status == "completed" and facts.run.code is None
+            assert facts.tools[0].status == "denied" and facts.tools[0].code == code
+            assert facts.tools[0].executor_started is False
+            assert provider.observations == [
+                {
+                    "call_id": facts.tools[0].call_id,
+                    "name": "echo",
+                    "code": code,
+                    "status": "denied",
+                }
+            ]
+        else:
+            assert facts.run.status == "failed" and facts.run.code == code
         assert len(calls) == (1 if mode in {"output", "post-forge"} else 0)
-        assert provider.calls == 1 and provider.active == 0
+        assert provider.calls == (2 if mode == "no-policy" else 1) and provider.active == 0
         if mode == "post-forge":
             assert facts.tools[0].value == "actual"
+
+
+@pytest.mark.asyncio
+async def test_repeated_call_id_after_soft_denial_is_rejected(tmp_path):
+    calls = []
+
+    async def execute(args):
+        calls.append(args)
+        return "actual"
+
+    # Deliberately retain the repeating fixture for the separate duplicate-ID guard.
+    provider = EventProvider([ModelToolCall(id="repeated", name="echo", arguments={"text": "x"})])
+    async with await open_application(
+        tmp_path / "repeat-denied.db",
+        provider=provider,
+        registry=registry_for(execute),
+        policy=None,
+    ) as app:
+        run = await app.service.start(RunRequest(text="request", request_key="repeat"))
+        await app.service.wait(run.id)
+        facts = await app.service.result(run.id)
+        assert facts.run.status == "failed" and facts.run.code == "duplicate_tool_call"
+        assert calls == [] and provider.calls == 2 and provider.active == 0
+        assert len(facts.tools) == 1
+        assert facts.tools[0].status == "denied" and facts.tools[0].code == "permission_denied"
+        assert facts.tools[0].executor_started is False
 
 
 @pytest.mark.parametrize(
@@ -192,7 +281,9 @@ async def test_approval_bound_once_and_conflicting_or_cross_run_rejected(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["deny", "expire", "cancel"])
-async def test_denied_expired_cancelled_approval_has_zero_executor_calls(tmp_path, action):
+async def test_denied_expired_cancelled_approval_has_zero_executor_calls(
+    tmp_path, monkeypatch, action
+):
     calls = []
 
     async def execute(args):
@@ -202,38 +293,55 @@ async def test_denied_expired_cancelled_approval_has_zero_executor_calls(tmp_pat
     async def ask(invocation):
         return "ask"
 
-    settings = Settings(approval_timeout=0.05 if action == "expire" else 2)
+    provider = ToolResultProvider(
+        [ModelToolCall(id="approval", name="echo", arguments={"text": "ok"})]
+    )
     async with await open_application(
-        tmp_path / (action + ".db"), settings=settings, registry=registry_for(execute), policy=ask
+        tmp_path / (action + ".db"), registry=registry_for(execute), policy=ask, provider=provider
     ) as app:
-        run = await app.service.start(RunRequest(text="/echo ok", request_key=action))
+        run = await app.service.start(RunRequest(text="request", request_key=action))
+        request = await parked_request(app, run.id)
         if action == "expire":
-            await app.service.wait(run.id)
-            request = next(
-                e.data
-                for e in (await app.store.snapshot(run.id)).events
-                if e.kind == "approval_request"
+            # Advance only the approval admission clock, not execution-budget time.
+            monkeypatch.setattr(
+                "krim_agent.runtime.service.time",
+                SimpleNamespace(time=lambda: request["expires_at"] + 1, monotonic=time.monotonic),
             )
-        else:
-            request = await pending(app.service, run.id)
-        if action == "deny":
+            assert await app.service.approvals(run.id) == []
+            with pytest.raises(ServiceError, match="approval_expired"):
+                await app.service.reply_approval(run.id, request["request_id"], make_reply(request))
+        elif action == "deny":
             await app.service.reply_approval(
                 run.id, request["request_id"], make_reply(request, False)
             )
-        if action == "cancel":
-            await app.service.cancel(run.id)
+        else:
+            cancelled = await app.service.cancel(run.id)
+            assert cancelled.status == "aborted" and cancelled.code == "cancelled"
         await app.service.wait(run.id)
         if action != "deny":
-            with pytest.raises(ServiceError):
+            with pytest.raises(ServiceError, match="approval_unavailable"):
                 await app.service.reply_approval(run.id, request["request_id"], make_reply(request))
         facts = await app.service.result(run.id)
         assert calls == [] and facts.tools[0].executor_started is False
-        assert (
-            facts.run.code
-            == {"deny": "approval_denied", "expire": "approval_expired", "cancel": "cancelled"}[
-                action
+        assert (facts.run.status, facts.run.code) == {
+            "deny": ("completed", None),
+            "expire": ("failed", "approval_expired"),
+            "cancel": ("aborted", "cancelled"),
+        }[action]
+        assert sum(event.kind == "terminal" for event in facts.events) == 1
+        assert sum(event.kind == "approval_reply" for event in facts.events) == (action == "deny")
+        if action == "deny":
+            assert facts.tools[0].status == "denied" and facts.tools[0].code == "approval_denied"
+            assert provider.observations == [
+                {
+                    "call_id": facts.tools[0].call_id,
+                    "name": "echo",
+                    "code": "approval_denied",
+                    "status": "denied",
+                }
             ]
-        )
+        else:
+            assert provider.calls == 1
 
 
 @pytest.mark.asyncio
@@ -283,9 +391,8 @@ async def test_approval_commit_caller_cancellation_delivers_original_decision_on
         policy=ask,
     ) as app:
         run = await app.service.start(RunRequest(text="/echo bound", request_key="commit"))
-        request = await pending(app.service, run.id)
+        request = await parked_request(app, run.id)
         request_id = request["request_id"]
-        future = app.service._pending[request_id]
         original = app.store._event
 
         async def hold_transaction(conn, run_id, kind, *args, **kwargs):
@@ -310,21 +417,24 @@ async def test_approval_commit_caller_cancellation_delivers_original_decision_on
             caller.cancel()
             await asyncio.sleep(0)
             caller.cancel()
-            assert not caller.done() and not future.done() and calls == []
+            assert not caller.done() and calls == []
             release.set()
             with pytest.raises(asyncio.CancelledError):
                 await caller
             replay = await app.service.reply_approval(run.id, request_id, reply)
-            assert replay["replayed"] is True
-            assert future.done() and not future.cancelled(), "持久决定未交付原等待者"
-            assert future.result() is allow
+            assert replay["replayed"] is True and replay["allow"] is allow
             await asyncio.wait_for(app.service.wait(run.id), 2)
             facts = await app.service.result(run.id)
-            assert facts.run.status == ("completed" if allow else "failed")
-            assert facts.run.code == (None if allow else "approval_denied")
+            assert facts.run.status == "completed" and facts.run.code is None
+            assert facts.tools[0].executor_started is allow
+            assert facts.tools[0].status == ("ok" if allow else "denied")
+            assert facts.tools[0].code == (None if allow else "approval_denied")
             assert calls == (["bound"] if allow else [])
-            assert sum(e.kind == "approval_reply" for e in facts.events) == 1
-            assert request_id not in app.service._pending
+            decisions = [event for event in facts.events if event.kind == "approval_reply"]
+            assert len(decisions) == 1 and decisions[0].data["reply"] == reply.model_dump(
+                mode="json"
+            )
+            assert sum(event.kind == "terminal" for event in facts.events) == 1
             for conflicting in [
                 make_reply(request, not allow),
                 make_reply(request, allow, "other-key"),
@@ -332,84 +442,138 @@ async def test_approval_commit_caller_cancellation_delivers_original_decision_on
                 with pytest.raises(ServiceError, match="approval_conflict"):
                     await app.service.reply_approval(run.id, request_id, conflicting)
             assert calls == (["bound"] if allow else [])
-            (tmp_path / "approval-observed.json").write_text(
-                json.dumps(
-                    {
-                        "allow": allow,
-                        "caller_cancelled": caller.cancelled(),
-                        "future_done": future.done(),
-                        "future_cancelled": future.cancelled(),
-                        "future_result": future.result(),
-                        "tools": len(calls),
-                        "status": facts.run.status,
-                        "code": facts.run.code,
-                        "approval_reply_events": sum(
-                            e.kind == "approval_reply" for e in facts.events
-                        ),
-                    }
-                )
-            )
         finally:
             release.set()
             await asyncio.gather(caller, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["expire", "cancel"])
-async def test_approval_commit_never_revives_expired_or_cancelled_waiter(tmp_path, action):
-    entered, release, ended = (asyncio.Event() for _ in range(3))
+@pytest.mark.parametrize("stop_first", [False, True], ids=["commit-first", "stop-first"])
+async def test_approval_commit_racing_public_cancel_cannot_revive_run(
+    tmp_path, monkeypatch, stop_first
+):
+    entered, release, stopped = (asyncio.Event() for _ in range(3))
     calls = []
 
     async def execute(args):
-        calls.append(1)
+        calls.append(args.text)
         return "actual"
 
     async def ask(invocation):
         return "ask"
 
     async with await open_application(
-        tmp_path / ("late-commit-" + action + ".db"),
+        tmp_path / ("cancel-commit-" + str(stop_first) + ".db"),
         registry=registry_for(execute),
         policy=ask,
-        settings=Settings(approval_timeout=0.6 if action == "expire" else 3),
     ) as app:
-        run = await app.service.start(RunRequest(text="/echo bound", request_key="late"))
-        request = await pending(app.service, run.id)
+        run = await app.service.start(RunRequest(text="/echo bound", request_key="race"))
+        request = await parked_request(app, run.id)
         request_id = request["request_id"]
-        future = app.service._pending[request_id]
-        future.add_done_callback(lambda _: ended.set())
+        original = app.store.append
+        original_stop = app.store.request_stop
+
+        async def held_append(run_id, kind, data, **kwargs):
+            if kind == "approval_reply" and stop_first:
+                # The reply passed admission, but stop commits before its event.
+                entered.set()
+                await release.wait()
+            event = await original(run_id, kind, data, **kwargs)
+            if kind == "approval_reply" and not stop_first:
+                # Decision is durable; pause before the service can resume it.
+                entered.set()
+                await release.wait()
+            return event
+
+        async def observed_stop(run_id):
+            await original_stop(run_id)
+            stopped.set()
+
+        monkeypatch.setattr(app.store, "append", held_append)
+        monkeypatch.setattr(app.store, "request_stop", observed_stop)
+        reply = make_reply(request)
+        caller = asyncio.create_task(app.service.reply_approval(run.id, request_id, reply))
+        cancellation = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            cancellation = asyncio.create_task(app.service.cancel(run.id))
+            await asyncio.wait_for(stopped.wait(), 2)
+            result = await asyncio.wait_for(cancellation, 2)
+            assert result.status == "aborted" and result.code == "cancelled"
+            release.set()
+            outcome = (await asyncio.wait_for(asyncio.gather(caller, return_exceptions=True), 2))[0]
+            if stop_first:
+                assert isinstance(outcome, ServiceError) and outcome.code == "run_closed"
+                with pytest.raises(ServiceError, match="approval_unavailable"):
+                    await app.service.reply_approval(run.id, request_id, reply)
+            else:
+                assert outcome["replayed"] is False
+                assert (await app.service.reply_approval(run.id, request_id, reply))["replayed"]
+            assert (await app.service.wait(run.id)).status == "aborted"
+            assert await app.service.approvals(run.id) == []
+            assert calls == [] and app.provider.calls == 1
+            facts = await app.service.result(run.id)
+            assert sum(e.kind == "terminal" for e in facts.events) == 1
+            assert sum(e.kind == "approval_reply" for e in facts.events) == (not stop_first)
+        finally:
+            release.set()
+            await asyncio.gather(
+                caller, *([cancellation] if cancellation else []), return_exceptions=True
+            )
+
+
+@pytest.mark.asyncio
+async def test_decision_admitted_before_expiry_survives_delayed_commit(tmp_path, monkeypatch):
+    """Expiry gates new decisions, not an already admitted decision's commit/replay."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def execute(args):
+        calls.append(args.text)
+        return "actual"
+
+    async def ask(invocation):
+        return "ask"
+
+    async with await open_application(
+        tmp_path / "expiry-commit.db",
+        registry=registry_for(execute),
+        policy=ask,
+        settings=Settings(approval_timeout=30),
+    ) as app:
+        run = await app.service.start(RunRequest(text="/echo bound", request_key="expiry-commit"))
+        request = await parked_request(app, run.id)
         original = app.store._event
 
-        async def hold_transaction(conn, run_id, kind, *args, **kwargs):
+        async def held_event(conn, run_id, kind, *args, **kwargs):
             event = await original(conn, run_id, kind, *args, **kwargs)
             if kind == "approval_reply":
                 entered.set()
                 await release.wait()
             return event
 
-        app.store._event = hold_transaction
+        monkeypatch.setattr(app.store, "_event", held_event)
         reply = make_reply(request)
-        caller = asyncio.create_task(app.service.reply_approval(run.id, request_id, reply))
+        caller = asyncio.create_task(
+            app.service.reply_approval(run.id, request["request_id"], reply)
+        )
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            caller.cancel()
-            if action == "cancel":
-                # 真实 producer 在事务屏障期间取消；等待其原 future 收束。
-                app.service.tasks[run.id].cancel()
-            await asyncio.wait_for(ended.wait(), 2)
-            assert future.cancelled() and calls == []
+            monkeypatch.setattr(
+                "krim_agent.runtime.service.time",
+                SimpleNamespace(time=lambda: request["expires_at"] + 1, monotonic=time.monotonic),
+            )
+            assert calls == []
             release.set()
-            with pytest.raises(ServiceError, match="approval_expired"):
-                await caller
-            await asyncio.wait_for(app.service.wait(run.id), 2)
+            assert (await asyncio.wait_for(caller, 2))["replayed"] is False
+            assert (await app.service.wait(run.id)).status == "completed"
+            assert (await app.service.reply_approval(run.id, request["request_id"], reply))[
+                "replayed"
+            ]
             facts = await app.service.result(run.id)
-            assert facts.run.status == ("aborted" if action == "cancel" else "failed")
-            assert facts.run.code == ("cancelled" if action == "cancel" else "approval_expired")
+            assert calls == ["bound"]
             assert sum(e.kind == "approval_reply" for e in facts.events) == 1
-            assert calls == [] and request_id not in app.service._pending
-            # 同键只能读到历史决定，不能重新激活已收束的 future 或工具。
-            assert (await app.service.reply_approval(run.id, request_id, reply))["replayed"]
-            assert future.cancelled() and calls == []
+            assert sum(e.kind == "terminal" for e in facts.events) == 1
         finally:
             release.set()
             await asyncio.gather(caller, return_exceptions=True)

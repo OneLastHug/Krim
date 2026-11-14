@@ -398,40 +398,12 @@ class StorageBroker:
             if action in {"command_start", "command_start_background"}:
                 operation_id = internal_id(values["operation_id"])
                 background = action == "command_start_background"
-                command_record = self._read(self.jobs.filename(operation_id))
-                command = values["command"]
-                expected_fields = {
-                    "environment_id", "project_id", "operation_id", "command",
-                    "runtime_image", "runtime_fingerprint",
-                }
-                if set(values) != expected_fields:
-                    raise ServiceError("invalid_input", 422)
-                if background and command_record is None:
-                    return self.jobs.submit(
-                        environment_id,
-                        project_id,
-                        operation_id,
-                        command,
-                        background=True,
-                        expected_image=values["runtime_image"],
-                        expected_fingerprint=values["runtime_fingerprint"],
-                    )
-                if (
-                    command_record is None
-                    or command_record.get("background", False) is not background
-                    or command_record.get("environment_id") != environment_id
-                    or command_record.get("project_id") != project_id
-                    or command_record.get("status") not in {"accepted", "intent"}
-                    or command_record.get("command") != command
-                    or command_record.get("image") != values["runtime_image"]
-                    or command_record.get("runtime_fingerprint") != values["runtime_fingerprint"]
-                ):
-                    raise ServiceError("target_binding_changed")
+                # CommandJobs owns first admission and durable replay under one lock.
                 return self.jobs.submit(
                     environment_id,
                     project_id,
                     operation_id,
-                    command,
+                    values["command"],
                     background=background,
                     expected_image=values["runtime_image"],
                     expected_fingerprint=values["runtime_fingerprint"],
