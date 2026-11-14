@@ -219,14 +219,27 @@ class CommandJobs:
                 raise ServiceError("invalid_input", 422)
             requested_program = values.program if isinstance(values, SandboxCommand) else "python"
             previous = self.broker._read(self.filename(operation_id))
-            if previous is not None and previous.get("status") in {"finished", "unknown"}:
+            if previous is not None:
                 if (
                     previous.get("project_id") != project_id
                     or previous.get("environment_id") != environment_id
                 ):
                     raise ServiceError("not_found", 404)
-                if previous.get("kind", "command") != kind:
+                if (
+                    previous.get("kind", "command") != kind
+                    or previous.get("background", False) is not background
+                ):
                     raise ServiceError("key_conflict")
+                if expected_image is not None and expected_image not in (
+                    previous.get("request_runtime_image"),
+                    previous.get("request_image", previous.get("image")),
+                ):
+                    raise ServiceError("target_binding_changed")
+                if expected_fingerprint is not None and previous.get(
+                    "request_runtime_fingerprint", previous.get("runtime_fingerprint")
+                ) != expected_fingerprint:
+                    raise ServiceError("target_binding_changed")
+            if previous is not None and previous.get("status") in {"finished", "unknown"}:
                 payload_hash = previous.get("request_payload_hash")
                 stored_program = previous.get("program", "python")
                 stored_image = previous.get("request_image", previous.get("image"))
@@ -306,10 +319,13 @@ class CommandJobs:
                 if isinstance(values, SandboxCommand)
                 else self.runner
             )
+            runtime_image = getattr(runner, "image", None) or getattr(
+                getattr(runner, "runtime", None), "image", self.image
+            )
             if (
                 expected_image is not None
                 and runner is not None
-                and runner.identity != expected_image
+                and expected_image not in (runtime_image, runner.identity)
             ):
                 raise ServiceError("target_binding_changed")
             if (
@@ -318,20 +334,9 @@ class CommandJobs:
                 and getattr(runner, "runtime_fingerprint", None) != expected_fingerprint
             ):
                 raise ServiceError("target_binding_changed")
-            if isinstance(values, SandboxCommand) and self.catalog is not None and not background:
-                probe = self.broker._read("probe-" + operation_id + ".json")
-                runtime = probe.get("runtime", {}) if isinstance(probe, dict) else {}
-                if (
-                    probe is None
-                    or probe.get("environment_id") != environment_id
-                    or probe.get("project_id") != project_id
-                    or probe.get("program") != requested_program
-                    or not isinstance(runtime, dict)
-                    or runner is None
-                    or runtime.get("image_id") != runner.identity
-                    or runtime.get("fingerprint") != getattr(runner, "runtime_fingerprint", None)
-                ):
-                    raise ServiceError("target_binding_changed")
+            # _runner_for has resolved the trusted profile and probed Docker/runsc.
+            # Runner.run verifies the created container and cgroup before releasing
+            # the payload; no separately pre-seeded probe journal is required.
             digest = self._request_digest(
                 environment_id,
                 command,
@@ -354,6 +359,7 @@ class CommandJobs:
                 "request_hash": digest,
                 "request_payload_hash": fingerprint(command),
                 "request_image": runner.identity if runner is not None else None,
+                "request_runtime_image": runtime_image,
                 "request_runtime_fingerprint": (
                     getattr(runner, "runtime_fingerprint", None) if runner is not None else None
                 ),

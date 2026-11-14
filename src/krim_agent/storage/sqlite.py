@@ -566,22 +566,27 @@ class SQLiteStore:
 
         async def operation(conn: AsyncConnection) -> None:
             row = await self._row(conn, run_id)
+            if row["stop_requested"]:
+                raise ServiceError("cancelled")
             if row["status"] not in ("queued", "awaiting"):
                 raise ServiceError("run_closed")
             await conn.execute(update(runs).where(runs.c.id == run_id).values(status="running"))
 
         await settled(self._write(operation))
 
-    async def set_awaiting(self, run_id: str) -> None:
-        """运行中的运行标记为停靠等待人工审批（ADR-0015）。"""
+    async def set_awaiting(self, run_id: str) -> bool:
+        """Atomically park unless a stop request has already won the transition."""
 
-        async def operation(conn: AsyncConnection) -> None:
+        async def operation(conn: AsyncConnection) -> bool:
             row = await self._row(conn, run_id)
+            if row["stop_requested"]:
+                return False
             if row["status"] != "running":
                 raise ServiceError("run_closed")
             await conn.execute(update(runs).where(runs.c.id == run_id).values(status="awaiting"))
+            return True
 
-        await settled(self._write(operation))
+        return await settled(self._write(operation))
 
     async def write_checkpoint(
         self, run_id: str, checkpoint: dict[str, object], fingerprint_value: str

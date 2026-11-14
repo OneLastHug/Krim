@@ -501,18 +501,9 @@ class SessionService:
                 failed_queued.append(turn_id)
             cancelled_runs: list[str] = []
             failures: list[ServiceError] = []
-            for run_id, task in list(self.runs.tasks.items()):
-                if task.done():
-                    continue
-                try:
-                    source = (await self.runs.store.snapshot(run_id)).session_context
-                except ServiceError:
-                    continue  # 快照不可得时无法归属，不猜着取消别人的Run。
-                if source is None:
-                    continue
-                session = await sql.get_session(self.store, source.session_id)
-                if session.owner_id != principal_id:
-                    continue
+            # Parked runs have no live producer, including after an application
+            # reopen. Persisted session ownership, not Task.done(), defines scope.
+            for run_id in await sql.owned_active_runs(self.store, principal_id):
                 try:
                     await self.runs.cancel(run_id)
                     cancelled_runs.append(run_id)

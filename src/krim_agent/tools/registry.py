@@ -8,12 +8,13 @@ from krim_agent.contracts import ServiceError
 
 from .core import ToolSpec
 
-MAX_TOOLS = 16
+DEFAULT_MAX_TOOLS = 16
+MAX_TOOLS = 32
 
 
 class ToolRegistry:
-    def __init__(self, specs: tuple[ToolSpec, ...], *, max_tools: int = 16) -> None:
-        if type(max_tools) is not int or not 16 <= max_tools <= 32:
+    def __init__(self, specs: tuple[ToolSpec, ...], *, max_tools: int = DEFAULT_MAX_TOOLS) -> None:
+        if type(max_tools) is not int or not DEFAULT_MAX_TOOLS <= max_tools <= MAX_TOOLS:
             raise ValueError("工具目录容量无效")
         if len({item.name for item in specs}) != len(specs):
             raise ValueError("工具名称冲突")

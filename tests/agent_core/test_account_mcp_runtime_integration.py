@@ -11,15 +11,18 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fixtures.session_server import WireFixture
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 from uvicorn import Config, Server
 
 from krim_agent.account_mcp.secrets import MasterKeyring
 from krim_agent.account_mcp.service import (
+    MAX_SELECTED_TOOLS,
     ConnectionCreate,
     ConnectionUpdate,
     SessionConnection,
@@ -28,13 +31,18 @@ from krim_agent.account_mcp.service import (
 from krim_agent.accounts.service import IdentityService
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
-from krim_agent.contracts import ApprovalReply
+from krim_agent.contracts import ApprovalReply, ServiceError
+from krim_agent.mcp.types import MCPServerConfig
 from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
 )
+from krim_agent.sandbox.operations import SandboxOperations
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.tools.core import Invocation
+from krim_agent.tools.executor import ToolExecutor
+from krim_agent.tools.registry import MAX_TOOLS, ToolRegistry
 
 CREDENTIAL = "mcp-cred-marker-3f9a"
 ROTATED_CREDENTIAL = "mcp-cred-rotated-7c21"
@@ -152,7 +160,15 @@ class DocsServer:
             listener.close()
 
 
-async def open_managed_app(wire: McpWire, tmp_path: Path, key_file: Path):
+async def open_managed_app(
+    wire: McpWire,
+    tmp_path: Path,
+    key_file: Path,
+    *,
+    registry=None,
+    pre=None,
+    post=None,
+):
     """预先建立managed身份库并写入主密钥，再经open_application装配账号MCP。"""
     database = Path(tmp_path) / "mcp-runtime.sqlite"
     store = await SQLiteStore.open(database)
@@ -174,7 +190,9 @@ async def open_managed_app(wire: McpWire, tmp_path: Path, key_file: Path):
                 personal_mcp_key_file=key_file,
             ),
             provider=provider,
-            registry=wire.registry(),
+            registry=wire.registry() if registry is None else registry,
+            pre=pre,
+            post=post,
         )
         return app, provider, boot
     except BaseException:
@@ -281,7 +299,7 @@ async def assert_no_credential_leak(app, run_id: str) -> None:
         assert ROTATED_CREDENTIAL not in payload
 
 
-async def _run_case(tmp_path, body) -> None:
+async def _run_case(tmp_path, body, **app_kwargs) -> None:
     """共用装配：wire + 回环MCP服务器 + managed应用；body写断言。"""
     wire = McpWire("docs__search")
     docs = DocsServer()
@@ -290,7 +308,7 @@ async def _run_case(tmp_path, body) -> None:
     key_file = Path(tmp_path) / "mcp-master.json"
     MasterKeyring.create(bytes(range(32))).save(key_file)
     try:
-        app, provider, boot = await open_managed_app(wire, tmp_path, key_file)
+        app, provider, boot = await open_managed_app(wire, tmp_path, key_file, **app_kwargs)
         try:
             owner, workspace = await owner_principal(app, boot)
             session = await app.sessions.create(
@@ -305,6 +323,180 @@ async def _run_case(tmp_path, body) -> None:
     finally:
         await docs.stop()
         await wire.close()
+
+
+@pytest.mark.asyncio
+async def test_personal_mcp_composes_with_full_sandbox_registry(tmp_path):
+    """Sandbox 17工具目录仍可与个人MCP工具组成运行时。"""
+    registry = SandboxOperations(None).registry()
+    assert len(registry.schemas()) > 16
+
+    async def body(app, wire, owner, workspace, session_id, docs):
+        await connect_and_select(
+            app, owner, workspace, session_id, f"http://127.0.0.1:{docs.port}/mcp"
+        )
+        _turn, run_id, request = await park_turn(
+            app, owner, workspace, session_id, "mcp-turn", "/docs find sandbox"
+        )
+        await app.service.reply_approval(run_id, request["request_id"], reply(request, True))
+        result = await app.service.wait(run_id)
+        assert result.status == "completed", result.code
+        facts = await app.service.result(run_id)
+        assert facts.tools[0].name == "docs__search"
+        assert facts.tools[0].status == "ok"
+        assert docs.calls == [{"tool": "search", "query": "find sandbox"}]
+
+    await _run_case(tmp_path, body, registry=registry)
+
+
+@pytest.mark.asyncio
+async def test_personal_mcp_recovery_preserves_application_hooks(tmp_path):
+    """个人MCP审批恢复执行时仍调用open_application传入的钩子。"""
+    pre_calls: list[str] = []
+    post_calls: list[str] = []
+
+    async def pre(invocation):
+        pre_calls.append(invocation.name)
+
+    async def post(invocation, _observation):
+        post_calls.append(invocation.name)
+
+    async def body(app, wire, owner, workspace, session_id, docs):
+        await connect_and_select(
+            app, owner, workspace, session_id, f"http://127.0.0.1:{docs.port}/mcp"
+        )
+        _turn, run_id, request = await park_turn(
+            app, owner, workspace, session_id, "mcp-turn", "/docs find hooks"
+        )
+        await app.service.reply_approval(run_id, request["request_id"], reply(request, True))
+        result = await app.service.wait(run_id)
+        assert result.status == "completed", result.code
+        assert docs.calls == [{"tool": "search", "query": "find hooks"}]
+        assert "docs__search" in pre_calls
+        assert "docs__search" in post_calls
+
+    await _run_case(tmp_path, body, pre=pre, post=post)
+
+
+def docs_config(docs):
+    return MCPServerConfig(
+        name="docs",
+        transport="streamable_http",
+        url=f"http://127.0.0.1:{docs.port}/mcp",
+        allowed_hosts=frozenset({"127.0.0.1"}),
+        selected_tools=("search",),
+        readonly_tools=frozenset({"search"}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_personal_mcp_composition_preserves_host_pipeline_and_base_policy(tmp_path):
+    async def body(app, wire, _owner, _workspace, _session_id, docs):
+        policy_calls = []
+
+        async def policy(invocation):
+            policy_calls.append(invocation.name)
+            return "deny"
+
+        async def pre(_invocation):
+            return None
+
+        async def post(_invocation, _observation):
+            return None
+
+        async def middleware(_invocation):
+            return None
+
+        async def wrap(_invocation, next_once):
+            return await next_once()
+
+        base = ToolExecutor(wire.registry(), policy, pre, post, middleware=(middleware,), wrap=wrap)
+        unchanged, empty = await app.account_mcp.build_runtime((), base)
+        assert unchanged is base
+        assert empty == ()
+        executor, connections = await app.account_mcp.build_runtime((docs_config(docs),), base)
+        try:
+            assert executor.pre is pre
+            assert executor.post is post
+            assert executor.middleware == (middleware,)
+            assert executor.wrap is wrap
+            invocation = Invocation("run", "call", "span", 0, "host_tool", "{}", "0" * 64)
+            assert await executor.policy(invocation) == "deny"
+            assert policy_calls == ["host_tool"]
+            assert await executor.policy(replace(invocation, name="docs__search")) == "ask"
+            assert policy_calls == ["host_tool"]
+            assert docs.calls == []
+        finally:
+            await asyncio.gather(*(connection.close() for connection in connections))
+
+    await _run_case(tmp_path, body)
+
+
+@pytest.mark.parametrize("at_limit", [False, True], ids=["exact-limit", "over-limit"])
+@pytest.mark.asyncio
+async def test_personal_mcp_composition_enforces_total_directory_limit(tmp_path, at_limit):
+    async def body(app, wire, _owner, _workspace, _session_id, docs):
+        template = wire.registry()._frozen[0][0]
+        count = MAX_TOOLS if at_limit else MAX_TOOLS - 1
+        registry = ToolRegistry(
+            tuple(replace(template, name=f"host_{index}") for index in range(count)),
+            max_tools=MAX_TOOLS,
+        )
+        base = ToolExecutor(registry, None)
+        if at_limit:
+            with pytest.raises(ServiceError, match="tool_limit"):
+                await app.account_mcp.build_runtime((docs_config(docs),), base)
+            assert docs.calls == []
+            return
+        executor, connections = await app.account_mcp.build_runtime((docs_config(docs),), base)
+        try:
+            assert len(executor.registry.schemas()) == MAX_TOOLS
+        finally:
+            await asyncio.gather(*(connection.close() for connection in connections))
+
+    await _run_case(tmp_path, body)
+
+
+@pytest.mark.asyncio
+async def test_personal_mcp_host_pre_hook_can_deny_before_approval(tmp_path):
+    async def pre(_invocation):
+        return "host-denied"
+
+    async def body(app, _wire, owner, workspace, session_id, docs):
+        await connect_and_select(
+            app, owner, workspace, session_id, f"http://127.0.0.1:{docs.port}/mcp"
+        )
+        turn = await app.sessions.submit(
+            owner,
+            workspace,
+            session_id,
+            TurnRequest(request_key="host-denied-turn", text="/docs denied", expected_revision=0),
+        )
+        async with asyncio.timeout(20):
+            while True:
+                current = await app.sessions.turn(owner, workspace, session_id, turn.id)
+                if current.run_id is not None:
+                    break
+                assert current.status != "failed", current.code
+                await asyncio.sleep(0.01)
+        result = await app.service.wait(current.run_id)
+        assert result.status == "failed"
+        assert result.code == "hook_denied"
+        assert await app.service.approvals(current.run_id) == []
+        assert docs.calls == []
+
+    await _run_case(tmp_path, body, pre=pre)
+
+
+def test_personal_mcp_selected_tools_limit_is_not_the_total_directory_limit():
+    with pytest.raises(ValidationError):
+        ConnectionCreate(
+            request_key="too-many-selected-tools",
+            name="docs",
+            url="https://docs.example/mcp",
+            allowed_hosts=("docs.example",),
+            selected_tools=tuple(f"tool_{index}" for index in range(MAX_SELECTED_TOOLS + 1)),
+        )
 
 
 @pytest.mark.asyncio

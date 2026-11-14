@@ -464,7 +464,7 @@ class RunService:
                     configs = await self.account_mcp.configurations_for_turn(turn_id)
                     if configs:
                         executor, provisional_connections = await self.account_mcp.build_runtime(
-                            configs, binding.loop.executor.registry, binding.loop.executor.policy
+                            configs, binding.loop.executor
                         )
                 run, created = await self.store.begin_turn_run(
                     turn_id, request, descriptor, binding.settings
@@ -575,10 +575,10 @@ class RunService:
                                         snapshot.session_context.turn_id
                                     )
                                     if configs:
-                                        executor, connections = await self.account_mcp.build_runtime(
-                                            configs,
-                                            base.loop.executor.registry,
-                                            base.loop.executor.policy,
+                                        executor, connections = (
+                                            await self.account_mcp.build_runtime(
+                                                configs, base.loop.executor
+                                            )
                                         )
                                         executing = TurnBinding(
                                             base,
@@ -587,9 +587,15 @@ class RunService:
                                             connections,
                                         )
                             except BaseException:
-                                if isinstance(executing, TurnBinding) and executing.account_mcp_connections:
+                                if (
+                                    isinstance(executing, TurnBinding)
+                                    and executing.account_mcp_connections
+                                ):
                                     await asyncio.gather(
-                                        *(item.close() for item in executing.account_mcp_connections),
+                                        *(
+                                            item.close()
+                                            for item in executing.account_mcp_connections
+                                        ),
                                         return_exceptions=True,
                                     )
                                 raise
@@ -608,12 +614,17 @@ class RunService:
                             executing.assert_current,
                             execution_budget=budget,
                             resume=recovery,
-                            executor=executing.executor if isinstance(executing, TurnBinding) else None,
+                            executor=(
+                                executing.executor if isinstance(executing, TurnBinding) else None
+                            ),
                         )
                     except BaseException:
                         if isinstance(executing, TurnBinding) and executing.account_mcp_connections:
                             await asyncio.gather(
-                                *(connection.close() for connection in executing.account_mcp_connections),
+                                *(
+                                    connection.close()
+                                    for connection in executing.account_mcp_connections
+                                ),
                                 return_exceptions=True,
                             )
                         raise
@@ -624,7 +635,8 @@ class RunService:
             except TimeoutError:
                 status, code = "failed", "run_timeout"
             except ServiceError as error:
-                status, code = "failed", error.code
+                status = "aborted" if error.code == "cancelled" else "failed"
+                code = error.code
             except Exception:
                 status, code = "failed", "execution_error"
             finally:
@@ -647,6 +659,10 @@ class RunService:
                     self._execution_budgets.pop(run.id, None)
                 self._finalizing.add(run.id)
                 try:
+                    if parked:
+                        parked = await self.store.set_awaiting(run.id)
+                        if not parked:
+                            status, code = "aborted", "cancelled"
                     if not parked and base.loop.sandbox is not None:
                         from krim_agent.sandbox.tasks import cancel_run_tasks
 
@@ -709,9 +725,7 @@ class RunService:
                             await base.loop.sandbox.service.store._write(mark_tasks_unknown)
                             if status == "completed":
                                 status, code = "failed", error.code
-                    if parked:
-                        await self.store.set_awaiting(run.id)
-                    else:
+                    if not parked:
                         await self.store.finish(run.id, status, code)
                 finally:
                     self._finalizing.discard(run.id)
@@ -770,17 +784,14 @@ class RunService:
         task = self.tasks.get(run_id)
         error: ServiceError | None = None
         try:
-            # 内存 producer 的所有权不依赖读库成功；失败也必须进入清理。
-            view = await self.get(run_id)
-            if view.status == "awaiting":
-                # 停靠定稿与任务收尾之间存在窗口：状态已停靠即直接定稿，
-                # 未决调用保留受理事实（ADR-0015）。
-                await self.store.request_stop(run_id)
-                return await self.store.finish(run_id, "aborted", "cancelled")
+            # Persist stop before joining: parking may commit while the owner
+            # is finalizing, but cannot discard this request or resume the run.
             await self.store.request_stop(run_id)
         except ServiceError as failure:
             error = failure
         finally:
+            # Approval may replace the parked producer while request_stop waits.
+            task = self.tasks.get(run_id, task)
             if task is not None:
                 if (
                     not task.done()
@@ -792,7 +803,15 @@ class RunService:
                 await settled(task)
         if error is not None:
             raise error
-        return await self.get(run_id)
+        snapshot = await self.store.snapshot(run_id)
+        if snapshot.run.status == "awaiting":
+            binding = self.bindings.get(snapshot.request.target)
+            if binding is not None and binding.loop.sandbox is not None:
+                from krim_agent.sandbox.tasks import cancel_run_tasks
+
+                await cancel_run_tasks(binding.loop.sandbox.service, run_id)
+            return await self.store.finish(run_id, "aborted", "cancelled")
+        return snapshot.run
 
     async def _approval_request(
         self, invocation: Invocation, budget_remaining: float | None
@@ -873,6 +892,8 @@ class RunService:
 
     def _trigger_resume(self, run_id: str, snapshot: RunSnapshot) -> bool:
         """停靠批全部答复后启动恢复驱动；已有驱动在跑则不动（幂等）。"""
+        if snapshot.run.stop_requested or snapshot.run.status != "awaiting":
+            return False
         task = self.tasks.get(run_id)
         if task is not None and not task.done():
             return False
@@ -891,7 +912,7 @@ class RunService:
         consumed = {
             event.data["request_id"] for event in snapshot.events if event.kind == "approval_reply"
         }
-        if snapshot.run.status in TERMINAL:
+        if snapshot.run.status != "awaiting" or snapshot.run.stop_requested:
             return []
         return [
             dict(event.data)
@@ -941,7 +962,7 @@ class RunService:
                     # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
                     self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
-            if snapshot.run.status in TERMINAL:
+            if snapshot.run.status in TERMINAL or snapshot.run.stop_requested:
                 raise ServiceError("approval_unavailable")
             if snapshot.run.status != "awaiting":
                 # 事件已写但状态未及转停靠（进程在两者之间崩溃）：不猜着续跑
