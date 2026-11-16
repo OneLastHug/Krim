@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from krim_agent.dev_network.manager import DownloadNetworks
 
 from krim_agent.development.contracts import EnvironmentHandle, ProcessHandle
 from krim_agent.development.ports import (
@@ -23,13 +27,32 @@ class DevelopmentBackend:
     def __init__(self, repository: EnvironmentRepository, locks: ProjectLocks,
                  authorizer: EnvironmentAuthorizer, *, runner: docker.Runner | None = None,
                  mount_check: Callable[[RuntimeSpec], None] = verify_mount,
-                 processes: ProcessRepository | None = None) -> None:
+                 processes: ProcessRepository | None = None,
+                 downloads: DownloadNetworks | None = None) -> None:
         self.repository = repository
         self.authorizer = authorizer
         self.locks = locks
         self.runner = runner or docker.DockerCLI()
         self.mount_check = mount_check
         self.processes = processes
+        self.downloads = downloads
+
+    async def _network_check(self, spec: RuntimeSpec) -> None:
+        await docker.check_network(self.runner, spec)
+        if spec.network.policy_ref is not None:
+            if self.downloads is None:
+                raise EnvironmentError("network_enforcement_required")
+            await self.downloads.check(spec)
+
+    async def _network_arm(self, spec: RuntimeSpec, cid: str) -> None:
+        if spec.network.policy_ref is not None:
+            if self.downloads is None:
+                raise EnvironmentError("network_enforcement_required")
+            await self.downloads.arm(spec, cid)
+
+    async def _network_release(self, cid: str) -> None:
+        if self.downloads is not None:
+            await self.downloads.release(cid)
 
     async def _resolve(self, handle: EnvironmentHandle, action: Action) -> RuntimeSpec:
         record = await self.repository.resolve(handle)
@@ -76,7 +99,7 @@ class DevelopmentBackend:
     async def _ensure(self, record: RuntimeSpec, *, start: bool) -> EnvironmentHandle:
         if record.handle.state == "stopping":
             raise EnvironmentError("environment_stopping")
-        await docker.check_network(self.runner, record)
+        await self._network_check(record)
         value = await docker.inspect(self.runner, record)
         if value is None:
             if record.container_id is not None or record.handle.state != "creating":
@@ -102,6 +125,11 @@ class DevelopmentBackend:
             if observed_id != cid:
                 raise EnvironmentError("start_outcome_unknown")
             record = await self._save(record, state, cid)
+        if start and state == "ready":
+            await self._network_arm(record, cid)
+            if record.network.policy_ref is not None:
+                assert self.downloads is not None
+                await self.downloads.wait_ready(cid)
         if start and record.handle.state != "ready":
             raise EnvironmentError("environment_not_ready")
         return record.handle
@@ -117,7 +145,7 @@ class DevelopmentBackend:
     async def inspect(self, environment: EnvironmentHandle) -> EnvironmentHandle:
         async with self.locks.hold(environment.owner_id, environment.project_id):
             record = await self._resolve(environment, "inspect")
-            await docker.check_network(self.runner, record)
+            await self._network_check(record)
             state, cid = await self._observation(record)
             await self._exclusive_container(record, cid)
             if record.handle.state == "stopping":
@@ -189,6 +217,7 @@ class DevelopmentBackend:
                     incomplete = True  # Missing outcome is not an invented exit.
                 continue
             was_exited = value["State"]["Status"] == "exited"
+            await self._network_release(str(value["Id"]))
             await docker.stop_verified(self.runner, spec, value)
             stopped = await docker.inspect(self.runner, spec)
             if stopped is None or docker.verify(spec, stopped) != "stopped":
@@ -210,6 +239,7 @@ class DevelopmentBackend:
             value = await docker.inspect(self.runner, record)
             if value is None:
                 raise EnvironmentError("environment_stop_unknown")
+            await self._network_release(str(value["Id"]))
             state = await docker.stop_verified(self.runner, record, value)
             if state != "stopped":
                 raise EnvironmentError("environment_stop_unknown")
@@ -228,12 +258,13 @@ class DevelopmentBackend:
             if old is not None:
                 docker.verify(prior, old)
                 await self._exclusive_container(current, prior.container_id)
-                await docker.check_network(self.runner, current)
+                await self._network_check(current)
                 await docker.check_image(self.runner, current)
                 if current.container_id is not None or current.handle.state != "creating":
                     raise EnvironmentError("recreate_binding_drift")
             await self.authorizer(current.handle, "recreate")
             await self._stop_executions(prior, retired=True)
             if old is not None:
+                await self._network_release(prior.container_id)
                 await docker.checked(self.runner, ("rm", "--force", prior.container_id))
             return await self._ensure(current, start=True)

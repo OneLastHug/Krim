@@ -1,6 +1,7 @@
-"""Project authorization, trusted secret delivery and Git/egress policy values.
+"""Project authorization, sealed delivery and native Git host adapters.
 
-Wire ProjectAccessService only in the trusted host. D does not expose a tool or
-API endpoint, run Git, hold a database, grant cleanup authority, or enforce the
-container network. See D-progress.md for integration evidence and remaining work.
+Wire ProjectAccessService and TrustedGitRunner only in the trusted host. This
+package does not expose model tools, own a database, grant cleanup authority,
+or enforce container networking. See deployment/development-credentials/README.md
+for assembly interfaces and local verification scope.
 """

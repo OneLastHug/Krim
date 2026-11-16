@@ -213,7 +213,12 @@ def test_mount_registers_only_manifest_paths_for_get_and_head(tmp_path: Path) ->
         assert response.status_code == 200
         assert response.content == FONT_BYTES
         assert response.headers["content-type"] == "font/woff2"
-        assert "default-src 'self'" in response.headers["content-security-policy"]
+        policy = response.headers["content-security-policy"]
+        assert "default-src 'self'" in policy
+        assert "img-src 'self' blob:;" in policy
+        assert "frame-ancestors 'none'" in policy
+        assert "connect-src 'self';" in policy
+        assert "img-src *" not in policy
         assert client.head(route_path).status_code == 200
         assert client.get("/ui/assets/fonts/unlisted-abc12345.woff2").status_code == 401
         assert client.get("/v2/private").status_code == 401

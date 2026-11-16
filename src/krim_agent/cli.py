@@ -429,6 +429,10 @@ def main() -> None:
     serve.add_argument("--database", required=True)
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--tool-config", type=Path)
+    development = sub.add_parser("serve-development")
+    development.add_argument("--database", required=True)
+    development.add_argument("--development-config", type=Path, required=True)
+    development.add_argument("--tool-config", type=Path)
     for command in ("run", "get", "result", "trace", "events", "cancel"):
         child = sub.add_parser(command)
         child.add_argument("--database", default=".data/krim-agent.db")
@@ -537,6 +541,18 @@ def main() -> None:
     add_account_parser(sub)
     args = parser.parse_args()
     try:
+        if args.command == "serve-development":
+            from krim_agent.development.serving import run_development
+
+            changes: dict[str, Any] = {
+                "database": Path(args.database),
+                "development_config_file": args.development_config,
+            }
+            if args.tool_config is not None:
+                changes["tool_config_file"] = args.tool_config
+            settings = Settings.from_env().model_copy(update=changes)
+            asyncio.run(run_development(settings, OpenAICompatibleConfig.from_env()))
+            return
         if args.command == "serve":
             import uvicorn
 

@@ -83,7 +83,7 @@ class WebsocketsConnector:
                     sock=sock,
                     origin=origin,
                     additional_headers=headers,
-                    subprotocols=subprotocols,
+                    subprotocols=subprotocols or None,
                     proxy=None,
                     logger=_LOG,
                     open_timeout=10,

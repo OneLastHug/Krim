@@ -14,6 +14,7 @@ from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.development_models import DEVELOPMENT_TABLES
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 from tests.agent_core.test_account_api import client_for, initialize
 
@@ -92,7 +93,7 @@ async def exercise_closed_session_lifecycle(host) -> None:
     assert restored.status == "closed"
     assert [item.id for item in await service.list(actor, workspace)] == [session.id]
     assert await service.list(actor, workspace, view="trash") == []
-    assert store.schema_version == SCHEMA_VERSION == 16
+    assert store.schema_version == SCHEMA_VERSION == 17
 
 
 @pytest.mark.asyncio
@@ -257,7 +258,7 @@ async def test_lifecycle_requires_schema_14_and_stays_readonly_below(tmp_path):
         await host.close()
     with sqlite3.connect(database) as connection:
         for table in reversed((
-            *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
+            *SIDEBAR_TABLES, *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
         )):
             connection.execute(f'DROP TABLE "{table.name}"')
         connection.execute("PRAGMA user_version=13")
@@ -339,7 +340,7 @@ async def test_schema_13_readonly_then_upgrade_adds_only_lifecycle_tables(tmp_pa
         await host.close()
     with sqlite3.connect(database) as connection:
         for table in reversed((
-            *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
+            *SIDEBAR_TABLES, *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
         )):
             connection.execute(f'DROP TABLE "{table.name}"')
         connection.execute("PRAGMA user_version=13")
@@ -354,7 +355,7 @@ async def test_schema_13_readonly_then_upgrade_adds_only_lifecycle_tables(tmp_pa
     assert database.read_bytes() == unchanged
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 16
+        assert writer.schema_version == SCHEMA_VERSION == 17
         assert (await session_sql.get_session(writer, session.id)).id == session.id
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT * FROM sessions").fetchall() == before
@@ -377,7 +378,7 @@ async def test_lifecycle_migration_preserves_historical_sandbox_tables(tmp_path)
         await host.close()
     with sqlite3.connect(database) as connection:
         for table in reversed((
-            *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
+            *SIDEBAR_TABLES, *SESSION_LIFECYCLE_TABLES, *DEVELOPMENT_TABLES, *PREVIEW_TABLES,
         )):
             connection.execute(f'DROP TABLE "{table.name}"')
         connection.execute("PRAGMA user_version=13")
@@ -385,7 +386,7 @@ async def test_lifecycle_migration_preserves_historical_sandbox_tables(tmp_path)
             "SELECT name FROM sqlite_master WHERE type='table'")}
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == 16
+        assert writer.schema_version == 17
         assert (await session_sql.get_session(writer, session.id)).id == session.id
         with sqlite3.connect(database) as connection:
             actual = {row[0] for row in connection.execute(

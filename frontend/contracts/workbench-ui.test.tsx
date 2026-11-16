@@ -109,6 +109,8 @@ test("首页默认对话，主导航和浏览器回退同步页面", async () =>
   expect(new URL(location.href).searchParams.get("view")).toBeNull();
   await until(() => expect(host.querySelector('[aria-label="已存对话"]')).toBeTruthy());
   expect(host.querySelectorAll(".desktop-sidebar .sidebar-buttons")).toHaveLength(1);
+  expect(host.querySelectorAll(".sidebar-buttons [aria-label^='导航到']")).toHaveLength(1);
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".sidebar-code-action")].find(button => button.textContent === "更多")!.click());
   expect(host.querySelectorAll(".sidebar-buttons [aria-label^='导航到']")).toHaveLength(5);
   expect(host.querySelector(".desktop-sidebar .app-sidebar")).toBeTruthy();
   expect(host.querySelectorAll(".chat-sidebar")).toHaveLength(1);
@@ -224,8 +226,10 @@ test("手机导航抽屉可打开并导航后关闭", async () => {
 
 test("原侧栏Trace入口承载观测内容，不再追加重复入口", async () => {
   await mount();
-  const icons = [...host.querySelectorAll('.sidebar-buttons button')].map(button => button.getAttribute("aria-label"));
-  expect(icons).toEqual(["新建对话", "导航到对话", "导航到运行记录", "导航到Trace", "导航到数据集", "导航到评测", "查找对话"]);
+  expect(host.querySelector(".sidebar-mode-tabs")?.textContent).toBe("Krim AgentCode");
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".sidebar-code-action")].find(button => button.textContent === "更多")!.click());
+  const icons = [...host.querySelectorAll('.sidebar-buttons [aria-label^="导航到"]')].map(button => button.getAttribute("aria-label"));
+  expect(icons).toEqual(["导航到对话", "导航到运行记录", "导航到Trace", "导航到数据集", "导航到评测"]);
   expect(host.querySelector('.sidebar-observability-entry')).toBeNull();
   expect(host.querySelector('[aria-label="导航到观测"]')).toBeNull();
   await act(async () => button("导航到Trace").click());
@@ -358,7 +362,8 @@ test("重命名只在会话标题同步后关闭对话框", async () => {
   };
   history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
   await mount();
-  await until(() => expect(button("重命名当前对话")).toBeTruthy());
+  await until(() => expect(button("会话 A 的操作")).toBeTruthy());
+  await act(async () => button("会话 A 的操作").click());
   await act(async () => button("重命名当前对话").click());
   await act(async () => {
     const input = document.getElementById("rename-session-title") as HTMLInputElement;
@@ -390,7 +395,8 @@ test("重命名结果未知时保留查询入口且不重复提交", async () =>
   };
   history.replaceState(null, "", "/ui/?view=chat&workspace=local&session=A");
   await mount();
-  await until(() => expect(button("重命名当前对话")).toBeTruthy());
+  await until(() => expect(button("会话 A 的操作")).toBeTruthy());
+  await act(async () => button("会话 A 的操作").click());
   await act(async () => button("重命名当前对话").click());
   await act(async () => {
     const input = document.getElementById("rename-session-title") as HTMLInputElement;

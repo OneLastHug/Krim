@@ -15,6 +15,7 @@ from krim_agent.development.ports import EnvironmentRecord, command_digest
 Action = Literal["create", "start", "inspect", "stop", "recreate", "execute"]
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_POLICY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
 class EnvironmentError(RuntimeError):
@@ -75,9 +76,10 @@ class RuntimeSpec:
             raise EnvironmentError("environment_configuration_invalid")
         if r.container_id is not None and not _HEX.fullmatch(r.container_id):
             raise EnvironmentError("environment_configuration_invalid")
-        if ((r.network_id is None) != (r.network_policy_ref is None)
-                or (r.network_id is not None and not _HEX.fullmatch(r.network_id))):
-            raise EnvironmentError("network_binding_invalid")
+        # An arbitrary Docker bridge ID is not an egress enforcement facility.
+        # Downloads use the host-owned stdio broker while Docker stays offline.
+        if r.network_id is not None:
+            raise EnvironmentError("uncontrolled_network_forbidden")
         if (self.request is None) != (self.process_id is None):
             raise EnvironmentError("execution_binding_invalid")
         if (self.request is not None
@@ -85,6 +87,13 @@ class RuntimeSpec:
             raise EnvironmentError("execution_binding_drift")
         if self.execution_id is not None and not _HEX.fullmatch(self.execution_id):
             raise EnvironmentError("execution_binding_invalid")
+        for policy_ref in (r.network_policy_ref, self.network.policy_ref):
+            if policy_ref is not None and (not isinstance(policy_ref, str)
+                                           or _POLICY.fullmatch(policy_ref) is None):
+                raise EnvironmentError("network_binding_invalid")
+        if (self.request is not None and r.network_policy_ref is not None
+                and r.network_policy_ref != self.network.policy_ref):
+            raise EnvironmentError("network_binding_drift")
 
     @property
     def handle(self) -> EnvironmentHandle:
@@ -106,7 +115,10 @@ class RuntimeSpec:
 
     @property
     def network(self) -> _Network:
-        return _Network(self.record.network_id, self.record.network_policy_ref)
+        # An execution never inherits permission from its idle environment.
+        policy_ref = (self.request.authorization.network_policy_ref
+                      if self.request is not None else self.record.network_policy_ref)
+        return _Network(self.record.network_id, policy_ref)
 
     @property
     def container_id(self) -> str | None:
@@ -118,7 +130,7 @@ class RuntimeSpec:
         value = {"identity": identity(r.environment), "image": r.image_id,
                  "content": (str(r.content_path), r.content_device, r.content_inode),
                  "cpu": self.limits.nano_cpus, "memory": r.memory_bytes, "pids": r.pids_limit,
-                 "network": (r.network_id, r.network_policy_ref),
+                 "network": (self.network.network_id, self.network.policy_ref),
                  "profile": "krim-development-runsc-v2-uid65532"}
         if self.request is not None:
             value["request"] = command_digest(self.request)

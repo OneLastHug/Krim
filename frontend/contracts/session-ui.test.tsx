@@ -260,7 +260,7 @@ for (const barrier of ["post", "get"] as const) for (const steering of ["tab", "
     await until(() => expect(fixture.accepted).not.toBeNull());
     const original = JSON.parse(JSON.stringify(readIntents(localStorage)[0])) as unknown;
     if (barrier === "get") { await act(async () => button("查找原请求").click()); await until(() => expect(fixture.findCount).toBe(1)); }
-    if (steering === "tab") await act(async () => button("导航到运行记录").click());
+    if (steering === "tab") { await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".sidebar-code-action")].find(button => button.textContent === "更多")!.click()); await act(async () => button("导航到运行记录").click()); }
     if (steering === "other") await act(async () => button("会话 B").click());
     if (steering === "key") { await openAccountMenu(); await act(async () => menuItem("切换账号").click()); await type("api-key", "corrected-synthetic"); await act(async () => document.getElementById("connect-save")!.click()); }
     if (steering === "refresh") { await openMorePopover(); await act(async () => menuItem("刷新对话").click()); }

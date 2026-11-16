@@ -26,6 +26,7 @@ from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.development import DevelopmentStore
 from krim_agent.storage.development_models import DEVELOPMENT_TABLES
 from krim_agent.storage.preview_models import PREVIEW_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
@@ -324,7 +325,7 @@ async def test_schema14_readonly_and_upgrade_preserve_original_rows(tmp_path: Pa
     run, _ = await store.begin(RunRequest(text='legacy', request_key='legacy'), {})
     await store.close()
     with sqlite3.connect(path) as connection:
-        for table in reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)):
+        for table in reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES, *SIDEBAR_TABLES)):
             connection.execute(f'DROP TABLE "{table.name}"')
         connection.execute('PRAGMA user_version=14')
     original = path.read_bytes()
@@ -339,7 +340,7 @@ async def test_schema14_readonly_and_upgrade_preserve_original_rows(tmp_path: Pa
     assert path.read_bytes() == original
     writer = await SQLiteStore.open(path)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 16
+        assert writer.schema_version == SCHEMA_VERSION == 17
         assert (await writer.snapshot(run.id)).request.text == 'legacy'
     finally:
         await writer.close()

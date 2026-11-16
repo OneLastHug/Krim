@@ -9,6 +9,7 @@ import { useSession, type SessionState } from "../src/hooks/use-session";
 let root: Root, container: HTMLDivElement;
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 function setup(chat: SessionState, more = false) {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -48,17 +49,17 @@ function state(overrides: Partial<SessionState> = {}): SessionState {
 }
 
 function rowLabels(row: Element) {
-  return [...row.querySelectorAll("button")].map(button => button.getAttribute("aria-label"));
+  act(() => row.querySelector<HTMLButtonElement>(".session-more")!.click());
+  return [...document.querySelectorAll('[role="menu"] button')].map(button => button.getAttribute("aria-label"));
 }
 
 test("closed session row exposes archive and trash, while the filter changes scope", () => {
   const chat = state();
   const view = setup(chat);
-  const filter = view.querySelector<HTMLSelectElement>('select[aria-label="对话列表范围"]')!;
-  expect(filter.value).toBe("active");
-  act(() => { filter.value = "archived"; filter.dispatchEvent(new Event("change", { bubbles: true })); });
+  act(() => view.querySelector<HTMLButtonElement>(".session-tree-toolbar > button")!.click());
+  act(() => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(button => button.textContent === "已归档")!.click());
   expect(chat.setSessionListView).toHaveBeenCalledWith("archived");
-  const actions = [...view.querySelectorAll<HTMLButtonElement>("button")].map(button => button.getAttribute("aria-label"));
+  const actions = rowLabels(view.querySelector(".chat-session-row")!);
   expect(actions).toContain("归档此对话");
   expect(actions).toContain("移入回收站");
 });
@@ -66,7 +67,7 @@ test("closed session row exposes archive and trash, while the filter changes sco
 test("trash row provides restore and hides move-to-trash action, even when still archived", () => {
   const chat = state({ listView: "trash", list: [{ ...state().session!, archived_at: 5, deleted_at: 3 }] });
   const view = setup(chat);
-  const actions = [...view.querySelectorAll<HTMLButtonElement>("button")].map(button => button.getAttribute("aria-label"));
+  const actions = rowLabels(view.querySelector(".chat-session-row")!);
   expect(actions).toContain("恢复此对话");
   expect(actions).not.toContain("移入回收站");
   expect(actions).not.toContain("取消归档");
@@ -83,7 +84,10 @@ test("row actions follow each row's own state, not the selected session", () => 
   expect(rowLabels(rows[0]!)).toContain("移入回收站");
   expect(rowLabels(rows[1]!)).not.toContain("归档此对话");
   expect(rowLabels(rows[1]!)).not.toContain("移入回收站");
-  act(() => rows[0]!.querySelector<HTMLButtonElement>('button[aria-label="归档此对话"]')!.click());
+  rowLabels(rows[0]!);
+  act(() => document.querySelector<HTMLButtonElement>('button[aria-label="归档此对话"]')!.click());
+  expect(chat.lifecycle).not.toHaveBeenCalled();
+  act(() => document.querySelector<HTMLButtonElement>('.session-sidebar-dialog button[type="submit"]')!.click());
   expect(chat.lifecycle).toHaveBeenCalledWith("archive", "s1");
 });
 
@@ -217,6 +221,37 @@ beforeEach(() => {
   history.replaceState({}, "", "/ui/?workspace=local&session=A");
   hookCalls.length = 0;
   hookState = null;
+});
+
+test("重命名非当前会话使用目标revision，不改变选择或写到当前会话", async () => {
+  let title = "另一个会话";
+  const other = () => lifecycleSession({ id: "B", title, status: "open", revision: 9, closed_at: null });
+  serve((path, method, body) => {
+    if (path === "/v2/me") return identity();
+    if (path === hookBase + "?limit=50") return json([lifecycleSession(), other()]);
+    if (path === hookBase + "/A") return json(lifecycleSession());
+    if (path.startsWith(hookBase + "/A/turns?")) return json([]);
+    if (path === hookBase + "/B/rename" && method === "POST") { title = (body as { title: string }).title; expect((body as { expected_revision: number }).expected_revision).toBe(9); return json({ session_id: "B", request_key: (body as { request_key: string }).request_key, status: "completed" }); }
+    return undefined;
+  });
+  await mountHook(); await until(() => expect(hookState?.list).toHaveLength(2));
+  await act(async () => hookState!.rename("改名B", "B"));
+  await until(() => expect(hookState?.list.find(session => session.id === "B")?.title).toBe("改名B"));
+  expect(hookState?.id).toBe("A"); expect(hookCalls.some(call => call.path.endsWith("/A/rename"))).toBe(false);
+  expect(localStorage.getItem(CONTROL)).toBe("{}");
+});
+
+test("管理员不能通过非当前会话rename写入其他owner", async () => {
+  serve(path => {
+    if (path === "/v2/me") return identity();
+    if (path === hookBase + "?limit=50") return json([lifecycleSession(), lifecycleSession({ id: "B", status: "open", closed_at: null, owner_id: "other" })]);
+    if (path === hookBase + "/A") return json(lifecycleSession());
+    if (path.startsWith(hookBase + "/A/turns?")) return json([]);
+    return undefined;
+  });
+  await mountHook(); await until(() => expect(hookState?.list).toHaveLength(2));
+  await act(async () => hookState!.rename("不应提交", "B"));
+  expect(hookCalls.filter(call => call.method === "POST")).toHaveLength(0);
 });
 
 test("丢失响应后再次操作先查lifecycle回执，命中即不再重复提交", async () => {

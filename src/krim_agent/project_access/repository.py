@@ -6,7 +6,13 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from krim_agent.development.contracts import AuthorizationRef
+from krim_agent.development.contracts import (
+    AuthorizationRef,
+    EnvironmentHandle,
+    OperationReceipt,
+    RunOwnership,
+)
+from krim_agent.development.ports import ProcessRecord
 from krim_agent.project_access.git import GitGrant
 from krim_agent.project_access.types import (
     AccessIntent,
@@ -19,6 +25,24 @@ from krim_agent.security import PrincipalContext
 
 
 @dataclass(frozen=True, slots=True)
+class CommandAccessState:
+    """I projects these CURRENT rows under the same guard as the secret.
+
+    No supplied receipt is authority. Missing or unverifiable run/operation/
+    process/environment rows leave ``AccessSnapshot.command`` as None. Run
+    ownership is projected independently from the run/session join.
+    """
+
+    operation: OperationReceipt
+    command_digest: str
+    process: ProcessRecord
+    environment: EnvironmentHandle
+    ownership: RunOwnership
+    run_status: str
+    stop_requested: bool
+
+
+@dataclass(frozen=True, slots=True)
 class AccessSnapshot:
     actor: PrincipalContext | None
     grant: ProjectGrant | None
@@ -26,6 +50,7 @@ class AccessSnapshot:
     secrets: tuple[SecretRecord, ...] = field(default=(), repr=False)
     network: NetworkGrant | None = None
     git: GitGrant | None = None
+    command: CommandAccessState | None = None
 
 
 class AccessRepository(Protocol):

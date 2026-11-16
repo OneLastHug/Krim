@@ -41,8 +41,8 @@ from . import model_step as model_step_module
 from .contracts import ExecutionBudget, RunSnapshot, RunStore, settled
 from .engine import AgentLoop, Parked
 from .facts import project_facts
-from .recovery import RecoveryState, load_checkpoint
-from .sdk_loop import DevelopmentSDKLoop, SDKResume
+from .recovery import SDKResume, sdk_resume
+from .sdk_loop import DevelopmentSDKLoop
 
 
 def implementation(value: object | None) -> dict[str, JsonValue]:
@@ -121,19 +121,36 @@ class RunBinding:
                 for token in (id(method), id(getattr(method, "__code__", None)))
             )
             result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        from krim_agent.agent_sdk import adapter as sdk_adapter
+        from krim_agent.agent_sdk import context as sdk_context
+        from krim_agent.agent_sdk import host as sdk_host
+        from krim_agent.agent_sdk import model as sdk_model
+        from krim_agent.agent_sdk import response as sdk_response
+
+        result += tuple(source_digest(cast(str, module.__file__)) for module in (
+            sdk_adapter, sdk_context, sdk_host, sdk_model, sdk_response,
+        ))
         if isinstance(loop, DevelopmentSDKLoop):
-            from krim_agent.agent_sdk import adapter as sdk_adapter
-            from krim_agent.agent_sdk import host as sdk_host
-            from krim_agent.agent_sdk import model as sdk_model
-            from krim_agent.agent_sdk import response as sdk_response
+            from krim_agent.context import compaction, compaction_source
             from krim_agent.runtime import sdk_loop
+            from krim_agent.storage import development_context
 
             result += (id(function(loop.run)), id(loop.development_store),
                        id(function(loop.development_scope)), id(function(loop.development_cleanup)),
-                       id(function(loop.development_approval_projection)))
+                       id(function(loop.development_approval_projection)),
+                       id(function(loop.development_media_for_run)))
             result += tuple(source_digest(cast(str, module.__file__)) for module in (
-                sdk_adapter, sdk_host, sdk_model, sdk_response, sdk_loop,
+                sdk_loop, compaction, compaction_source, development_context,
             ))
+            if loop.settings.development_history_compaction:
+                result += tuple(map(id, (
+                    development_context.DevelopmentCompactionSource.verify,
+                    development_context.DevelopmentCompactionSource.verify_frozen,
+                    development_context.DevelopmentCompactionSource.page,
+                    development_context.DevelopmentCompactionSource.save_prepared,
+                    development_context.DevelopmentCompactionSource.read_prepared,
+                )))
+                result += (hash(compaction.binding_token()),)
         if loop.sandbox is not None:
             result += (
                 id(loop.sandbox),
@@ -279,6 +296,7 @@ class RunBinding:
             "post": implementation(loop.executor.post),
             "limits": limits,
             "limits_fingerprint": fingerprint(limits),
+            "agent_loop": "ai-python/0.9.0-host-v2",
         }
         if loop.work is not None:
             descriptor["workspace_profile"] = loop.work.profile.model_dump(mode="json")
@@ -292,6 +310,8 @@ class RunBinding:
         if isinstance(loop, DevelopmentSDKLoop):
             descriptor["development"] = loop.development_descriptor
             descriptor["agent_loop"] = "ai-python/0.9.0-host-v1"
+            if settings.development_history_compaction:
+                descriptor["development_history_compaction"] = True
         if loop.sandbox is not None:
             descriptor["sandbox"] = {"version": "sandbox/1",
                 "image": loop.sandbox.service.configuration.command_image,
@@ -314,7 +334,8 @@ class RunBinding:
         )
 
     def assert_current(self) -> None:
-        self.loop.executor.registry.assert_current()
+        # describe() validates and returns the current registry schemas below.
+        # Keep one complete schema check per synchronous binding check.
         if self.tool_tokens(self.loop) != self.tool_identities:
             raise ServiceError("tool_binding_changed")
         if self._http_token is not None and (
@@ -572,7 +593,7 @@ class RunService:
                 budget.bind(timeout_context)
                 async with timeout_context:
                     await self.store.set_running(run.id)
-                    recovery: RecoveryState | SDKResume | None = None
+                    recovery: SDKResume | None = None
                     if resume:
                         assert recovery_checkpoint is not None
                         snapshot = await self.store.snapshot(run.id)
@@ -625,9 +646,7 @@ class RunService:
                             if event.kind == "approval_reply"
                         }
                         data, stored = recovery_checkpoint
-                        recovery = (SDKResume(data, stored, replies)
-                                    if isinstance(executing.loop, DevelopmentSDKLoop)
-                                    else load_checkpoint(run.id, data, stored, replies))
+                        recovery = sdk_resume(data, stored, replies)
                     try:
                         await executing.loop.run(
                             run.id,

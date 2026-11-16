@@ -422,15 +422,12 @@ async def test_dedicated_network_policy_drift_is_rejected(backend_env):
         network_id=network_id,
         network_policy_ref="policy-1",
     )
-    ready = RuntimeSpec(record).observed("ready", hashlib.sha256(b"container").hexdigest()).record
-    bindings.record = ready
-    runner.add_container(ready, container_id=ready.container_id)
-    runner.network_drift = True
-
+    bindings.record = record
     with pytest.raises(EnvironmentError) as raised:
-        await backend.inspect(ready.environment)
+        await backend.inspect(record.environment)
 
-    assert raised.value.code == "network_binding_drift"
+    assert raised.value.code == "uncontrolled_network_forbidden"
+    assert not runner.calls
 
 
 @pytest.mark.asyncio

@@ -19,11 +19,12 @@ import ai
 import httpx
 import openai
 from ai.providers.openai import OpenAIChatCompletionsProtocol
+from ai.types.messages import FilePart, TextPart, ToolCallPart, ToolResultPart
 from ai.types.messages import Message as SDKMessage
-from ai.types.messages import TextPart, ToolCallPart, ToolResultPart
 from ai.types.tools import Tool, ToolSpec
 from pydantic import Field, JsonValue, SecretStr, ValidationError, field_validator, model_validator
 
+from krim_agent.agent_sdk.host_media import HostImageMessage, validate_host_images
 from krim_agent.contracts import (
     Message,
     ServiceError,
@@ -53,7 +54,8 @@ class OpenAICompatibleConfig(StrictModel):
     read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
     write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     pool_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
-    max_request_bytes: int = Field(default=32768, ge=256, le=32768)
+    max_request_bytes: int = Field(default=32768, ge=256, le=1048576)
+    allow_images: bool = Field(default=False, strict=True)
     max_response_bytes: int = Field(default=131072, ge=256, le=131072)
     max_event_bytes: int = Field(default=16384, ge=128, le=16384)
     max_events: int = Field(default=1024, ge=1, le=1024)
@@ -127,6 +129,9 @@ class OpenAICompatibleConfig(StrictModel):
             "REASONING_EFFORT",
             "THINKING",
             "READ_TIMEOUT_SECONDS",
+            "MAX_REQUEST_BYTES",
+            "MAX_TOOL_CALLS",
+            "ALLOW_IMAGES",
         )
         values = {
             name.lower(): os.environ["KRIM_AGENT_HTTP_" + name]
@@ -136,12 +141,16 @@ class OpenAICompatibleConfig(StrictModel):
         if not values:
             return None
         try:
-            if "max_output_tokens" in values:
-                if re.fullmatch(r"[0-9]+", values["max_output_tokens"]) is None:
-                    raise ValueError
             arguments: dict[str, Any] = dict(values)
-            if "max_output_tokens" in values:
-                arguments["max_output_tokens"] = int(values["max_output_tokens"])
+            for name in ("max_output_tokens", "max_request_bytes", "max_tool_calls"):
+                if name in values:
+                    if re.fullmatch(r"[0-9]+", values[name]) is None:
+                        raise ValueError
+                    arguments[name] = int(values[name])
+            if "allow_images" in values:
+                if values["allow_images"] not in {"true", "false"}:
+                    raise ValueError
+                arguments["allow_images"] = values["allow_images"] == "true"
             if "read_timeout_seconds" in values:
                 if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values["read_timeout_seconds"]) is None:
                     raise ValueError
@@ -262,10 +271,16 @@ class _ToolBuffer:
             raise ProviderError("provider_tool_arguments") from None
 
 
-def _messages(messages: Sequence[Message]) -> list[dict[str, JsonValue]]:
+def _messages(
+    messages: Sequence[Message], *, allow_images: bool = False
+) -> list[dict[str, JsonValue]]:
     result: list[dict[str, JsonValue]] = []
     pending: set[str] = set()
-    for message in messages:
+    for index, message in enumerate(messages):
+        if isinstance(message, HostImageMessage) and (
+            not allow_images or message.role != "user" or index != len(messages) - 1
+        ):
+            raise ServiceError("invalid_input")
         item: dict[str, JsonValue] = {"role": message.role, "content": message.content}
         if message.role == "assistant" and message.tool_calls:
             if pending:
@@ -349,9 +364,11 @@ def _texts(value: str) -> list[str]:
     return result
 
 
-def _sdk_messages(messages: Sequence[Message]) -> list[SDKMessage]:
+def _sdk_messages(
+    messages: Sequence[Message], *, allow_images: bool = False
+) -> list[SDKMessage]:
     # 在 SDK 的历史修复之前检查 Krim 的工具结果配对，避免静默修补无效历史。
-    _messages(messages)
+    _messages(messages, allow_images=allow_images)
     result: list[SDKMessage] = []
     names: dict[str, str] = {}
     for message in messages:
@@ -368,6 +385,17 @@ def _sdk_messages(messages: Sequence[Message]) -> list[SDKMessage]:
         else:
             if message.content or not message.tool_calls:
                 parts.append(TextPart(text=message.content))
+            if isinstance(message, HostImageMessage):
+                parts.extend(
+                    FilePart(
+                        data=payload,
+                        media_type="image/png",
+                        filename=image.filename,
+                    )
+                    for image, payload in zip(
+                        message.images, validate_host_images(message.images), strict=True
+                    )
+                )
             for raw in message.tool_calls:
                 call = ModelToolCall.model_validate(raw)
                 names[call.id] = call.name
@@ -627,11 +655,15 @@ class OpenAICompatibleProvider:
 
     def binding_token(self) -> tuple[object, ...]:
         """仅私有内存使用，含凭据的值绝不repr/序列化。"""
+        config = self.config.model_dump(mode="json", exclude={"api_key", "base_url"})
+        # Keep the historical no-image binding stable; opt-in is explicit and bound.
+        if not self.config.allow_images:
+            config.pop("allow_images", None)
         return (
             id(self.config),
             self.config.base_url,
             self.config.api_key.get_secret_value(),
-            encoded(self.config.model_dump(mode="json", exclude={"api_key", "base_url"})),
+            encoded(config),
             id(self._client),
             id(self._sdk_client),
             id(self._sdk_client._client),
@@ -682,6 +714,9 @@ class OpenAICompatibleProvider:
         result: dict[str, JsonValue] = self.config.model_dump(
             mode="json", exclude={"api_key", "base_url", "model"}, exclude_none=True
         )
+        # Preserve the old execution fingerprint for text-only default configs.
+        if not self.config.allow_images:
+            result.pop("allow_images", None)
         for key in (
             "connect_timeout_seconds",
             "read_timeout_seconds",
@@ -747,7 +782,7 @@ class OpenAICompatibleProvider:
         )
         if declarations and max_tool_calls == 1:
             extra["parallel_tool_calls"] = False
-        projected = _sdk_messages(messages)
+        projected = _sdk_messages(messages, allow_images=self.config.allow_images)
         self.calls += 1
         self.active += 1
         try:

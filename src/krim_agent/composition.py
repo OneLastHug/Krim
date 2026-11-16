@@ -16,7 +16,7 @@ from krim_agent.account_mcp.secrets import AuthenticatedSecretVault, MasterKeyri
 from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings
-from krim_agent.contracts import ServiceError
+from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.development.configuration import DevelopmentConfiguration
 from krim_agent.development.service import DevelopmentService
 from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
@@ -152,8 +152,12 @@ class Application:
                 finally:
                     try:
                         try:
-                            if self.sandbox is not None:
-                                await self.sandbox.close()
+                            try:
+                                if self.development is not None:
+                                    await self.development.close()
+                            finally:
+                                if self.sandbox is not None:
+                                    await self.sandbox.close()
                         finally:
                             if self.identities is not None:
                                 await self.identities.close()
@@ -377,6 +381,7 @@ async def open_application(
     operations = None
     application: Application | None = None
     tool_runtime: ToolRuntime | None = None
+    development: DevelopmentService | None = None
     try:
         identities = await IdentityService.open(store)
         if config.personal_mcp_key_file is not None and not identities.managed:
@@ -409,7 +414,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -429,7 +434,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
@@ -560,13 +565,26 @@ async def open_application(
                 raise ServiceError("sandbox_config_invalid", 422)
             await asyncio.to_thread(DevelopmentService.prepare_private, development_configuration)
             development = DevelopmentService(store, identities, sandbox_service,
-                                             development_configuration)
+                                             development_configuration, vault=personal_mcp_vault)
+            if development_configuration.model_images and not (
+                isinstance(selected, OpenAICompatibleProvider) and selected.config.allow_images
+            ):
+                raise ServiceError("provider_config", 422)
             await development.start_supervisor()
+            await development.recover_secret_executions()
             development_settings = config.model_copy(update={
                 "target_version": "development/1", "run_timeout": 300.0, "tool_timeout": 30.0,
+                "max_steps": development_configuration.max_steps,
+                "max_tool_calls": development_configuration.max_tool_calls,
+                "development_history_compaction": development_configuration.history_compaction,
                 "system_prompt": (
                     "你是Krim开发Agent。在已授权项目中使用Shell和文件工具完成任务。"
+                    "自行计划、开发、运行测试并根据失败修复。"
                     "检查实际退出码、日志与测试；只有用户明确要求的服务使用project_service。"
+                    "需要安装依赖时使用项目已授予的download_policy；不得猜测授权。"
+                    "项目服务启动后注册预览，使用浏览器工具验证实际交互；"
+                    "截图工具返回的是产物引用，只有宿主附加图片后才能声称看到了图片。"
+                    "用户要求Git提交或推送时，只操作明确授权的仓库和ref。"
                 ),
             })
             development_loop = DevelopmentSDKLoop(
@@ -576,8 +594,13 @@ async def open_application(
                 repositories=development.repositories, cleanup_run=development.cleanup_run,
                 descriptor={"version": "development/1",
                             "image_id": development_configuration.image_id,
-                            "runtime": "docker-runsc", "contract": "c0-v1.1"},
+                            "runtime": "docker-runsc", "contract": "c0-v1.1",
+                            "configuration": fingerprint(
+                                development_configuration.model_dump(mode="json"),
+                            )},
                 approval_projection=development.approval_projection,
+                media_for_run=(development.media_for_run
+                               if development_configuration.model_images else None),
             )
             bindings["target-development"] = RunBinding.freeze(
                 "target-development", development_loop, development_settings,
@@ -707,7 +730,11 @@ async def open_application(
                         asyncio.gather(*(p.close() for p in owned), return_exceptions=True)
                     )
             finally:
-                await settled(store.close())
+                try:
+                    if development is not None:
+                        await settled(development.close())
+                finally:
+                    await settled(store.close())
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 raise outcome from None

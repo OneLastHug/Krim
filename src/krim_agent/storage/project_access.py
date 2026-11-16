@@ -15,9 +15,15 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import ServiceError, encoded, fingerprint, parse_json
-from krim_agent.development.contracts import AuthorizationRef, OperationIdentity
+from krim_agent.development.contracts import (
+    AuthorizationRef,
+    OperationIdentity,
+    OperationReceipt,
+    RunOwnership,
+)
+from krim_agent.development.ports import command_digest
 from krim_agent.project_access.git import GitGrant, GitOperation
-from krim_agent.project_access.repository import AccessSnapshot
+from krim_agent.project_access.repository import AccessSnapshot, CommandAccessState
 from krim_agent.project_access.types import (
     AccessIntent,
     ApprovalBinding,
@@ -28,9 +34,9 @@ from krim_agent.project_access.types import (
 from krim_agent.security import Membership, PrincipalContext
 
 from .account_models import access_keys, account_workspaces, accounts
-from .development_models import development_operations
+from .development_models import development_operations, development_processes
 from .development_models import project_access_records as records
-from .models import run_events, runs
+from .models import run_events, runs, sessions, turns
 from .sandbox_models import sandbox_projects
 
 if TYPE_CHECKING:
@@ -209,7 +215,8 @@ class SQLiteAccessRepository:
             raise ServiceError("facts_corrupt")
         return value
 
-    async def _actor(self, conn: AsyncConnection, actor_id: str) -> PrincipalContext | None:
+    @staticmethod
+    async def _actor(conn: AsyncConnection, actor_id: str) -> PrincipalContext | None:
         account = (
             (
                 await conn.execute(
@@ -341,6 +348,110 @@ class SQLiteAccessRepository:
         except (ValueError, KeyError):
             return None
 
+    async def _command_state(
+        self, conn: AsyncConnection, intent: AccessIntent,
+    ) -> CommandAccessState | None:
+        """Read current command evidence inside the authorization transaction."""
+        from .development import DevelopmentStore, _process_record
+
+        operation_row = (await conn.execute(select(development_operations).where(
+            development_operations.c.operation_id == intent.operation_id,
+            development_operations.c.owner_id == intent.owner_id,
+            development_operations.c.project_id == intent.project_id,
+        ))).mappings().first()
+        process_row = (await conn.execute(select(development_processes).where(
+            development_processes.c.operation_id == intent.operation_id,
+            development_processes.c.owner_id == intent.owner_id,
+            development_processes.c.project_id == intent.project_id,
+        ))).mappings().first()
+        if operation_row is None or process_row is None:
+            return None
+
+        try:
+            identity = OperationIdentity.model_validate(operation_row["identity"])
+            operation = OperationReceipt.model_validate(operation_row["receipt"])
+            process = _process_record(process_row)
+            indexed_environment = process.request.environment
+            development = DevelopmentStore(self.store)
+            environment_record = await development.current_environment(conn, indexed_environment)
+            environment = environment_record.environment
+
+            joined = (await conn.execute(
+                select(
+                    turns.c.session_id.label("turn_session_id"),
+                    turns.c.owner_id.label("turn_owner_id"),
+                    turns.c.workspace_id.label("turn_workspace_id"),
+                    turns.c.run_id.label("turn_run_id"),
+                    sessions.c.id.label("joined_session_id"),
+                    sessions.c.owner_id.label("session_owner_id"),
+                    sessions.c.workspace_id.label("session_workspace_id"),
+                )
+                .select_from(turns.join(sessions, turns.c.session_id == sessions.c.id))
+                .where(turns.c.run_id == identity.ownership.run_id)
+            )).mappings().first()
+            run = (await conn.execute(select(runs).where(
+                runs.c.id == identity.ownership.run_id,
+            ))).mappings().first()
+            if joined is None or run is None:
+                return None
+            ownership = RunOwnership(
+                owner_id=joined["turn_owner_id"],
+                session_id=joined["turn_session_id"],
+                run_id=joined["turn_run_id"],
+            )
+            if (
+                operation.identity != identity
+                or identity.ownership != ownership
+                or identity.environment.model_dump(exclude={"state"})
+                != environment.model_dump(exclude={"state"})
+                or identity.operation_id != intent.operation_id
+                or operation_row["command_digest"] is None
+                or operation_row["command_digest"] != process.request_digest
+                or operation_row["command_digest"] != command_digest(process.request)
+                or operation_row["environment_id"] != environment.environment_id
+                or operation_row["session_id"] != ownership.session_id
+                or operation_row["run_id"] != ownership.run_id
+                or operation_row["owner_id"] != ownership.owner_id
+                or operation_row["project_id"] != environment.project_id
+                or process.request.operation_id != identity.operation_id
+                or process.request.ownership != ownership
+                or process.request.environment.model_dump(exclude={"state"})
+                != environment.model_dump(exclude={"state"})
+                or process_row["environment_id"] != environment.environment_id
+                or process_row["session_id"] != ownership.session_id
+                or process_row["run_id"] != ownership.run_id
+                or process_row["owner_id"] != ownership.owner_id
+                or process_row["project_id"] != environment.project_id
+                or environment_record.environment.owner_id != intent.owner_id
+                or environment.project_id != intent.project_id
+                or joined["turn_session_id"] != identity.ownership.session_id
+                or joined["turn_run_id"] != identity.ownership.run_id
+                or joined["turn_owner_id"] != identity.ownership.owner_id
+                or joined["turn_workspace_id"] != intent.workspace_id
+                or joined["session_owner_id"] != identity.ownership.owner_id
+                or joined["session_workspace_id"] != intent.workspace_id
+                or joined["joined_session_id"] != identity.ownership.session_id
+            ):
+                return None
+
+            # Active commands use the shared fence; completed launch evidence must
+            # remain projectable for D's monitor to inspect result_ref safely.
+            if run["status"] == "running" and not run["stop_requested"]:
+                await development.ownership(conn, environment, ownership)
+            elif run["status"] not in {"completed", "failed", "cancelled"}:
+                return None
+            return CommandAccessState(
+                operation=operation,
+                command_digest=operation_row["command_digest"],
+                process=process,
+                environment=environment,
+                ownership=ownership,
+                run_status=run["status"],
+                stop_requested=run["stop_requested"],
+            )
+        except (ServiceError, TypeError, ValueError, KeyError, AttributeError):
+            return None
+
     @asynccontextmanager
     async def guard(
         self,
@@ -410,4 +521,8 @@ class SQLiteAccessRepository:
                     tuple(secrets),
                     network if isinstance(network, NetworkGrant) else None,
                     git if isinstance(git, GitGrant) else None,
+                    command=(
+                        await self._command_state(conn, intent)
+                        if intent.action == "shell.execute" and ref.secret_refs else None
+                    ),
                 )

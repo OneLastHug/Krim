@@ -1,5 +1,7 @@
 """不可变上下文来源；完整历史与工作输入分别保存。"""
 
+from __future__ import annotations
+
 from typing import Literal
 
 from pydantic import Field, JsonValue
@@ -73,3 +75,48 @@ class PreparedContext(StrictModel):
     input_bytes: int = Field(ge=0, le=1048576)
     estimated_tokens: int = Field(ge=0)
     counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"
+
+
+class DevelopmentContextFrozen(StrictModel):
+    """V3 development history anchor; prior messages stay behind its source refs."""
+
+    schema_version: Literal[3] = 3
+    owner_id: str
+    workspace_id: str
+    project_id: str
+    session_id: str
+    turn_id: str
+    run_id: str
+    authorization_generation: int = Field(ge=1)
+    sources: tuple[HistorySource, ...] = Field(max_length=1024)
+    current: Message
+    system_prompt: str
+    extensions: dict[str, JsonValue] = Field(default_factory=dict)
+    policy: ContextPolicy
+    compaction: CompactionPolicy
+    tool_fingerprint: str
+    projection_version: str
+    source_fingerprint: str
+
+
+class DevelopmentContextState(StrictModel):
+    """Frozen V3 anchor and bounded prepared model input."""
+
+    schema_version: Literal[3] = 3
+    frozen: DevelopmentContextFrozen
+    prepared: PreparedContext | None = None
+    prepared_hash: str | None = None
+
+
+class DevelopmentSessionContext(StrictModel):
+    """Runtime view of a target-development V3 context, never a WorkFrame."""
+
+    schema_version: Literal[3] = 3
+    owner_id: str
+    workspace_id: str
+    project_id: str
+    session_id: str
+    turn_id: str
+    authorization_generation: int = Field(ge=1)
+    frozen: DevelopmentContextFrozen
+    prepared: PreparedContext | None = None
