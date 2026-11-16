@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import replace
-from typing import Any
+from typing import Any, Protocol
 
 from krim_agent.contracts import ServiceError
 from krim_agent.development.contracts import (
@@ -30,6 +30,14 @@ Authorize = Callable[[CommandRequest, str], Awaitable[None]]
 TERMINAL = {"exited", "cancelled", "failed"}
 
 
+class SecretLifecycle(Protocol):
+    """Host-only hook; no secret values in shared/persistent contracts."""
+
+    async def launched(self, record: ProcessRecord, execution: RuntimeExecution) -> None: ...
+    async def finished(self, record: ProcessRecord) -> None: ...
+    def tracks(self, record: ProcessRecord) -> bool: ...
+
+
 class TerminalBackend:
     """Authorization is injected by I; matching DTOs are never authorization.
 
@@ -41,11 +49,13 @@ class TerminalBackend:
     def __init__(
         self, repository: ProcessRepository, executions: ExecutionBackend,
         worker: WorkerClient, *, authorize: Authorize,
+        secrets: SecretLifecycle | None = None,
     ) -> None:
         self.repository = repository
         self.executions = executions
         self.worker = worker
         self.authorize = authorize
+        self.secrets = secrets
         self._launch_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -142,6 +152,21 @@ class TerminalBackend:
         if record.execution_id is None:
             return await self._save_state(record, "unknown", None)
         execution = self._execution(record)
+        if record.request.authorization.secret_refs and (
+            self.secrets is None or not self.secrets.tracks(record)
+        ):
+            # An old reservation cannot reconstruct the delivered revisions.
+            # Recovery therefore stops the exact unit instead of retaining an
+            # unmonitored Secret process or calling launch/delivery again.
+            status = await self.executions.cancel(execution)
+            self._check_runtime(status, execution)
+            if status.state != "exited":
+                return await self._save_state(record, "unknown", None)
+            await self._close_attachment(record)
+            record = await self._save_state(record, "cancelled", status.exit_code)
+            if self.secrets is not None:
+                await self.secrets.finished(record)
+            return record
         status = await self.executions.inspect(execution)
         self._check_runtime(status, execution)
         if status.state == "exited":
@@ -155,6 +180,10 @@ class TerminalBackend:
         return await self._save_state(record, "unknown", None)
 
     async def submit(self, request: CommandRequest) -> ProcessHandle:
+        if request.authorization.secret_refs and (
+            self.secrets is None or request.timeout_seconds is None
+        ):
+            raise ServiceError("permission_denied", 403)
         await self.authorize(request, "submit")
         record: ProcessRecord = await self._settled(self._admit_and_attach(request))
         if request.wait_seconds and record.handle.state not in TERMINAL:
@@ -200,6 +229,10 @@ class TerminalBackend:
                         local = await self.worker.attach(request, record.handle, target)
                         if local.get("state") not in {"running", "exited"}:
                             raise WorkerError("attachment_launch_unknown")
+                        if request.authorization.secret_refs:
+                            if self.secrets is None:
+                                raise ServiceError("permission_denied", 403)
+                            await self.secrets.launched(record, target)
                         # The worker durably owns the spawned CLI before the
                         # project fence is released. B.inspect takes that same
                         # fence, so runtime confirmation must happen outside.
@@ -244,6 +277,8 @@ class TerminalBackend:
                     record = await self._save_state(
                         record, "failed" if stopped else "unknown", exit_code,
                     )
+                    if stopped and self.secrets is not None:
+                        await self.secrets.finished(record)
                     if isinstance(error, ValueError) or (
                         isinstance(error, ServiceError) and error.code not in {
                             "revision_conflict", "input_revision_conflict",
@@ -271,6 +306,8 @@ class TerminalBackend:
         # Terminal status is durable before removing the runtime resource.
         # B.release must be idempotent; the host log is retained independently.
         await self.executions.release(self._execution(record))
+        if self.secrets is not None:
+            await self.secrets.finished(record)
 
     async def read_output(self, process: ProcessHandle, cursor: int) -> OutputPage:
         if cursor < 0:
@@ -321,7 +358,10 @@ class TerminalBackend:
             if status.state != "exited":
                 return (await self._save_state(record, "unknown", None)).handle
             await self._close_attachment(record)
-            return (await self._save_state(record, "cancelled", status.exit_code)).handle
+            record = await self._save_state(record, "cancelled", status.exit_code)
+            if self.secrets is not None:
+                await self.secrets.finished(record)
+            return record.handle
 
     async def cancel(self, process: ProcessHandle) -> ProcessHandle:
         result: ProcessHandle = await self._settled(self._cancel(process))

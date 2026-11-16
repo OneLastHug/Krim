@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any, cast
@@ -21,7 +22,14 @@ from ai.types.tools import ToolApproval
 from ai.types.tools import ToolSpec as SDKToolSpec
 from pydantic import JsonValue
 
-from krim_agent.contracts import TERMINAL, ToolObservation, encoded, fingerprint, parse_json
+from krim_agent.contracts import (
+    TERMINAL,
+    ServiceError,
+    ToolObservation,
+    encoded,
+    fingerprint,
+    parse_json,
+)
 from krim_agent.development.contracts import (
     EnvironmentHandle,
     OperationIdentity,
@@ -33,7 +41,8 @@ from krim_agent.runtime.contracts import RunStore
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Admission, ToolContext, ToolExecutor
 
-from .host import CURRENT_OPERATION, HostExecution
+from .host import CURRENT_OPERATION, HostExecution, sdk_lifetime
+from .media import DEFAULT_MEDIA_LIMITS, MediaLimits, authorize_history
 from .response import CompleteResponseProvider
 
 
@@ -54,7 +63,7 @@ class _Entry:
     admission: Admission
     identity: OperationIdentity | None
     gate: asyncio.Event
-    predecessor: asyncio.Event | None = None
+    predecessors: tuple[asyncio.Event, ...] = ()
 
 
 class _OrderedAgent(ai.Agent):
@@ -72,11 +81,11 @@ class _OrderedAgent(ai.Agent):
         entry = owner.entries[part.tool_call_id]
 
         async def ordered() -> events.ToolCallResult:
-            if entry.predecessor is not None:
-                await entry.predecessor.wait()
+            for predecessor in entry.predecessors:
+                await predecessor.wait()
             try:
                 await owner.check_stop()
-                if owner.deferred:
+                if owner.deferred and not owner.batch_approvals:
                     # Do not start a later call while an earlier one is parked.
                     # It remains in the checkpoint's assistant turn for replay.
                     return deferred_tool_result(
@@ -120,11 +129,11 @@ class _OrderedAgent(ai.Agent):
 
 
 class SDKAdapter:
-    """Explicit probe instance for one host run; no application registration.
+    """One host run bridged to the pinned SDK's native loop and ToolRunner.
 
-    ``read_result`` reads a durable result_ref; it never re-executes an operation.
+    Development writes use the existing OperationStore. Other targets use the
+    host's durable intent/result events. Neither path re-executes uncertain work.
     Approval replies supplied to run() must already be authorized by the host.
-    The probe uses serial execution for all tools, retaining write isolation.
     """
 
     CHECKPOINT = "sdk-probe-v1"
@@ -133,22 +142,43 @@ class SDKAdapter:
         self,
         *,
         store: RunStore,
-        operations: OperationStore,
+        operations: OperationStore | None = None,
         executor: ToolExecutor,
         tools: Sequence[ai.AgentTool],
-        environment: EnvironmentHandle,
-        ownership: RunOwnership,
+        environment: EnvironmentHandle | None = None,
+        ownership: RunOwnership | None = None,
+        run_id: str | None = None,
+        read_parallelism: int = 1,
+        batch_approvals: bool = False,
+        fail_on_tool_error: bool = False,
         read_result: Callable[[str], Awaitable[JsonValue]],
         approval_request: Callable[[Invocation, float | None], Awaitable[dict[str, JsonValue]]],
         host: HostExecution | None = None,
+        authorize_media: Callable[[messages.FilePart], Awaitable[None]] | None = None,
+        media_limits: MediaLimits = DEFAULT_MEDIA_LIMITS,
     ) -> None:
-        if environment.owner_id != ownership.owner_id:
-            raise ValueError("environment ownership mismatch")
+        if operations is not None:
+            if (environment is None or ownership is None
+                    or environment.owner_id != ownership.owner_id):
+                raise ValueError("environment ownership mismatch")
+            if run_id is not None and run_id != ownership.run_id:
+                raise ValueError("run ownership mismatch")
+            run_id = ownership.run_id
+        elif environment is not None or ownership is not None or host is None:
+            raise ValueError("generic SDK runs require a host and no development identity")
+        if not run_id or read_parallelism < 1:
+            raise ValueError("missing run or invalid read parallelism")
+        self._run_id = run_id
+        self.read_parallelism = read_parallelism
+        self.batch_approvals = batch_approvals
+        self.fail_on_tool_error = fail_on_tool_error
+        self.batch_expires: float | None = None
         self.store, self.operations, self.executor = store, operations, executor
         self.environment, self.ownership = environment, ownership
         self.read_result = read_result
         self.approval_request = approval_request
         self.host = host
+        self.authorize_media, self.media_limits = authorize_media, media_limits
         self.entries: dict[str, _Entry] = {}
         self.deferred: messages.HookPart[Any] | None = None
         self.step = 0
@@ -187,7 +217,7 @@ class SDKAdapter:
 
     @property
     def run_id(self) -> str:
-        return self.ownership.run_id
+        return self._run_id
 
     async def check_stop(self) -> None:
         if self.host is not None:
@@ -217,15 +247,46 @@ class SDKAdapter:
             return replace(self.host.context, emit=emit, approve=unexpected_approval)
         return ToolContext(emit=emit, approve=unexpected_approval, timeout=5.0)
 
+    def order(self, entries: Sequence[_Entry]) -> None:
+        """Fence native SDK tasks in bounded adjacent read groups.
+
+        SDK ToolRunner still creates, joins and cancels every task. These gates
+        express host ordering only; they do not execute or schedule a tool.
+        """
+        plan = list(entries)
+        if self.batch_approvals:
+            # Legacy host batches execute all allowed calls before opening the
+            # common approval window. A first ask must not consume that window
+            # while later allowed work is still running.
+            plan = [entry for entry in entries if entry.admission.decision != "ask"]
+            plan += [entry for entry in entries if entry.admission.decision == "ask"]
+        previous: tuple[asyncio.Event, ...] = ()
+        index = 0
+        while index < len(plan):
+            group = [plan[index]]
+            while (len(group) < self.read_parallelism
+                   and index + len(group) < len(plan)
+                   and group[-1].admission.spec.risk == "read"
+                   and plan[index + len(group)].admission.spec.risk == "read"
+                   and group[-1].admission.decision == "allow"
+                   and plan[index + len(group)].admission.decision == "allow"):
+                group.append(plan[index + len(group)])
+            for entry in group:
+                entry.predecessors = previous
+            previous = tuple(entry.gate for entry in group)
+            index += len(group)
+
     async def prepare(self, calls: Sequence[messages.ToolCallPart]) -> None:
         await self.check_stop()
         self.step = self.host.model_step() if self.host is not None else self.step + 1
         prepared: dict[str, _Entry] = {}
-        predecessor: asyncio.Event | None = None
+        self.batch_expires = None
         for call in calls:
             if call.tool_call_id in self.entries:
                 raise ValueError("provider reused a call id")
             if call.tool_name not in self.tool_names:
+                if self.operations is None:
+                    raise ServiceError("unknown_tool")
                 raise ValueError("tool is not exposed to this agent")
             # Resolve every name and strict argument set before releasing even
             # the first ToolEnd to Agent's eager dispatcher.
@@ -248,7 +309,8 @@ class SDKAdapter:
                 invocation, context, timeout_seconds=context.timeout,
             )
             identity = None
-            if spec.risk != "read":
+            if spec.risk != "read" and self.operations is not None:
+                assert self.environment is not None and self.ownership is not None
                 identity = OperationIdentity(
                     operation_id=f"op-{uuid4().hex}",
                     call_id=invocation.call_id,
@@ -263,10 +325,9 @@ class SDKAdapter:
                 replace(admission, start_emitted=True),
                 identity,
                 asyncio.Event(),
-                predecessor,
             )
             prepared[call.tool_call_id] = entry
-            predecessor = entry.gate
+        self.order(list(prepared.values()))
         # Only after every admission succeeds do tool_start events become visible.
         for entry in prepared.values():
             await self.store.append(
@@ -290,6 +351,7 @@ class SDKAdapter:
         await self.check_stop()
         identity = entry.identity
         if identity is not None and entry.admission.decision != "deny":
+            assert self.operations is not None
             receipt = await self.operations.lookup(identity)
             if receipt is None:
                 await self.check_stop()
@@ -312,6 +374,41 @@ class SDKAdapter:
                     "code": "operation_not_replayed",
                 }
             await self.check_stop()
+        if self.operations is None:
+            # The existing event ledger is the operation fence for non-development
+            # targets. An intent or any terminal observation forbids dispatch on
+            # resume, including an executor that crashed before recording output.
+            snapshot = await self.store.snapshot(self.run_id)
+            prior = [event for event in snapshot.events
+                     if event.data.get("call_id") == entry.invocation.call_id
+                     and event.kind in {"tool_intent", "tool_end"}]
+            if prior:
+                last = prior[-1]
+                if last.kind == "tool_end":
+                    observed = ToolObservation.model_validate(last.data)
+                    if (observed.name != entry.invocation.name
+                            or observed.provider_call_id != entry.invocation.provider_call_id
+                            or observed.step_index != entry.invocation.step_index):
+                        raise ServiceError("facts_corrupt")
+                    if observed.status == "ok" and observed.result_available is True:
+                        return observed.model_dump(mode="json")
+                raise ServiceError("facts_corrupt")
+        if self.operations is None and entry.admission.decision == "deny":
+            # A denied legacy batch item never entered execute/wrap. Preserve
+            # that boundary, including an explicit rejected approval observation.
+            invocation = entry.invocation
+            observation = ToolObservation(
+                call_id=invocation.call_id, provider_call_id=invocation.provider_call_id,
+                span_id=invocation.span_id, step_index=invocation.step_index,
+                name=invocation.name,
+                arguments=cast(dict[str, JsonValue], parse_json(invocation.arguments_json)),
+                status="denied", executor_started=False, result_available=False,
+                decision="ask" if entry.admission.code == "approval_denied" else "deny",
+                code=entry.admission.code or "permission_denied",
+            )
+            await self.context().emit("tool_end", observation.model_dump(mode="json"))
+            await self.check_stop()
+            return observation.model_dump(mode="json")
         token = CURRENT_OPERATION.set(identity)
         try:
             observation = await self.executor.execute(
@@ -323,6 +420,7 @@ class SDKAdapter:
         # only its reference. A crash before this receipt leaves accepted/unknown,
         # which lookup will not dispatch again.
         if identity is not None and entry.admission.decision != "deny":
+            assert self.operations is not None
             await self.operations.save_receipt(
                 OperationReceipt(
                     identity=identity,
@@ -332,7 +430,16 @@ class SDKAdapter:
                 )
             )
         await self.check_stop()
+        if (self.fail_on_tool_error and observation.status != "ok"
+                and entry.admission.decision != "deny"):
+            raise ServiceError(observation.code or "tool_error")
         return observation.model_dump(mode="json")
+
+    async def prepare_input(self, history: Sequence[messages.Message]) -> list[messages.Message]:
+        await self.check_stop()
+        prepared = await authorize_history(history, self.authorize_media, self.media_limits)
+        await self.check_stop()
+        return prepared
 
     async def commit_response(
         self,
@@ -349,11 +456,12 @@ class SDKAdapter:
 
     def checkpoint(self, history: Sequence[messages.Message]) -> dict[str, Any]:
         return {
-            "format": self.CHECKPOINT,
+            "format": self.CHECKPOINT if self.operations is not None else "sdk-host-v2",
+            "run_id": self.run_id,
             "response_complete": True,
             "tool_fingerprint": self.tool_fingerprint,
-            "environment": self.environment.model_dump(mode="json"),
-            "ownership": self.ownership.model_dump(mode="json"),
+            "environment": self.environment.model_dump(mode="json") if self.environment else None,
+            "ownership": self.ownership.model_dump(mode="json") if self.ownership else None,
             "step": self.step,
             "budget_remaining": self.host.budget.remaining if self.host is not None else None,
             "host_state": self.host.checkpoint_state() if self.host is not None else None,
@@ -373,14 +481,21 @@ class SDKAdapter:
         self, checkpoint: dict[str, Any], stored_fingerprint: str
     ) -> list[messages.Message]:
         if (
-            checkpoint.get("format") != self.CHECKPOINT
+            checkpoint.get("format") != (
+                self.CHECKPOINT if self.operations is not None else "sdk-host-v2"
+            )
+            or checkpoint.get("run_id", self.run_id) != self.run_id
             or checkpoint.get("response_complete") is not True
             or checkpoint.get("tool_fingerprint", self.tool_fingerprint) != self.tool_fingerprint
             or stored_fingerprint != (
                 fingerprint(checkpoint) if self.host is not None else self.tool_fingerprint
             )
-            or checkpoint.get("environment") != self.environment.model_dump(mode="json")
-            or checkpoint.get("ownership") != self.ownership.model_dump(mode="json")
+            or checkpoint.get("environment") != (
+                self.environment.model_dump(mode="json") if self.environment else None
+            )
+            or checkpoint.get("ownership") != (
+                self.ownership.model_dump(mode="json") if self.ownership else None
+            )
         ):
             raise ValueError("checkpoint binding changed")
         self.step = checkpoint["step"]
@@ -390,7 +505,6 @@ class SDKAdapter:
                 raise ValueError("checkpoint lost host counters")
             self.host.restore_state(state)
         self.entries.clear()
-        predecessor: asyncio.Event | None = None
         for call_id, item in checkpoint["entries"].items():
             invocation = Invocation(**item["invocation"])
             spec = self.executor.registry.get(invocation.name)
@@ -402,7 +516,7 @@ class SDKAdapter:
             identity = (
                 OperationIdentity.model_validate(item["identity"]) if item["identity"] else None
             )
-            if (spec.risk != "read") != (identity is not None):
+            if (spec.risk != "read" and self.operations is not None) != (identity is not None):
                 raise ValueError("checkpoint lost operation identity")
             if identity is not None and (
                 identity.environment != self.environment
@@ -420,9 +534,8 @@ class SDKAdapter:
                 raise ValueError("checkpoint operation binding changed")
             admission = Admission(spec, parsed, item["decision"], item["code"], start_emitted=True)
             self.entries[call_id] = _Entry(
-                invocation, admission, identity, asyncio.Event(), predecessor
+                invocation, admission, identity, asyncio.Event()
             )
-            predecessor = self.entries[call_id].gate
         history = [messages.Message.model_validate(item) for item in checkpoint["messages"]]
         # Only the final incomplete assistant batch will be replayed by the SDK.
         pending: set[str] = set()
@@ -438,12 +551,9 @@ class SDKAdapter:
                 ):
                     raise ValueError("checkpoint message binding changed")
                 pending.add(part.tool_call_id)
-        previous: asyncio.Event | None = None
+        self.order([entry for call_id, entry in self.entries.items() if call_id in pending])
         for call_id, entry in self.entries.items():
-            if call_id in pending:
-                entry.predecessor = previous
-                previous = entry.gate
-            else:
+            if call_id not in pending:
                 entry.gate.set()
         return history
 
@@ -461,6 +571,13 @@ class SDKAdapter:
         await self.check_stop()
         remaining = self.host.budget.remaining if self.host is not None else None
         data = await self.approval_request(invocation, remaining)
+        expires_at = data.get("expires_at") if isinstance(data, dict) else None
+        if self.batch_approvals and isinstance(expires_at, (float, int)):
+            if self.batch_expires is None:
+                self.batch_expires = min(
+                    expires_at, time.time() + self.context().approval_timeout
+                )
+            data["expires_at"] = min(expires_at, self.batch_expires)
         expected = {
             "run_id": invocation.run_id,
             "call_id": invocation.call_id,
@@ -521,6 +638,9 @@ class SDKAdapter:
                 raise ProbeStopped("host has not claimed the run")
         if history is None:
             raise ValueError("missing history")
+        # SDK replay bypasses the provider; authorize before entering Agent.run
+        # as well as at each real model request. No checkpoint implies permission.
+        history = await self.prepare_input(history)
         self.deferred = None
         registry = HookRegistry()
         for call_id, granted in (replies or {}).items():
@@ -532,10 +652,11 @@ class SDKAdapter:
                 self.prepare,
                 commit=self.commit_response,
                 guard=self.check_stop,
+                prepare_input=self.prepare_input,
             ),
         )
         collected: list[events.AgentEvent] = []
-        async with self.agent.run(model, history, hook_registry=registry) as stream:
+        async with sdk_lifetime(), self.agent.run(model, history, hook_registry=registry) as stream:
             async for event in stream:
                 collected.append(event)
                 if isinstance(event, events.HookEvent) and event.hook.status == "pending":

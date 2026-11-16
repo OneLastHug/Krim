@@ -15,6 +15,7 @@ from krim_agent.storage.mcp_models import MCP_TABLES
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.sandbox_models import SANDBOX_TABLES
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 ACCOUNT_TABLES = [
@@ -39,6 +40,7 @@ def drop_accounts(path):
     conn = sqlite3.connect(path)
     try:
         for table in [
+            *reversed(SIDEBAR_TABLES),
             *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
             *reversed(SESSION_LIFECYCLE_TABLES),
             *reversed(MCP_TABLES),

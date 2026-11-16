@@ -323,9 +323,11 @@ def create_app(
 
     from .extensions import mount_extensions
     from .session_lifecycle import mount_session_lifecycle
+    from .session_sidebar import mount_session_sidebar
 
     mount_extensions(app)
     mount_session_lifecycle(app)
+    mount_session_sidebar(app)
 
     from .account_mcp import mount_account_mcp
 

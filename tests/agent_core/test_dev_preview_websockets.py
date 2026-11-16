@@ -76,7 +76,9 @@ class LibraryPeer:
         from websockets.http11 import Request
         from websockets.server import ServerProtocol
 
-        protocol = ServerProtocol(subprotocols=["vite-hmr"])
+        protocol = ServerProtocol(
+            subprotocols=None if self.mode == "no-subprotocol" else ["vite-hmr"],
+        )
         loop = asyncio.get_running_loop()
         while True:
             data = await loop.sock_recv(peer, 65536)
@@ -136,6 +138,21 @@ async def test_real_ws_socketpair_text_binary_and_close(real_ws, monkeypatch):
     assert routes.headers["Host"] == "public.invalid"
     assert routes.headers["Origin"] == "https://public.invalid"
     assert routes.path == "/hmr?v=1" and routes.closed and routes.connected == 1
+
+
+async def test_real_ws_without_subprotocol_omits_header(real_ws, monkeypatch):
+    forbid_network(monkeypatch)
+    routes = LibraryPeer("no-subprotocol")
+    async with asyncio.timeout(5):
+        async with WebsocketsConnector(routes).connect(
+            routes.lease, b"/ws", origin="https://public.invalid",
+            headers=[], subprotocols=[],
+        ) as channel:
+            assert channel.subprotocol is None
+            await channel.send("plain-websocket")
+            assert await anext(channel.messages()) == "plain-websocket"
+    assert "Sec-WebSocket-Protocol" not in routes.headers
+    assert routes.closed and routes.connected == 1
 
 
 async def test_real_ws_redirect_refused_without_second_connection(real_ws, monkeypatch):

@@ -15,8 +15,11 @@ from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.config import Settings
 from krim_agent.context import builder
 from krim_agent.context.types import (
+    CompactionPolicy,
     ContextPolicy,
     ContextSnapshot,
+    DevelopmentContextState,
+    DevelopmentSessionContext,
     HistorySource,
     SessionContext,
     WorkspaceSessionContext,
@@ -37,9 +40,10 @@ from krim_agent.sessions.types import ControlView, SessionCreate, SessionView, T
 from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 
 from . import work as work_sql
+from .account_models import accounts
 from .mcp_models import turn_mcp
 from .models import runs, session_controls, sessions, turns, work_turns
-from .sandbox_models import sandbox_turn_contracts
+from .sandbox_models import sandbox_projects, sandbox_session_bindings, sandbox_turn_contracts
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
@@ -62,7 +66,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -662,10 +666,12 @@ async def begin_run(
             raise ServiceError("capacity", 429)
         if fingerprint(session["target"]) != fingerprint(target):
             raise ServiceError("target_binding_changed")
+        paged_development = (session["target_key"] == "target-development"
+                             and settings.development_history_compaction)
         previous = (
             (
                 await conn.execute(
-                    select(turns)
+                    (select(turns.c.status) if paged_development else select(turns))
                     .where(turns.c.session_id == session["id"], turns.c.ordinal < turn["ordinal"])
                     .order_by(turns.c.ordinal)
                 )
@@ -710,6 +716,137 @@ async def begin_run(
                 update(turns)
                 .where(turns.c.id == turn_id)
                 .values(run_id=run.id, status="running", started_at=time.time())
+            )
+            return run, True
+        if paged_development:
+            from .development_context import (
+                MAX_FROZEN_BYTES,
+                _source_rows,
+                make_frozen,
+            )
+
+            binding = (
+                (
+                    await conn.execute(
+                        select(sandbox_session_bindings).where(
+                            sandbox_session_bindings.c.session_id == session["id"]
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if binding is None or binding["project_id"] is None:
+                raise ServiceError("workspace_contract_required")
+            if binding["principal_id"] != session["owner_id"]:
+                raise ServiceError("facts_corrupt")
+            project = (
+                (
+                    await conn.execute(
+                        select(sandbox_projects).where(
+                            sandbox_projects.c.project_id == binding["project_id"]
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            account = (
+                (
+                    await conn.execute(
+                        select(accounts.c.status, accounts.c.authorization_generation).where(
+                            accounts.c.principal_id == session["owner_id"]
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if (
+                project is None
+                or project["principal_id"] != session["owner_id"]
+                or project["workspace_id"] != session["workspace_id"]
+                or account is None
+                or account["status"] != "active"
+            ):
+                raise ServiceError("permission_denied")
+            refs = await _source_rows(conn, session["id"], turn_id)
+            if len(refs) > 1024:
+                raise ServiceError("context_budget", 422)
+            frozen_sources = tuple(
+                HistorySource(
+                    turn_id=cast(str, ref["turn_id"]),
+                    run_id=cast(str | None, ref["run_id"]),
+                    last_seq=cast(int, ref["terminal_seq"]),
+                    fingerprint=cast(str, ref["transcript_fingerprint"]),
+                )
+                for ref in refs
+            )
+            policy = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+            ext = (
+                await load_turn_extensions(conn, turn["id"])
+                if store.schema_version >= 11
+                else {"version": "extensions/2", "revision": 0, "items": []}
+            )
+            extension_snapshot = cast(dict[str, JsonValue], ext)
+            tools = cast(list[dict[str, JsonValue]], target["tools"])
+            builder.check_budget(
+                [
+                    Message(role="system", content=settings.system_prompt),
+                    *extension_messages(extension_snapshot),
+                    Message(role="user", content=turn["text"]),
+                ],
+                tools,
+                policy,
+                settings.max_request_bytes,
+            )
+            development_frozen = make_frozen(
+                owner_id=session["owner_id"],
+                workspace_id=session["workspace_id"],
+                project_id=binding["project_id"],
+                session_id=session["id"],
+                turn_id=turn["id"],
+                run_id=run_id,
+                authorization_generation=account["authorization_generation"],
+                sources=frozen_sources,
+                current=Message(role="user", content=turn["text"]),
+                system_prompt=settings.system_prompt,
+                extensions=extension_snapshot,
+                policy=policy,
+                compaction=CompactionPolicy(),
+                tool_fingerprint=fingerprint(tools),
+            )
+            raw = DevelopmentContextState(frozen=development_frozen).model_dump(mode="json")
+            if len(encoded(raw).encode()) > MAX_FROZEN_BYTES:
+                raise ServiceError("context_budget", 422)
+            raw_hash = fingerprint(raw["frozen"])
+            development_descriptor: dict[str, JsonValue] = {
+                "schema_version": 3,
+                "source_fingerprint": development_frozen.source_fingerprint,
+                "frozen_fingerprint": raw_hash,
+            }
+            account_mcp = (
+                await load_turn_mcp(conn, turn["id"])
+                if store.schema_version >= 12
+                else None
+            )
+            if account_mcp is not None and account_mcp["snapshot"]["connections"]:
+                development_descriptor["account_mcp"] = account_mcp["fingerprint"]
+            effective = target | {"context": development_descriptor}
+            digest = fingerprint(
+                {"request": request.model_dump(mode="json"), "target": effective}
+            )
+            run = await store._insert_run(conn, request, effective, run_id, digest)
+            await conn.execute(
+                update(turns)
+                .where(turns.c.id == turn_id)
+                .values(
+                    run_id=run.id,
+                    status="running",
+                    context_snapshot=raw,
+                    context_fingerprint=raw_hash,
+                    started_at=time.time(),
+                )
             )
             return run, True
         history: list[Message] = []
@@ -833,8 +970,8 @@ async def source(
     request_key: str,
     version: int,
     target: dict[str, JsonValue],
-) -> SessionContext | WorkspaceSessionContext | None:
-    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+) -> SessionContext | DevelopmentSessionContext | WorkspaceSessionContext | None:
+    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
@@ -873,6 +1010,53 @@ async def source(
                 effective_fingerprint=frame.effective_fingerprint,
                 source_fingerprint=fingerprint(list(frame.source_refs)),
             )
+        target_context = target.get("context")
+        if (
+            session["target_key"] == "target-development"
+            and isinstance(target_context, dict)
+            and target_context.get("schema_version") == 3
+        ):
+            from .development_context import DevelopmentCompactionSource, state_from_raw
+
+            if (
+                not isinstance(row["context_snapshot"], dict)
+                or fingerprint(row["context_snapshot"].get("frozen"))
+                != row["context_fingerprint"]
+                or row["workspace_id"] != session["workspace_id"]
+                or row["owner_id"] != session["owner_id"]
+                or request_key != "ac-turn." + row["id"]
+            ):
+                raise ServiceError("facts_corrupt")
+            state = state_from_raw(row["context_snapshot"], row["context_fingerprint"])
+            frozen = state.frozen
+            expected_context: dict[str, JsonValue] = {
+                "schema_version": 3,
+                "source_fingerprint": frozen.source_fingerprint,
+                "frozen_fingerprint": row["context_fingerprint"],
+            }
+            mcp = await load_turn_mcp(conn, row["id"]) if version >= 12 else None
+            if mcp is not None and mcp["snapshot"]["connections"]:
+                expected_context["account_mcp"] = mcp["fingerprint"]
+            elif "account_mcp" in target_context:
+                raise ServiceError("facts_corrupt")
+            if fingerprint(target_context) != fingerprint(expected_context):
+                raise ServiceError("facts_corrupt")
+            source_view = DevelopmentCompactionSource(frozen)
+            await source_view.verify_frozen(conn, run_id)
+            return DevelopmentSessionContext(
+                owner_id=frozen.owner_id,
+                workspace_id=frozen.workspace_id,
+                project_id=frozen.project_id,
+                session_id=frozen.session_id,
+                turn_id=frozen.turn_id,
+                authorization_generation=frozen.authorization_generation,
+                frozen=frozen,
+                prepared=state.prepared,
+            )
+        if isinstance(row["context_snapshot"], dict) and row["context_snapshot"].get(
+            "schema_version"
+        ) == 3:
+            raise ServiceError("facts_corrupt")
         if (
             row["context_snapshot"] is None
             or fingerprint(row["context_snapshot"]) != row["context_fingerprint"]
@@ -981,6 +1165,49 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
                 code=snapshot.run.code,
                 finished_at=snapshot.run.finished_at,
                 transcript=[m.model_dump(mode="json") for m in task_transcript()],
+            )
+        )
+        return
+    if isinstance(snapshot.session_context, DevelopmentSessionContext):
+        from dataclasses import replace
+
+        from .models import compactions
+
+        summary_steps = {
+            event.data.get("step_index")
+            for event in snapshot.events
+            if event.kind == "model_start" and event.data.get("purpose") == "summary"
+        }
+        transcript_events = tuple(
+            event
+            for event in snapshot.events
+            if event.kind != "summary_text"
+            and not (
+                event.kind in {"model_start", "model_end", "usage"}
+                and event.data.get("step_index") in summary_steps
+            )
+        )
+        await conn.execute(
+            update(compactions)
+            .where(compactions.c.run_id == snapshot.run.id, compactions.c.status == "reserved")
+            .values(
+                status="interrupted"
+                if snapshot.run.status in {"aborted", "interrupted"}
+                else "failed",
+                finished_at=time.time(),
+            )
+        )
+        await conn.execute(
+            update(turns)
+            .where(turns.c.id == snapshot.session_context.turn_id)
+            .values(
+                status="cancelled" if snapshot.run.status == "aborted" else snapshot.run.status,
+                code=snapshot.run.code,
+                finished_at=snapshot.run.finished_at,
+                transcript=[
+                    message.model_dump(mode="json")
+                    for message in builder.transcript(replace(snapshot, events=transcript_events))
+                ],
             )
         )
         return

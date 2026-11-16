@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { ChevronDown, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
+import { ChevronDown, CodeXml, Ellipsis, KeyRound, LogOut, Search, Settings2, SquarePen, UserRound, Users } from "lucide-react";
 import type { AccountTab } from "./AccountSettings";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
@@ -26,8 +26,10 @@ const observationEntries = [
   ["eval", "评测"], ["review", "复核"], ["status", "数据状态"],
 ] as const;
 
-export function AppSidebar({ active, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, chat, beforeSessionSelect, onClose, onNavigate, onObservabilityPage, observabilityPage = "context", onOpenSearch, onConnect, onCreate, theme, onThemeSelect, readingSize, onReadingSizeSelect, footerExtra, className = "" }: {
+export function AppSidebar({ active, apiKey = "", onCreateInGroup, identity, identityLoading, identityError, accountName = "", gatewayName = "", accountAdmin = false, onAccountTab, onLogout, chat, beforeSessionSelect, onClose, onNavigate, onObservabilityPage, observabilityPage = "context", onOpenSearch, onConnect, onCreate, theme, onThemeSelect, readingSize, onReadingSizeSelect, footerExtra, className = "" }: {
   active: WorkbenchView;
+  apiKey?: string;
+  onCreateInGroup?: (groupId: string) => void;
   identity: Actor | null;
   identityLoading: boolean;
   identityError: string;
@@ -49,7 +51,7 @@ export function AppSidebar({ active, identity, identityLoading, identityError, a
   footerExtra?: ReactNode;
   className?: string;
 }) {
-  const [accountOpen, setAccountOpen] = useState(false), [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false), [settingsOpen, setSettingsOpen] = useState(false), [navigationOpen, setNavigationOpen] = useState(false), [future, setFuture] = useState("");
   const accountRef = useRef<HTMLButtonElement>(null), settingsRef = useRef<HTMLButtonElement>(null);
   const chatMode = active === "chat";
   const identityLabel = identity ? accountName || "账号" : identityLoading ? "正在读取账号" : identityError ? "登录失效" : "未登录";
@@ -57,15 +59,22 @@ export function AppSidebar({ active, identity, identityLoading, identityError, a
   const canCreate = chatMode && !!chat?.ready && chat.canWrite;
 
   return <aside className={`app-sidebar ${className}`} aria-label="Krim Agent 工作区侧栏">
-    <div className="sidebar-buttons" role="toolbar" aria-label="工作台操作">
+    {chatMode ? <div className="sidebar-code-navigation sidebar-buttons">
+      <div className="sidebar-mode-tabs" aria-label="工作模式"><button type="button" onClick={() => setFuture("敬请期待")}>Krim Agent</button><button type="button" aria-current="page" aria-label="导航到对话" onClick={() => onNavigate("chat")}><CodeXml aria-hidden="true"/>Code</button></div>
+      <Button variant="ghost" className="sidebar-code-action" aria-label="新建对话" disabled={!canCreate} onClick={() => { onCreate(); onClose?.(); }}><SquarePen aria-hidden="true"/>新会话</Button>
+      <Button variant="ghost" className="sidebar-code-action" aria-label="查找对话" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true"/>搜索会话</Button>
+      <Button variant="ghost" className="sidebar-code-action" onClick={() => setFuture("敬请期待")}><Settings2 aria-hidden="true"/>自定义</Button>
+      <Button variant="ghost" className="sidebar-code-action" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(open => !open)}><Ellipsis aria-hidden="true"/>更多</Button>
+      {future && <p className="session-sidebar-notice" role="status">{future}</p>}
+      {navigationOpen && <nav className="sidebar-more-navigation" aria-label="工作台分区">{workbenchNavigationEntries.filter(entry => entry.id !== "chat").map(({ id, label, icon: Icon }) => <Button key={id} variant="ghost" className="sidebar-code-action" aria-label={`导航到${label}`} onClick={() => { onNavigate(id); onClose?.(); }}><Icon aria-hidden="true"/>{label}</Button>)}</nav>}
+    </div> : <div className="sidebar-buttons" role="toolbar" aria-label="工作台操作">
       <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => { onCreate(); onClose?.(); }}><SquarePen aria-hidden="true" /></Button>
       <span className="sidebar-buttons-divider" aria-hidden="true"></span>
       {workbenchNavigationEntries.map(({ id, label, icon: Icon }) => <Button key={id} variant="ghost" className="icon-button" aria-label={`导航到${label}`} aria-current={active === id ? "page" : undefined} title={label} onClick={() => { onNavigate(id); onClose?.(); }}><Icon aria-hidden="true" /></Button>)}
       <span className="spacer" aria-hidden="true"></span>
       <Button variant="ghost" className="icon-button" aria-label="查找对话" title="查找对话 Ctrl K" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true" /></Button>
-    </div>
-    {chatMode && chat && <div className="sidebar-group-label">{workspaceNames[chat.workspace] ?? "个人工作区"}</div>}
-    {chatMode && chat && <SessionList chat={chat} beforeSelect={(workspace, sessionId) => { beforeSessionSelect?.(workspace, sessionId); onClose?.(); }} />}
+    </div>}
+    {chatMode && chat && <SessionList chat={chat} apiKey={apiKey} onCreateInGroup={onCreateInGroup} beforeSelect={(workspace, sessionId) => { beforeSessionSelect?.(workspace, sessionId); onClose?.(); }} />}
     {active === "trace" ? <nav className="sidebar-current-section sidebar-observability-nav" aria-label="观测分析">
       <span className="workspace-label">观测分析</span>
       {observationEntries.map(([id, label]) => <button key={id} type="button" className="sidebar-observe-link" aria-current={observabilityPage === id ? "page" : undefined} onClick={() => { onObservabilityPage?.(id); onClose?.(); }}>{label}</button>)}

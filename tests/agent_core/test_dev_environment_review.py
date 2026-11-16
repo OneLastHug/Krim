@@ -135,8 +135,8 @@ async def test_recreate_preflight_failure_preserves_old_container(
     bindings = MemoryBindings(current)
     runner = RecreatePreflightRunner()
     runner.add_container(previous, container_id=old_id)
-    runner.register_record(current)
     if failure == "image":
+        runner.register_record(current)
         runner.fail_image = True
     else:
         runner.network_drift = True
@@ -153,7 +153,7 @@ async def test_recreate_preflight_failure_preserves_old_container(
 
     expected_error = {
         "image": "docker_image_failed",
-        "network": "network_binding_drift",
+        "network": "uncontrolled_network_forbidden",
     }[failure]
     assert raised.value.code == expected_error
     assert old_id in runner.containers

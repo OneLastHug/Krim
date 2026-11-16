@@ -217,6 +217,39 @@ def test_registry_rejects_write_and_duplicate_names():
         )
 
 
+async def test_binding_check_builds_each_schema_once_and_still_rejects_mutation(
+    tmp_path, monkeypatch,
+):
+    from krim_agent.tools.core import ToolSpec
+
+    calls = []
+
+    async def execute(args):
+        calls.append(args)
+        return "actual"
+
+    async with await open_application(
+        tmp_path / "schema-check.db", registry=registry_for(execute),
+    ) as app:
+        binding = app.service.bindings["demo"]
+        registry = binding.loop.executor.registry
+        original = ToolSpec.descriptor
+        built = []
+
+        def observed(spec):
+            built.append(spec.name)
+            return original(spec)
+
+        monkeypatch.setattr(ToolSpec, "descriptor", observed)
+        binding.assert_current()
+        assert built == [spec.name for spec, _ in registry._frozen]
+        spec = registry._frozen[0][0]
+        object.__setattr__(spec, "description", spec.description + " changed")
+        with pytest.raises(ServiceError, match="tool_binding_changed"):
+            binding.assert_current()
+        assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_frozen_definition_change_during_intent_wait_refuses_executor(tmp_path):
     calls = []

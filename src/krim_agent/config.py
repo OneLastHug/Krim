@@ -51,6 +51,7 @@ class Settings(BaseModel):
     context_max_messages: int = Field(default=256, ge=2, le=1024)
     context_reserved_output_tokens: int | None = Field(default=None, ge=1, le=32768)
     context_counter: Literal["approx-utf8/1"] = "approx-utf8/1"
+    development_history_compaction: bool = False
 
     @field_validator("gateway_display_name")
     @classmethod
@@ -103,5 +104,6 @@ SESSION_FIELDS = frozenset(
         "context_max_messages",
         "context_reserved_output_tokens",
         "context_counter",
+        "development_history_compaction",
     }
 )

@@ -42,7 +42,8 @@ const themes: { id: DisplayTheme; label: string }[] = [
 ];
 const readingSizes = [12, 14, 16] as const;
 
-export function WorkbenchLayout({ view, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children, onObservabilityPage, observabilityPage }: {
+export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children, onObservabilityPage, observabilityPage }: {
+  apiKey?: string;
   view: WorkbenchView; identity: Actor | null; identityLoading: boolean; identityError: string;
   accountName?: string; gatewayName?: string; workspaceNames?: Record<string, string>; accountAdmin?: boolean;
   onAccountTab?: (tab: AccountTab) => void; onLogout?: () => void;
@@ -62,7 +63,8 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   const moreRef = useRef<HTMLButtonElement>(null);
   const previousIdentity = useRef("");
   const currentTitle = view === "chat" ? chatTitle || workbenchTitles[view] : workbenchTitles[view];
-  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout, onObservabilityPage, observabilityPage };
+  const [createGroup, setCreateGroup] = useState<string | undefined>();
+  const sidebarProps = { active: view, apiKey, onCreateInGroup: openCreate, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout, onObservabilityPage, observabilityPage };
   const chatSession = view === "chat" ? chat : null;
   const canCreate = !!chatSession?.ready && chatSession.canWrite;
   const workspaceConfigured = chat?.actor?.target_keys?.includes("target-workspace") === true;
@@ -70,6 +72,12 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   const canCloseSession = canRefresh && chatSession.session?.status === "open" && chatSession.canWrite && !chatSession.controlling;
   const paused = chatSession?.session?.dispatch_paused === true;
   const results = chat?.ready ? chat.list.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())) : [];
+  function openCreate(groupId?: string) {
+    setCreateGroup(groupId);
+    const targets = chat?.actor?.target_keys ?? ["demo"];
+    setCreateTarget(chat?.session && targets.includes(chat.session.target_key) ? chat.session.target_key : targets.includes("target-development") ? "target-development" : targets.includes("target-http") && httpEnabled ? "target-http" : "demo");
+    setCreateOpen(true);
+  }
   function openSearch() {
     if (!identity) return;
     if (view !== "chat") onNavigate("chat");
@@ -99,7 +107,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
     {!mobile && <div className="desktop-sidebar" inert={collapsed}>
       <AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
         theme={theme} onThemeSelect={onThemeSelect} readingSize={readingSize} onReadingSizeSelect={onReadingSizeSelect}
-        onCreate={() => setCreateOpen(true)} />
+        onCreate={() => openCreate()} />
     </div>}
     <div className="workbench-main">
       <header className="chat-toolbar" aria-label="会话标题栏">
@@ -107,7 +115,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
         <span className="actions-divider" aria-hidden="true"></span>
         <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1></div>
         <div className="toolbar-actions">
-          {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => setCreateOpen(true)}><SquarePlus aria-hidden="true" /></Button>}
+          {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => openCreate()}><SquarePlus aria-hidden="true" /></Button>}
           <Button variant="ghost" className="icon-button" aria-label="终端（规划中）" title="终端（规划中）" disabled><Terminal aria-hidden="true" /></Button>
           <Button variant="ghost" className="icon-button" aria-label="运行（规划中）" title="运行（规划中）" disabled><Play aria-hidden="true" /></Button>
           <Button variant="ghost" className="icon-button" aria-label="打开工作目录（规划中）" title="打开工作目录（规划中）" disabled><Folder aria-hidden="true" /></Button>
@@ -139,10 +147,10 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
     </div>
     <Dialog open={navOpen && mobile} onOpenChange={setNavOpen}><DialogContent className="mobile-drawer-content" aria-label="主导航与对话" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>主导航与对话</DialogTitle></DialogHeader><AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
       theme={theme} onThemeSelect={onThemeSelect} readingSize={readingSize} onReadingSizeSelect={onReadingSizeSelect}
-      onCreate={() => setCreateOpen(true)} className="drawer-sidebar" /></DialogContent></Dialog>
+      onCreate={() => openCreate()} className="drawer-sidebar" /></DialogContent></Dialog>
     <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="session-create-dialog" aria-describedby={undefined}>
       <DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
-      {chat && <form className="session-create-form" onSubmit={e => { e.preventDefault(); beforeSessionSelect?.(chat.workspace, ""); void chat.create(createTitle, createTarget).then(() => setCreateOpen(false)); }}>
+      {chat && <form className="session-create-form" onSubmit={e => { e.preventDefault(); beforeSessionSelect?.(chat.workspace, ""); void chat.create(createTitle, createTarget, createGroup).then(created => { if (created) { setCreateOpen(false); setCreateGroup(undefined); } }); }}>
         <div className="session-create-field">
           <Label htmlFor="session-title">{c.title}</Label>
           <Input id="session-title" value={createTitle} onChange={e => setCreateTitle(e.target.value)} maxLength={128} required autoComplete="off" />
@@ -153,6 +161,7 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
             <select id="chat-target" aria-describedby={workspaceConfigured ? undefined : "session-target-help"} value={createTarget} onChange={e => setCreateTarget(e.target.value)}>
               <option value="demo">{c.defaultTarget}</option>
               {httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}
+              {chat.actor?.target_keys?.includes("target-development") && <option value="target-development">开发项目</option>}
               <option value="target-workspace" disabled={!workspaceConfigured}>工作区</option>
             </select>
             <ChevronDown aria-hidden="true" />

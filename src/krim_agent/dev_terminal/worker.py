@@ -198,7 +198,12 @@ class Process:
                     raise
                 if not data:
                     break
-                self.log.append(data)
+                # Secret-enabled commands have an opaque output channel: even
+                # accidental print/PTY echo must never enter durable logs or
+                # model-visible pages. Authorized code may still copy its own
+                # secret elsewhere; this is not arbitrary-program DLP.
+                if not self.record["request"].get("authorization", {}).get("secret_refs"):
+                    self.log.append(data)
         except OSError:
             self.record["reason"] = "output_read_failed"
         finally:

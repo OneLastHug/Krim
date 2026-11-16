@@ -99,7 +99,7 @@ class ContainerExecutions:
                 # reconcile the existing container and classify unknown.
                 raise EnvironmentError("execution_outcome_unknown")
             await docker.check_image(self.runner, spec)
-            await docker.check_network(self.runner, spec)
+            await self.environments._network_check(spec)
             await self.environments.authorizer(env.handle, "execute")
             self.environments.mount_check(spec)
             await docker.checked(self.runner, docker.create_args(spec))
@@ -112,6 +112,7 @@ class ContainerExecutions:
             descriptor = self._descriptor(spec, str(value["Id"]))
             # Caller persists this ID before launching under C's supervisor.
             try:
+                await self.environments._network_arm(spec, descriptor.execution_id)
                 yield descriptor
                 persisted = await self.processes.get(process_id)
                 self._validate_row(persisted, request, process_id)
@@ -129,6 +130,7 @@ class ContainerExecutions:
         self._validate_row(row, spec.request, spec.process_id)
         if row.execution_id not in (None, spec.execution_id):
             raise EnvironmentError("execution_binding_drift")
+        await self.environments._network_release(spec.execution_id)
         value = await docker.inspect(self.runner, spec)
         if value is None:
             raise EnvironmentError("execution_cleanup_unknown")
@@ -156,8 +158,9 @@ class ContainerExecutions:
         expected = self._descriptor(spec, execution.execution_id)
         if execution.attach_argv and expected.attach_argv != execution.attach_argv:
             raise EnvironmentError("execution_binding_drift")
-        if not cleanup:
-            await docker.check_network(self.runner, spec)
+        # Observation and host cleanup retain canonical bindings and their own
+        # read/cleanup authority. An expired download grant must not hide exits;
+        # prepare/arm and the broker still resolve current network permission.
         return spec
 
     @staticmethod
@@ -186,6 +189,7 @@ class ContainerExecutions:
         handle = execution.environment
         async with self.environments.locks.hold(handle.owner_id, handle.project_id):
             spec = await self._bound(execution, cleanup=True)
+            await self.environments._network_release(execution.execution_id)
             value = await docker.inspect(self.runner, spec)
             if value is None:
                 return RuntimeStatus(execution.execution_id, "unknown")
@@ -207,6 +211,7 @@ class ContainerExecutions:
         handle = execution.environment
         async with self.environments.locks.hold(handle.owner_id, handle.project_id):
             spec = await self._bound(execution, cleanup=True)
+            await self.environments._network_release(execution.execution_id)
             value = await docker.inspect(self.runner, spec)
             if value is None:
                 return

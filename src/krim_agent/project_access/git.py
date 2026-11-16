@@ -1,8 +1,9 @@
 """Git identity, exact operation binding and standard credential-helper framing.
 
-D does not run Git or mint provider tokens. C/I must constrain the actual Git
-process and isolate its credential channel from generic Shell. Matching a helper
-request proves the repository context only, not the ref/action used on the wire.
+These domain functions do not run Git or mint provider tokens. The host-only
+Git runner is in git_execution and uses a separate native credential channel.
+Matching a helper request proves the repository context only; the runner binds
+ref/action/OIDs to its structured argv at guarded process acceptance.
 """
 
 from __future__ import annotations

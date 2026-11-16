@@ -115,6 +115,7 @@ class Routes:
         self.connected = 0
         self.socket_closed = 0
         self.principals = []
+        self.wire_headers = []
 
     async def observe(self, process, port, principal):
         return ServiceInstance(execution_id="a" * 64, started_at=self.started_at)
@@ -178,6 +179,7 @@ class Routes:
                     return
             assert request_event is not None
             headers = httpx.Headers(request_event.headers)
+            self.wire_headers.append(headers)
             url = "http://" + headers["host"] + request_event.target.decode()
 
             async def body():
@@ -376,6 +378,24 @@ async def test_wrong_host_and_no_auth_never_acquire_route(rig):
 class EmptyStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         yield b""
+
+
+async def test_empty_get_does_not_invent_transfer_encoding(rig):
+    seen = []
+
+    async def upstream(request):
+        seen.append(request)
+        assert await request.aread() == b""
+        return httpx.Response(200, content=b"bodyless-get")
+
+    rig.routes.transport = httpx.MockTransport(upstream)
+    async with client_for(rig) as client:
+        await login(rig, client)
+        response = await client.get("/")
+    assert response.status_code == 200 and response.content == b"bodyless-get"
+    assert len(seen) == 1 and len(rig.routes.wire_headers) == 1
+    assert "transfer-encoding" not in rig.routes.wire_headers[0]
+    assert "content-length" not in rig.routes.wire_headers[0]
 
 
 async def test_http_headers_upload_cookies_and_redirects(rig):

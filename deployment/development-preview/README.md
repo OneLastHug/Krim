@@ -1,6 +1,25 @@
 # 独立开发预览部署接口
 
-模块 E 提供独立 ASGI `PreviewApp`，消费 C0、C 持久进程和 B 的受管 socket 路由。B 中继与 E HTTP 适配器已完成真实 runsc 传输验证；schema16 的 SQLite 预览记录、票据和权限源已实现并测试。正式应用入口、认证 API 与独立 TLS 预览服务的装配尚未完成。E 不发布网络、启动项目命令、解析模型 URL 或创建目标连接。
+模块 E 提供独立 ASGI `PreviewApp`，消费 C0、C 持久进程和 B 的受管 socket 路由。I 已在 `DevelopmentService` 装配 schema16 SQLite 仓储、当前授权源、B 路由和 E HTTP/WS 代理；认证控制 API、模型预览工具及 `serve-development` 双 TLS 监听入口已实现。B/runsc 传输与双 TLS 入口分别经过实测，真实 Broker/XFS、项目容器、浏览器的完整组合仍待验收。E 不启动项目命令、解析模型 URL 或创建目标连接。
+
+## 启动与控制入口
+
+开发配置中新增可选 `preview`：`control_origin`、`control_cookie_domain`、`preview_domain`，必须是独立站点。未配置时不注册预览工具，旧开发配置保持可用。独立启动还需 `preview.listener`，包含 `control_host/control_port`、`preview_host/preview_port`、`control_certificate/control_private_key` 和 `preview_certificate/preview_private_key`；证书与私钥使用绝对路径，属于进程用户且不可被 group/other 写入，私钥不可被 group/other 读取。
+
+`krim serve-development --database <database> --development-config <trusted-config>` 复用现有 `KRIM_AGENT_SANDBOX_CONFIG_FILE` 和模型配置。它只打开一个 Application，控制 API 与预览分别使用 TLS listener；绑定只允许 loopback，默认端口8765/8766，禁用 forwarded-header 信任和访问日志，控制 listener 不接受 WebSocket。公共 HTTPS 域名须由部署方通过 TLS 透传连接对应 listener，或为本地测试配置对应独立 loopback 地址/443；代理不能通过添加 forwarded headers 伪造 HTTPS。此命令不会安装证书、配置 DNS 或发布外网服务。
+
+模型图片配置使用已有 `model_images: true`，并显式设置 `KRIM_AGENT_HTTP_ALLOW_IMAGES=true`。`KRIM_AGENT_HTTP_MAX_REQUEST_BYTES`（256–1048576）与 `KRIM_AGENT_MAX_REQUEST_BYTES` 共同限制请求，取较小值；PNG转base64、工具schema和历史都计入真实请求大小。`KRIM_AGENT_HTTP_MAX_TOOL_CALLS` 为每次模型响应上限（1–4），仍受宿主每步和每run总预算约束。图片开关只接受 `true`/`false`；未设置时仍关闭图片、请求默认32768字节。真实模型运行需显式 `KRIM_AGENT_PROVIDER=http` 和 `KRIM_AGENT_HTTP_MODE=agent`。
+
+启动前可运行 `scripts/check_development_startup.py`，传入 `--project-root`、`--development-config`、`--sandbox-config`、`--provider-bounds`、`--host-max-request-bytes` 和 `--prompt`。配置路径必须符合现有宿主loader的权限要求。provider-bounds文件仅含 `allow_images`、`max_output_tokens`、`max_request_bytes`、`max_tool_calls` 四个非秘密字段，不接受供应商地址、模型名或Key。该工具核对TLS证书加载、browser CA hash/seccomp文件、媒体开关与有效请求预算，只输出状态码、预算和提示词SHA；不会启动应用、连接Broker或模型。`static_ready` 表示静态检查通过，真实服务、网络和应用流程另验收。
+
+认证控制接口：
+
+- `POST /v2/me/development/projects/{project_id}/previews`，JSON `{request_key, process_id, port}`。从真实持久进程注册；同主体/项目/request_key重放返回原绑定，换目标或同服务端口冲突拒绝。
+- `GET /v2/me/development/previews/{preview_id}?wait_seconds=0..20`：当前授权下读状态或等待就绪。
+- `POST /v2/me/development/previews/{preview_id}/stop`：先关闭预览，再停止服务。
+- `POST /api/development/previews/{preview_id}/open`：认证 Bearer、精确配置的 HTTPS Host/Origin；存在 Sec-Fetch-Site 时必须 same-origin。返回 `{action,ticket,expires_at}`，禁止缓存。客户端在新顶层标签页以表单 POST 兑换，不能把票据交给模型。
+
+模型工具为 `dev_preview_register`、`dev_preview_status`、`dev_preview_stop`，只操作当前项目/环境，返回 PreviewHandle，不返回票据。应用关闭时关闭自身路由/连接，保留部署所有的项目服务与 supervisor。
 
 ## I 组合入口
 

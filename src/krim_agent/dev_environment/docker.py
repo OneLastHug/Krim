@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from krim_agent.project_access.process_bootstrap import secret_wait_bootstrap
+
 from .bootstrap import CWD_EXEC
 from .model import EnvironmentError, RuntimeSpec
 
@@ -115,7 +117,26 @@ def labels(record: RuntimeSpec) -> dict[str, str]:
 def command(record: RuntimeSpec) -> tuple[str, list[str]]:
     if record.request is None:
         return "/bin/sleep", ["infinity"]
-    args = ["-I", "-c", CWD_EXEC, record.request.cwd, record.request.command]
+    network_wait = ""
+    if record.network.policy_ref is not None:
+        from krim_agent.dev_network.shim import WAIT_CODE
+        network_wait = WAIT_CODE
+    if record.request.authorization.secret_refs:
+        assert record.process_id is not None
+        bootstrap = secret_wait_bootstrap(
+            record.request, record.process_id, CWD_EXEC, record.request.timeout_seconds
+        )
+        args = ["-I", "-c", network_wait + bootstrap,
+                record.request.cwd, record.request.command]
+        # Keep the original request timeout as PID 1. The reader then applies
+        # a second, tighter deadline for the remaining authorization lifetime.
+        if record.request.timeout_seconds is None:
+            return "/usr/bin/python3", args
+        return "/usr/bin/timeout", ["--foreground", "--signal=KILL",
+                                   f"{record.request.timeout_seconds:.9f}s",
+                                   "/usr/bin/python3", *args]
+    bootstrap = network_wait + CWD_EXEC
+    args = ["-I", "-c", bootstrap, record.request.cwd, record.request.command]
     if record.request.timeout_seconds is None:
         return "/usr/bin/python3", args
     # Existing coreutils timeout is PID 1, so its exit tears down the whole
@@ -135,12 +156,14 @@ def create_args(record: RuntimeSpec) -> tuple[str, ...]:
             f"--memory={limits.memory_bytes}", f"--memory-swap={limits.memory_bytes}",
             f"--cpus={limits.nano_cpus / 1_000_000_000:.9f}", f"--pids-limit={limits.pids}",
             f"--shm-size={limits.shm_bytes}", "--ulimit=nofile=1024:4096",
-            "--network=" + (record.network.network_id or "none"),
+            "--network=none",
             "--mount", (f"type=bind,source={record.mount.path},target=/workspace,"
                         "bind-propagation=rprivate,bind-recursive=disabled"),
             "--env=HOME=" + HOME, "--env=npm_config_cache=/workspace/.cache/npm",
             "--env=PIP_CACHE_DIR=/workspace/.cache/pip", "--workdir=/workspace",
             "--entrypoint=" + entrypoint, "--no-healthcheck"]
+    for key, value in network_env(record).items():
+        args += ["--env=" + key + "=" + value]
     if record.request is not None:
         args += ["--interactive"]
         if record.request.pty:
@@ -186,18 +209,24 @@ async def check_image(runner: Runner, record: RuntimeSpec) -> None:
 
 
 async def check_network(runner: Runner, record: RuntimeSpec) -> None:
-    if record.network.network_id is None:
-        return
-    reply = await checked(runner, ("network", "inspect", record.network.network_id))
-    try:
-        network, = json.loads(reply)
-        if (network["Id"] != record.network.network_id
-                or network["Name"] in {"bridge", "host", "none"}
-                or network["Driver"] != "bridge"
-                or network.get("Labels", {}).get(LABEL + "policy") != record.network.policy_ref):
-            raise ValueError
-    except (ValueError, KeyError, TypeError, AttributeError):
-        raise EnvironmentError("network_binding_drift") from None
+    del runner
+    if record.network.network_id is not None:
+        raise EnvironmentError("uncontrolled_network_forbidden")
+
+
+def network_env(record: RuntimeSpec) -> dict[str, str]:
+    if record.network.policy_ref is None:
+        return {}
+    from krim_agent.dev_network.shim import CA_PATH, PROXY_PORT
+    proxy = f"http://127.0.0.1:{PROXY_PORT}"
+    return {"HTTPS_PROXY": proxy, "https_proxy": proxy,
+            "HTTP_PROXY": proxy, "http_proxy": proxy,
+            "NO_PROXY": "", "no_proxy": "",
+            "NODE_EXTRA_CA_CERTS": CA_PATH, "SSL_CERT_FILE": CA_PATH,
+            "REQUESTS_CA_BUNDLE": CA_PATH, "CURL_CA_BUNDLE": CA_PATH,
+            "PIP_CERT": CA_PATH, "npm_config_cafile": CA_PATH,
+            "npm_config_proxy": proxy, "npm_config_https_proxy": proxy,
+            "npm_config_audit": "false", "npm_config_fund": "false"}
 
 
 async def stop_verified(runner: Runner, record: RuntimeSpec, value: dict[str, Any]) -> str:
@@ -249,7 +278,7 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
                 or host.get("DnsOptions") or host.get("Sysctls")
                 or host.get("RestartPolicy", {}).get("Name") != "no"
                 or host.get("LogConfig", {}).get("Type") != "none"
-                or host.get("NetworkMode") != (record.network.network_id or "none")
+                or host.get("NetworkMode") != "none"
                 or host.get("Memory") != record.limits.memory_bytes
                 or host.get("MemorySwap") != record.limits.memory_bytes
                 or host.get("NanoCpus") != record.limits.nano_cpus
@@ -262,7 +291,8 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
         environment = dict(item.split("=", 1) for item in config["Env"])
         if (environment.get("HOME") != HOME
                 or environment.get("npm_config_cache") != "/workspace/.cache/npm"
-                or environment.get("PIP_CACHE_DIR") != "/workspace/.cache/pip"):
+                or environment.get("PIP_CACHE_DIR") != "/workspace/.cache/pip"
+                or any(environment.get(k) != v for k, v in network_env(record).items())):
             raise ValueError
         # No image volumes, second project, host socket, recursive submount or port publish.
         mounts = value["Mounts"]

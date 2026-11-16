@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 from krim_agent.context.compaction import Compactor
+from krim_agent.context.compaction_source import WorkspaceCompactionSource
 from krim_agent.context.types import CompactionPolicy, ContextPolicy
 from krim_agent.contracts import Message, encoded, fingerprint
 from krim_agent.providers.types import ModelText
@@ -24,6 +25,11 @@ class Store:
 class Provider:
     async def stream(self, messages, tools):
         yield ModelText(text="answer")
+
+
+class Source:
+    async def save_prepared(self, conn, run_id, prepared):
+        await WorkspaceCompactionSource.save_prepared(self, conn, run_id, prepared)
 
 
 class MeasuredCompactor(Compactor):
@@ -52,6 +58,8 @@ class MeasuredCompactor(Compactor):
         self.compaction_changes = []
         self.events = []
         self.summary_requests = []
+        self.source = Source()
+        self.extension_snapshot = {"version": "extensions/2", "revision": 0, "items": []}
 
     async def emit(self, kind, data):
         self.events.append((kind, data))

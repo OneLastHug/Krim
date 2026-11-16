@@ -14,7 +14,7 @@ PUBLIC_UI_PATHS = frozenset({"/", "/ui/", *("/ui/" + name for name in FILES)})
 HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; "
         "frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
@@ -57,10 +57,10 @@ def mount_browser_ui(app: FastAPI, *, root: Path | None = None) -> None:
             methods=["GET", "HEAD"],
             include_in_schema=False,
         )
-    for asset in fonts:
+    for font_asset in fonts:
         app.add_api_route(
-            "/ui/" + asset.path,
-            endpoint(asset.path, media_type="font/woff2"),
+            "/ui/" + font_asset.path,
+            endpoint(font_asset.path, media_type="font/woff2"),
             methods=["GET", "HEAD"],
             include_in_schema=False,
         )

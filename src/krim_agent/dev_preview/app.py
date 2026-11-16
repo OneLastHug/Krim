@@ -246,23 +246,22 @@ class PreviewApp:
                     # already-connected B socket and has no DNS/dial fallback.
                     url = httpx.URL("http://" + host).copy_with(raw_path=target)
                     uploaded = asyncio.Event()
+                    incoming = Request(scope, receive).stream()
+                    first = await anext(incoming)
+                    if not first:
+                        uploaded.set()
 
                     async def body() -> AsyncIterator[bytes]:
-                        async for part in Request(scope, receive).stream():
+                        yield first
+                        async for part in incoming:
                             yield part
                         uploaded.set()
 
-                    request = httpx.Request(
+                    async with client.stream(
                         scope["method"],
                         url,
                         headers=headers,
-                        content=body(),
-                    )
-                    async with client.stream(
-                        request.method,
-                        request.url,
-                        headers=request.headers,
-                        content=request.stream,
+                        content=body() if first else None,
                     ) as upstream:
                         await self.service.recheck(current, grant.principal, lease)
                         out_headers = response_headers(

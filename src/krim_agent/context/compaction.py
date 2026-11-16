@@ -14,7 +14,8 @@ from pydantic import JsonValue
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from krim_agent.context import builder
+from krim_agent.context import builder, compaction_source
+from krim_agent.context.compaction_source import CompactionSource, WorkspaceCompactionSource
 from krim_agent.context.manifest import Category, ItemMetadata
 from krim_agent.context.types import CompactionPolicy, ContextPolicy, HistorySource, PreparedContext
 from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
@@ -22,8 +23,7 @@ from krim_agent.extensions import _extension_snapshot, extension_messages
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.model_step import ModelStep
 from krim_agent.source_fingerprints import source_digest
-from krim_agent.storage.models import compactions, runs, work_turns
-from krim_agent.storage.sessions import workspace_history
+from krim_agent.storage.models import compactions, runs
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.workspace.types import ExecutionAccess, WorkFrame
 
@@ -44,42 +44,77 @@ class Compactor:
         *,
         source_anchor: str,
     ) -> None:
-        self.store, self.access, self.step, self.check = store, access, step, check
-        self.frame = WorkFrame.model_validate_json(frame.model_dump_json())
-        self.anchor_refs = tuple(json.loads(encoded(list(self.frame.source_refs))))
-        if (
-            not isinstance(source_anchor, str)
-            or fingerprint(list(self.anchor_refs)) != source_anchor
-        ):
+        source = WorkspaceCompactionSource(frame, access, source_anchor=source_anchor)
+        # Retain existing public attributes for workspace callers. The algorithm
+        # and SDK recovery consume the source port, never these workspace details.
+        self.frame, self.access = source.frame, source.access
+        self._initialize(store, source, step, check, system, request_limit, provider_identity)
+
+    @classmethod
+    def from_source(
+        cls, store: SQLiteStore, source: CompactionSource, step: ModelStep,
+        check: Callable[[], None], system: str, request_limit: int,
+        provider_identity: dict[str, JsonValue],
+    ) -> Compactor:
+        instance = cls.__new__(cls)
+        instance._initialize(store, source, step, check, system, request_limit, provider_identity)
+        return instance
+
+    def _initialize(
+        self, store: SQLiteStore, source: CompactionSource, step: ModelStep,
+        check: Callable[[], None], system: str, request_limit: int,
+        provider_identity: dict[str, JsonValue],
+    ) -> None:
+        self.store, self.source, self.step, self.check = store, source, step, check
+        self.session_id = source.session_id
+        self.anchor_refs = tuple(json.loads(encoded(list(source.source_refs))))
+        self.source_anchor = source.source_fingerprint
+        if (not source.domain or not self.session_id
+                or not isinstance(self.source_anchor, str) or not self.source_anchor):
             raise ServiceError("facts_corrupt")
-        self.source_anchor = source_anchor
         self.system, self.request_limit = system, request_limit
-        context = cast(dict[str, JsonValue], self.frame.conditions["context"])
-        self.policy = ContextPolicy.model_validate_json(encoded(context["policy"]))
-        self.compaction = CompactionPolicy.model_validate_json(encoded(context["compaction"]))
+        self.policy = ContextPolicy.model_validate_json(source.context_policy.model_dump_json())
+        self.compaction = CompactionPolicy.model_validate_json(
+            source.compaction_policy.model_dump_json())
         self.provider_identity = cast(dict[str, JsonValue], json.loads(encoded(provider_identity)))
         self.history: list[dict[str, Any]] | None = None
         self.covered, self.passes, self.summary = 0, 0, ""
         self.compaction_changes: list[dict[str, JsonValue]] = []
         self.producer = asyncio.current_task()
-        self.extension_snapshot = cast(
-            dict[str, JsonValue],
-            context.get(
-                "extensions", {"version": "extensions/2", "revision": 0, "items": []}
-            ),
-        )
+        self.extension_snapshot = cast(dict[str, JsonValue], json.loads(encoded(source.extensions)))
         _extension_snapshot(self.extension_snapshot)
-        self.record_policy = {
+        self._source_binding = fingerprint(self._source_descriptor())
+        self.record_policy: dict[str, JsonValue] = {
             "context": self.policy.model_dump(mode="json"),
             "extensions": fingerprint(self.extension_snapshot),
             "compaction": self.compaction.model_dump(mode="json"),
-            "implementation": binding_token()[-1],
+            "implementation": cast(str, binding_token()[-1]),
             "model_step_implementation": source_digest(
                 Path(__file__).parents[1].joinpath("runtime/model_step.py")
             ),
             "counter_version": "approx-utf8/1",
-            "grant": self.frame.grant.model_dump(mode="json"),
+            "source": {
+                "domain": source.domain, "binding": json.loads(encoded(source.policy_binding)),
+                "implementation": source_digest(Path(__file__).with_name("compaction_source.py")),
+            },
         }
+        if isinstance(source, WorkspaceCompactionSource):
+            self.record_policy.update(json.loads(encoded(source.policy_binding)))
+
+    def _source_descriptor(self) -> dict[str, Any]:
+        source = self.source
+        return {
+            "domain": source.domain, "session_id": source.session_id,
+            "refs": list(source.source_refs), "anchor": source.source_fingerprint,
+            "binding": source.policy_binding,
+            "policy": source.context_policy.model_dump(mode="json"),
+            "compaction": source.compaction_policy.model_dump(mode="json"),
+            "extensions": source.extensions,
+        }
+
+    def _assert_source(self) -> None:
+        if fingerprint(self._source_descriptor()) != self._source_binding:
+            raise ServiceError("facts_corrupt")
 
     def guard(self) -> None:
         self.check()
@@ -117,10 +152,44 @@ class Compactor:
         )
 
     async def verify(self, conn: AsyncConnection) -> None:
-        await workspace_history(
-            conn, self.run_id, 0, 1, self.access, source_anchor=self.source_anchor
-        )
         self.guard()
+        self._assert_source()
+        await self.source.verify(conn, self.run_id)
+        self._assert_source()
+        self.guard()
+
+    async def page(self, conn: AsyncConnection, offset: int, limit: int) -> list[dict[str, Any]]:
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 16:
+            raise ServiceError("facts_corrupt")
+        await self.verify(conn)
+        rows = await self.source.page(conn, self.run_id, offset, limit)
+        expected = self.anchor_refs[offset:offset + limit]
+        if len(rows) != len(expected):
+            raise ServiceError("facts_corrupt")
+        for row, ref in zip(rows, expected, strict=True):
+            if row.get("ref") != ref:
+                raise ServiceError("facts_corrupt")
+            builder.validate_groups(row["messages"])
+            # Transcript fingerprint semantics belong to the source: workspace
+            # freezes the stored transcript (including None), while session v3
+            # freezes the projected messages. Do not reinterpret either here.
+        await self.verify(conn)
+        return rows
+
+    async def save_prepared(self, conn: AsyncConnection, prepared: PreparedContext) -> None:
+        if prepared.source_fingerprint != self.source_anchor:
+            raise ServiceError("facts_corrupt")
+        await self.verify(conn)
+        await self.source.save_prepared(conn, self.run_id, prepared)
+        await self.verify(conn)
+
+    async def read_prepared(self, conn: AsyncConnection) -> PreparedContext | None:
+        await self.verify(conn)
+        prepared = await self.source.read_prepared(conn, self.run_id)
+        if prepared is not None and prepared.source_fingerprint != self.source_anchor:
+            raise ServiceError("facts_corrupt")
+        await self.verify(conn)
+        return prepared
 
     async def row(self, index: int) -> dict[str, Any] | None:
         async def read(conn: AsyncConnection) -> dict[str, Any] | None:
@@ -142,7 +211,7 @@ class Compactor:
                     not refs
                     or refs != list(self.anchor_refs[: len(refs)])
                     or row["source_hash"] != fingerprint(refs)
-                    or row["session_id"] != self.frame.session_id
+                    or row["session_id"] != self.session_id
                     or row["policy"] != self.record_policy
                     or row["provider_identity"] != self.provider_identity
                     or row["prompt_hash"] != fingerprint(PROMPT)
@@ -212,7 +281,7 @@ class Compactor:
                 not refs
                 or refs != list(self.anchor_refs[: len(refs)])
                 or row["source_hash"] != fingerprint(refs)
-                or row["session_id"] != self.frame.session_id
+                or row["session_id"] != self.session_id
                 or row["policy"] != self.record_policy
                 or row["provider_identity"] != self.provider_identity
                 or row["prompt_hash"] != fingerprint(PROMPT)
@@ -238,11 +307,7 @@ class Compactor:
                 if error.code not in {"context_budget", "step_limit"}:
                     raise
             else:
-                await conn.execute(
-                    update(work_turns)
-                    .where(work_turns.c.run_id == self.run_id)
-                    .values(prepared_context=prepared.model_dump(mode="json"))
-                )
+                await self.save_prepared(conn, prepared)
             await self.verify(conn)
             return dict(row) | {"status": "complete", "output": output, "output_hash": digest}
 
@@ -269,7 +334,7 @@ class Compactor:
         args = {
             "run_id": self.run_id,
             "pass_index": index,
-            "session_id": self.frame.session_id,
+            "session_id": self.session_id,
             "source_refs": refs,
             "source_hash": fingerprint(refs),
             "policy": self.record_policy,
@@ -397,9 +462,7 @@ class Compactor:
             for offset in range(0, len(self.anchor_refs), 16):
 
                 async def page(conn: AsyncConnection, offset: int = offset) -> list[dict[str, Any]]:
-                    return await workspace_history(
-                        conn, run_id, offset, 16, self.access, source_anchor=self.source_anchor
-                    )
+                    return await self.page(conn, offset, 16)
 
                 rows = await self.store.work_read(page)
                 self.guard()
@@ -413,7 +476,7 @@ class Compactor:
                             select(compactions)
                             .join(runs, compactions.c.run_id == runs.c.id)
                             .where(
-                                compactions.c.session_id == self.frame.session_id,
+                                compactions.c.session_id == self.session_id,
                                 compactions.c.status == "complete",
                                 compactions.c.run_id != run_id,
                                 (runs.c.status == "completed")
@@ -553,22 +616,16 @@ class Compactor:
         async def save(conn: AsyncConnection) -> bool:
             self.guard()
             await self.verify(conn)
-            await conn.execute(
-                update(work_turns)
-                .where(work_turns.c.run_id == run_id)
-                .values(prepared_context=prepared.model_dump(mode="json"))
-            )
+            await self.save_prepared(conn, prepared)
             await self.verify(conn)
             return True
 
         async def known() -> bool | None:
             async def read(conn: AsyncConnection) -> bool | None:
                 await self.verify(conn)
-                row = await conn.scalar(
-                    select(work_turns.c.prepared_context).where(work_turns.c.run_id == run_id)
-                )
+                row = await self.read_prepared(conn)
                 await self.verify(conn)
-                return True if row == prepared.model_dump(mode="json") else None
+                return True if row == prepared else None
 
             return await self.store.work_read(read)
 
@@ -636,7 +693,13 @@ def binding_token() -> tuple[object, ...]:
         id(Compactor.verify),
         id(Compactor.snapshot),
         id(Compactor.manifest_metadata),
-        id(workspace_history),
+        id(Compactor.__dict__["from_source"].__func__),
+        id(Compactor._initialize), id(Compactor._assert_source),
+        id(Compactor._source_descriptor),
+        id(Compactor.page),
+        id(Compactor.save_prepared),
+        id(Compactor.read_prepared),
+        compaction_source.binding_token(),
         fingerprint(PROMPT),
         source_digest(__file__),
     )

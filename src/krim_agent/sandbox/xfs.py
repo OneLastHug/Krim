@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -42,15 +43,22 @@ class XfsAccounts:
         ):
             raise ServiceError("sandbox_config_invalid", 422)
         self._identity = (self.root.stat().st_dev, self.root.stat().st_ino)
-        target = subprocess.run(
-            ["findmnt", "-n", "-o", "FSTYPE,OPTIONS", "-T", str(root)],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout
-        if not target.startswith("xfs ") or "prjquota" not in target:
-            raise ServiceError("sandbox_backend_unavailable", 503)
+        try:
+            output = subprocess.run(
+                ["findmnt", "--json", "-o", "TARGET,FSTYPE,OPTIONS", "-T", str(root)],
+                capture_output=True, text=True, check=True, timeout=5,
+            ).stdout
+            filesystem, = json.loads(output)["filesystems"]
+            target = private_directory(Path(filesystem["target"]))
+            if (filesystem["fstype"] != "xfs"
+                    or "prjquota" not in filesystem["options"].split(",")
+                    or not self.root.is_relative_to(target)
+                    or target.stat().st_dev != self._identity[0]):
+                raise ValueError("untrusted quota mount")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            raise ServiceError("sandbox_backend_unavailable", 503) from None
+        self.quota_mount = target
+        self._mount_identity = (target.stat().st_dev, target.stat().st_ino)
         state = self.command("state -p")
         if "Accounting: ON" not in state or "Enforcement: ON" not in state:
             raise ServiceError("sandbox_backend_unavailable", 503)
@@ -65,8 +73,12 @@ class XfsAccounts:
             raise ServiceError("sandbox_backend_unavailable", 503)
 
     def command(self, expression: str) -> str:
+        private_directory(self.quota_mount)
+        info = self.quota_mount.stat()
+        if (info.st_dev, info.st_ino) != self._mount_identity:
+            raise ServiceError("sandbox_backend_unavailable", 503)
         result = subprocess.run(
-            ["/usr/sbin/xfs_quota", "-x", "-c", expression, str(self.mount)],
+            ["/usr/sbin/xfs_quota", "-x", "-c", expression, str(self.quota_mount)],
             capture_output=True,
             text=True,
             timeout=10,

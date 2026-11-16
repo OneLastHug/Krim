@@ -78,6 +78,12 @@ class SecretSink(Protocol):
     def deliver(self, binding: DeliveryBinding, material: SecretMaterial) -> None: ...
 
 
+class SecretDelivery(Protocol):
+    """Encrypted pending delivery consumed by the guarded service only."""
+
+    def release(self, binding: DeliveryBinding, sink: SecretSink) -> None: ...
+
+
 def handoff(sink: SecretSink, binding: DeliveryBinding, plaintext: bytes) -> None:
     material = SecretMaterial(plaintext)
     del plaintext

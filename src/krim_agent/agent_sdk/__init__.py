@@ -1,4 +1,4 @@
-"""Isolated SDK replacement probe; not wired into the application runtime."""
+"""Pinned SDK execution bridge shared by all runtime targets."""
 
 from .adapter import ProbeResult, ProbeStopped, SDKAdapter
 from .response import CompleteResponseProvider, IncompleteTurn

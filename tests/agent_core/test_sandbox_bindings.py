@@ -22,6 +22,7 @@ from krim_agent.storage.models import turns
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_turn_contracts
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
@@ -236,6 +237,7 @@ async def test_schema8_readonly_and_upgrade_add_only_bindings(tmp_path):
         conn.execute("DROP TABLE sandbox_quota_state")
         conn.execute("DROP TABLE sandbox_session_bindings")
         for table in [
+            *reversed(SIDEBAR_TABLES),
             *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
             *reversed(SESSION_LIFECYCLE_TABLES),
             *reversed(MCP_TABLES),

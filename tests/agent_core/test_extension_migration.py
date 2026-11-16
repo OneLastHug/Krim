@@ -67,6 +67,7 @@ for version, additions in (
     (15, {"development_environments", "development_operations", "development_processes",
           "project_access_records"}),
     (16, {"development_previews", "development_preview_credentials"}),
+    (17, {"session_sidebars"}),
 ):
     HISTORICAL_TABLES[version] = HISTORICAL_TABLES[version - 1] | additions
 
@@ -96,19 +97,19 @@ async def seed_run(path):
 
 
 @pytest.mark.asyncio
-async def test_fresh_schema16_registers_all_feature_tables(tmp_path):
+async def test_fresh_schema17_registers_all_feature_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 16
-        assert table_names(database) == HISTORICAL_TABLES[16]
+        assert store.schema_version == SCHEMA_VERSION == 17
+        assert table_names(database) == HISTORICAL_TABLES[17]
         assert EXTENSION_TABLE_NAMES <= table_names(database)
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [11, 12, 13, 14, 15])
+@pytest.mark.parametrize("version", [11, 12, 13, 14, 15, 16])
 async def test_feature_upgrade_preserves_data(tmp_path, version):
     database = tmp_path / f"feature-{version}.sqlite"
     run = await seed_run(database)
@@ -117,8 +118,8 @@ async def test_feature_upgrade_preserves_data(tmp_path, version):
     assert table_names(database) == HISTORICAL_TABLES[version]
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 16
-        assert table_names(database) == HISTORICAL_TABLES[16]
+        assert store.schema_version == SCHEMA_VERSION == 17
+        assert table_names(database) == HISTORICAL_TABLES[17]
         assert rows(database, "runs") == before
         assert (await store.snapshot(run.id)).request.text == "保留的运行"
     finally:
@@ -126,7 +127,7 @@ async def test_feature_upgrade_preserves_data(tmp_path, version):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", range(1, 17))
+@pytest.mark.parametrize("version", range(1, 18))
 async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
     database = tmp_path / f"historical-v{version}.sqlite"
     run = await seed_run(database)
@@ -149,8 +150,8 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 16
-        assert table_names(database) == HISTORICAL_TABLES[16]
+        assert writer.schema_version == SCHEMA_VERSION == 17
+        assert table_names(database) == HISTORICAL_TABLES[17]
         assert (await writer.snapshot(run.id)).request.text == "保留的运行"
         for name in expected:
             assert rows(database, name) == before_rows[name]
@@ -164,7 +165,7 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     reader = await SQLiteStore.open(database, readonly=True)
     try:
-        assert reader.schema_version == 16
+        assert reader.schema_version == 17
         assert (await reader.snapshot(run.id)).run.id == run.id
     finally:
         await reader.close()
@@ -180,6 +181,7 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
         (14, "session_lifecycle"),
         (15, "development_environments"),
         (16, "development_previews"),
+        (17, "session_sidebars"),
     ],
 )
 @pytest.mark.parametrize("damage", ["missing", "extra"])

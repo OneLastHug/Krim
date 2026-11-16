@@ -31,6 +31,9 @@ class CompleteResponseProvider(ai.Provider):
         Callable[[list[sdk_messages.Message], sdk_messages.Message], Awaitable[None]] | None
     ) = PrivateAttr(default=None)
     _guard: Callable[[], Awaitable[None]] | None = PrivateAttr(default=None)
+    _prepare_input: (
+        Callable[[list[sdk_messages.Message]], Awaitable[list[sdk_messages.Message]]] | None
+    ) = PrivateAttr(default=None)
     _max_events: int = PrivateAttr(default=4096)
     _max_bytes: int = PrivateAttr(default=1_048_576)
 
@@ -42,12 +45,15 @@ class CompleteResponseProvider(ai.Provider):
         commit: Callable[[list[sdk_messages.Message], sdk_messages.Message], Awaitable[None]]
         | None = None,
         guard: Callable[[], Awaitable[None]] | None = None,
+        prepare_input: Callable[[list[sdk_messages.Message]],
+                                Awaitable[list[sdk_messages.Message]]] | None = None,
         max_events: int = 4096,
         max_bytes: int = 1_048_576,
     ) -> None:
         super().__init__()
         self._source, self._prepare = source, prepare
         self._commit, self._guard = commit, guard
+        self._prepare_input = prepare_input
         self._max_events, self._max_bytes = max_events, max_bytes
 
     async def stream(
@@ -59,6 +65,8 @@ class CompleteResponseProvider(ai.Provider):
         history = messages
         if self._guard is not None:
             await self._guard()
+        if self._prepare_input is not None:
+            history = await self._prepare_input(history)
         buffered: list[events.Event] = []
         starts: list[str] = []
         ends: list[str] = []

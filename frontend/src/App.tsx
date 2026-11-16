@@ -340,6 +340,7 @@ export function App() {
 
   return <div className={`app-shell${legacy === false ? " core-member" : ""}`} data-reading-size={readingSize}>
     <WorkbenchLayout
+      apiKey={key}
       view={mode}
       identity={identity}
       identityLoading={identityLoading}

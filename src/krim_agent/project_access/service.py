@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from typing import NoReturn
@@ -9,6 +10,7 @@ from typing import NoReturn
 from krim_agent.account_mcp.contracts import SecretVault
 from krim_agent.contracts import ServiceError, parse_json
 from krim_agent.development.contracts import AuthorizationRef, CommandRequest
+from krim_agent.development.ports import command_digest
 from krim_agent.network.egress_policy import EgressViolation
 from krim_agent.project_access.egress import ProjectEgressPolicy
 from krim_agent.project_access.git import (
@@ -18,9 +20,17 @@ from krim_agent.project_access.git import (
     check_helper_request,
     credential_response,
 )
+from krim_agent.project_access.process_secrets import (
+    MAX_COMMAND_BYTES,
+    MAX_SECRET_BYTES,
+    CommandSecretBinding,
+    CommandSecretSink,
+)
 from krim_agent.project_access.repository import AccessRepository, AccessSnapshot
 from krim_agent.project_access.secrets import (
     DeliveryBinding,
+    SecretDelivery,
+    SecretMaterial,
     SecretSink,
     handoff,
     project_secret_context,
@@ -57,12 +67,16 @@ class ProjectAccessService:
         *,
         secret_sink: SecretSink,
         git_sink: SecretSink,
+        delivery_sink: SecretSink | None = None,
+        command_sink: CommandSecretSink | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._repository = repository
         self._vault = vault
         self._secret_sink = secret_sink
         self._git_sink = git_sink
+        self._delivery_sink = delivery_sink
+        self._command_sink = command_sink
         self._clock = clock
 
     def _validate(
@@ -245,6 +259,246 @@ class ProjectAccessService:
                 del response
             return receipt
 
+    async def release_secret(
+        self, binding: DeliveryBinding, pending: SecretDelivery
+    ) -> ResolvedAccess:
+        """Host-only delayed release, fenced with current scope and revision.
+
+        The constructor-wired final sink must accept synchronously and without
+        blocking; neither the queue nor receipt is a bearer capability.
+        """
+        sink = self._delivery_sink
+        if sink is None:
+            _deny()
+        assert sink is not None
+        final_sink: SecretSink = sink
+        async with self._repository.guard(binding.authorization, binding.intent) as snapshot:
+            receipt = self._validate(binding.authorization, binding.intent, snapshot)
+            self._delivery_record(binding, snapshot)
+            service = self
+
+            class FinalSink:
+                def deliver(self, actual: DeliveryBinding, material: SecretMaterial) -> None:
+                    if actual != binding:
+                        _deny()
+                    # Queue decryption can advance wall time even while no
+                    # other writer can change records under this guard.
+                    service._validate(binding.authorization, binding.intent, snapshot)
+                    service._delivery_record(binding, snapshot)
+                    final_sink.deliver(actual, material)
+
+            pending.release(binding, FinalSink())
+            return receipt
+
+    def _command_records(
+        self, binding: CommandSecretBinding, snapshot: AccessSnapshot, *, starting: bool,
+    ) -> tuple[SecretRecord, ...]:
+        request = binding.request
+        proof = snapshot.command
+        if (proof is None or snapshot.grant is None
+                or "secret.deliver" not in snapshot.grant.actions):
+            _deny()
+        assert proof is not None
+        process = proof.process
+        operation = proof.operation
+        try:
+            process.handle.require_binding(request)
+        except ValueError:
+            _deny()
+        expected_environment = request.environment.model_dump(exclude={"state"})
+        operation_live = operation.state == "accepted" if starting else (
+            operation.state in {"accepted", "running"}
+            or (operation.state == "completed"
+                and operation.result_ref == operation.identity.call_id)
+        )
+        if (
+            proof.run_status != "running" or proof.stop_requested
+            or proof.ownership != request.ownership
+            or proof.environment.state != "ready"
+            or proof.environment.model_dump(exclude={"state"}) != expected_environment
+            or process.request != request
+            or proof.command_digest != command_digest(request)
+            or process.request_digest != command_digest(request)
+            or process.handle.process_id != binding.process_id
+            or process.execution_id != binding.execution_id
+            or process.handle.state not in ({"accepted"} if starting else {"accepted", "running"})
+            or not operation_live
+            or operation.identity.operation_id != request.operation_id
+            or operation.identity.ownership != request.ownership
+            or operation.identity.environment.model_dump(exclude={"state"}) != expected_environment
+        ):
+            _deny()
+        records = {r.secret_id: r for r in snapshot.secrets}
+        if any(
+            key not in records or records[key].revision != revision
+            or records[key].purpose != "project.delivery"
+            for key, revision in binding.revisions
+        ):
+            _deny()
+        assert snapshot.grant is not None
+        expiries = [self._clock(), snapshot.grant.expires_at,
+                    *(r.expires_at for r in snapshot.secrets)]
+        if snapshot.approval is not None:
+            expiries.append(snapshot.approval.expires_at)
+        if snapshot.network is not None:
+            expiries.append(snapshot.network.expires_at)
+        if any(not math.isfinite(value) for value in expiries):
+            _deny()
+        return tuple(records[key] for key in request.authorization.secret_refs)
+
+    async def validate_command_secrets(
+        self, binding: CommandSecretBinding, *, starting: bool = False,
+    ) -> ResolvedAccess:
+        """Host watcher checks current run/operation/process and secret revisions."""
+        request = binding.request
+        intent = command_intent(request, workspace_id=binding.workspace_id)
+        async with self._repository.guard(request.authorization, intent) as snapshot:
+            receipt = self._validate(request.authorization, intent, snapshot)
+            self._command_records(binding, snapshot, starting=starting)
+            return receipt
+
+    async def deliver_command_secrets(self, binding: CommandSecretBinding) -> ResolvedAccess:
+        """All-or-nothing package accepted under CURRENT authorization fence.
+
+        The sole constructor-wired sink retains ciphertext only. No callback,
+        destination path or environment variable comes from model input.
+        """
+        sink = self._command_sink
+        if sink is None:
+            _deny()
+        assert sink is not None
+        request = binding.request
+        intent = command_intent(request, workspace_id=binding.workspace_id)
+        materials: list[SecretMaterial] = []
+        failed = False
+        async with self._repository.guard(request.authorization, intent) as snapshot:
+            receipt = self._validate(request.authorization, intent, snapshot)
+            records = self._command_records(binding, snapshot, starting=True)
+            try:
+                size = 0
+                for record in records:
+                    plaintext = self._decrypt(record)
+                    try:
+                        size += len(plaintext)
+                        if not 1 <= len(plaintext) <= MAX_SECRET_BYTES or size > MAX_COMMAND_BYTES:
+                            raise ServiceError("input_limit", 422)
+                        materials.append(SecretMaterial(plaintext))
+                    finally:
+                        del plaintext
+                # Decryption/encryption can advance wall time. Recheck at the
+                # actual sink acceptance while mutation writers remain fenced.
+                self._validate(request.authorization, intent, snapshot)
+                self._command_records(binding, snapshot, starting=True)
+                assert snapshot.grant is not None
+                expiries = [snapshot.grant.expires_at, *(r.expires_at for r in records)]
+                if snapshot.approval is not None:
+                    expiries.append(snapshot.approval.expires_at)
+                if snapshot.network is not None:
+                    expiries.append(snapshot.network.expires_at)
+                assert request.timeout_seconds is not None
+                expiries.append(self._clock() + request.timeout_seconds)
+                sink.deliver_command(binding, tuple(materials), expires_at=min(expiries))
+                self._validate(request.authorization, intent, snapshot)
+            except Exception:
+                failed = True
+            finally:
+                for material in materials:
+                    material.erase()
+        if failed:
+            raise ServiceError("execution_error", 500)
+        return receipt
+
+    async def release_command_secrets(self, binding: CommandSecretBinding) -> ResolvedAccess:
+        """Revalidate again at one-shot transport spawn, not merely queue time."""
+        sink = self._command_sink
+        if sink is None:
+            _deny()
+        assert sink is not None
+        request = binding.request
+        intent = command_intent(request, workspace_id=binding.workspace_id)
+        failed = False
+        async with self._repository.guard(request.authorization, intent) as snapshot:
+            receipt = self._validate(request.authorization, intent, snapshot)
+            self._command_records(binding, snapshot, starting=True)
+            def check() -> None:
+                self._validate(request.authorization, intent, snapshot)
+                self._command_records(binding, snapshot, starting=True)
+
+            try:
+                sink.release_command(binding, check)
+            except Exception:
+                failed = True
+        if failed:
+            raise ServiceError("execution_error", 500)
+        return receipt
+
+    def _delivery_record(self, binding: DeliveryBinding, snapshot: AccessSnapshot) -> None:
+        records = snapshot.secrets
+        if len(records) != 1 or (records[0].secret_id, records[0].revision) != (
+            binding.secret_id,
+            binding.revision,
+        ):
+            _deny()
+        record = records[0]
+        if binding.intent.action == "secret.deliver":
+            if record.purpose != "project.delivery":
+                _deny()
+        elif binding.intent.action in ("git.clone", "git.push"):
+            if (
+                record.purpose != "git.credential"
+                or snapshot.network is None
+                or snapshot.git is None
+                or snapshot.git.credential_secret_id != binding.secret_id
+            ):
+                _deny()
+            operation = self._git_operation(binding.intent, snapshot)
+            try:
+                ProjectEgressPolicy(snapshot.network).validate_target(operation.repository)
+            except EgressViolation:
+                _deny()
+        else:
+            _deny()
+
+    async def accept_git(
+        self,
+        ref: AuthorizationRef,
+        intent: AccessIntent,
+        accept: Callable[[GitIdentity], None],
+        *,
+        credential_binding: DeliveryBinding | None = None,
+    ) -> ResolvedAccess:
+        """Accept one exact native Git spawn under the authorization fence.
+
+        The constructor-wired host executor derives argv from intent. This is
+        not a model tool or a permission to execute arbitrary callbacks. The
+        callback only spawns/registers a bounded process; waiting is outside.
+        I must terminate accepted processes on later committed revocation.
+        """
+        if not intent.action.startswith("git."):
+            _deny()
+        async with self._repository.guard(ref, intent) as snapshot:
+            receipt = self._validate(ref, intent, snapshot)
+            assert snapshot.git is not None
+            if (
+                intent.action in ("git.clone", "git.push")
+                and snapshot.git.credential_secret_id is not None
+                and credential_binding is None
+            ):
+                _deny()
+            if credential_binding is not None:
+                if credential_binding.intent != intent or credential_binding.authorization != ref:
+                    _deny()
+                self._delivery_record(credential_binding, snapshot)
+            assert snapshot.git is not None
+            failed = False
+            try:
+                accept(snapshot.git.identity)
+            except Exception:
+                failed = True
+            if failed:
+                raise ServiceError("execution_error", 500)
+            return receipt
+
     async def git_identity(self, ref: AuthorizationRef, intent: AccessIntent) -> GitIdentity:
         async with self._repository.guard(ref, intent) as snapshot:
             self._validate(ref, intent, snapshot)
@@ -279,7 +533,17 @@ class ProjectAccessService:
         try:
             return self._vault.decrypt(project_secret_context(record), record.ciphertext)
         except ServiceError as exc:
-            error = (exc.code, exc.status)
+            allowed = {
+                ("invalid_input", 422),
+                ("input_limit", 422),
+                ("mcp_unavailable", 503),
+                ("storage_unavailable", 503),
+            }
+            error = (
+                (exc.code, exc.status)
+                if (exc.code, exc.status) in allowed
+                else ("execution_error", 500)
+            )
         except Exception:
             error = ("execution_error", 500)
         raise ServiceError(*error)

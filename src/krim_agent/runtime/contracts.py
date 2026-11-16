@@ -9,7 +9,11 @@ from typing import Any, Protocol
 from pydantic import JsonValue
 
 from krim_agent.config import Settings
-from krim_agent.context.types import SessionContext, WorkspaceSessionContext
+from krim_agent.context.types import (
+    DevelopmentSessionContext,
+    SessionContext,
+    WorkspaceSessionContext,
+)
 from krim_agent.contracts import RunEvent, RunRequest, RunStatus, RunView
 from krim_agent.workspace.types import WorkFrame
 
@@ -20,7 +24,7 @@ class RunSnapshot:
     request: RunRequest
     target: dict[str, JsonValue]
     events: tuple[RunEvent, ...]
-    session_context: SessionContext | WorkspaceSessionContext | None = None
+    session_context: SessionContext | DevelopmentSessionContext | WorkspaceSessionContext | None = None
     work: WorkFrame | None = None
 
 

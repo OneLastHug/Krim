@@ -58,10 +58,12 @@ from .session_lifecycle_models import (
     SESSION_LIFECYCLE_TABLE_NAMES,
     SESSION_LIFECYCLE_TABLES,
 )
+from .sidebar_models import SIDEBAR_TABLE_NAMES, SIDEBAR_TABLES
 
 APPLICATION_ID = 0x4B4C4331
-# 15：开发环境、统一操作回执与进程；14：会话归档；13：长任务；12：账号MCP
-SCHEMA_VERSION = 16
+# 16：开发预览绑定与浏览器凭据；15：开发环境、统一操作回执与进程；14：会话归档；
+# 13：长任务；12：账号MCP；17：会话侧栏呈现
+SCHEMA_VERSION = 17
 T = TypeVar("T")
 
 
@@ -144,6 +146,7 @@ class SQLiteStore:
                     *SESSION_LIFECYCLE_TABLES,
                     *DEVELOPMENT_TABLES,
                     *PREVIEW_TABLES,
+                    *SIDEBAR_TABLES,
                 ],
             )
         )
@@ -230,7 +233,8 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
                     current_tables = set(metadata.tables) | set(TABLES)
-                    schema16 = current_tables
+                    schema17 = current_tables
+                    schema16 = schema17 - SIDEBAR_TABLE_NAMES
                     schema15 = schema16 - PREVIEW_TABLE_NAMES
                     schema14 = schema15 - DEVELOPMENT_TABLE_NAMES
                     schema13 = schema14 - SESSION_LIFECYCLE_TABLE_NAMES
@@ -272,11 +276,12 @@ class SQLiteStore:
                         14: schema14,
                         15: schema15,
                         16: schema16,
+                        17: schema17,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-
+                        or version not in
+                        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
@@ -481,7 +486,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, status, code)
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
                     else None
                 )
                 terminal_data: dict[str, JsonValue] = {
@@ -506,7 +511,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -550,7 +555,7 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
-            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+            if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                 from . import observation_outbox as hot_sql
 
                 try:
@@ -750,7 +755,7 @@ class SQLiteStore:
             ),
             (
                 await work_sql.load(conn, run_id)
-                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+                if self.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
                 else None
             ),
         )
@@ -767,7 +772,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+        if self.schema_version not in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1267,7 +1272,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
-                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+                    if self.schema_version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
                     else None
                 )
                 recovered_code = (
@@ -1302,7 +1307,7 @@ class SQLiteStore:
                         finished_at=time.time(),
                     )
                 )
-                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+                if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -1354,7 +1359,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+            if self.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 

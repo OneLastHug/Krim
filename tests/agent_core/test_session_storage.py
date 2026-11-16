@@ -18,6 +18,7 @@ from krim_agent.storage.models import runs, turns
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.sandbox_models import SANDBOX_TABLES
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import MCP_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
 
 
@@ -37,6 +38,7 @@ def downgrade(path, version):
         for name in sorted(MCP_TABLE_NAMES):
             conn.execute(f'DROP TABLE "{name}"')
         for table in [
+            *reversed(SIDEBAR_TABLES),
             *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
             *reversed(SESSION_LIFECYCLE_TABLES),
             *reversed(EXTENSION_TABLES),

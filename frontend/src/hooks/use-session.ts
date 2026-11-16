@@ -3,6 +3,7 @@ import { object, request, RequestError } from "../api";
 import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
+import { DEFAULT_GROUP, includeSessions, parseSidebar } from "../lib/session-sidebar";
 
 interface Detail { facts: Record<string, unknown> | null; trace: Record<string, unknown>; events: Record<string, unknown>[]; loadedForStatus?: Turn["status"]; traceLoaded?: boolean }
 interface ControlIntent extends Scope { target: string; turn_id: string; body: Record<string, unknown>; rejected: boolean }
@@ -133,9 +134,17 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       }
       try {
         const suffix = listView === "active" ? "" : listView === "trash" ? "/lifecycle/trash" : "/lifecycle/archived";
-        const rows = await request(sessionPath(workspace) + suffix + "?limit=50", apiKey, undefined, controller.signal);
-        if (!current()) return; if (!Array.isArray(rows)) throw new Error("对话列表无效");
-        const sessions = rows.map(parseSession); if (sessions.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配"); setList(sessions);
+        const sessions: Session[] = [];
+        for (let offset = 0; offset < 10000; offset += 50) {
+          const rows = await request(sessionPath(workspace) + suffix + (offset ? `?offset=${offset}&limit=50` : "?limit=50"), apiKey, undefined, controller.signal);
+          if (!current()) return; if (!Array.isArray(rows)) throw new Error("对话列表无效");
+          const page = rows.map(parseSession);
+          if (page.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配");
+          sessions.push(...page); if (page.length < 50) break;
+          if (offset === 9950) throw new Error("对话列表容量超限");
+        }
+        if (new Set(sessions.map(s => s.id)).size !== sessions.length) throw new Error("对话列表重复，请刷新");
+        setList(sessions);
         if (!id) { setSession(null); setHistory([]); return; }
         while (current()) {
           const value = parseSession(await request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal));
@@ -290,14 +299,32 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     }
   }
   function edit(text: string) { try { saveDraft(localStorage, scope(), text); setDraft(text); } catch (error) { setNotice(chatReason(error)); } }
-  async function create(title: string, target: string) {
-    let marker = "", ownsFlight = false; let current = () => false;
+  async function create(title: string, target: string, groupId?: string) {
+    let marker = "", ownsFlight = false; let current = () => false; let created: Session | null = null;
+    const originalSession = id;
     try {
       const targetScope = scope(null); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
       flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, title);
       const { intent, first } = prepareIntent(localStorage, targetScope, "session", { title, target_key: target }); refreshPending();
-      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
-    } catch (error) { if (current()) setNotice(chatReason(error)); }
+      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; created = value as Session; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
+      const who = actorRef.current?.value;
+      const sameAccount = () => mounted.current && activeRef.current && keyRef.current === apiKey && actorRef.current?.value.principal_id === targetScope.principal_id && actorRef.current?.value.generation === targetScope.generation && selected.current.workspace === targetScope.workspace_id;
+      if (created && who && sameAccount()) {
+        try {
+          const path = `/v2/workspaces/${encodeURIComponent(targetScope.workspace_id)}/session-sidebar`;
+          const prior = parseSidebar(await request(path, apiKey));
+          if (!sameAccount()) return created;
+          const next = includeSessions(prior, [...list.filter(session => session.id !== created!.id), created]);
+          if (next.groups.length > 100 || new TextEncoder().encode(JSON.stringify(next)).length > 64000) throw new Error("排序容量超限");
+          const destination = groupId ?? prior.sessions.find(entry => entry.session_id === originalSession)?.group_id ?? DEFAULT_GROUP;
+          if (!next.groups.some(group => group.id === destination)) throw new Error("会话分组已变化");
+          const entries = next.sessions.map(entry => entry.session_id === created!.id ? { ...entry, group_id: destination } : entry);
+          await request(path, apiKey, { expected_revision: prior.revision, groups: next.groups, sessions: entries }, undefined, "PUT");
+          if (sameAccount()) window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: targetScope.principal_id, workspace: targetScope.workspace_id } }));
+        } catch { if (sameAccount()) setNotice("会话已创建，分组保存结果未确认。请重新读取排序后检查。"); }
+      }
+      return created;
+    } catch (error) { if (current()) setNotice(chatReason(error)); return null; }
     finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
   }
   async function submit() {
@@ -322,33 +349,36 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); refreshPending(); }
   }
-  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string) {
+  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string, target?: Session) {
     const who = actorRef.current, member = who?.value.workspaces.find(w => w.workspace_id === workspace);
-    if (!activeRef.current || !who || who.key !== keyRef.current || !session || session.id !== id || session.workspace_id !== workspace || selected.current.id !== id || selected.current.workspace !== workspace) return;
+    const controlled = target ?? session;
+    if (!activeRef.current || !who || who.key !== keyRef.current || !controlled || controlled.workspace_id !== workspace || !target && controlled.id !== id || selected.current.id !== id || selected.current.workspace !== workspace) return;
+    if (target && (action !== "rename" || !list.some(value => value.id === target.id && value.revision === target.revision) || target.workspace_id !== workspace || target.owner_id !== who.value.principal_id)) return;
+    const targetId = controlled.id;
     const canWriteNow = !!member && member.role !== "viewer";
     const canApproveNow = canWriteNow && member.approve;
     if (action === "rename") {
-      if (!canWriteNow || typeof title !== "string" || !title.trim() || title.trim().length > 128 || session.status !== "open") return;
+      if (!canWriteNow || typeof title !== "string" || !title.trim() || title.trim().length > 128 || controlled.status !== "open") return;
     } else if (action === "approval") {
       if (!canApproveNow || !turn || !turn.run_id || typeof allow !== "boolean" || turn.status !== "running" || turn.session_id !== id || turn.workspace_id !== workspace || !history.some(item => item.id === turn.id && item.run_id === turn.run_id && item.status === "running") || !approval) return;
       const stillPending = approvals.some(item => item.request_id === approval.request_id && item.run_id === turn.run_id && item.call_id === approval.call_id && item.arguments_hash === approval.arguments_hash && item.tool_hash === approval.tool_hash);
       if (!stillPending) return;
     } else if (!canWriteNow) return;
     if (action === "cancel" && (!turn || turn.session_id !== id || turn.workspace_id !== workspace || !["queued", "running"].includes(turn.status) || !history.some(item => item.id === turn.id && item.status === turn.status))) return;
-    if (action === "close" && session.status !== "open" || action === "resume" && session.status !== "closed") return;
-    const marker = action + ":" + (approval?.request_id ?? turn?.id ?? id); if (flights.current.has(marker)) return;
+    if (action === "close" && controlled.status !== "open" || action === "resume" && controlled.status !== "closed") return;
+    const marker = action + ":" + (approval?.request_id ?? turn?.id ?? targetId); if (flights.current.has(marker)) return;
     let current = () => false;
     try {
-      const targetScope = scope(id); let cacheKey = JSON.stringify({ ...targetScope, marker });
+      const targetScope = scope(targetId); let cacheKey = JSON.stringify({ ...targetScope, marker });
       flight(marker, true); invalidate(); current = capture(); setVersion(v => v + 1);
-      const values = controls(), sessionTarget = sessionPath(workspace) + "/" + encodeURIComponent(id);
+      const values = controls(), sessionTarget = sessionPath(workspace) + "/" + encodeURIComponent(targetId);
       const expectedTarget = action === "approval" ? turnPath(workspace, id, turn!.id) + "/approvals/" + encodeURIComponent(String(approval!.request_id)) : action === "cancel" ? turnPath(workspace, id, turn!.id) + "/cancel" : sessionTarget + "/" + action;
-      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.generation === targetScope.generation && value.workspace_id === workspace && value.session_id === id && value.target === expectedTarget);
+      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.generation === targetScope.generation && value.workspace_id === workspace && value.session_id === targetId && value.target === expectedTarget);
       if (previous) cacheKey = previous[0];
       let saved = previous?.[1] ?? values[cacheKey], first = saved === undefined;
       if (!saved) {
         const path = expectedTarget;
-        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: session.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
+        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: controlled.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
         saved = { ...targetScope, target: path, turn_id: turn?.id ?? "", body, rejected: false }; values[cacheKey] = saved; saveControls(values);
       }
       first = first || saved.rejected;
@@ -370,7 +400,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); }
   }
-  async function rename(title: string) { await control(null, "rename", undefined, undefined, title); }
+  async function rename(title: string, sessionId = id) { const target = sessionId === id ? undefined : list.find(value => value.id === sessionId); if (sessionId !== id && !target) return; await control(null, "rename", undefined, undefined, title, target); }
   function loadDetails(turn: Turn): Promise<void> {
     const identity = actorRef.current?.value;
     if (!identity || identity.principal_id !== actor?.value.principal_id || turn.session_id !== id || turn.workspace_id !== workspace || !turn.run_id) return Promise.resolve();
