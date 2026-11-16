@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, LoaderCircle, Shield, Wrench } from "lucide-react";
 import { runReason } from "../lib/copy";
+import { displayToolName } from "../lib/tool-names";
 import type { ToolPresentation, ToolState } from "../lib/session-presentation";
 import { ToolProvenance } from "./ToolProvenance";
 import { Button } from "./ui/button";
@@ -44,21 +45,23 @@ export function ToolCallCard({ tool, canApprove, busy, pending, onDecision, onIn
   onDecision: (allow: boolean) => void;
   onInspect: () => void;
 }) {
+  // 显示用名称：旧 dev_* 名映射为新名；事件与审批记录中的原始 name 不变。
+  const toolName = displayToolName(tool.name);
   if (tool.approval) return <section className="approval chat-approval" data-request-id={tool.approval.request_id} data-risk={tool.risk === "write" ? "write" : tool.risk === "read" ? "read" : "unknown"} aria-label="等待审批">
-    <div className="approval-title"><Shield aria-hidden="true" /><strong data-ui-data>{tool.name}</strong><span>等待审批</span></div>
+    <div className="approval-title"><Shield aria-hidden="true" /><strong data-ui-data>{toolName}</strong><span>等待审批</span></div>
     <ToolProvenance value={{ source: tool.source, risk: tool.risk ?? "unknown" }} />
     <ApprovalTime expiresAt={tool.approval.expires_at} />
-    <pre data-ui-data className="approval-arguments" tabIndex={0} aria-label={`${tool.name} 的调用参数`}>{valueText(tool.approval.arguments)}</pre>
+    <pre data-ui-data className="approval-arguments" tabIndex={0} aria-label={`${toolName} 的调用参数`}>{valueText(tool.approval.arguments)}</pre>
     <div className="approval-actions">
-      <Button disabled={!canApprove || busy || pending} onClick={() => onDecision(true)} aria-label={`允许 ${tool.name} 本次调用`}>允许本次调用</Button>
-      <Button variant="outline" disabled={!canApprove || busy || pending} onClick={() => onDecision(false)} aria-label={`拒绝 ${tool.name} 本次调用`}>拒绝</Button>
+      <Button disabled={!canApprove || busy || pending} onClick={() => onDecision(true)} aria-label={`允许 ${toolName} 本次调用`}>允许本次调用</Button>
+      <Button variant="outline" disabled={!canApprove || busy || pending} onClick={() => onDecision(false)} aria-label={`拒绝 ${toolName} 本次调用`}>拒绝</Button>
       {pending && <span role="status">正在确认决定</span>}
       {!canApprove && <span>当前身份没有审批权限</span>}
     </div>
   </section>;
 
   return <details className="chat-tool" data-state={tool.state} data-call-id={tool.callId ?? tool.providerCallId}>
-    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Wrench aria-hidden="true" />}<strong data-ui-data>{tool.name}</strong><span>{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
+    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Wrench aria-hidden="true" />}<strong data-ui-data>{toolName}</strong><span>{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
     <div className="chat-tool-body">
       <ToolProvenance value={{ source: tool.source, risk: tool.risk }} />
       <div className="chat-tool-section"><span>参数</span><pre data-ui-data tabIndex={0}>{valueText(tool.arguments)}</pre></div>

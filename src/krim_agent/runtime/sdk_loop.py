@@ -143,6 +143,7 @@ class DevelopmentSDKLoop(AgentLoop):
             assert_target_current,
             max_steps=self.settings.max_steps,
             max_output=self.settings.max_output_bytes,
+            model_timeout=self.settings.model_timeout,
             deadline=execution_budget.deadline,
             workspace=development_context is not None,
             execution_budget=execution_budget,

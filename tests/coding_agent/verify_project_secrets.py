@@ -56,7 +56,7 @@ class SecretModel:
         self.calls += 1
         if self.calls == 1:
             yield ModelToolCall(
-                id="secret-command", name="dev_shell",
+                id="secret-command", name="shell",
                 arguments={
                     "command": "exec /usr/bin/python3 -I -c " + shlex.quote(CONSUMER),
                     "secret_refs": ["fixture-token"], "timeout_seconds": 120,

@@ -57,3 +57,19 @@ test("未知工具状态仍保留不确定结果", async () => {
   await render({ ...base, state: "unknown", executorStarted: null });
   expect(host.textContent).toContain("结果未确认");
 });
+
+test("旧 dev_shell 显示新名 shell，回调与调用标识保持原名", async () => {
+  await render({ ...base, name: "dev_shell", approval: { request_id: "request-9", run_id: "run-1", call_id: "call-1", name: "dev_shell", arguments: { command: "ls" }, arguments_hash: "a".repeat(64), tool_hash: "b".repeat(64), expires_at: 1300 } });
+  const section = host.querySelector("section.approval");
+  expect(section?.getAttribute("data-request-id")).toBe("request-9");
+  expect(section?.textContent).toContain("shell");
+  expect(section?.textContent).not.toContain("dev_shell");
+  const allow = host.querySelector<HTMLButtonElement>('[aria-label="允许 shell 本次调用"]');
+  expect(allow).toBeTruthy();
+  await act(async () => allow!.click());
+  expect(decision).toHaveBeenCalledExactlyOnceWith(true);
+  await render({ ...base, name: "dev_shell", state: "ok" });
+  expect(host.querySelector(".chat-tool")?.getAttribute("data-call-id")).toBe("call-1");
+  expect(host.querySelector("summary")?.textContent).toContain("shell");
+  expect(host.querySelector("summary")?.textContent).not.toContain("dev_shell");
+});

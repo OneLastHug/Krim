@@ -1,5 +1,6 @@
 import type { SessionState } from "../hooks/use-session";
 import { projectTurn } from "./session-presentation";
+import { canonicalToolName } from "./tool-names";
 import { object } from "../api";
 
 export interface RegisteredPreview { preview_id: string; project_id: string; state: string; port: number }
@@ -12,7 +13,7 @@ export function registeredPreviews(chat: SessionState, projectId: string | null)
     const detail = chat.details?.[turn.id];
     const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : []);
     for (const item of projectTurn(turn, events, [], { events: detail?.events, facts: chat.turnFacts?.[turn.id] ?? detail?.facts })) {
-      if (item.type !== "tool" || item.state !== "ok" || !item.resultAvailable || !["dev_preview_register", "dev_preview_status", "dev_preview_stop"].includes(item.name)) continue;
+      if (item.type !== "tool" || item.state !== "ok" || !item.resultAvailable || !["preview_register", "preview_status", "preview_stop"].includes(canonicalToolName(item.name))) continue;
       try {
         const result = object(item.result), environment = object(result.environment), id = result.preview_id;
         if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id) || environment.project_id !== projectId || environment.owner_id !== chat.actor.principal_id || !Number.isInteger(result.port) || Number(result.port) < 1 || Number(result.port) > 65535 || !["pending", "ready", "stopped", "revoked", "unknown"].includes(String(result.state))) continue;

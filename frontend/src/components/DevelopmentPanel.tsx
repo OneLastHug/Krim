@@ -13,6 +13,7 @@ import { fetchDirectory, fetchFileBytes, fetchProjectsPage, useDevelopment, type
 import type { SessionState } from "../hooks/use-session.ts";
 import { request } from "../api.ts";
 import { parsePreviewBootstrap, registeredPreviews } from "../lib/development-previews";
+import { displayToolName } from "../lib/tool-names";
 import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
@@ -216,9 +217,9 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
             <summary><ChevronRight aria-hidden="true" />MCP tools<span className="g-detail-count">{dev.tools.length}</span></summary>
             <div className="g-detail-list" tabIndex={0} aria-label="会话工具目录">
               {dev.tools.length === 0 && <p className="dev-detail-empty">当前目标没有可用工具</p>}
-              {dev.tools.map((tool, index) => <button type="button" className="g-tool-row" key={`${tool.name}:${index}`} title={tool.name}
+              {dev.tools.map((tool, index) => <button type="button" className="g-tool-row" key={`${tool.name}:${index}`} title={displayToolName(tool.name)}
                 onClick={() => setDialog({ kind: "tool", tool })}>
-                <span>{tool.name}</span><span>{riskLabel(tool.risk)}</span>
+                <span>{displayToolName(tool.name)}</span><span>{riskLabel(tool.risk)}</span>
               </button>)}
             </div>
           </details>
@@ -798,7 +799,7 @@ function ContextDialogBody({ chat }: { chat: SessionState }) {
 
 function ToolDialogBody({ tool }: { tool: ToolEntry }) {
   return <>
-    <DialogHeader><DialogTitle>{tool.name}</DialogTitle><DialogDescription>会话工具目录</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{displayToolName(tool.name)}</DialogTitle><DialogDescription>会话工具目录</DialogDescription></DialogHeader>
     <dl className="g-source-details">
       <dt>来源</dt><dd>{tool.kind ? `${tool.kind === "mcp" ? "MCP" : "HTTP"} · ${tool.server} / ${tool.tool}` : "内置工具"}</dd>
       {tool.version && <><dt>版本</dt><dd>{tool.version}</dd></>}

@@ -369,7 +369,6 @@ export function App() {
         {mode !== "chat" && identity && identity.workspaces.length > 1 && <select className="workbench-workspace-select" aria-label="当前工作区" value={productWorkspace} onChange={event => chooseWorkspace(event.target.value)}>
           {identity.workspaces.map(value => <option key={value.workspace_id} value={value.workspace_id}>{workspaceNames[value.workspace_id] ?? "工作区"}</option>)}
         </select>}
-        <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
       </>}
       inspector={<WorkbenchInspector view={mode} objectId={objectId} identity={identity} accountName={accountName} gatewayName={gatewayName} workspaceNames={workspaceNames}/>}
     >
@@ -422,5 +421,6 @@ export function App() {
         </section>
       </section>
     </WorkbenchLayout>
+    <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
   </div>;
 }

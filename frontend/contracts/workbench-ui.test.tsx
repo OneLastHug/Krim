@@ -84,6 +84,37 @@ async function openMorePopover() {
   await until(() => expect(document.querySelector(".popover-menu[aria-label='更多操作']")).toBeTruthy());
 }
 
+test("窄屏未登录时连接弹窗独立于侧栏挂载，跨断点保留输入并可登录", async () => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+  override = (path, options) => {
+    if (path !== "/v2/me") return undefined;
+    return new Headers(options.headers).get("Authorization") === "Bearer mobile-login-fixture"
+      ? json({ principal_id: "operator", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] })
+      : json({ error: { code: "unauthorized" } }, 401);
+  };
+  await mount();
+  await until(() => expect(host.textContent).toContain("密钥无效，请重新连接"));
+  expect(host.querySelector(".desktop-sidebar")).toBeNull();
+  const connect = [...host.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent?.trim() === "连接");
+  expect(connect).toBeTruthy();
+  await act(async () => connect!.click());
+  await until(() => expect(document.querySelector("#api-key")).toBeTruthy());
+  await act(async () => {
+    const input = document.getElementById("api-key") as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "mobile-login-fixture");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    window.dispatchEvent(new Event("resize"));
+  });
+  expect(document.querySelectorAll("#api-key")).toHaveLength(1);
+  expect((document.getElementById("api-key") as HTMLInputElement).value).toBe("mobile-login-fixture");
+  await act(async () => document.getElementById("connect-save")!.click());
+  await until(() => expect(document.getElementById("api-key")).toBeNull());
+  await until(() => expect(host.querySelector('[aria-label="已存对话"]')).toBeTruthy());
+});
+
 test("评测与自动化共存时切换页面不复制工作台或复用组件身份", async () => {
   productEnabled = true;
   vi.stubGlobal("crypto", webcrypto);

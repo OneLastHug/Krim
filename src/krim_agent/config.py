@@ -27,6 +27,7 @@ class Settings(BaseModel):
     max_input_bytes: int = Field(default=32768, ge=1, le=32768)
     max_request_bytes: int = Field(default=262144, ge=256, le=1048576)
     run_timeout: float = Field(default=30, gt=0, le=300)
+    model_timeout: float = Field(default=20, gt=0, le=300)
     tool_timeout: float = Field(default=5, gt=0, le=30)
     # 上限 86400：无状态停靠的人类尺度批复窗口（ADR-0015 §5）；默认 300 兼容 ADR-0014
     approval_timeout: float = Field(default=300, gt=0, le=86400)

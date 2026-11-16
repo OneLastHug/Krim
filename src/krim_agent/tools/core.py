@@ -14,6 +14,7 @@ from krim_agent.contracts import ToolObservation, fingerprint
 
 from .mcp_schema import MCPContract
 from .output import OutputContract, WireOutputSchema
+from .project_names import LEGACY_PROJECT_NAMES, PROJECT_CAPABILITIES
 
 type Decision = Literal["allow", "deny", "ask"]
 
@@ -87,13 +88,7 @@ class ToolSpec:
         external = self.external_executor is not None
         if external:
             if self.name in {
-                "dev_shell", "dev_process", "dev_output", "dev_stdin", "dev_cancel",
-                "dev_read", "dev_list",
-                "dev_preview_register", "dev_preview_status", "dev_preview_stop",
-                "dev_browser_open", "dev_browser_action", "dev_browser_upload",
-                "dev_browser_screenshot", "dev_browser_close",
-                "dev_git_clone", "dev_git_diff", "dev_git_tree",
-                "dev_git_commit", "dev_git_push",
+                *LEGACY_PROJECT_NAMES,
                 "sandbox_project",
                 "sandbox_read",
                 "sandbox_list",
@@ -132,16 +127,8 @@ class ToolSpec:
             or self.capability is None
             or self.capability
             != {
-                "dev_shell": "command", "dev_process": "read", "dev_output": "read",
-                "dev_stdin": "write", "dev_cancel": "write", "dev_read": "read", "dev_list": "read",
-                "dev_preview_register": "write", "dev_preview_status": "read",
-                "dev_preview_stop": "write",
-                "dev_browser_open": "write", "dev_browser_action": "write",
-                "dev_browser_upload": "write", "dev_browser_screenshot": "write",
-                "dev_browser_close": "write",
-                "dev_git_clone": "write", "dev_git_diff": "write",
-                "dev_git_tree": "write", "dev_git_commit": "write",
-                "dev_git_push": "write",
+                **PROJECT_CAPABILITIES,
+                **{old: PROJECT_CAPABILITIES[new] for old, new in LEGACY_PROJECT_NAMES.items()},
                 "sandbox_project": "read",
                 "sandbox_read": "read",
                 "sandbox_list": "read",
@@ -210,7 +197,8 @@ class ToolSpec:
         }
         if self.scoped_executor is not None:
             value.update(risk=self.risk, capability=self.capability, policy_version=(
-                "development/1" if self.name.startswith("dev_") else
+                "development/1"
+                if self.name in PROJECT_CAPABILITIES or self.name in LEGACY_PROJECT_NAMES else
                 "sandbox/1" if self.name.startswith("sandbox_") else "workspace/1"))
         if self.source is not None:
             if type(self.source) is not ToolSource or self.external_executor is None:

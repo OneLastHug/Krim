@@ -54,18 +54,18 @@ async def test_git_management_tools_and_revocation_are_wired(tmp_path: Path, mon
     try:
         registry = development.registry()
         names = {
-            "dev_git_clone",
-            "dev_git_diff",
-            "dev_git_tree",
-            "dev_git_commit",
-            "dev_git_push",
+            "git_clone",
+            "git_diff",
+            "git_tree",
+            "git_commit",
+            "git_push",
         }
         assert names <= set(registry._items)
         for name in names:
             spec = registry.get(name)
             assert spec.risk == "write" and spec.capability == "write"
             assert spec.scoped_executor == development.execute
-        assert registry.get("dev_git_tree").parameters is not GitExecutionRequest
+        assert registry.get("git_tree").parameters is not GitExecutionRequest
 
         async def no_supervisor(_self):
             return None

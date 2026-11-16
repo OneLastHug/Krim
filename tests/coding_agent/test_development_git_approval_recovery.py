@@ -79,7 +79,7 @@ class GitModel:
 
     async def stream(self, messages: Any, tools: Any):
         names = {item["name"] for item in tools}
-        if "dev_git_commit" not in names:
+        if "git_commit" not in names:
             # The real development-context compactor may ask for a no-tool
             # summary first. Keep this local and deterministic too.
             yield ModelText(text="No prior history.")
@@ -88,7 +88,7 @@ class GitModel:
         if self.task_calls == 1:
             yield ModelToolCall(
                 id="fixture-commit",
-                name="dev_git_commit",
+                name="git_commit",
                 arguments=self.request.model_dump(mode="json"),
             )
         else:

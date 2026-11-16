@@ -14,7 +14,7 @@
 
 `PUT /v2/me/development/projects/{project_id}/secrets/{secret_id}` 由当前项目具有写入和批准权限的主体管理。请求字段为 `expected_revision`、`expires_at`、`value`、`revoked`；值按UTF-8最多8192字节，过期时间最多24小时。响应只有Secret引用、当前revision和撤销状态。值不进入模型会话、工具参数或响应；同一引用不能在Git凭据和项目投递用途之间切换。
 
-模型调用 `dev_shell` 时只传 `secret_refs: ["已配置的引用"]` 及有限 `timeout_seconds`，当前grant还必须明确包含两项动作。API没有配置的vault时，Secret管理和命令投递保持关闭。
+模型调用 `shell` 时只传 `secret_refs: ["已配置的引用"]` 及有限 `timeout_seconds`，当前grant还必须明确包含两项动作。API没有配置的vault时，Secret管理和命令投递保持关闭。
 
 轮换或撤销提交后，管理路径释放项目锁，再在更新围栏内等待精确清理；停止未确认会报失败并保留可重试绑定。不要将Secret取消放在持有项目锁的子任务中，以免终端取消再次取锁。
 

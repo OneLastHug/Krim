@@ -84,6 +84,9 @@ async def test_imports_contents_modes_and_excludes_git_metadata(tmp_path: Path) 
     (git_dir / "hooks").mkdir(parents=True)
     (git_dir / "hooks" / "pre-commit").write_text("touch SHOULD_NOT_RUN\n", encoding="utf-8")
     (git_dir / "config").write_text("not an imported file\n", encoding="utf-8")
+    staging = root / ".krim-file-staging"
+    staging.mkdir(mode=0o700)
+    (staging / (".krim-write-" + "a" * 32)).write_text("interrupted write")
     repo = repository(tmp_path / "private.git")
 
     result = await GitWorkspaceBridge().import_tree(binding(root), repo, verify=allow)
@@ -96,7 +99,8 @@ async def test_imports_contents_modes_and_excludes_git_metadata(tmp_path: Path) 
     assert any("README.md" in entry and entry.startswith("100644") for entry in entries)
     assert any("bin/run.sh" in entry and entry.startswith("100755") for entry in entries)
     assert any(".gitattributes" in entry for entry in entries)
-    assert not any(entry.partition(chr(9))[2].split("/")[0] == ".git" for entry in entries)
+    assert not any(entry.partition(chr(9))[2].split("/")[0]
+                   in {".git", ".krim-file-staging"} for entry in entries)
     assert git("--git-dir", str(repo), "show", f"{result.tree_id}:README.md") == b"hello\n"
     assert not (tmp_path / "SHOULD_NOT_RUN").exists()
 

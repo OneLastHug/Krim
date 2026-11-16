@@ -148,6 +148,8 @@ class AgentLoop:
             check,
             max_steps=max_steps,
             max_output=self.settings.max_output_bytes,
+            # Legacy frozen workspace frames retain their historical 20s step budget.
+            model_timeout=20 if frame else self.settings.model_timeout,
             deadline=scope.deadline if scope else None,
             workspace=frame is not None,
             execution_budget=execution_budget if frame is not None else None,

@@ -297,14 +297,14 @@ async def test_model_media_requires_canonical_tool_result_and_current_grant(moun
     history = [Message(role="system", content="test"),
                Message(role="user", content=encoded(saved)),
                Message(role="assistant", content="", tool_calls=[{
-                   "id": "screenshot-wire", "name": "dev_browser_screenshot",
+                   "id": "screenshot-wire", "name": "browser_screenshot",
                    "arguments": {"browser_id": "browser-fixture"},
                }]),
                Message(role="tool", call_id="screenshot-wire", content=encoded(saved))]
     assert await attach(history) == history
     await app.store.append(run_id, "tool_end", {
         "call_id": "screenshot-call", "provider_call_id": "screenshot-wire",
-        "span_id": "screenshot-span", "step_index": 0, "name": "dev_browser_screenshot",
+        "span_id": "screenshot-span", "step_index": 0, "name": "browser_screenshot",
         "status": "ok", "executor_started": True, "result_available": True,
         "value": saved, "decision": "allow",
     })
@@ -406,15 +406,15 @@ async def test_browser_tool_records_private_screenshot_and_cleanup(mounted, monk
         finally:
             CURRENT.reset(token)
 
-    opened = await invoke("dev_browser_open", {"preview_id": record.handle.preview_id})
-    await invoke("dev_browser_action", {"browser_id": opened["browser_id"],
+    opened = await invoke("browser_open", {"preview_id": record.handle.preview_id})
+    await invoke("browser_action", {"browser_id": opened["browser_id"],
                                         "action": "click", "selector": "#button"})
-    saved = await invoke("dev_browser_screenshot", {"browser_id": opened["browser_id"]})
+    saved = await invoke("browser_screenshot", {"browser_id": opened["browser_id"]})
     assert "data_base64" not in saved and "ticket" not in saved
     found, _ = await selected.read_browser_artifact(actor, saved["project_id"],
                                                   saved["run_id"], saved["reference"])
     assert found == data
-    await invoke("dev_browser_close", {"browser_id": opened["browser_id"]})
+    await invoke("browser_close", {"browser_id": opened["browser_id"]})
 
     async def stop_run(ownership):
         calls.append("terminal-stop")
@@ -431,9 +431,9 @@ async def test_preview_tools_are_project_scoped_and_return_no_ticket(mounted):
     assert selected is not None and app.identities is not None
     actor = app.identities.resolve(record.process.ownership.owner_id)
     registry = selected.registry()
-    assert registry.get("dev_preview_register").risk == "write"
-    assert registry.get("dev_preview_status").risk == "read"
-    assert registry.get("dev_preview_stop").risk == "write"
+    assert registry.get("preview_register").risk == "write"
+    assert registry.get("preview_status").risk == "read"
+    assert registry.get("preview_stop").risk == "write"
 
     async def invoke(name, values, *, cross_project=False, stale_generation=False):
         spec = registry.get(name)
@@ -463,17 +463,17 @@ async def test_preview_tools_are_project_scoped_and_return_no_ticket(mounted):
             CURRENT.reset(scope_token)
 
     with pytest.raises(ServiceError, match="permission_denied"):
-        await invoke("dev_preview_register", {
+        await invoke("preview_register", {
             "process_id": record.process.process_id, "port": 3003,
         }, stale_generation=True)
-    result = await invoke("dev_preview_register", {
+    result = await invoke("preview_register", {
         "process_id": record.process.process_id, "port": 3003,
     })
     assert "ticket" not in result and result["state"] == "pending"
-    status = await invoke("dev_preview_status", {"preview_id": result["preview_id"]})
+    status = await invoke("preview_status", {"preview_id": result["preview_id"]})
     assert status == result
     with pytest.raises(ServiceError, match="permission_denied"):
-        await invoke("dev_preview_status", {"preview_id": result["preview_id"]},
+        await invoke("preview_status", {"preview_id": result["preview_id"]},
                      cross_project=True)
-    stopped = await invoke("dev_preview_stop", {"preview_id": result["preview_id"]})
+    stopped = await invoke("preview_stop", {"preview_id": result["preview_id"]})
     assert stopped["state"] == "stopped" and "ticket" not in stopped

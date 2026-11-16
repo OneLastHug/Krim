@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { request } from "../api";
+import { displayToolName } from "../lib/tool-names";
 
 type ToolScope = {
   principal_id: string;
@@ -105,7 +106,7 @@ export function ToolCatalog({ apiKey, targetKey, scope, active }: {
     <summary><strong>外部工具</strong><span>{tools.length} 项</span></summary>
     {tools.map((tool, index) => <article className="chat-detail" key={`${tool.name}:${tool.source.kind}:${tool.source.server}:${tool.source.tool}:${index}`}>
       <div>
-        <strong>{tool.name}</strong><span aria-hidden="true"> → </span>
+        <strong>{displayToolName(tool.name)}</strong><span aria-hidden="true"> → </span>
         <span>{tool.source.server} / {tool.source.tool}</span>
       </div>
       <p>{tool.source.kind === "mcp" ? "MCP" : "HTTP"}　{tool.risk === "read" ? "只读" : tool.risk === "write" ? "写操作" : "风险未标注"}</p>

@@ -19,7 +19,7 @@
 - `POST /v2/me/development/previews/{preview_id}/stop`：先关闭预览，再停止服务。
 - `POST /api/development/previews/{preview_id}/open`：认证 Bearer、精确配置的 HTTPS Host/Origin；存在 Sec-Fetch-Site 时必须 same-origin。返回 `{action,ticket,expires_at}`，禁止缓存。客户端在新顶层标签页以表单 POST 兑换，不能把票据交给模型。
 
-模型工具为 `dev_preview_register`、`dev_preview_status`、`dev_preview_stop`，只操作当前项目/环境，返回 PreviewHandle，不返回票据。应用关闭时关闭自身路由/连接，保留部署所有的项目服务与 supervisor。
+模型工具为 `preview_register`、`preview_status`、`preview_stop`，只操作当前项目/环境，返回 PreviewHandle，不返回票据。应用关闭时关闭自身路由/连接，保留部署所有的项目服务与 supervisor。
 
 ## I 组合入口
 

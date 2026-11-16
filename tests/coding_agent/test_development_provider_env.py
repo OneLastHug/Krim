@@ -58,6 +58,25 @@ def test_explicit_development_image_and_tool_budget(monkeypatch):
     assert config.api_key.get_secret_value() == ""
 
 
+def test_responses_protocol_loads_from_environment(monkeypatch):
+    config = configure(
+        monkeypatch,
+        wire_api="responses",
+        max_response_bytes="1048576",
+        max_event_bytes="65536",
+        max_events="16384",
+        max_arguments_bytes="32768",
+    )
+    assert config is not None and config.wire_api == "responses"
+    assert config.max_response_bytes == 1048576
+    assert config.max_event_bytes == 65536 and config.max_events == 16384
+
+
+def test_unknown_wire_protocol_fails_closed(monkeypatch):
+    with pytest.raises(ProviderError, match="provider_config"):
+        configure(monkeypatch, wire_api="unknown")
+
+
 def test_explicit_false_does_not_enable_images(monkeypatch):
     config = configure(monkeypatch, allow_images="false")
     assert config is not None and config.allow_images is False
@@ -79,10 +98,18 @@ def test_serve_development_passes_explicit_media_budget(monkeypatch, tmp_path):
         calls.append((settings, http_config))
 
     monkeypatch.setattr(serving, "run_development", capture)
-    monkeypatch.setattr(sys, "argv", [
-        "krim", "serve-development", "--database", str(database),
-        "--development-config", str(development),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "krim",
+            "serve-development",
+            "--database",
+            str(database),
+            "--development-config",
+            str(development),
+        ],
+    )
     cli.main()
     assert len(calls) == 1
     settings, provider = calls[0]
@@ -134,15 +161,19 @@ def test_image_environment_reaches_real_development_composition(monkeypatch, tmp
         async with await open_application(
             database,
             settings=Settings(
-                database=database, provider="http", http_mode="agent",
-                sandbox_config_file=broker, max_request_bytes=1048576,
+                database=database,
+                provider="http",
+                http_mode="agent",
+                sandbox_config_file=broker,
+                max_request_bytes=1048576,
             ),
             http_config=config,
             development_configuration=DevelopmentConfiguration(
                 image_id="sha256:" + "a" * 64,
                 broker_environments_root=tmp_path / "environments",
                 private_state_root=tmp_path / "private",
-                model_images=True, history_compaction=True,
+                model_images=True,
+                history_compaction=True,
             ),
         ) as app:
             binding = app.service.bindings["target-development"]
@@ -155,21 +186,28 @@ def test_image_environment_reaches_real_development_composition(monkeypatch, tmp
     assert calls == []
 
 
-@pytest.mark.parametrize("name,value", [
-    ("allow_images", "1"),
-    ("allow_images", "yes"),
-    ("allow_images", "TRUE"),
-    ("allow_images", ""),
-    ("max_request_bytes", "1048577"),
-    ("max_request_bytes", "255"),
-    ("max_request_bytes", "1e6"),
-    ("max_request_bytes", " 32768"),
-    ("max_request_bytes", "32768.0"),
-    ("max_tool_calls", "0"),
-    ("max_tool_calls", "5"),
-    ("max_tool_calls", "true"),
-    ("max_tool_calls", "1.0"),
-])
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("allow_images", "1"),
+        ("allow_images", "yes"),
+        ("allow_images", "TRUE"),
+        ("allow_images", ""),
+        ("max_request_bytes", "1048577"),
+        ("max_request_bytes", "255"),
+        ("max_request_bytes", "1e6"),
+        ("max_request_bytes", " 32768"),
+        ("max_request_bytes", "32768.0"),
+        ("max_response_bytes", "1048577"),
+        ("max_event_bytes", "1048577"),
+        ("max_events", "16385"),
+        ("max_arguments_bytes", "65537"),
+        ("max_tool_calls", "0"),
+        ("max_tool_calls", "5"),
+        ("max_tool_calls", "true"),
+        ("max_tool_calls", "1.0"),
+    ],
+)
 def test_invalid_development_environment_fails_closed(monkeypatch, name, value):
     with pytest.raises(ProviderError, match="provider_config"):
         configure(monkeypatch, **{name: value})
