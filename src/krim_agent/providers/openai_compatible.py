@@ -6,8 +6,10 @@ SDK 负责模型请求和流式模型事件；完整 finish/DONE 和工具 JSON 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
+import traceback
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ import ai
 import httpx
 import openai
 from ai.providers.openai import OpenAIChatCompletionsProtocol
+from ai.providers.openai.protocol import OpenAIResponsesProtocol
 from ai.types.messages import FilePart, TextPart, ToolCallPart, ToolResultPart
 from ai.types.messages import Message as SDKMessage
 from ai.types.tools import Tool, ToolSpec
@@ -46,20 +49,21 @@ class ProviderError(ServiceError):
 class OpenAICompatibleConfig(StrictModel):
     base_url: str = Field(min_length=1, max_length=2048, repr=False)
     model: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     max_output_tokens: int = Field(default=512, ge=1, le=4096)
     reasoning_effort: Literal["xhigh"] | None = None
     thinking: Literal["disabled"] | None = None
-    connect_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
+    connect_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
     write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     pool_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     max_request_bytes: int = Field(default=32768, ge=256, le=1048576)
     allow_images: bool = Field(default=False, strict=True)
-    max_response_bytes: int = Field(default=131072, ge=256, le=131072)
-    max_event_bytes: int = Field(default=16384, ge=128, le=16384)
-    max_events: int = Field(default=1024, ge=1, le=1024)
-    max_arguments_bytes: int = Field(default=4096, ge=2, le=4096)
+    max_response_bytes: int = Field(default=131072, ge=256, le=1048576)
+    max_event_bytes: int = Field(default=16384, ge=128, le=1048576)
+    max_events: int = Field(default=1024, ge=1, le=16384)
+    max_arguments_bytes: int = Field(default=4096, ge=2, le=65536)
     max_tool_calls: int = Field(default=1, ge=1, le=4, strict=True)
 
     @field_validator("base_url")
@@ -124,12 +128,18 @@ class OpenAICompatibleConfig(StrictModel):
         names = (
             "BASE_URL",
             "MODEL",
+            "WIRE_API",
             "API_KEY",
             "MAX_OUTPUT_TOKENS",
             "REASONING_EFFORT",
             "THINKING",
+            "CONNECT_TIMEOUT_SECONDS",
             "READ_TIMEOUT_SECONDS",
             "MAX_REQUEST_BYTES",
+            "MAX_RESPONSE_BYTES",
+            "MAX_EVENT_BYTES",
+            "MAX_EVENTS",
+            "MAX_ARGUMENTS_BYTES",
             "MAX_TOOL_CALLS",
             "ALLOW_IMAGES",
         )
@@ -142,7 +152,15 @@ class OpenAICompatibleConfig(StrictModel):
             return None
         try:
             arguments: dict[str, Any] = dict(values)
-            for name in ("max_output_tokens", "max_request_bytes", "max_tool_calls"):
+            for name in (
+                "max_output_tokens",
+                "max_request_bytes",
+                "max_response_bytes",
+                "max_event_bytes",
+                "max_events",
+                "max_arguments_bytes",
+                "max_tool_calls",
+            ):
                 if name in values:
                     if re.fullmatch(r"[0-9]+", values[name]) is None:
                         raise ValueError
@@ -151,10 +169,11 @@ class OpenAICompatibleConfig(StrictModel):
                 if values["allow_images"] not in {"true", "false"}:
                     raise ValueError
                 arguments["allow_images"] = values["allow_images"] == "true"
-            if "read_timeout_seconds" in values:
-                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values["read_timeout_seconds"]) is None:
-                    raise ValueError
-                arguments["read_timeout_seconds"] = float(values["read_timeout_seconds"])
+            for name in ("connect_timeout_seconds", "read_timeout_seconds"):
+                if name in values:
+                    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values[name]) is None:
+                        raise ValueError
+                    arguments[name] = float(values[name])
             return cls.model_validate(arguments)
         except (ValueError, ValidationError):
             raise ProviderError("provider_config", 422) from None
@@ -166,6 +185,18 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
     lines: list[bytes] = []
     response_size = event_size = count = 0
     pending_cr = has_frame = False
+
+    def event_limit() -> ProviderError:
+        logging.getLogger(__name__).warning(
+            "Provider SSE limit: event_bytes=%d/%d events=%d/%d response_bytes=%d/%d",
+            event_size,
+            config.max_event_bytes,
+            count,
+            config.max_events,
+            response_size,
+            config.max_response_bytes,
+        )
+        return ProviderError("provider_event_limit")
 
     def finish_line() -> str | None:
         nonlocal event_size, count, has_frame
@@ -185,7 +216,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
         if has_frame:
             count += 1
             if count > config.max_events:
-                raise ProviderError("provider_event_limit")
+                raise event_limit()
         try:
             payload = b"\n".join(lines).decode("utf-8", errors="strict") if lines else None
         except UnicodeError:
@@ -204,7 +235,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
                 if byte == 10:
                     event_size += 1
                     if event_size > config.max_event_bytes:
-                        raise ProviderError("provider_event_limit")
+                        raise event_limit()
                     payload = finish_line()
                     if payload is not None:
                         yield payload
@@ -214,7 +245,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
                     yield payload
             event_size += 1
             if event_size > config.max_event_bytes:
-                raise ProviderError("provider_event_limit")
+                raise event_limit()
             if byte == 13:
                 pending_cr = True
             elif byte == 10:
@@ -364,9 +395,7 @@ def _texts(value: str) -> list[str]:
     return result
 
 
-def _sdk_messages(
-    messages: Sequence[Message], *, allow_images: bool = False
-) -> list[SDKMessage]:
+def _sdk_messages(messages: Sequence[Message], *, allow_images: bool = False) -> list[SDKMessage]:
     # 在 SDK 的历史修复之前检查 Krim 的工具结果配对，避免静默修补无效历史。
     _messages(messages, allow_images=allow_images)
     result: list[SDKMessage] = []
@@ -524,8 +553,170 @@ class _StreamBoundary:
         return complete
 
 
+@dataclass
+class _ResponsesBoundary:
+    """Bound Responses SSE; SDK still owns message conversion and tool hydration."""
+
+    config: OpenAICompatibleConfig
+    max_tool_calls: int
+    calls: dict[str, _ToolBuffer] = dataclass_field(default_factory=dict)
+    finished: set[str] = dataclass_field(default_factory=set)
+    indices: dict[int, str] = dataclass_field(default_factory=dict)
+    delta_seen: set[str] = dataclass_field(default_factory=set)
+    sdk_ids: dict[int, str] = dataclass_field(default_factory=dict)
+    snapshots: list[TokenUsage] = dataclass_field(default_factory=list)
+    prior: TokenUsage | None = None
+    done: bool = False
+    error: ProviderError | None = None
+    response: httpx.Response | None = None
+    completed_calls: list[ModelToolCall] = dataclass_field(default_factory=list)
+
+    def _item(self, item: Any) -> tuple[str, _ToolBuffer]:
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            raise ProviderError("provider_protocol")
+        identifier = item.get("id")
+        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 128:
+            raise ProviderError("provider_protocol")
+        buffer = _ToolBuffer()
+        buffer.append(
+            {
+                "id": item.get("call_id"),
+                "function": {
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments", ""),
+                },
+            },
+            self.config,
+        )
+        if not buffer.identifier or not buffer.name:
+            raise ProviderError("provider_protocol")
+        return identifier, buffer
+
+    def accept(self, payload: str) -> str:
+        event = parse_json(payload)
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str) or self.done:
+            raise ProviderError("provider_protocol")
+        kind = event["type"]
+        if kind == "response.incomplete":
+            raise ProviderError("provider_output_limit")
+        if kind in {"error", "response.failed"}:
+            raise ProviderError("provider_protocol")
+        if kind == "response.output_item.added":
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") not in {
+                "function_call",
+                "message",
+                "reasoning",
+            }:
+                raise ProviderError("provider_protocol")
+            if item["type"] == "function_call":
+                key, buffer = self._item(item)
+                if key in self.calls:
+                    raise ProviderError("provider_protocol")
+                if len(self.calls) >= self.max_tool_calls:
+                    raise ProviderError("tool_limit")
+                index = event.get("output_index")
+                if type(index) is not int or index < 0 or index in self.indices:
+                    raise ProviderError("provider_protocol")
+                self.indices[index] = key
+                self.calls[key] = buffer
+        elif kind in {
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        }:
+            delta_key = event.get("item_id")
+            output_index = event.get("output_index")
+            indexed_key = self.indices.get(output_index) if type(output_index) is int else None
+            if delta_key is None:
+                delta_key = indexed_key
+            elif indexed_key is not None and indexed_key != delta_key:
+                raise ProviderError("provider_protocol")
+            if not isinstance(delta_key, str) or delta_key not in self.calls:
+                raise ProviderError("provider_protocol")
+            delta_buffer = self.calls[delta_key]
+            if delta_key in self.finished:
+                raise ProviderError("provider_protocol")
+            if kind.endswith(".delta"):
+                delta = event.get("delta")
+                if not isinstance(delta, str):
+                    raise ProviderError("provider_protocol")
+                delta_buffer.append({"function": {"arguments": delta}}, self.config)
+                self.delta_seen.add(delta_key)
+            else:
+                arguments = event.get("arguments")
+                if not isinstance(arguments, str):
+                    raise ProviderError("provider_protocol")
+                if delta_key not in self.delta_seen and not delta_buffer.arguments:
+                    delta_buffer.append({"function": {"arguments": arguments}}, self.config)
+                if arguments != delta_buffer.arguments:
+                    raise ProviderError("provider_protocol")
+        elif kind == "response.output_item.done":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                raise ProviderError("provider_protocol")
+            if item.get("type") == "function_call":
+                key, buffer = self._item(item)
+                if self.calls.get(key) != buffer or key in self.finished:
+                    raise ProviderError("provider_protocol")
+                self.finished.add(key)
+        elif kind == "response.completed":
+            response = event.get("response")
+            if (
+                not isinstance(response, dict)
+                or response.get("status") != "completed"
+                or response.get("error")
+            ):
+                raise ProviderError("provider_protocol")
+            output = response.get("output")
+            if not isinstance(output, list):
+                raise ProviderError("provider_protocol")
+            keys = []
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") not in {
+                    "function_call",
+                    "message",
+                    "reasoning",
+                }:
+                    raise ProviderError("provider_protocol")
+                if item["type"] == "function_call":
+                    key, buffer = self._item(item)
+                    if key not in self.finished or self.calls.get(key) != buffer:
+                        raise ProviderError("provider_protocol")
+                    keys.append(key)
+                    self.completed_calls.append(buffer.collect())
+            if len(keys) != len(set(keys)) or set(keys) != set(self.calls):
+                raise ProviderError("provider_protocol")
+            if len({call.id for call in self.completed_calls}) != len(keys):
+                raise ProviderError("provider_protocol")
+            self.sdk_ids = {index: call.id for index, call in enumerate(self.completed_calls)}
+            usage = response.get("usage")
+            if usage is not None:
+                if not isinstance(usage, dict):
+                    raise ProviderError("provider_usage_conflict")
+                self.prior = _usage(
+                    {
+                        "prompt_tokens": usage.get("input_tokens"),
+                        "completion_tokens": usage.get("output_tokens"),
+                        "total_tokens": usage.get("total_tokens"),
+                        "prompt_tokens_details": usage.get("input_tokens_details"),
+                        "completion_tokens_details": usage.get("output_tokens_details"),
+                    }
+                )
+                if self.prior is not None:
+                    self.snapshots.append(self.prior)
+            self.done = True
+        return encoded(event)
+
+    def complete(self) -> list[ModelToolCall]:
+        if not self.done:
+            raise ProviderError("provider_incomplete_stream")
+        return self.completed_calls
+
+
 class _GuardedStream(httpx.AsyncByteStream):
-    def __init__(self, response: httpx.Response, boundary: _StreamBoundary) -> None:
+    def __init__(
+        self, response: httpx.Response, boundary: _StreamBoundary | _ResponsesBoundary
+    ) -> None:
         self.raw = httpx.Response(
             response.status_code,
             headers=response.headers,
@@ -545,6 +736,14 @@ class _GuardedStream(httpx.AsyncByteStream):
                     return
             self.boundary.complete()
         except ProviderError as error:
+            logging.getLogger(__name__).warning(
+                "Provider boundary rejected: code=%s frames=%s",
+                error.code,
+                [
+                    (frame.f_code.co_name, line)
+                    for frame, line in traceback.walk_tb(error.__traceback__)
+                ],
+            )
             self.boundary.error = error
             raise
         except (ValueError, RecursionError):
@@ -580,7 +779,9 @@ class OpenAICompatibleProvider:
             ),
         )
         self._owned_client = self._client
-        self._boundary: ContextVar[_StreamBoundary] = ContextVar("krim_model_boundary")
+        self._boundary: ContextVar[_StreamBoundary | _ResponsesBoundary] = ContextVar(
+            "krim_model_boundary"
+        )
         self._client.event_hooks["request"].append(self._guard_request)
         self._client.event_hooks["response"].append(self._guard_response)
         self._sdk_client = openai.AsyncOpenAI(
@@ -597,7 +798,11 @@ class OpenAICompatibleProvider:
             base_url=self.config.base_url,
             api_key=self.config.api_key.get_secret_value(),
             env={},
-            protocol=OpenAIChatCompletionsProtocol(),
+            protocol=(
+                OpenAIResponsesProtocol()
+                if self.config.wire_api == "responses"
+                else OpenAIChatCompletionsProtocol()
+            ),
         )
         self._sdk_model = ai.Model(id=self.config.model, provider=self._sdk_provider)
         self._sealed = self.binding_token()
@@ -622,9 +827,11 @@ class OpenAICompatibleProvider:
         body = parse_json(request.content.decode())
         if isinstance(body, dict):
             for tool in cast(list[dict[str, Any]], body.get("tools", [])):
-                function = tool.get("function", {})
+                function = tool if self.config.wire_api == "responses" else tool.get("function", {})
                 if function.get("description") in (None, ""):
                     function.pop("description", None)
+            if self.config.wire_api == "responses":
+                body["store"] = False
             wire = encoded(body).encode()
             request._content = wire
             request.stream = httpx.ByteStream(wire)
@@ -659,6 +866,8 @@ class OpenAICompatibleProvider:
         # Keep the historical no-image binding stable; opt-in is explicit and bound.
         if not self.config.allow_images:
             config.pop("allow_images", None)
+        if self.config.wire_api == "chat_completions":
+            config.pop("wire_api", None)
         return (
             id(self.config),
             self.config.base_url,
@@ -708,6 +917,8 @@ class OpenAICompatibleProvider:
             result["reasoning_effort"] = self.config.reasoning_effort
         if self.config.thinking is not None:
             result["thinking"] = self.config.thinking
+        if self.config.wire_api == "responses":
+            result["wire_api"] = "responses"
         return result
 
     def execution_limits(self) -> dict[str, JsonValue]:
@@ -717,6 +928,8 @@ class OpenAICompatibleProvider:
         # Preserve the old execution fingerprint for text-only default configs.
         if not self.config.allow_images:
             result.pop("allow_images", None)
+        if self.config.wire_api == "chat_completions":
+            result.pop("wire_api", None)
         for key in (
             "connect_timeout_seconds",
             "read_timeout_seconds",
@@ -758,12 +971,26 @@ class OpenAICompatibleProvider:
         max_tool_calls = self.config.max_tool_calls
         if budget is not None:
             max_tool_calls = min(max_tool_calls, budget.max_tool_calls_this_step)
-        boundary = _StreamBoundary(self.config, max_tool_calls)
-        # 保留现有兼容端点的参数名，而不是 SDK 默认的 max_completion_tokens。
-        extra: dict[str, Any] = {"max_tokens": self.config.max_output_tokens, "n": 1}
+        responses = self.config.wire_api == "responses"
+        boundary = (
+            _ResponsesBoundary(self.config, max_tool_calls)
+            if responses
+            else _StreamBoundary(self.config, max_tool_calls)
+        )
+        # Keep each protocol's native token field; Responses requests are stateless.
+        extra: dict[str, Any] = (
+            {"max_output_tokens": self.config.max_output_tokens, "store": False}
+            if responses
+            else {"max_tokens": self.config.max_output_tokens, "n": 1}
+        )
         if self.config.reasoning_effort is not None:
-            extra["reasoning_effort"] = self.config.reasoning_effort
+            if responses:
+                extra["reasoning"] = {"effort": self.config.reasoning_effort}
+            else:
+                extra["reasoning_effort"] = self.config.reasoning_effort
         if self.config.thinking is not None:
+            if responses:
+                raise ProviderError("provider_config", 422)
             extra["thinking"] = {"type": self.config.thinking}
         declarations = (
             [
@@ -814,7 +1041,12 @@ class OpenAICompatibleProvider:
                     raise ProviderError("provider_protocol")
                 for index, call in enumerate(complete):
                     sdk_call = sdk_calls.get(boundary.sdk_ids[index])
-                    if sdk_call is None or parse_json(sdk_call.tool_args) != call.arguments:
+                    if (
+                        sdk_call is None
+                        or parse_json(sdk_call.tool_args) != call.arguments
+                        or responses
+                        and sdk_call.tool_name != call.name
+                    ):
                         raise ProviderError("provider_protocol")
                 # SDK 的 ToolStart 只带最初名称；分片工具名仍使用边界完成校验的名称。
                 # 调用 ID 和参数必须同时通过 SDK 聚合与 Krim 的严格 JSON 校验。
@@ -836,6 +1068,14 @@ class OpenAICompatibleProvider:
                 if isinstance(cause, (httpx.HTTPError, openai.APIConnectionError)):
                     raise ProviderError("provider_network") from None
                 cause = cause.__cause__ if cause is not None else None
+            logging.getLogger(__name__).warning(
+                "Provider SDK rejected: exception_type=%s frames=%s",
+                type(error).__name__,
+                [
+                    (frame.f_code.co_name, line)
+                    for frame, line in traceback.walk_tb(error.__traceback__)
+                ],
+            )
             raise ProviderError("provider_protocol") from None
         finally:
             try:

@@ -154,7 +154,8 @@ test("绑定项目后环境行、工具目录与账号连接显示真实数据�
   expect(host.textContent).toContain("已就绪");
   expect(host.textContent).toContain("引用管理");
   expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("docs.search_pages");
-  expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("dev_read");
+  expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).not.toContain("dev_read");
+  expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("read");
   expect(host.querySelector('[aria-label="账号 MCP 连接"]')?.textContent).toContain("docs");
   expect(host.querySelector('[aria-label="账号 MCP 连接"]')?.textContent).toContain("凭据已配置");
   // 上下文不编造构成百分比；容量来自会话策略，用量缺失如实标注。

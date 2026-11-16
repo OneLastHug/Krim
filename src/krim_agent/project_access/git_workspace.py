@@ -400,7 +400,7 @@ class GitWorkspaceBridge:
             if len(state) >= self._max_files * 4 + 1:
                 raise ServiceError("artifact_limit", 413)
             state[relative] = node_fp
-            if component.casefold() == ".git":
+            if component.casefold() in {".git", ".krim-file-staging"}:
                 # Check the type above, but never open or traverse Git metadata.
                 continue
             if stat.S_ISDIR(info.st_mode):
@@ -468,7 +468,7 @@ class GitWorkspaceBridge:
             if len(state) >= self._max_files * 4 + 1:
                 raise ServiceError("artifact_limit", 413)
             state[relative] = node_fp
-            if component.casefold() == ".git":
+            if component.casefold() in {".git", ".krim-file-staging"}:
                 continue
             if stat.S_ISDIR(info.st_mode):
                 if depth >= self._max_depth:

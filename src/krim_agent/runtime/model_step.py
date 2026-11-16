@@ -41,8 +41,10 @@ class ModelStep:
                  emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
                  check: Callable[[], None], *, max_steps: int, max_output: int,
                  deadline: float | None, workspace: bool,
-                 execution_budget: ExecutionBudget | None = None) -> None:
+                 execution_budget: ExecutionBudget | None = None,
+                 model_timeout: float = 20) -> None:
         self.provider, self.emit, self.check = provider, emit, check
+        self.model_timeout = model_timeout
         self.max_steps, self.max_output = max_steps, max_output
         self.deadline, self.workspace = deadline, workspace
         self.execution_budget = execution_budget
@@ -109,7 +111,8 @@ class ModelStep:
         clock = asyncio.get_running_loop().time
         run_deadline = (self.execution_budget.deadline if self.execution_budget is not None
                         else self.deadline)
-        end = min(run_deadline, clock()+20) if run_deadline is not None else None
+        model_deadline = clock() + self.model_timeout
+        end = min(run_deadline, model_deadline) if run_deadline is not None else model_deadline
         span = secrets.token_hex(8)
         extra: dict[str, JsonValue] = {"purpose": purpose} if self.workspace else {}
         text, calls = "", []

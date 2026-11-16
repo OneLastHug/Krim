@@ -59,6 +59,7 @@ def _parts(path: str, *, directory: bool = False) -> tuple[str, ...]:
         raise ServiceError("invalid_input", 422)
     if any(
         p.lower() in {".git", ".ssh", ".aws", "credentials", "id_rsa", "id_ed25519"}
+        or p.lower() == ".krim-file-staging"
         or p.lower() == ".env"
         or p.lower().startswith(".env.")
         for p in parts
@@ -680,14 +681,17 @@ class ProjectFiles:
         entry_cap = byte_cap = depth_cap = match_cap = False
         count = 0
 
-        def scan(directory: int, prefix: str, depth: int) -> None:
+        def scan(directory: int, prefix: str, depth: int, only: str | None = None) -> None:
             nonlocal count, scanned_bytes, skipped, total_matches, result_bytes
             nonlocal entry_cap, byte_cap, depth_cap, match_cap
-            with os.scandir(directory) as listing:
-                items = sorted(
-                    ((entry.name, entry.stat(follow_symlinks=False)) for entry in listing),
-                    key=lambda item: item[0],
-                )
+            if only is not None:
+                items = [(only, os.stat(only, dir_fd=directory, follow_symlinks=False))]
+            else:
+                with os.scandir(directory) as listing:
+                    items = sorted(
+                        ((entry.name, entry.stat(follow_symlinks=False)) for entry in listing),
+                        key=lambda item: item[0],
+                    )
             for name, before_info in items:
                 if entry_cap or match_cap:
                     return
@@ -785,11 +789,23 @@ class ProjectFiles:
                         result_bytes += item_bytes
                         matches.append(item)
 
-        with (
-            self._content(environment_id, project_id) as content,
-            self._parent(content, names) as fd,
-        ):
-            scan(fd, "/".join(names) + "/" if names else "", 0)
+        with self._content(environment_id, project_id) as content:
+            if not names:
+                scan(content, "", 0)
+            else:
+                with self._parent(content, names[:-1]) as parent:
+                    node = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+                    if stat.S_ISDIR(node.st_mode):
+                        fd = os.open(names[-1], FLAGS, dir_fd=parent)
+                        try:
+                            scan(fd, "/".join(names) + "/", 0)
+                        finally:
+                            os.close(fd)
+                    elif stat.S_ISREG(node.st_mode) and node.st_nlink == 1:
+                        root_prefix = "/".join(names[:-1]) + "/" if len(names) > 1 else ""
+                        scan(parent, root_prefix, 0, only=names[-1])
+                    else:
+                        raise ServiceError("artifact_invalid")
         next_offset = offset + len(matches) if offset + len(matches) < total_matches else None
         scan_incomplete = entry_cap or match_cap or byte_cap or depth_cap
         results_truncated = scan_incomplete or next_offset is not None

@@ -73,7 +73,7 @@ class ProtocolModel:
         if messages[-1].role != "tool":
             yield ModelToolCall(
                 id="start-protocol-service",
-                name="dev_shell",
+                name="shell",
                 arguments={
                     "command": "exec /usr/bin/python3 -I -u -c " + shlex.quote(self.peer),
                     "lifecycle": "project_service",

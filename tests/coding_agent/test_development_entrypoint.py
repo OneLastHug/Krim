@@ -42,19 +42,25 @@ class ProjectBroker:
 
 
 class ShellModel:
-    def __init__(self):
+    def __init__(self, tool="shell"):
         self.calls = 0
+        self.tool = tool
 
     async def stream(self, messages, tools):
         self.calls += 1
         if messages[-1].role == "tool":
             yield ModelText(text="project task finished")
         else:
-            assert any(item["name"] == "dev_shell" for item in tools)
+            assert any(item["name"] == "shell" for item in tools)
             yield ModelToolCall(
                 id="shell-" + str(self.calls),
-                name="dev_shell",
-                arguments={"command": "printf entrypoint"},
+                name=self.tool,
+                arguments={
+                    "shell": {"command": "printf entrypoint"},
+                    "write": {"path": "new.py", "content": "print('hello')\n"},
+                    "edit": {"path": "new.py", "old_string": "hello", "new_string": "world",
+                             "expected_sha256": "0" * 64},
+                }[self.tool],
             )
 
     async def close(self):
@@ -62,10 +68,12 @@ class ShellModel:
 
 
 @pytest.mark.parametrize("approval", [False, True])
+@pytest.mark.parametrize("tool", ["shell", "write", "edit"])
 async def test_project_api_and_session_sdk_authorize_the_same_command(
     tmp_path: Path,
     monkeypatch,
     approval: bool,
+    tool: str,
 ) -> None:
     path = tmp_path / "application.sqlite"
     token = await initialize(path)
@@ -86,7 +94,7 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
         return
 
     monkeypatch.setattr(DevelopmentService, "start_supervisor", supervisor)
-    model = ShellModel()
+    model = ShellModel(tool)
     app = await open_application(
         path,
         settings=Settings(database=path, sandbox_config_file=config_path),
@@ -128,7 +136,19 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
         return
 
     monkeypatch.setattr(development.environments, "start", start)
+    output_reads = []
+
+    async def read_output(handle, cursor):
+        from krim_agent.development.contracts import OutputPage
+        output_reads.append((handle.process_id, cursor))
+        if len(output_reads) == 1:
+            return OutputPage(process_id=handle.process_id, cursor=cursor,
+                              next_cursor=0, eof=False, text="")
+        return OutputPage(process_id=handle.process_id, cursor=cursor,
+                          next_cursor=11, eof=True, text='{"ok":true}')
+
     monkeypatch.setattr(development.terminal, "submit", terminal_submit)
+    monkeypatch.setattr(development.terminal, "read_output", read_output)
     monkeypatch.setattr(development.terminal, "stop_run", stop_run)
     api = create_app(application=app)
     try:
@@ -142,6 +162,12 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
         ):
             me = (await client.get("/v2/me")).json()
             assert "target-development" in me["target_keys"]
+            catalog = (await client.get("/v2/targets/target-development/tools")).json()
+            assert {"shell", "read", "list", "write", "edit", "find", "search"} <= {
+                item["name"] for item in catalog
+            }
+            assert not any(item["name"].startswith("dev_") for item in catalog)
+            assert all(item["policy_version"] == "development/1" for item in catalog)
             workspace = me["workspaces"][0]["workspace_id"]
             project = await client.post(
                 "/v2/me/sandbox/projects",
@@ -231,6 +257,13 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
             assert writes[0].environment.project_id == project_id
             assert writes[0].ownership.session_id == session_id
             assert model.calls == 2
+            if tool != "shell":
+                assert writes[0].command.startswith("exec /usr/bin/python3 -I -c ")
+                assert writes[0].authorization.secret_refs == ()
+                assert writes[0].authorization.network_policy_ref is None
+                facts = await app.service.result(run.id)
+                assert facts.tools[0].name == tool and facts.tools[0].value["ok"] is True
+                assert len(output_reads) == 2 and output_reads[0] == output_reads[1]
     finally:
         await app.close()
         broker.files.close()

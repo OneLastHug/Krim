@@ -163,9 +163,9 @@ class Fixture:
     async def operation(self, request, *, state="accepted", admit=True):
         self.count += 1
         name = (
-            "dev_git_tree"
+            "git_tree"
             if isinstance(request, GitTreeRequest)
-            else "dev_" + request.git.action.replace(".", "_")
+            else request.git.action.replace(".", "_")
         )
         args = request.model_dump(mode="json")
         tool_hash = "b" * 64

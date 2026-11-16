@@ -4,6 +4,7 @@ import { obsFilterStatuses, obsStatusNames, type ObsRequestRecord, type ObsToolR
 import { downloadObservationCsv } from "./export";
 import { formatBytes, formatClock, formatCost, formatCount, formatDuration, formatTime, formatReportedTokens } from "./obs-format";
 import { obsSeries } from "./obs-palette";
+import { displayToolName } from "../lib/tool-names";
 import { ObsEmpty, ObsPageHead, ObsScopeNote, ObsStatusPill, type ObsViewProps } from "./obs-ui";
 
 /** 运行页：有界列表 + 详情。时间线为真实 trace span 的同级排布；
@@ -181,7 +182,7 @@ function RequestInspector({ request, onContext }: { request: ObsRequestRecord; o
 
 function ToolInspector({ tool, onContext }: { tool: ObsToolRecord; onContext: (id: string) => void }) {
   return <div>
-    <h4 className="obs-section-label">工具调用 · {tool.name}</h4>
+    <h4 className="obs-section-label">工具调用 · {tool.name === null ? "未记录" : displayToolName(tool.name)}</h4>
     <div className="obs-fact-grid">
       <div className="obs-fact"><span>结果</span><strong>{tool.status}{tool.code ? ` · ${tool.code}` : ""}</strong></div>
       <div className="obs-fact"><span>审批决定</span><strong>{tool.decision ?? "未记录"}</strong></div>

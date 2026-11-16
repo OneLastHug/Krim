@@ -48,6 +48,16 @@ from krim_agent.development.contracts import (
     PreviewHandle,
     RunOwnership,
 )
+from krim_agent.development.file_tools import (
+    EditInput,
+    FindInput,
+    SearchInput,
+    WriteInput,
+    implementation_digest,
+    mutation_command,
+    text_page,
+    worker_source,
+)
 from krim_agent.development.git_operations import (
     GitCredentialRouter,
     GitOperations,
@@ -261,6 +271,7 @@ class DevelopmentService:
             configuration,
         )
         self.repositories = DevelopmentStore(store)
+        self._file_worker_source = worker_source()
         self.access_repository = SQLiteAccessRepository(store)
         self.vault = vault or NoSecretVault()
         self.git_credentials = GitCredentialRouter()
@@ -941,13 +952,13 @@ class DevelopmentService:
     async def policy(self, invocation: Invocation) -> Decision:
         scope = self.current(invocation)
         if invocation.name in {
-            "dev_read", "dev_list", "dev_process", "dev_output", "dev_cancel",
-            "dev_preview_status", "dev_preview_stop", "dev_browser_close",
+            "read", "list", "find", "search", "process_status", "read_output", "stop_process",
+            "preview_status", "preview_stop", "browser_close",
         }:
             return "allow"
-        if invocation.name.startswith("dev_git_"):
-            action = ("git.commit" if invocation.name == "dev_git_tree"
-                      else invocation.name.removeprefix("dev_").replace("_", "."))
+        if invocation.name.startswith("git_"):
+            action = ("git.commit" if invocation.name == "git_tree"
+                      else invocation.name.replace("_", "."))
             grant = await self._grant(scope, cast(Action, action))
         else:
             grant = await self._grant(scope)
@@ -986,7 +997,8 @@ class DevelopmentService:
     async def approval_projection(
         self, invocation: Invocation, request: dict[str, JsonValue]
     ) -> dict[str, JsonValue]:
-        if invocation.name != "dev_shell" and not invocation.name.startswith("dev_git_"):
+        if (invocation.name not in {"shell", "write", "edit"}
+                and not invocation.name.startswith("git_")):
             return request
         saved = await self.store.read_checkpoint(invocation.run_id)
         if saved is None:
@@ -1014,18 +1026,20 @@ class DevelopmentService:
             )
         ).tools
         assert isinstance(scope, DevelopmentScope)
-        if invocation.name.startswith("dev_git_"):
+        if invocation.name.startswith("git_"):
             if self.git is None:
                 raise ServiceError("permission_denied", 403)
-            model = GitTreeRequest if invocation.name == "dev_git_tree" else GitExecutionRequest
+            model = GitTreeRequest if invocation.name == "git_tree" else GitExecutionRequest
             operation = model.model_validate_json(invocation.arguments_json)
             git_scope = await self.git.scope(scope.actor, identity, operation)
             derived = derive_intent(
                 operation, git_scope, identity, cast(str, request["request_id"]),
             )
             return {**request, "project_access": cast(JsonValue, derived.approval_projection)}
-        values = ShellInput.model_validate(parse_json(invocation.arguments_json))
-        command = await self._command(scope, values, identity, cast(str, request["request_id"]))
+        model = {"write": WriteInput, "edit": EditInput}.get(invocation.name, ShellInput)
+        values = model.model_validate(parse_json(invocation.arguments_json))
+        shell = self._file_shell(values) if isinstance(values, (WriteInput, EditInput)) else values
+        command = await self._command(scope, shell, identity, cast(str, request["request_id"]))
         intent = command_intent(command, workspace_id=scope.workspace_id)
         return {
             **request,
@@ -1040,6 +1054,10 @@ class DevelopmentService:
                 "arguments_digest": command.authorization.arguments_digest,
             },
         }
+
+    def _file_shell(self, values: WriteInput | EditInput) -> ShellInput:
+        return ShellInput(command=mutation_command(values, self._file_worker_source),
+                          timeout_seconds=20, wait_seconds=20)
 
     async def execute(
         self, invocation: Invocation, parameters: BaseModel, context: Any
@@ -1057,12 +1075,12 @@ class DevelopmentService:
                              and event.data.get("call_id") == invocation.call_id), None)
             result_git: GitTreeResult | GitExecutionResult
             if isinstance(parameters, GitTreeRequest):
-                if invocation.name != "dev_git_tree":
+                if invocation.name != "git_tree":
                     raise ServiceError("invalid_input", 422)
                 result_git = await self.git.tree(scope.actor, identity, parameters,
                                                  approval_id=cast(str | None, approval))
             else:
-                expected = "dev_" + parameters.git.action.replace(".", "_")
+                expected = parameters.git.action.replace(".", "_")
                 if invocation.name != expected:
                     raise ServiceError("invalid_input", 422)
                 execute = {"git.clone": self.git.clone, "git.diff": self.git.diff,
@@ -1072,7 +1090,7 @@ class DevelopmentService:
                 )
             scope.check()
             return cast(JsonValue, result_git.model_dump(mode="json"))
-        if isinstance(parameters, ShellInput):
+        if isinstance(parameters, (ShellInput, WriteInput, EditInput)):
             identity = CURRENT_OPERATION.get()
             if identity is None or identity.call_id != invocation.call_id:
                 raise ServiceError("facts_corrupt")
@@ -1086,9 +1104,44 @@ class DevelopmentService:
                 ),
                 None,
             )
-            request = await self._command(scope, parameters, identity, cast(str | None, approval))
+            values = (self._file_shell(parameters)
+                      if isinstance(parameters, (WriteInput, EditInput)) else parameters)
+            request = await self._command(scope, values, identity, cast(str | None, approval))
             await self.repositories.operations.bind_command(identity, request)
-            return cast(JsonValue, (await self.terminal.submit(request)).model_dump(mode="json"))
+            command_handle = await self.terminal.submit(request)
+            if isinstance(parameters, ShellInput):
+                return cast(JsonValue, command_handle.model_dump(mode="json"))
+            scope.check()
+            if command_handle.state != "exited":
+                return {"state": "pending", "code": "file_operation_pending",
+                        "process": command_handle.model_dump(mode="json"),
+                        "next_action": "Use process_status/read_output; do not repeat write."}
+            # Worker output is bounded JSON, kept with the original durable process.
+            page = await self.terminal.read_output(command_handle, 0)
+            drain_deadline = asyncio.get_running_loop().time() + 2
+            while not page.eof and not page.truncated:
+                scope.check()
+                if asyncio.get_running_loop().time() >= drain_deadline:
+                    return {"state": "pending", "code": "file_operation_pending",
+                            "process": command_handle.model_dump(mode="json"),
+                            "next_action": "Use read_output for this process; do not repeat write."}
+                await asyncio.sleep(0.025)
+                page = await self.terminal.read_output(command_handle, 0)
+            scope.check()
+            try:
+                file_result = parse_json(page.text.strip())
+                if not page.eof or page.truncated or not isinstance(file_result, dict):
+                    raise ValueError
+                if type(file_result.get("ok")) is not bool:
+                    raise ValueError
+                if file_result["ok"] != (command_handle.exit_code == 0):
+                    raise ValueError
+            except (ValueError, RecursionError):
+                return {"state": "unknown", "code": "file_result_unavailable",
+                        "process": command_handle.model_dump(mode="json"),
+                        "next_action": "Inspect read_output and read the target before retrying."}
+            return {**file_result, "process_id": command_handle.process_id,
+                    "exit_code": command_handle.exit_code}
         if isinstance(parameters, (BrowserOpenInput, BrowserInput)):
             if self.browsers is None:
                 raise ServiceError("browser_closed", 503)
@@ -1099,7 +1152,7 @@ class DevelopmentService:
             browser = self.browsers._bound(
                 parameters.browser_id, scope.actor, scope.environment, scope.ownership,
             )
-            if invocation.name == "dev_browser_close":
+            if invocation.name == "browser_close":
                 await self.browsers.close_session(
                     parameters.browser_id, scope.actor, scope.environment, scope.ownership,
                 )
@@ -1130,7 +1183,7 @@ class DevelopmentService:
                 command = {"op": "upload", "selector": parameters.selector,
                            "name": parameters.name, "media_type": parameters.media_type,
                            "data_base64": base64.b64encode(data).decode("ascii")}
-            elif invocation.name == "dev_browser_screenshot":
+            elif invocation.name == "browser_screenshot":
                 command = {"op": "screenshot"}
             else:
                 raise ServiceError("invalid_input", 422)
@@ -1163,7 +1216,7 @@ class DevelopmentService:
                     "status": status, "media_type": media_type,
                     "size": size, "sha256": digest,
                 }
-            if invocation.name == "dev_browser_screenshot":
+            if invocation.name == "browser_screenshot":
                 try:
                     image = base64.b64decode(browser_result["data_base64"], validate=True)
                     if (browser_result["media_type"] != "image/png"
@@ -1231,18 +1284,24 @@ class DevelopmentService:
                     record.handle, parameters.data, close=parameters.close
                 )
                 return {"accepted": True}
-            elif invocation.name == "dev_cancel":
+            elif invocation.name == "stop_process":
                 result = await self.terminal.cancel(record.handle)
             else:
                 result = await self.terminal.inspect(record.handle)
             return cast(JsonValue, result.model_dump(mode="json"))
+        if isinstance(parameters, FindInput):
+            return cast(JsonValue, await self.sandbox.find_files(
+                scope.actor, scope.environment.project_id, **parameters.model_dump(),
+            ))
+        if isinstance(parameters, SearchInput):
+            return cast(JsonValue, await self.sandbox.search_files(
+                scope.actor, scope.environment.project_id, **parameters.model_dump(),
+            ))
         if isinstance(parameters, ReadInput):
-            return cast(
-                JsonValue,
-                await self.sandbox.read_file(
-                    scope.actor, scope.environment.project_id, **parameters.model_dump()
-                ),
+            result_file = await self.sandbox.read_file(
+                scope.actor, scope.environment.project_id, **parameters.model_dump(),
             )
+            return cast(JsonValue, text_page(result_file))
         if isinstance(parameters, ListInput):
             return cast(
                 JsonValue,
@@ -1271,7 +1330,7 @@ class DevelopmentService:
                 if message.role == "assistant":
                     for call in message.tool_calls:
                         names[call.get("id")] = call.get("name")
-                if message.role != "tool" or names.get(message.call_id) != "dev_browser_screenshot":
+                if message.role != "tool" or names.get(message.call_id) != "browser_screenshot":
                     continue
                 try:
                     value = parse_json(message.content)
@@ -1279,7 +1338,7 @@ class DevelopmentService:
                     continue
                 event = next((event for event in reversed(snapshot.events)
                               if event.kind == "tool_end"
-                              and event.data.get("name") == "dev_browser_screenshot"
+                              and event.data.get("name") == "browser_screenshot"
                               and event.data.get("provider_call_id") == message.call_id
                               and event.data.get("status") == "ok"
                               and event.data.get("result_available") is True
@@ -1439,55 +1498,70 @@ class DevelopmentService:
         async def unavailable(_parameters: BaseModel) -> JsonValue:
             raise ServiceError("workspace_contract_required")
 
-        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        digest = implementation_digest(Path(__file__).read_text(encoding="utf-8"))
         specs: list[tuple[str, type[BaseModel], str, str]] = [
             (
-                "dev_shell",
+                "shell",
                 ShellInput,
                 "command",
-                "Run project Shell commands; project_service retains explicit services.",
+                "Run project Shell commands (wait_seconds <= 20). Inspect exit_code and use "
+                "read_output to read logs. Use write/edit for file changes; project_service "
+                "retains explicitly requested services.",
             ),
-            ("dev_process", ProcessInput, "read", "Read process status without restarting it."),
-            ("dev_output", OutputInput, "read", "Read bounded process output using a byte cursor."),
-            ("dev_stdin", StdinInput, "write", "Send terminal input or close stdin."),
-            ("dev_cancel", ProcessInput, "write", "Stop the complete execution unit."),
-            ("dev_read", ReadInput, "read", "Read a bounded project file."),
-            ("dev_list", ListInput, "read", "List a project directory."),
+            ("process_status", ProcessInput, "read", "Read process status without restarting it."),
+            ("read_output", OutputInput, "read", "Read process output using a byte cursor."),
+            ("write_stdin", StdinInput, "write", "Send terminal input or close stdin."),
+            ("stop_process", ProcessInput, "write", "Stop the complete execution unit."),
+            ("read", ReadInput, "read", "Read UTF-8 text with byte offset/limit and sha256. "
+             "Continue at next_offset; use sha256 for write/edit. Binary files are rejected."),
+            ("list", ListInput, "read", "List a project directory with pagination."),
+            ("find", FindInput, "read", "Find project files by glob, with bounded pagination."),
+            ("search", SearchInput, "read", "Search a project file or directory, "
+             "returning bounded matches with line numbers and up to 3 context lines."),
+            ("write", WriteInput, "write", "Create a UTF-8 file (content <= 16384 bytes). "
+             "Existing files require expected_sha256 from read; null means create-only. "
+             "Parent directories must exist. Returns ok, size and sha256. "
+             "If state=pending/unknown, "
+             "use process_status/read_output and inspect the target; never repeat blindly."),
+            ("edit", EditInput, "write", "Replace exact text in a UTF-8 file using expected_sha256 "
+             "from read. old_string must match once unless replace_all=true. "
+             "Returns ok and new sha256. For pending/unknown, read the original process output "
+             "and target before retrying. Version conflicts do not overwrite the file."),
         ]
         if self.previews is not None:
             specs.extend([
-                ("dev_preview_register", PreviewRegisterInput, "write",
+                ("preview_register", PreviewRegisterInput, "write",
                  "Register a running project_service port for an authorized preview."),
-                ("dev_preview_status", PreviewStatusInput, "read",
+                ("preview_status", PreviewStatusInput, "read",
                  "Inspect or wait for an authorized preview; returns no browser ticket."),
-                ("dev_preview_stop", PreviewInput, "write",
+                ("preview_stop", PreviewInput, "write",
                  "Revoke preview access and stop its registered service."),
             ])
         if self.browsers is not None:
             specs.extend([
-                ("dev_browser_open", BrowserOpenInput, "write",
+                ("browser_open", BrowserOpenInput, "write",
                  "Open an authorized preview browser."),
-                ("dev_browser_action", BrowserActionInput, "write",
+                ("browser_action", BrowserActionInput, "write",
                  "Navigate, inspect DOM, resize desktop (1024x768) or mobile (375x812), "
                  "or check a bounded download with context or preview_only application cookies."),
-                ("dev_browser_upload", BrowserUploadInput, "write",
+                ("browser_upload", BrowserUploadInput, "write",
                  "Upload an existing current-project file using the isolated browser."),
-                ("dev_browser_screenshot", BrowserInput, "write",
+                ("browser_screenshot", BrowserInput, "write",
                  "Save a viewport PNG and return its authorized artifact reference."),
-                ("dev_browser_close", BrowserInput, "write",
+                ("browser_close", BrowserInput, "write",
                  "Close the browser and reclaim its worker."),
             ])
         if self.git is not None:
             specs.extend([
-                ("dev_git_clone", GitExecutionRequest, "write",
+                ("git_clone", GitExecutionRequest, "write",
                  "Fetch an approved HTTPS repository object/ref into its private project mirror."),
-                ("dev_git_diff", GitExecutionRequest, "write",
+                ("git_diff", GitExecutionRequest, "write",
                  "Compare two exact Git objects in the approved private repository."),
-                ("dev_git_tree", GitTreeRequest, "write",
+                ("git_tree", GitTreeRequest, "write",
                  "Snapshot the authorized project workspace into its private Git mirror."),
-                ("dev_git_commit", GitExecutionRequest, "write",
+                ("git_commit", GitExecutionRequest, "write",
                  "Create a commit from an imported workspace tree using the approved identity."),
-                ("dev_git_push", GitExecutionRequest, "write",
+                ("git_push", GitExecutionRequest, "write",
                  "Push an exact Git object with an expected-old-object lease "
                  "to the approved HTTPS repository."),
             ])

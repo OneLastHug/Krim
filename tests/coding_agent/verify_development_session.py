@@ -50,7 +50,7 @@ class SessionScript:
         if last.role != "tool":
             yield ModelToolCall(
                 id="shell-" + str(self.calls),
-                name="dev_shell",
+                name="shell",
                 arguments={
                     "command": "printf 'sdk-real-write\\n' >> proof.txt",
                     "wait_seconds": 2.0,
@@ -58,7 +58,7 @@ class SessionScript:
             )
         elif self.calls % 3 == 2:
             yield ModelToolCall(
-                id="read-" + str(self.calls), name="dev_read", arguments={"path": "proof.txt"}
+                id="read-" + str(self.calls), name="read", arguments={"path": "proof.txt"}
             )
         else:
             yield ModelText(text="File written and read through the project tools.")

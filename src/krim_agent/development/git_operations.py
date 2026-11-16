@@ -102,9 +102,9 @@ def _operation(request: GitRequest) -> GitOperation:
 
 def _tool_name(request: GitRequest) -> str:
     return (
-        "dev_git_tree"
+        "git_tree"
         if isinstance(request, GitTreeRequest)
-        else "dev_" + request.git.action.replace(".", "_")
+        else request.git.action.replace(".", "_")
     )
 
 
