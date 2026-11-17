@@ -39,10 +39,10 @@ class StepResult:
 class ModelStep:
     def __init__(self, provider: ModelProvider,
                  emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
-                 check: Callable[[], None], *, max_steps: int, max_output: int,
+                 check: Callable[[], None], *, max_steps: int | None, max_output: int | None,
                  deadline: float | None, workspace: bool,
                  execution_budget: ExecutionBudget | None = None,
-                 model_timeout: float = 20) -> None:
+                 model_timeout: float | None = None) -> None:
         self.provider, self.emit, self.check = provider, emit, check
         self.model_timeout = model_timeout
         self.max_steps, self.max_output = max_steps, max_output
@@ -54,15 +54,17 @@ class ModelStep:
     def request_budget(
         self,
         max_group: int,
-        remaining_tools: int,
+        remaining_tools: int | None,
         *,
         purpose: str = "task",
     ) -> ModelRequestBudget:
-        remaining_steps = self.max_steps - self.index
-        if remaining_steps <= 0:
+        remaining_steps = None if self.max_steps is None else self.max_steps - self.index
+        if remaining_steps is not None and remaining_steps <= 0:
             raise ServiceError("step_limit")
         provider_cap = getattr(getattr(self.provider, "config", None), "max_tool_calls", None)
-        limits = [max_group, remaining_tools]
+        limits = [max_group]
+        if remaining_tools is not None:
+            limits.append(remaining_tools)
         if type(provider_cap) is int:
             limits.append(provider_cap)
         max_this_step = 0 if purpose == "summary" else min(limits)
@@ -78,8 +80,9 @@ class ModelStep:
     ) -> list[Message]:
         result = list(messages)
         prompt = _BUDGET_PROMPT.format(
-            steps=budget.remaining_steps,
-            tools=budget.remaining_tool_calls,
+            steps=(budget.remaining_steps if budget.remaining_steps is not None else "unlimited"),
+            tools=(budget.remaining_tool_calls
+                   if budget.remaining_tool_calls is not None else "unlimited"),
             step_tools=budget.max_tool_calls_this_step,
         )
         if result and result[0].role == "system":
@@ -93,7 +96,7 @@ class ModelStep:
 
     async def call(self, messages: list[Message], tools: list[dict[str, JsonValue]], *,
                    purpose: str = "task", max_group: int = 1,
-                   remaining_tools: int = 1, summary_bytes: int = 2048,
+                   remaining_tools: int | None = 1, summary_bytes: int = 2048,
                    request_budget: ModelRequestBudget | None = None,
                    request_prepared: bool = False,
                    request_metadata: Sequence[ItemMetadata | None] = (),
@@ -105,16 +108,17 @@ class ModelStep:
         budget = request_budget or self.request_budget(
             max_group, remaining_tools, purpose=purpose
         )
-        if self.index >= self.max_steps:
+        if self.max_steps is not None and self.index >= self.max_steps:
             raise ServiceError("step_limit")
         index, self.index = self.index, self.index+1
         clock = asyncio.get_running_loop().time
         run_deadline = (self.execution_budget.deadline if self.execution_budget is not None
                         else self.deadline)
-        model_deadline = clock() + self.model_timeout
-        end = min(run_deadline, model_deadline) if run_deadline is not None else model_deadline
+        model_deadline = None if self.model_timeout is None else clock() + self.model_timeout
+        deadlines = [value for value in (run_deadline, model_deadline) if value is not None]
+        end = min(deadlines) if deadlines else None
         span = secrets.token_hex(8)
-        extra: dict[str, JsonValue] = {"purpose": purpose} if self.workspace else {}
+        extra: dict[str, JsonValue] = {"purpose": purpose}
         text, calls = "", []
         usage: TokenUsage | None = None
         final_usage = False
@@ -133,7 +137,7 @@ class ModelStep:
             input_budget_bytes=input_budget_bytes,
         )
         if compaction_changes:
-            context_manifest["compaction_changes"] = list(compaction_changes[:2])
+            context_manifest["compaction_changes"] = list(compaction_changes)
         first_content_at: float | None = None
         first_text_at: float | None = None
         started_at = clock()
@@ -161,7 +165,7 @@ class ModelStep:
                                 if first_text_at is None:
                                     first_text_at = received_at
                             self.output_bytes += len(item.text.encode())
-                            if self.output_bytes > self.max_output:
+                            if self.max_output is not None and self.output_bytes > self.max_output:
                                 raise ServiceError("output_limit")
                             text += item.text
                             if purpose == "summary" and len(text.encode()) > summary_bytes:

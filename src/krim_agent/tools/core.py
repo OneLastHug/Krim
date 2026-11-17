@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 
@@ -15,6 +16,7 @@ from krim_agent.contracts import ToolObservation, fingerprint
 from .mcp_schema import MCPContract
 from .output import OutputContract, WireOutputSchema
 from .project_names import LEGACY_PROJECT_NAMES, PROJECT_CAPABILITIES
+from .session import SESSION_CAPABILITIES, SESSION_RISKS
 
 type Decision = Literal["allow", "deny", "ask"]
 
@@ -89,6 +91,7 @@ class ToolSpec:
         if external:
             if self.name in {
                 *LEGACY_PROJECT_NAMES,
+                *SESSION_CAPABILITIES,
                 "sandbox_project",
                 "sandbox_read",
                 "sandbox_list",
@@ -122,7 +125,14 @@ class ToolSpec:
             self.source.descriptor()
         elif self.source is not None or (self.risk != "read" and self.scoped_executor is None):
             raise ValueError("legacy工具仅接受只读执行器")
-        if self.scoped_executor is not None and (
+        session_scoped = self.capability in SESSION_RISKS
+        if session_scoped and (
+            not inspect.iscoroutinefunction(self.scoped_executor)
+            or SESSION_CAPABILITIES.get(self.name) != self.capability
+            or self.risk != SESSION_RISKS.get(self.capability or "")
+        ):
+            raise ValueError("会话工具须登记精确作用域和风险")
+        if self.scoped_executor is not None and not session_scoped and (
             not inspect.iscoroutinefunction(self.scoped_executor)
             or self.capability is None
             or self.capability
@@ -193,10 +203,14 @@ class ToolSpec:
             "version": self.version,
             "implementation_digest": self.implementation_digest,
             "input_schema": self.parameters.model_json_schema(),
-            "output_schema": OutputContract(self.output_schema).schema(),
+            # __post_init__ validates the declaration. Copy its current value so
+            # registry fingerprints still detect mutation without re-running
+            # Draft 2020-12 meta-schema validation at every runtime fence.
+            "output_schema": deepcopy(self.output_schema),
         }
         if self.scoped_executor is not None:
             value.update(risk=self.risk, capability=self.capability, policy_version=(
+                "session/1" if self.capability in SESSION_RISKS else
                 "development/1"
                 if self.name in PROJECT_CAPABILITIES or self.name in LEGACY_PROJECT_NAMES else
                 "sandbox/1" if self.name.startswith("sandbox_") else "workspace/1"))

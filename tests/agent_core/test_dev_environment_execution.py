@@ -366,7 +366,7 @@ class ExecutionRunner:
                 "CapDrop": ["ALL"],
                 "SecurityOpt": ["no-new-privileges"],
                 "PidMode": "",
-                "IpcMode": "private",
+                "IpcMode": "none" if spec.resource_policy == "unlimited" else "private",
                 "UTSMode": "",
                 "UsernsMode": "",
                 "CgroupnsMode": "private",
@@ -386,12 +386,14 @@ class ExecutionRunner:
                 "RestartPolicy": {"Name": "no"},
                 "LogConfig": {"Type": "none"},
                 "NetworkMode": network_name,
-                "Memory": limits.memory_bytes,
-                "MemorySwap": limits.memory_bytes,
-                "NanoCpus": limits.nano_cpus,
+                "Memory": limits.memory_bytes or 0,
+                "MemorySwap": limits.memory_bytes or 0,
+                "NanoCpus": limits.nano_cpus or 0,
                 "PidsLimit": limits.pids,
-                "ShmSize": limits.shm_bytes,
-                "Ulimits": [{"Name": "nofile", "Soft": 1024, "Hard": 4096}],
+                "ShmSize": (limits.shm_bytes if spec.legacy_profile
+                            else 64 * 1024 * 1024),
+                "Ulimits": ([{"Name": "nofile", "Soft": 1024, "Hard": 4096}]
+                            if spec.legacy_profile else []),
                 "OomKillDisable": False,
                 "Init": False,
                 "Tmpfs": docker.tmpfs(spec),
@@ -415,7 +417,12 @@ class ExecutionRunner:
                     "Destination": "/workspace",
                     "RW": True,
                     "Propagation": "rprivate",
-                }
+                },
+                *[
+                    {"Type": "tmpfs", "Source": "tmpfs", "Destination": destination,
+                     "RW": True, "Propagation": ""}
+                    for destination in docker.tmpfs(spec)
+                ],
             ],
             "NetworkSettings": {"Networks": {network_name: network_value}},
             "State": state_value,

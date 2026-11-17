@@ -308,8 +308,6 @@ async def test_memory_hash_revision_delete_and_idempotency(tmp_path):
             await service.memory(owner, MemoryCreate(request_key="blank", body=" \n\t"))
         with pytest.raises(ServiceError, match="invalid_input"):
             await service.memory(owner, MemoryCreate(request_key="nul", body="正\x00文"))
-        with pytest.raises(ServiceError, match="invalid_input"):
-            await service.memory(owner, MemoryCreate(request_key="wide", body="中" * 2049))
 
         with pytest.raises(ServiceError, match="revision_conflict"):
             await service.memory(

@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
 import { INTENTS, KNOWN, readIntents } from "../src/lib/session-requests";
+import { parseSession } from "../src/lib/session-contracts";
 import { navigationObservation, navigationObservationPage } from "./observability-navigation-fixture";
 
 let root: Root, container: HTMLDivElement;
@@ -67,6 +68,48 @@ test("真实App StrictMode对话入口零自动POST，新建仅由显式操作",
   await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("A"));
 });
 
+test("会话响应兼容null消息上限和旧整数，并拒绝无效值", () => {
+  for (const max_messages of [null, 2, 256]) {
+    const value = session();
+    const raw = JSON.parse(JSON.stringify({ ...value, context_policy: { ...value.context_policy, max_messages } }));
+    expect(parseSession(raw).context_policy.max_messages).toBe(max_messages);
+  }
+  for (const max_messages of [undefined, -1, 0, 1, 1.5, "256", true, Number.MAX_SAFE_INTEGER + 1]) {
+    const value = session();
+    const raw = JSON.parse(JSON.stringify({ ...value, context_policy: { ...value.context_policy, max_messages } }));
+    expect(() => parseSession(raw)).toThrow();
+  }
+});
+
+test("真实App创建并重读默认null消息上限的会话", async () => {
+  const base = "/v2/workspaces/local/sessions";
+  let created: ReturnType<typeof session> | null = null;
+  override = (path, options) => {
+    if (path === base && options.method === "POST") {
+      const body = JSON.parse(String(options.body)) as { request_key: string };
+      created = session("A", body.request_key);
+      return json({ ...created, context_policy: { ...created.context_policy, max_messages: null } }, 201);
+    }
+    if (path === base + "?limit=50") return json(created ? [{ ...created, context_policy: { ...created.context_policy, max_messages: null } }] : []);
+    if (path === base + "/A" && created) return json({ ...created, context_policy: { ...created.context_policy, max_messages: null } });
+    return undefined;
+  };
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect(createButton().disabled).toBe(false));
+  await act(async () => createButton().click());
+  await act(async () => button("创建对话").click());
+  await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("A"));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  await until(() => expect(calls.some(call => call.path === base + "/A")).toBe(true));
+  await openMorePopover();
+  await act(async () => menuItem("刷新对话").click());
+  await until(() => expect(calls.filter(call => call.path === base + "/A").length).toBeGreaterThanOrEqual(2));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  expect(calls.filter(call => call.method === "POST" && call.path === base)).toHaveLength(1);
+  expect(container.textContent).not.toContain("对话响应无效");
+  expect(readIntents(localStorage)).toEqual([]);
+});
+
 test("身份GET失败后刷新只读恢复且零POST", async () => {
   let reject = true;
   override = path => path === "/v2/me" && reject ? json({ error: { code: "execution_error" } }, 503) : undefined;
@@ -119,6 +162,46 @@ async function mountExisting() {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
 }
+test("超过32KiB的普通聊天草稿完整提交，输入框保留单行配置", async () => {
+  const fixture = server("none");
+  await mountExisting();
+  const large = "长正文".repeat(12000);
+  expect(large.length).toBeGreaterThan(32768);
+  expect(new TextEncoder().encode(large).length).toBeGreaterThan(32768);
+  const prompt = document.getElementById("chat-prompt") as HTMLTextAreaElement;
+  expect(prompt.hasAttribute("maxlength")).toBe(false);
+  expect(prompt.rows).toBe(1);
+  await type("chat-prompt", large);
+  expect(prompt.value).toBe(large);
+  await act(async () => button("发送").click());
+  await until(() => expect(fixture.accepted?.text).toBe(large));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe(""));
+  const posts = calls.filter(call => call.method === "POST" && call.path.endsWith("/A/turns"));
+  expect(posts).toHaveLength(1);
+  expect((posts[0]!.body as { text: string }).text).toBe(large);
+  expect(container.textContent).not.toContain("输入超出容量");
+});
+
+test("超长消息由模型实际容量拒绝时显示模型错误且不重新提交", async () => {
+  const fixture = server("none");
+  const fallback = override!;
+  override = (path, options) => {
+    if (path === "/v2/workspaces/local/sessions/A/turns?offset=0&limit=50" && fixture.accepted) {
+      return json([{ ...fixture.accepted, status: "failed", code: "provider_request_limit", transcript: null }]);
+    }
+    return fallback(path, options);
+  };
+  await mountExisting();
+  const large = "内容".repeat(20000);
+  await type("chat-prompt", large);
+  await act(async () => button("发送").click());
+  await until(() => expect(container.querySelector(".chat-turn-notice")?.textContent).toContain("模型请求过长"));
+  expect(container.querySelector(".chat-turn-notice")?.textContent).toContain("provider_request_limit");
+  expect(fixture.accepted?.text).toBe(large);
+  expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/A/turns"))).toHaveLength(1);
+  expect(readIntents(localStorage)).toEqual([]);
+});
+
 test("长历史轮询只重读活动页，并合并终态后的新Turn", async () => {
   const base = "/v2/workspaces/local/sessions", prefix = Array.from({ length: 50 }, (_, index) => historyTurn("old-" + index, index + 1));
   const active = historyTurn("active-50", 51, "running"), added = historyTurn("new-51", 52, "queued");

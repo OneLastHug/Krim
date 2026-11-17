@@ -20,8 +20,6 @@ type LoadFile = Callable[[str], Awaitable[sdk.FilePart]]
 type ExpectedSha256 = Callable[[sdk.FilePart], str | None]
 
 _ALLOWED_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
-_MAX_BATCH_BYTES = 512 * 1024
-_MAX_IMAGES = 8
 _REFERENCE_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 _DATA_URL_RE = re.compile(r"data:([^;,]+);base64,(.*)\Z", re.DOTALL)
@@ -30,19 +28,20 @@ _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
 @dataclass(frozen=True, slots=True)
 class MediaLimits:
-    """Strict per-image, batch, and count bounds for model-bound media."""
+    """Host-supplied provider capacities; None adds no Krim product quota.
 
-    max_image_bytes: int = 256 * 1024
-    max_batch_bytes: int = _MAX_BATCH_BYTES
-    max_images: int = _MAX_IMAGES
+    Byte limits refer to decoded image bytes. The provider still enforces its
+    complete encoded request limit, including base64 expansion and other input.
+    """
+
+    max_image_bytes: int | None = None
+    max_batch_bytes: int | None = None
+    max_images: int | None = None
 
     def __post_init__(self) -> None:
-        if (type(self.max_image_bytes) is not int or type(self.max_batch_bytes) is not int
-                or type(self.max_images) is not int or self.max_image_bytes < 1
-                or self.max_image_bytes > _MAX_BATCH_BYTES or self.max_batch_bytes < 1
-                or self.max_batch_bytes > _MAX_BATCH_BYTES or self.max_images < 1
-                or self.max_images > _MAX_IMAGES):
-            raise ValueError("invalid media limits")
+        for value in (self.max_image_bytes, self.max_batch_bytes, self.max_images):
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError("invalid media limits")
 
 
 DEFAULT_MEDIA_LIMITS = MediaLimits()
@@ -61,8 +60,9 @@ def _decode_payload(part: sdk.FilePart, limits: MediaLimits) -> tuple[bytes, str
     if isinstance(data, bytes):
         payload = data
     elif isinstance(data, str):
-        max_encoded = 4 * ((limits.max_image_bytes + 2) // 3)
-        if len(data) > max_encoded + 64:
+        max_encoded = (4 * ((limits.max_image_bytes + 2) // 3)
+                       if limits.max_image_bytes is not None else None)
+        if max_encoded is not None and len(data) > max_encoded + 64:
             raise _invalid()
         encoded = data
         if data.startswith("data:"):
@@ -78,8 +78,7 @@ def _decode_payload(part: sdk.FilePart, limits: MediaLimits) -> tuple[bytes, str
             encoded_bytes = encoded.encode("ascii")
         except UnicodeEncodeError as exc:
             raise _invalid() from exc
-        max_encoded = 4 * ((limits.max_image_bytes + 2) // 3)
-        if len(encoded_bytes) > max_encoded:
+        if max_encoded is not None and len(encoded_bytes) > max_encoded:
             raise _invalid()
         try:
             payload = base64.b64decode(encoded_bytes, validate=True)
@@ -90,7 +89,9 @@ def _decode_payload(part: sdk.FilePart, limits: MediaLimits) -> tuple[bytes, str
     else:
         raise _invalid()
 
-    if not payload or len(payload) > limits.max_image_bytes:
+    if not payload or (
+        limits.max_image_bytes is not None and len(payload) > limits.max_image_bytes
+    ):
         raise _invalid()
     detected = sdk_media.detect_image_media_type(payload)
     if detected not in _ALLOWED_TYPES or detected != media_type:
@@ -117,11 +118,11 @@ def _inspect_history(
     for message in history:
         for part in message.parts:
             if isinstance(part, sdk.FilePart):
-                if len(files) >= limits.max_images:
+                if limits.max_images is not None and len(files) >= limits.max_images:
                     raise _invalid()
                 payload, _ = _decode_payload(part, limits)
                 total_bytes += len(payload)
-                if total_bytes > limits.max_batch_bytes:
+                if limits.max_batch_bytes is not None and total_bytes > limits.max_batch_bytes:
                     raise _invalid()
                 if expected_sha256 is not None:
                     _check_digest(payload, expected_sha256(part))

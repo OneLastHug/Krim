@@ -7,9 +7,18 @@ import hmac
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
-from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -18,22 +27,23 @@ from krim_agent.account_mcp.secrets import MAX_PLAINTEXT_BYTES
 from krim_agent.contracts import ServiceError, StrictModel, encoded, fingerprint, parse_json
 from krim_agent.mcp.client import MCPConnection
 from krim_agent.mcp.types import MCPServerConfig
+from krim_agent.runtime.contracts import settled
 from krim_agent.security import PrincipalContext
 from krim_agent.storage.mcp_models import mcp_connections, mcp_requests, session_mcp, turn_mcp
 from krim_agent.storage.models import sessions
-from krim_agent.tools.core import Decision, Invocation
+from krim_agent.tools.catalog_search import scope_key
+from krim_agent.tools.core import Decision, ExternalExecutor, Invocation, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.mcp import mcp_tools
-from krim_agent.tools.registry import MAX_TOOLS, ToolRegistry
+from krim_agent.tools.mcp_resources import MCPResourceBinding
+from krim_agent.tools.registry import ToolRegistry
 from krim_agent.tools.runtime import _mcp_egress_policy
+from krim_agent.tools.session import SessionScopeResolver, SessionToolScope, ToolBundle
 
 if TYPE_CHECKING:
     from krim_agent.accounts.service import IdentityService
     from krim_agent.storage.sqlite import SQLiteStore
 
-MAX_ACCOUNT_SERVERS = 8
-MAX_SELECTED_TOOLS = 8
-MAX_CONNECTION_CONFIG_BYTES = 8192
 _CREDENTIAL_PURPOSE = "mcp-credential"
 
 
@@ -42,8 +52,8 @@ class ConnectionCreate(StrictModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     url: str = Field(min_length=1, max_length=2048)
     allowed_hosts: tuple[str, ...] = Field(min_length=1, max_length=16)
-    selected_tools: tuple[str, ...] = Field(min_length=1, max_length=MAX_SELECTED_TOOLS)
-    readonly_tools: tuple[str, ...] = Field(default=(), max_length=MAX_SELECTED_TOOLS)
+    selected_tools: tuple[str, ...] = ()
+    readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] = Field(default_factory=dict, max_length=32)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
@@ -74,8 +84,8 @@ class ConnectionUpdate(StrictModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     url: str = Field(min_length=1, max_length=2048)
     allowed_hosts: tuple[str, ...] = Field(min_length=1, max_length=16)
-    selected_tools: tuple[str, ...] = Field(min_length=1, max_length=MAX_SELECTED_TOOLS)
-    readonly_tools: tuple[str, ...] = Field(default=(), max_length=MAX_SELECTED_TOOLS)
+    selected_tools: tuple[str, ...] = ()
+    readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] | None = Field(default=None, max_length=32)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
@@ -114,7 +124,7 @@ class SessionConnection(StrictModel):
 class SessionMCPSelection(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[!-~]+$")
     expected_revision: int = Field(ge=0)
-    connections: tuple[SessionConnection, ...] = Field(default=(), max_length=MAX_ACCOUNT_SERVERS)
+    connections: tuple[SessionConnection, ...] = ()
 
     @model_validator(mode="after")
     def unique_connections(self) -> SessionMCPSelection:
@@ -392,25 +402,12 @@ class AccountMCPService:
     ) -> dict[str, Any]:
         connection_id = str(uuid.uuid4())
         config = _config_document(body)
-        if len(encoded(config).encode("utf-8")) > MAX_CONNECTION_CONFIG_BYTES:
-            raise ServiceError("input_limit", 422)
-        if len(body.selected_tools) > MAX_SELECTED_TOOLS:
-            raise ServiceError("tool_limit", 422)
         credential_revision = 1
         secret = body.credentials
 
         async def operation(
             conn: AsyncConnection,
         ) -> tuple[dict[str, Any], tuple[str, int, str | None] | None]:
-            more = (
-                await conn.execute(
-                    select(mcp_connections.c.id)
-                    .where(mcp_connections.c.principal_id == actor.principal_id)
-                    .limit(MAX_ACCOUNT_SERVERS)
-                )
-            ).all()
-            if len(more) >= MAX_ACCOUNT_SERVERS:
-                raise ServiceError("input_limit", 422)
             duplicate = await conn.scalar(
                 select(mcp_connections.c.id).where(
                     mcp_connections.c.principal_id == actor.principal_id,
@@ -456,10 +453,6 @@ class AccountMCPService:
         if not connection_id or len(connection_id) > 64:
             raise ServiceError("not_found", 404)
         config = _config_document(body)
-        if len(encoded(config).encode("utf-8")) > MAX_CONNECTION_CONFIG_BYTES:
-            raise ServiceError("input_limit", 422)
-        if len(body.selected_tools) > MAX_SELECTED_TOOLS:
-            raise ServiceError("tool_limit", 422)
         secret = body.credentials
 
         async def operation(
@@ -655,25 +648,6 @@ class AccountMCPService:
                 if row["revision"] != selected.revision:
                     raise ServiceError("revision_conflict", 409)
             connections = [item.model_dump(mode="json") for item in body.connections]
-            total_tools = 0
-            for selected in body.connections:
-                row = (
-                    (
-                        await conn.execute(
-                            select(mcp_connections).where(
-                                mcp_connections.c.id == selected.connection_id,
-                                mcp_connections.c.principal_id == actor.principal_id,
-                            )
-                        )
-                    )
-                    .mappings()
-                    .first()
-                )
-                if row is None:
-                    raise ServiceError("not_found", 404)
-                total_tools += len(cast(dict[str, Any], row["config"])["selected_tools"])
-            if total_tools > MAX_SELECTED_TOOLS:
-                raise ServiceError("tool_limit", 422)
             values = {"connections": connections, "revision": current["revision"] + 1}
             if current["revision"] == 0:
                 await conn.execute(insert(session_mcp).values(session_id=session_id, **values))
@@ -776,14 +750,6 @@ class AccountMCPService:
                 "selection_revision": row["revision"] if row else 0,
                 "connections": connections,
             }
-        if len(encoded(snapshot).encode("utf-8")) > 131072:
-            raise ServiceError("input_limit", 422)
-        total_tools = sum(
-            len(cast(dict[str, Any], item["config"]).get("selected_tools", []))
-            for item in snapshot["connections"]
-        )
-        if total_tools > MAX_SELECTED_TOOLS:
-            raise ServiceError("tool_limit", 422)
         await conn.execute(
             insert(turn_mcp).values(
                 turn_id=turn_id, snapshot=snapshot, fingerprint=fingerprint(snapshot)
@@ -793,7 +759,12 @@ class AccountMCPService:
     async def build_runtime(
         self, configs: tuple[MCPServerConfig, ...], base: ToolExecutor
     ) -> tuple[ToolExecutor, tuple[MCPConnection, ...]]:
-        """Extend the selected executor without dropping its host pipeline."""
+        """Extend the selected executor without dropping its host pipeline.
+
+        历史兼容路径沿用 ``<server>__<remote>``原名以保持既有审批与恢复
+        绑定；host与账号同名服务器冲突由registry拒绝。新装配走
+        open_bundle的``account``命名空间。
+        """
         base.registry.assert_current()
         if not configs:
             return base, ()
@@ -805,10 +776,7 @@ class AccountMCPService:
                 connections.append(connection)
                 await connection.connect()
                 specs.extend(mcp_tools(connection))
-            selected_tools = len(specs) - len(base.registry._frozen)
-            if selected_tools > MAX_SELECTED_TOOLS:
-                raise ServiceError("tool_limit", 422)
-            registry = ToolRegistry(tuple(specs), max_tools=MAX_TOOLS)
+            registry = ToolRegistry(tuple(specs), dependencies=(base.registry,))
             account_names = frozenset(spec.name for spec in specs[len(base.registry._frozen) :])
 
             async def policy(invocation: Invocation) -> Decision:
@@ -828,6 +796,49 @@ class AccountMCPService:
         except BaseException:
             await asyncio.gather(*(item.close() for item in connections), return_exceptions=True)
             raise
+
+    async def open_bundle(
+        self,
+        configs: tuple[MCPServerConfig, ...],
+        resolve: SessionScopeResolver,
+        scope: SessionToolScope | None = None,
+    ) -> AccountMCPBundle:
+        """按turn冻结配置打开会话绑定的账号MCP工具束。
+
+        工具名使用``account``命名空间与宿主同名服务器共存。``scope``缺省
+        时以首个resolve结果为初始绑定，此后永不重绑：actor principal/
+        workspace/session/turn/run必须逐次一致，跨会话共享被拒绝；bundle
+        的policy每次resolve并scope.check后默认ask。连接或登记失败时关闭
+        全部已建连接。
+        """
+        bound = _BoundScope(resolve, scope)
+        if scope is not None:
+            bound.admit(scope)
+        connections: list[MCPConnection] = []
+        specs: list[ToolSpec] = []
+        try:
+            for server in configs:
+                connection = MCPConnection(server, egress_policy=_mcp_egress_policy(server))
+                connections.append(connection)
+                await connection.connect()
+                for spec in mcp_tools(connection, namespace="account"):
+                    original = spec.external_executor
+                    if original is None:
+                        raise ServiceError("facts_corrupt")
+                    specs.append(
+                        replace(spec, external_executor=_scoped_external(original, bound))
+                    )
+        except BaseException:
+            await asyncio.gather(*(item.close() for item in connections), return_exceptions=True)
+            raise
+
+        async def policy(invocation: Invocation) -> Decision:
+            if invocation.name not in frozenset(spec.name for spec in specs):
+                return "deny"
+            await bound.resolve(invocation)
+            return "ask"
+
+        return AccountMCPBundle(ToolBundle(tuple(specs), policy), tuple(connections), bound)
 
     async def configurations_for_turn(self, turn_id: str) -> tuple[MCPServerConfig, ...]:
         async with self.store.lock, self.store.engine.begin() as conn:
@@ -850,7 +861,6 @@ class AccountMCPService:
         if type(configs) is not list:
             raise ServiceError("facts_corrupt")
         result: list[MCPServerConfig] = []
-        count = 0
         seen_names: set[str] = set()
         seen_ids: set[str] = set()
         for item in configs:
@@ -899,10 +909,104 @@ class AccountMCPService:
                 raise ServiceError("facts_corrupt")
             seen_names.add(server.name)
             seen_ids.add(connection_id)
-            count += len(server.selected_tools)
-            if count > MAX_SELECTED_TOOLS:
-                raise ServiceError("tool_limit", 422)
             result.append(server)
-        if len(result) > MAX_ACCOUNT_SERVERS:
-            raise ServiceError("facts_corrupt")
         return tuple(result)
+
+
+class _BoundScope:
+    """绑定首个确认的会话范围；此后永不重绑，禁止跨会话共享。
+
+    身份字段直接采用catalog_search.scope_key的七元组，project_id与资源
+    侧键保持一致。
+    """
+
+    __slots__ = ("_resolver", "identity", "scope")
+
+    def __init__(
+        self, resolver: SessionScopeResolver, scope: SessionToolScope | None = None
+    ) -> None:
+        self._resolver = resolver
+        self.scope = scope
+        self.identity = scope_key(scope) if scope is not None else None
+
+    def admit(self, scope: SessionToolScope) -> None:
+        """校验工作区成员资格；首个scope即绑定，与已绑定范围不一致则拒绝。"""
+        scope.check()
+        scope.actor.member(scope.workspace_id)
+        identity = scope_key(scope)
+        if self.scope is None:
+            self.scope = scope
+            self.identity = identity
+        elif self.identity != identity:
+            raise ServiceError("permission_denied", 403)
+
+    async def resolve(self, invocation: Invocation) -> SessionToolScope:
+        scope = await self._resolver(invocation)
+        self.admit(scope)
+        return scope
+
+
+def _scoped_external(original: ExternalExecutor, bound: _BoundScope) -> ExternalExecutor:
+    async def execute(invocation: Invocation, arguments: BaseModel) -> JsonValue:
+        await bound.resolve(invocation)
+        value = await original(invocation, arguments)
+        # 执行期间撤权时不把旧权限下的数据带回给调用方。
+        await bound.resolve(invocation)
+        return value
+
+    return execute
+
+
+class AccountMCPBundle:
+    """会话绑定的账号MCP工具束；工具与资源访问共享同一初始scope。
+
+    policy每次经宿主resolve并scope.check后默认ask；external_executor再次
+    resolve并核对绑定范围（actor principal/workspace/session/turn/run），
+    模型无法提供或更换scope。resource_bindings把连接与已验证的owner_scope
+    一起交给资源服务，composition不经手未授权scope。close幂等。
+    """
+
+    def __init__(
+        self,
+        bundle: ToolBundle,
+        connections: tuple[MCPConnection, ...],
+        bound: _BoundScope,
+    ) -> None:
+        self.bundle = bundle
+        self.connections = connections
+        self._bound = bound
+        self._close_task: asyncio.Task[None] | None = None
+
+    @property
+    def owner_scope(self) -> SessionToolScope | None:
+        """已绑定的初始scope；延迟绑定时首个resolve前为None。"""
+        return self._bound.scope
+
+    async def require_scope(self, invocation: Invocation) -> SessionToolScope:
+        """统一scope入口：resolve、scope.check并核对初始绑定。"""
+        return await self._bound.resolve(invocation)
+
+    async def resource_bindings(
+        self, invocation: Invocation
+    ) -> tuple[MCPResourceBinding, ...]:
+        """以已验证的owner_scope构造资源绑定；不向任意scope泄漏裸连接。"""
+        scope = await self.require_scope(invocation)
+        return tuple(
+            MCPResourceBinding("account:" + connection.config.name, connection, scope)
+            for connection in self.connections
+        )
+
+    async def close(self) -> None:
+        """幂等关闭：缓存关闭任务，调用方取消不打断清理，可继续等待。"""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await settled(self._close_task)
+
+    async def _close(self) -> None:
+        results = await asyncio.gather(
+            *(connection.close() for connection in self.connections),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

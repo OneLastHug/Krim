@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
 import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
@@ -12,7 +12,7 @@ import { ToolCallCard } from "./ToolCallCard";
 
 const EMPTY_EVENTS: Record<string, unknown>[] = [];
 
-export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (turnId: string) => void }) {
+export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; onTrace?: (turnId: string) => void; children?: ReactNode }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showJump, setShowJump] = useState(false);
   const feedback = useCopyFeedback();
@@ -123,6 +123,7 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
             </section>}
           </article>;
         })}
+        {children}
       </div>
     </div>
     {showJump && <Button variant="outline" size="icon-sm" className="chat-jump" aria-label="回到底部" onClick={bottom}><ArrowDown aria-hidden="true" /></Button>}

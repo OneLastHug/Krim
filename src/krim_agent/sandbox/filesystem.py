@@ -12,7 +12,7 @@ import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -20,14 +20,11 @@ from typing import Any
 from krim_agent.contracts import ServiceError
 
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+# 应用文件字节配额已移除；该常量仅为checkpoints等既有调用方的捕获边界保留，
+# 不再是ProjectFiles读写/搜索的文件大小上限。
 MAX_FILE = 4 * 1024**2
 MAX_SEARCH_PATTERN_BYTES = 256
-MAX_SEARCH_ENTRIES = 4096
-MAX_SEARCH_BYTES = 32 * 1024**2
-MAX_REGEX_SEARCH_BYTES = 512 * 1024
 MAX_REGEX_PATTERN_BYTES = 64
-MAX_REGEX_LINE_CHARS = 1024
-MAX_SEARCH_MATCHES = 4096
 MAX_SEARCH_RESULT_BYTES = 64 * 1024
 
 
@@ -208,8 +205,6 @@ class ProjectFiles:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ServiceError("artifact_invalid")
-        if info.st_size > MAX_FILE:
-            raise ServiceError("artifact_limit")
         return info
 
     @staticmethod
@@ -230,7 +225,7 @@ class ProjectFiles:
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """目录项稳定排序分页；敏感名称被过滤且不计入 total，扫描上限仍为 4096 项。"""
+        """目录项稳定排序分页；敏感名称被过滤且不计入total，无条目总数上限。"""
         names = _parts(path, directory=True)
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
             raise ServiceError("invalid_input", 422)
@@ -239,12 +234,8 @@ class ProjectFiles:
             self._parent(content, names) as fd,
         ):
             entries: list[dict[str, Any]] = []
-            scanned = 0
             with os.scandir(fd) as scan:
                 for entry in scan:
-                    scanned += 1
-                    if scanned > 4096:
-                        raise ServiceError("artifact_limit")
                     try:
                         _parts(entry.name)
                     except ServiceError:
@@ -284,30 +275,21 @@ class ProjectFiles:
             type(limit) is not int
             or not 1 <= limit <= 100
             or type(offset) is not int
-            or not 0 <= offset < MAX_SEARCH_ENTRIES
-            or offset + limit > MAX_SEARCH_ENTRIES
+            or offset < 0
         ):
             raise ServiceError("invalid_input", 422)
         found: list[dict[str, Any]] = []
-        count = 0
-        entry_cap = False
         root_prefix = "/".join(names) + "/" if names else ""
         depth_cap = False
 
         def walk(directory: int, prefix: str, depth: int) -> None:
-            nonlocal count, entry_cap, depth_cap
+            nonlocal depth_cap
             with os.scandir(directory) as listing:
                 items = sorted(
                     ((entry.name, entry.stat(follow_symlinks=False)) for entry in listing),
                     key=lambda item: item[0],
                 )
             for name, info in items:
-                if entry_cap:
-                    return
-                count += 1
-                if count > MAX_SEARCH_ENTRIES:
-                    entry_cap = True
-                    return
                 full = prefix + name
                 try:
                     _parts(name)
@@ -350,12 +332,12 @@ class ProjectFiles:
             "include_glob": include_glob,
             "files": page,
             "offset": offset,
-            "total": None if entry_cap or depth_cap else len(found),
+            "total": None if depth_cap else len(found),
             "next_offset": None
-            if entry_cap or depth_cap
+            if depth_cap
             else (offset + len(page) if offset + len(page) < len(found) else None),
-            "truncated": entry_cap or depth_cap,
-            "entry_cap_reached": entry_cap,
+            "truncated": depth_cap,
+            "entry_cap_reached": False,
             "depth_cap_reached": depth_cap,
         }
 
@@ -439,7 +421,34 @@ class ProjectFiles:
         data: bytes,
         expected_sha256: str | None,
     ) -> dict[str, Any]:
-        return self._replace(environment_id, project_id, path, data, expected_sha256, 1024**2)
+        """单次整体替换，应用层不设内容大小上限；超大内容优先走stream_write分块传输。"""
+        return self._replace(environment_id, project_id, path, data, expected_sha256)
+
+    def stream_write(
+        self,
+        environment_id: str,
+        project_id: str,
+        path: str,
+        chunks: Iterable[bytes],
+        expected_sha256: str | None,
+        content_sha256: str,
+        journal: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """分块流式写入大文件；落盘汇总摘要与content_sha256一致才原子替换。
+
+        chunks为有序非空bytes块（如暂存库chunks()的输出），不把全部内容驻留内存。
+        expected_sha256语义同write（旧内容前置条件）；content_sha256必填，不符时
+        目标保持原状并报artifact_conflict。调用方须持有写租约。
+        """
+        return self._replace(
+            environment_id,
+            project_id,
+            path,
+            chunks,
+            expected_sha256,
+            journal,
+            content_sha256=content_sha256,
+        )
 
     def restore_write(
         self,
@@ -450,30 +459,37 @@ class ProjectFiles:
         expected_sha256: str | None,
         journal: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        return self._replace(
-            environment_id, project_id, path, data, expected_sha256, MAX_FILE, journal
-        )
+        return self._replace(environment_id, project_id, path, data, expected_sha256, journal)
 
     def _replace(
         self,
         environment_id: str,
         project_id: str,
         path: str,
-        data: bytes,
+        data: bytes | Iterable[bytes],
         expected_sha256: str | None,
-        maximum: int,
         journal: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        content_sha256: str | None = None,
     ) -> dict[str, Any]:
         """调用方须持有写租约；父目录必须存在，不隐式扩展目录树。"""
         names = _parts(path)
+        streaming = not isinstance(data, bytes)
+        chunks = iter(data) if streaming else None
         if (
-            type(data) is not bytes
-            or len(data) > maximum
+            (not streaming and type(data) is not bytes)
+            or (streaming and content_sha256 is None)
             or expected_sha256 is not None
             and (
                 type(expected_sha256) is not str
                 or len(expected_sha256) != 64
                 or any(c not in "0123456789abcdef" for c in expected_sha256)
+            )
+            or content_sha256 is not None
+            and (
+                type(content_sha256) is not str
+                or len(content_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in content_sha256)
             )
         ):
             raise ServiceError("invalid_input", 422)
@@ -511,13 +527,29 @@ class ProjectFiles:
                             "ino": temporary_info.st_ino,
                         }
                     )
+                digest = hashlib.sha256()
+                written = 0
                 with os.fdopen(os.dup(handle), "wb") as stream:
-                    stream.write(data)
+                    if chunks is None:
+                        if not isinstance(data, bytes):
+                            raise ServiceError("invalid_input", 422)
+                        stream.write(data)
+                        digest.update(data)
+                        written = len(data)
+                    else:
+                        for chunk in chunks:
+                            if type(chunk) is not bytes or not chunk:
+                                raise ServiceError("invalid_input", 422)
+                            stream.write(chunk)
+                            digest.update(chunk)
+                            written += len(chunk)
                     stream.flush()
                 owner = os.fstat(content)
                 if os.geteuid() == 0:
                     os.fchown(handle, owner.st_uid, owner.st_gid)
                 os.fsync(handle)
+                if content_sha256 is not None and digest.hexdigest() != content_sha256:
+                    raise ServiceError("artifact_conflict")
                 try:
                     current = os.stat(names[-1], dir_fd=fd, follow_symlinks=False)
                 except FileNotFoundError:
@@ -532,7 +564,7 @@ class ProjectFiles:
                 os.replace(temporary, names[-1], src_dir_fd=fd, dst_dir_fd=fd)
                 os.fsync(fd)
                 self._current()
-                return {"path": path, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                return {"path": path, "size": written, "sha256": digest.hexdigest()}
             finally:
                 os.close(handle)
                 try:
@@ -640,8 +672,7 @@ class ProjectFiles:
             or type(limit) is not int
             or not 1 <= limit <= 100
             or type(offset) is not int
-            or not 0 <= offset < MAX_SEARCH_MATCHES
-            or offset + limit > MAX_SEARCH_MATCHES
+            or offset < 0
             or type(case_sensitive) is not bool
             or type(before) is not int
             or not 0 <= before <= 3
@@ -678,12 +709,13 @@ class ProjectFiles:
         root_prefix = "/".join(names) + "/" if names else ""
         skipped = 0
         total_matches = 0
-        entry_cap = byte_cap = depth_cap = match_cap = False
-        count = 0
+        depth_cap = False
+        match_cap = False
+        page_resume_offset: int | None = None
 
         def scan(directory: int, prefix: str, depth: int, only: str | None = None) -> None:
-            nonlocal count, scanned_bytes, skipped, total_matches, result_bytes
-            nonlocal entry_cap, byte_cap, depth_cap, match_cap
+            nonlocal scanned_bytes, skipped, total_matches, result_bytes
+            nonlocal depth_cap, match_cap, page_resume_offset
             if only is not None:
                 items = [(only, os.stat(only, dir_fd=directory, follow_symlinks=False))]
             else:
@@ -693,12 +725,6 @@ class ProjectFiles:
                         key=lambda item: item[0],
                     )
             for name, before_info in items:
-                if entry_cap or match_cap:
-                    return
-                count += 1
-                if count > MAX_SEARCH_ENTRIES:
-                    entry_cap = True
-                    return
                 full = prefix + name
                 try:
                     _parts(name)
@@ -730,14 +756,7 @@ class ProjectFiles:
                 relative_path = full[len(root_prefix):] if full.startswith(root_prefix) else full
                 if include_glob is not None and not glob_matches(relative_path, include_glob):
                     continue
-                if before_info.st_size > MAX_FILE:
-                    skipped += 1
-                    continue
-                byte_limit = MAX_REGEX_SEARCH_BYTES if mode == "regex" else MAX_SEARCH_BYTES
-                if scanned_bytes + before_info.st_size > byte_limit:
-                    skipped += 1
-                    byte_cap = True
-                    continue
+                # 文件数量/总字节扫描配额已移除；每个匹配文件完整参与本次扫描。
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                 try:
                     actual = self._regular(fd)
@@ -760,21 +779,14 @@ class ProjectFiles:
                     skipped += 1
                     continue
                 lines = text.splitlines()
-                if mode == "regex" and any(len(line) > MAX_REGEX_LINE_CHARS for line in lines):
-                    skipped += 1
-                    byte_cap = True
-                    continue
                 for index, line in enumerate(lines):
                     subject = line if mode == "regex" or case_sensitive else line.casefold()
                     hit = matcher.search(subject) is not None if matcher else query in subject
                     if not hit:
                         continue
-                    if total_matches >= MAX_SEARCH_MATCHES:
-                        match_cap = True
-                        return
                     current = total_matches
                     total_matches += 1
-                    if offset <= current < offset + limit:
+                    if offset <= current < offset + limit and not match_cap:
                         item = {
                             "path": full,
                             "line": index + 1,
@@ -784,10 +796,12 @@ class ProjectFiles:
                         }
                         item_bytes = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
                         if result_bytes + item_bytes > MAX_SEARCH_RESULT_BYTES:
+                            # 单次响应仍有合理字节上限，但offset可继续读取被省略结果。
                             match_cap = True
-                            return
-                        result_bytes += item_bytes
-                        matches.append(item)
+                            page_resume_offset = current
+                        else:
+                            result_bytes += item_bytes
+                            matches.append(item)
 
         with self._content(environment_id, project_id) as content:
             if not names:
@@ -806,38 +820,35 @@ class ProjectFiles:
                         scan(parent, root_prefix, 0, only=names[-1])
                     else:
                         raise ServiceError("artifact_invalid")
-        next_offset = offset + len(matches) if offset + len(matches) < total_matches else None
-        scan_incomplete = entry_cap or match_cap or byte_cap or depth_cap
-        results_truncated = scan_incomplete or next_offset is not None
+        next_offset = page_resume_offset
+        if next_offset is None and offset + len(matches) < total_matches:
+            next_offset = offset + len(matches)
+        scan_incomplete = depth_cap
         return {
             "path": path,
             "offset": offset,
             "matches": matches,
-            "total_matches": total_matches if not scan_incomplete else None,
-            "next_offset": next_offset if not scan_incomplete else None,
-            "truncated": results_truncated,
-            "entry_cap_reached": entry_cap,
+            "total_matches": None if scan_incomplete else total_matches,
+            "next_offset": next_offset,
+            "truncated": scan_incomplete or next_offset is not None,
+            "entry_cap_reached": False,
             "match_cap_reached": match_cap,
             "skipped": skipped,
             "scanned_bytes": scanned_bytes,
-            "byte_cap_reached": byte_cap,
+            "byte_cap_reached": False,
             "depth_cap_reached": depth_cap,
         }
 
     def snapshot(self, environment_id: str, project_id: str) -> dict[str, Any]:
-        """写者静止且持有项目租约时使用；覆盖有界，排除项逐一记录。"""
+        """写者静止且持有项目租约时使用；不设应用层文件数量或内容字节总量上限。"""
         files: dict[str, bytes] = {}
         excluded: list[dict[str, str]] = []
-        count = 0
         size = 0
 
         def walk(directory: int, prefix: str) -> None:
-            nonlocal count, size
+            nonlocal size
             with os.scandir(directory) as scan:
                 for entry in scan:
-                    count += 1
-                    if count > 4096:
-                        raise ServiceError("artifact_limit")
                     path = prefix + entry.name
                     try:
                         _parts(path)
@@ -861,11 +872,6 @@ class ProjectFiles:
                         finally:
                             os.close(child)
                     elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
-                        if before.st_size > MAX_FILE:
-                            excluded.append({"path": path, "reason": "file_too_large"})
-                            continue
-                        if size + before.st_size > 32 * 1024**2:
-                            raise ServiceError("artifact_limit")
                         fd = os.open(
                             entry.name,
                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,

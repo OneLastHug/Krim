@@ -23,11 +23,13 @@ class FakeQuota:
 
     def provision(self, environment_id, limits):
         number = self.project_number(environment_id)
+        # 与真实XfsAccounts一致：unlimited写0/0（XFS 0=unlimited），limited写有限额。
+        unlimited = limits.resource_policy == "unlimited"
         self.rows[number] = {
             "environment_bytes": 0,
             "environment_inodes": 4,
-            "byte_limit": limits.environment_bytes,
-            "inode_limit": limits.environment_inodes,
+            "byte_limit": 0 if unlimited else limits.environment_bytes,
+            "inode_limit": 0 if unlimited else limits.environment_inodes,
         }
         return {
             "project_number": number,

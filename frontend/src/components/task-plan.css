@@ -1,0 +1,89 @@
+/* 会话计划只读视图：仅补充内容排版，外壳沿用 workspace-task-area 与现有 token。 */
+.task-plan { min-width: 0; color: var(--foreground); font-size: var(--font-size-ui); }
+.task-plan > summary { list-style: none; }
+.task-plan > summary::-webkit-details-marker { display: none; }
+.task-plan .task-plan-summary-meta { margin-left: auto; color: var(--muted-foreground); font-size: 12px; }
+.task-plan .task-plan-body { display: grid; gap: 10px; min-width: 0; padding-top: 8px; }
+.task-plan .task-plan-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+  min-width: 0;
+}
+.task-plan .task-plan-total { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.task-plan .task-plan-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted-foreground);
+  list-style: none;
+}
+.task-plan .task-plan-counts li { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.task-plan .task-plan-counts strong { color: var(--foreground); font-weight: 600; font-variant-numeric: tabular-nums; }
+.task-plan .task-plan-counts svg,
+.task-plan .task-plan-step-state svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.task-plan .task-plan-counts li[data-status="pending"] svg,
+.task-plan .task-plan-step[data-status="pending"] .task-plan-step-state svg { color: var(--muted-foreground); }
+.task-plan .task-plan-counts li[data-status="in_progress"] svg,
+.task-plan .task-plan-step[data-status="in_progress"] .task-plan-step-state svg { color: var(--foreground); }
+.task-plan .task-plan-counts li[data-status="completed"] svg,
+.task-plan .task-plan-step[data-status="completed"] .task-plan-step-state svg { color: var(--message-check); }
+.task-plan .task-plan-counts li[data-status="blocked"] svg,
+.task-plan .task-plan-step[data-status="blocked"] .task-plan-step-state svg { color: var(--destructive); }
+.task-plan .task-plan-loaded,
+.task-plan .task-plan-empty { margin: 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-plan .task-plan-steps { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.task-plan .task-plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.task-plan .task-plan-step-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.task-plan .task-plan-step-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.55;
+}
+.task-plan .task-plan-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.task-plan .task-plan-error { flex: 1 1 200px; margin: 0; color: var(--destructive); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-plan .task-plan-loading,
+.task-plan .task-plan-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.task-plan .task-plan-loading svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.task-plan .task-plan-more span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.task-plan .task-plan-spinner { animation: task-plan-spin 1.2s linear infinite; }
+@keyframes task-plan-spin { to { transform: rotate(360deg); } }
+@media (max-width: 700px) {
+  .task-plan > summary { min-height: 40px; }
+  .task-plan .task-plan-step { flex-direction: column; align-items: flex-start; gap: 3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-plan .task-plan-spinner { animation: none; }
+}

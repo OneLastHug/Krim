@@ -79,11 +79,12 @@ class FakeQuota:
 
     def provision(self, environment_id, limits):
         number = self.project_number(environment_id)
+        unlimited = limits.resource_policy == "unlimited"
         self.rows[number] = {
             "environment_bytes": 0,
             "environment_inodes": 0,
-            "byte_limit": limits.environment_bytes // 1024 * 1024,
-            "inode_limit": limits.environment_inodes,
+            "byte_limit": 0 if unlimited else limits.environment_bytes // 1024 * 1024,
+            "inode_limit": 0 if unlimited else limits.environment_inodes,
         }
         return {
             "project_number": number,
@@ -95,6 +96,15 @@ class FakeQuota:
     def checkpoint_partition(self, environment_id, limits):
         number = self.project_number(environment_id)
         checkpoint = number + 0x40000000
+        if not limits.checkpoint_bytes or not limits.checkpoint_count:
+            raise ServiceError("sandbox_limit")
+        if limits.resource_policy == "unlimited":
+            self.command(f"limit -p bhard=0k ihard=0 {checkpoint}")
+            return {
+                "checkpoint_number": checkpoint,
+                "checkpoint_bytes": 0,
+                "data_bytes": 0,
+            }
         ck_inodes = min(limits.environment_inodes // 4, max(128, limits.checkpoint_count * 64))
         data_bytes = (limits.environment_bytes - limits.checkpoint_bytes) // 1024 * 1024
         data_inodes = limits.environment_inodes - ck_inodes
@@ -138,7 +148,10 @@ def blocked_lease(storage, project_id):
 
 
 def limits(**overrides) -> dict:
+    # 本文件覆盖旧的有限额协议（先缩后扩、pending_reclaim等），显式limited；
+    # unlimited协议的行为由test_unlimited_storage.py单独覆盖。
     values = {
+        "resource_policy": "limited",
         "environment_bytes": 8 * MIB,
         "environment_inodes": 4000,
         "checkpoint_bytes": 2 * MIB,

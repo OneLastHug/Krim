@@ -1,12 +1,12 @@
-"""Fixed standard-library file mutations, executed only inside the project sandbox.
+"""Fixed standard-library file mutations executed inside the project sandbox.
 
-The host quotes this whole program and a JSON payload, never interpolates source.
-Directory descriptors and O_NOFOLLOW keep every operation under /workspace.
+Only the program and payload digest enter argv. JSON arrives on stdin;
+directory descriptors and O_NOFOLLOW keep operations under /workspace.
 """
 
 from __future__ import annotations
 
-import base64
+import codecs
 import fcntl
 import hashlib
 import json
@@ -14,10 +14,13 @@ import os
 import re
 import stat
 import sys
+import tempfile
 import unicodedata
 import uuid
+from collections.abc import Iterator
+from typing import Any, BinaryIO, Protocol, cast
 
-MAX_FILE = 1024 * 1024
+CHUNK = 65536
 STAGING = ".krim-file-staging"
 
 
@@ -25,7 +28,11 @@ class FileRejected(Exception):
     pass
 
 
-def parts(path):
+class Digest(Protocol):
+    def update(self, data: bytes, /) -> None: ...
+
+
+def parts(path: object) -> list[str]:
     if not isinstance(path, str) or len(path.encode()) > 512 or "\\" in path:
         raise FileRejected("invalid_input")
     names = path.split("/")
@@ -47,19 +54,57 @@ def parts(path):
     return names
 
 
-def identity(info):
+def identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def mutate(root, request):
+def transformed(
+    source: BinaryIO, request: dict[str, Any], original_hash: Digest,
+) -> Iterator[tuple[bytes, int]]:
+    """Stream exact UTF-8 edits, retaining only a possible cross-chunk match."""
+    old = request["old_string"].encode("utf-8")
+    new = request["new_string"].encode("utf-8")
+    if not old or old == new:
+        raise FileRejected("invalid_input")
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    pending = b""
+    count = 0
+    while True:
+        chunk = source.read(CHUNK)
+        original_hash.update(chunk)
+        decoder.decode(chunk, final=not chunk)
+        pending += chunk
+        start = 0
+        while True:
+            position = pending.find(old, start)
+            if position < 0:
+                break
+            yield pending[start:position], 0
+            yield new, 1
+            count += 1
+            start = position + len(old)
+        # Retain at most len(old)-1 unmatched bytes for the next input chunk.
+        end = max(start, len(pending) - len(old) + 1) if chunk else len(pending)
+        yield pending[start:end], 0
+        pending = pending[end:]
+        if not chunk:
+            break
+    if not count:
+        raise FileRejected("text_not_found")
+    if count != 1 and not request["replace_all"]:
+        raise FileRejected("text_not_unique")
+
+
+def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
     names = parts(request["path"])
+    if request["operation"] not in {"write", "edit"}:
+        raise FileRejected("invalid_input")
     opened = []
     temporary = None
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         parent = os.open(root, flags)
         opened.append(parent)
-        # Serialize dedicated mutations across runs against the same directory inode.
         fcntl.flock(parent, fcntl.LOCK_EX)
         try:
             os.mkdir(STAGING, 0o700, dir_fd=parent)
@@ -70,68 +115,80 @@ def mutate(root, request):
         stage_info = os.fstat(staging)
         if stage_info.st_uid != os.geteuid() or stat.S_IMODE(stage_info.st_mode) != 0o700:
             raise FileRejected("artifact_invalid")
-        # Only our reserved, exact names; the project lock excludes live file workers.
-        leftovers = os.listdir(staging)
-        if len(leftovers) > 1024:
-            raise FileRejected("artifact_limit")
-        for name in leftovers:
-            if not re.fullmatch(r"\.krim-write-[0-9a-f]{32}", name):
-                raise FileRejected("artifact_invalid")
-            info = os.stat(name, dir_fd=staging, follow_symlinks=False)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-                raise FileRejected("artifact_invalid")
-            os.unlink(name, dir_fd=staging)
+        with os.scandir(staging) as leftovers:
+            for item in leftovers:
+                name = item.name
+                if not re.fullmatch(r"\.krim-write-[0-9a-f]{32}", name):
+                    raise FileRejected("artifact_invalid")
+                info = item.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                    raise FileRejected("artifact_invalid")
+                os.unlink(name, dir_fd=staging)
         for name in names[:-1]:
             parent = os.open(name, flags, dir_fd=parent)
             opened.append(parent)
         original = None
-        content = None
+        original_fd = None
         try:
-            fd = os.open(names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            original_fd = os.open(
+                names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+            )
         except FileNotFoundError:
             if request.get("expected_sha256") is not None or request["operation"] == "edit":
                 raise FileRejected("source_changed") from None
         else:
-            try:
-                original = os.fstat(fd)
-                if not stat.S_ISREG(original.st_mode) or original.st_nlink != 1:
-                    raise FileRejected("artifact_invalid")
-                if original.st_size > MAX_FILE:
-                    raise FileRejected("artifact_limit")
-                with os.fdopen(os.dup(fd), "rb") as stream:
-                    content = stream.read(MAX_FILE + 1)
-                if identity(original) != identity(os.fstat(fd)) or len(content) > MAX_FILE:
-                    raise FileRejected("source_changed")
-                if hashlib.sha256(content).hexdigest() != request.get("expected_sha256"):
-                    raise FileRejected("source_changed")
-            finally:
-                os.close(fd)
-        if request["operation"] == "edit":
-            text = content.decode("utf-8")
-            count = text.count(request["old_string"])
-            if count == 0:
-                raise FileRejected("text_not_found")
-            if count != 1 and not request["replace_all"]:
-                raise FileRejected("text_not_unique")
-            updated = text.replace(
-                request["old_string"], request["new_string"], -1 if request["replace_all"] else 1
-            ).encode("utf-8")
-        else:
-            count = 0
-            updated = request["content"].encode("utf-8")
-        if len(updated) > MAX_FILE:
-            raise FileRejected("artifact_limit")
+            opened.append(original_fd)
+            original = os.fstat(original_fd)
+            if not stat.S_ISREG(original.st_mode) or original.st_nlink != 1:
+                raise FileRejected("artifact_invalid")
+            if request.get("expected_sha256") is None:
+                raise FileRejected("source_changed")
+            prior_hash = hashlib.sha256()
+            with os.fdopen(os.dup(original_fd), "rb") as source:
+                while chunk := source.read(CHUNK):
+                    prior_hash.update(chunk)
+            if (identity(original) != identity(os.fstat(original_fd))
+                    or prior_hash.hexdigest() != request["expected_sha256"]):
+                raise FileRejected("source_changed")
+            os.lseek(original_fd, 0, os.SEEK_SET)
         temporary = ".krim-write-" + uuid.uuid4().hex
         fd = os.open(
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=staging
         )
+        original_hash = hashlib.sha256()
+        updated_hash = hashlib.sha256()
+        size = count = 0
         try:
-            # Preserve executable mode on existing source files, never set special bits.
             if original is not None:
                 os.fchmod(fd, stat.S_IMODE(original.st_mode) & 0o777)
             with os.fdopen(os.dup(fd), "wb") as stream:
-                stream.write(updated)
+                if request["operation"] == "edit":
+                    if original_fd is None:
+                        raise FileRejected("source_changed")
+                    with os.fdopen(os.dup(original_fd), "rb") as source:
+                        for data, replacements in transformed(source, request, original_hash):
+                            stream.write(data)
+                            updated_hash.update(data)
+                            size += len(data)
+                            count += replacements
+                else:
+                    if original_fd is not None:
+                        with os.fdopen(os.dup(original_fd), "rb") as source:
+                            while chunk := source.read(CHUNK):
+                                original_hash.update(chunk)
+                    text = request["content"]
+                    for start in range(0, len(text), CHUNK):
+                        data = text[start:start + CHUNK].encode("utf-8")
+                        stream.write(data)
+                        updated_hash.update(data)
+                        size += len(data)
                 stream.flush()
+            if original is not None:
+                if original_fd is None or (
+                    identity(original) != identity(os.fstat(original_fd))
+                    or original_hash.hexdigest() != request["expected_sha256"]
+                ):
+                    raise FileRejected("source_changed")
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -144,7 +201,6 @@ def mutate(root, request):
         ):
             raise FileRejected("source_changed")
         if original is None:
-            # No-clobber publication, even when a concurrent process creates the target.
             os.link(
                 temporary, names[-1], src_dir_fd=staging, dst_dir_fd=parent, follow_symlinks=False
             )
@@ -155,8 +211,8 @@ def mutate(root, request):
         os.fsync(parent)
         return {
             "path": request["path"],
-            "size": len(updated),
-            "sha256": hashlib.sha256(updated).hexdigest(),
+            "size": size,
+            "sha256": updated_hash.hexdigest(),
             "replacements": count,
             "created": original is None,
         }
@@ -167,12 +223,23 @@ def mutate(root, request):
             os.close(fd)
 
 
-def main():
+def read_request(stream: BinaryIO, digest: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise FileRejected("invalid_input")
+    actual = hashlib.sha256()
+    with tempfile.TemporaryFile() as staged:
+        while chunk := stream.read(CHUNK):
+            staged.write(chunk)
+            actual.update(chunk)
+        if actual.hexdigest() != digest:
+            raise FileRejected("input_digest_mismatch")
+        staged.seek(0)
+        return cast(dict[str, Any], json.load(staged))
+
+
+def main() -> None:
     try:
-        request = json.loads(sys.argv[1])
-        for key in ("content", "old_string", "new_string"):
-            if key in request:
-                request[key] = base64.b64decode(request[key], validate=True).decode("utf-8")
+        request = read_request(sys.stdin.buffer, sys.argv[1])
         result = mutate("/workspace", request)
         print(json.dumps({"ok": True, **result}))
     except FileRejected as error:
@@ -180,6 +247,9 @@ def main():
         raise SystemExit(1) from None
     except UnicodeError:
         print(json.dumps({"ok": False, "code": "not_text"}))
+        raise SystemExit(1) from None
+    except (ValueError, KeyError, TypeError, IndexError):
+        print(json.dumps({"ok": False, "code": "invalid_input"}))
         raise SystemExit(1) from None
     except OSError:
         print(json.dumps({"ok": False, "code": "file_operation_failed"}))

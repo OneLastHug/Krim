@@ -358,9 +358,10 @@ async def test_observation_import_scope_and_eligibility(tmp_path, monkeypatch, k
             other = request.model_copy(update={"request_key": "import-02"})
             assert (await pipeline.import_sources(other))[0]["id"] == row["id"]
         assert app.adapter.execute_calls == 1
+        consumer_root = await asyncio.to_thread(lambda: Path(__file__).resolve().parents[2])
         assert Path(
             __import__("krim_agent.evaluation.continuous", fromlist=["x"]).__file__
-        ).is_relative_to(Path(__file__).resolve().parents[2] / "src")
+        ).is_relative_to(consumer_root / "src")
     finally:
         await app.close()
 
@@ -1821,14 +1822,19 @@ async def test_pn3_repair_source_cross_scope(tmp_path, monkeypatch):
 
 async def _pn3_repair_session_source(tmp_path):
     from krim_agent.composition import open_application
-    from krim_agent.security import Membership, PrincipalContext
+    from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
     from krim_agent.sessions.types import SessionCreate, TurnRequest
 
     path = tmp_path / "session-source.sqlite"
     DATABASES.append(path)
-    host = await open_application(path)
     owner = PrincipalContext("source-owner", 1, (Membership(workspace_id="local"),))
     other = PrincipalContext("other-owner", 1, (Membership(workspace_id="local"),))
+    host = await open_application(path, access_policy=AccessPolicy(credentials=(
+        Credential(principal_id=owner.principal_id, token="owner-fixture-token",
+                   memberships=owner.memberships),
+        Credential(principal_id=other.principal_id, token="other-fixture-token",
+                   memberships=other.memberships),
+    )))
     try:
         session = await host.sessions.create(
             owner, "local", SessionCreate(request_key="session", target_key="target-v2")
@@ -1839,11 +1845,8 @@ async def _pn3_repair_session_source(tmp_path):
             session.id,
             TurnRequest(request_key="turn", text="/add 2 3", expected_revision=session.revision),
         )
-        async with asyncio.timeout(3):
-            while turn.run_id is None:
-                await asyncio.sleep(0)
-                turn = await host.sessions.turn(owner, "local", session.id, turn.id)
-        await host.service.wait(turn.run_id)
+        turn = await host.sessions.wait(owner, "local", session.id, turn.id)
+        assert turn.status == "completed" and turn.run_id is not None
         return host, owner, other, turn.run_id, path
     except BaseException:
         await host.close()

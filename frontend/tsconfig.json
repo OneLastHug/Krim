@@ -27,9 +27,15 @@
     "allowImportingTsExtensions": true
   },
   "include": [
+    "contracts/memory*.test.ts*",
+    "contracts/planning-*.test.ts*",
+    "contracts/interaction-ui.test.tsx",
+    "contracts/session-features*.test.ts*",
+    "contracts/browser/session-features.tsx",
     "src/**/*.ts",
     "src/**/*.tsx",
     "vite.config.ts",
+    "vite.session-features.config.ts",
     "vite.integration.config.ts",
     "contracts/session-sidebar*.test.ts*",
     "contracts/development-*.test.ts*",
@@ -44,6 +50,7 @@
     "contracts/run-ui.test.tsx",
     "contracts/eval-ui.test.tsx",
     "contracts/session-ui.test.tsx",
+    "contracts/session-selection-ui.test.tsx",
     "contracts/session-adapter-ui.test.tsx",
     "contracts/session-lifecycle-ui.test.tsx",
     "contracts/session-presentation.test.ts",

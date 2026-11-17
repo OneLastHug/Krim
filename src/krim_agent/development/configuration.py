@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import stat
 from pathlib import Path
@@ -94,21 +95,54 @@ class DevelopmentPreviewConfiguration(StrictModel):
 
 
 class DevelopmentConfiguration(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
+    resource_policy: Literal["unlimited", "limited"] = "unlimited"
     image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     broker_environments_root: Path
     private_state_root: Path
-    max_processes: int = Field(default=4, ge=1, le=32)
-    cpu_cores: float = Field(default=1.0, ge=0.001, le=64)
-    memory_bytes: int = Field(default=1073741824, ge=67108864)
-    pids_limit: int = Field(default=256, ge=8, le=65536)
+    max_processes: int | None = Field(default=None, ge=1)
+    cpu_cores: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    memory_bytes: int | None = Field(default=None, ge=1)
+    pids_limit: int | None = Field(default=None, ge=1)
     preview: DevelopmentPreviewConfiguration | None = None
     browser: DevelopmentBrowserConfiguration | None = None
     git: DevelopmentGitConfiguration | None = None
-    history_compaction: bool = False
+    history_compaction: bool = True
     model_images: bool = False
-    max_steps: int = Field(default=8, ge=1, le=32)
-    max_tool_calls: int = Field(default=32, ge=1, le=128)
+    max_steps: int | None = Field(default=None, ge=1)
+    max_tool_calls: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_resource_policy(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        values = dict(value)
+        version = values.get("schema_version", 1)
+        if type(version) is not int or version not in {1, 2}:
+            raise ValueError("unsupported development configuration version")
+        if version == 1:
+            values["schema_version"] = 2
+        # Validate ignored legacy resource values as well: unlimited removes the
+        # ceiling, not the configuration's type and numeric validity checks.
+        for name in ("max_processes", "cpu_cores", "memory_bytes", "pids_limit",
+                     "max_steps", "max_tool_calls"):
+            candidate = values.get(name)
+            if candidate is None:
+                continue
+            valid_type = (type(candidate) in {int, float} if name == "cpu_cores"
+                          else type(candidate) is int)
+            if not valid_type or candidate < 0 or (
+                isinstance(candidate, float) and not math.isfinite(candidate)
+            ):
+                raise ValueError("invalid resource configuration")
+        # This version explicitly migrates resource ceilings. Zero is accepted only
+        # in unlimited mode; it is never silently converted to a finite fallback.
+        if values.get("resource_policy", "unlimited") == "unlimited":
+            for name in ("max_processes", "cpu_cores", "memory_bytes", "pids_limit",
+                         "max_steps", "max_tool_calls"):
+                values[name] = None
+        return values
 
     @model_validator(mode="after")
     def browser_requires_preview(self) -> Self:

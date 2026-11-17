@@ -72,6 +72,24 @@ describe("真实轮次详情", () => {
     }
   });
 
+  test("超过64次压缩的详情仍解析，并保留逐条数值校验", () => {
+    const body = JSON.parse(JSON.stringify(fixtures[0]!.body)) as {
+      session_id: string; turn_id: string; compactions: Record<string, unknown>[];
+    };
+    const matching = page.items.find(item => item.session_id === body.session_id && item.turn_id === body.turn_id)!;
+    body.compactions = Array.from({ length: 96 }, (_, pass_index) => ({
+      pass_index, status: "complete", created_at: 1, finished_at: 2, summary_step_index: pass_index,
+      covered_turns: 1, covered_turn_ids: ["turn-source"], source_hash: "a".repeat(64),
+      output_hash: "b".repeat(64), summary_bytes: 100, counter_version: "approx-utf8/1", reserved_output_tokens: 2048,
+    }));
+    expect(parseTurnObservations(body, matching).compactions).toHaveLength(96);
+    body.compactions[95]!.summary_bytes = 1.5;
+    expect(() => parseTurnObservations(body, matching)).toThrow("压缩记录数值无效");
+    body.compactions[95]!.summary_bytes = 100;
+    delete body.compactions[95]!.status;
+    expect(() => parseTurnObservations(body, matching)).toThrow("压缩记录结构无效");
+  });
+
   test("真实 manifest：分项字节守恒、总量与 items_truncated 可解析，差分保持纯计算", () => {
     for (const fixture of fixtures) {
       const body = fixture.body as { requests: { manifest: unknown; manifest_status: string }[] };

@@ -20,13 +20,21 @@ from krim_agent.sandbox.runtime_profiles import (
 
 class SandboxConfiguration(StrictModel):
     schema_version: Literal[1] = 1
-    max_projects_per_account: int = Field(default=32, ge=1, le=128)
+    # Compatibility input only; project admission no longer has a count quota.
+    max_projects_per_account: int | None = None
     broker_socket: Path | None = None
     broker_owner_uid: int = Field(default=0, ge=0)
     command_image: str | None = None
     runtime_manifest: Path | None = None
     allow_dev_runtimes: bool = False
     quotas: QuotaPolicy = Field(default_factory=QuotaPolicy)
+
+    @field_validator("max_projects_per_account", mode="before")
+    @classmethod
+    def migrate_project_quota(cls, value: object) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("invalid legacy project count")
+        return None
 
     @field_validator("command_image")
     @classmethod

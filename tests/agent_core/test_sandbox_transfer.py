@@ -34,7 +34,6 @@ from krim_agent.sandbox.transfer_store import (
     HashMismatch,
     InvalidRequest,
     NotFound,
-    QuotaExceeded,
     TransferStore,
     UnsafePath,
 )
@@ -108,9 +107,7 @@ def test_create_rejects_conflicting_request_key(store: TransferStore, principal:
         store.create(principal, 13, _sha(b"x" * 13), "rk-fixed")
 
 
-def test_create_validates_arguments(
-    store: TransferStore, principal: str, tmp_path: Path
-) -> None:
+def test_create_validates_arguments(store: TransferStore, principal: str) -> None:
     good = _sha(b"data")
     with pytest.raises(InvalidRequest):
         store.create("", 1, good, "k")
@@ -121,10 +118,9 @@ def test_create_validates_arguments(
     with pytest.raises(InvalidRequest):
         store.create(principal, -1, good, "k")
     with pytest.raises(InvalidRequest):
+        store.create(principal, True, good, "k")
+    with pytest.raises(InvalidRequest):
         store.create(principal, 1, good, "")
-    tight = TransferStore(tmp_path / "tight", max_bytes=8)
-    with pytest.raises(QuotaExceeded):
-        tight.create(principal, 9, good, "k")
 
 
 # ---- TransferStore：顺序追加与重叠核实 ----
@@ -274,30 +270,34 @@ def test_empty_transfer_roundtrip(store: TransferStore, principal: str) -> None:
     assert b"".join(store.chunks(principal, content.content_id)) == b""
 
 
-# ---- TransferStore：额度、对象数与TTL ----
+# ---- TransferStore：无配额声明与TTL ----
 
 
-def test_byte_budget_reserved_across_transfers(tmp_path: Path) -> None:
-    store = TransferStore(tmp_path / "s", max_bytes=100)
+def test_declared_total_has_no_application_cap(store: TransferStore, principal: str) -> None:
+    """应用层不再限制单次声明总量；声明后仅实际追加的字节落盘。"""
+    large = 64 * 1024 * 1024 + 1  # 超过旧的默认账号暂存预算
+    transfer = store.create(principal, large, _sha(b"partial"), "big-1")
+    transfer_id = str(transfer["transfer_id"])
+    assert transfer["total_size"] == large
+    state = store.append(principal, transfer_id, 0, b"partial", _sha(b"partial"))
+    assert state["received_bytes"] == 7
+    assert store.transfer(principal, transfer_id)["next_offset"] == 7
+    store.cancel(principal, transfer_id)
+
+
+def test_multiple_open_transfers_without_object_or_byte_cap(tmp_path: Path) -> None:
+    """旧构造参数仍可传入，但不再限制累计字节数或暂存对象数。"""
+    store = TransferStore(tmp_path / "s", max_bytes=1, max_files=1)
     principal = "acct-a"
-    first = store.create(principal, 60, _sha(b""), "k1")
-    with pytest.raises(QuotaExceeded):
-        store.create(principal, 41, _sha(b""), "k2")
-    store.cancel(principal, str(first["transfer_id"]))
-    third = store.create(principal, 41, _sha(b""), "k3")
-    assert third["status"] == "open"
-
-
-def test_object_count_limit(tmp_path: Path) -> None:
-    store = TransferStore(tmp_path / "s", max_files=2)
-    principal = "acct-b"
-    store.create(principal, 1, _sha(b"a"), "k1")
-    second = store.create(principal, 1, _sha(b"b"), "k2")
-    with pytest.raises(QuotaExceeded):
-        store.create(principal, 1, _sha(b"c"), "k3")
-    store.cancel(principal, str(second["transfer_id"]))
-    third = store.create(principal, 1, _sha(b"c"), "k3")
-    assert third["status"] == "open"
+    opened = [
+        str(store.create(principal, 3, _sha(b"abc"), f"k{i}")["transfer_id"])
+        for i in range(8)
+    ]
+    assert len(set(opened)) == 8
+    for transfer_id in opened:
+        store.append(principal, transfer_id, 0, b"abc", _sha(b"abc"))
+        content = store.finish(principal, transfer_id)
+        assert content.size == 3
 
 
 def test_expiry_blocks_append_and_cleanup_sweeps(tmp_path: Path) -> None:

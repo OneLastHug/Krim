@@ -190,7 +190,9 @@ def storage(tmp_path, monkeypatch):
 
 
 def limits(**overrides: Any) -> dict[str, Any]:
+    # 本文件覆盖旧的有限额协议；unlimited策略的清零迁移由test_unlimited_storage.py覆盖。
     values: dict[str, Any] = {
+        "resource_policy": "limited",
         "environment_bytes": 8 * MIB,
         "environment_inodes": 4000,
         "checkpoint_bytes": 2 * MIB,
@@ -266,6 +268,7 @@ def retirement(storage: StorageBroker) -> QuotaRetirement:
 
 
 TARGET = {
+    "resource_policy": "limited",
     "environment_bytes": 8 * MIB,
     "environment_inodes": 4000,
     "checkpoint_bytes": 0,

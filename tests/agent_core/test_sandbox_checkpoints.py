@@ -6,7 +6,6 @@ import uuid
 import pytest
 
 from krim_agent.contracts import ServiceError
-from krim_agent.sandbox import checkpoints as checkpoint_module
 from krim_agent.sandbox.checkpoints import ShadowCheckpoints
 from krim_agent.sandbox.filesystem import ProjectFiles
 from krim_agent.sandbox.quota import QuotaLimits
@@ -79,7 +78,9 @@ def test_reference_owners_coexist_and_release_only_own(checkpoints):
     # 引用保护越过期限清理；释放后即可回收。
     with pytest.MonkeyPatch.context() as patch:
         _age(patch, 10**6)
-        assert store.prune(env, project, QuotaLimits(checkpoint_retention_seconds=1))["count"] == 1
+        assert store.prune(
+            env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+        )["count"] == 1
     store.release_reference(env, project, checkpoint, "user", "owner")
     assert next(r for r in store.list(env, project))["pinned"] is False
     assert _refs(store, env, f"refs/holds/{project}/{checkpoint}/user/") == []
@@ -106,8 +107,12 @@ def test_unknown_job_reference_protects_from_prune_and_gc(checkpoints):
     store._git(repo, ["update-ref", ref, commit])
     with pytest.MonkeyPatch.context() as patch:
         _age(patch, 10**6)
-        assert store.prune(env, project, QuotaLimits(checkpoint_retention_seconds=1))["count"] == 1
-    preview = store.cleanup_preview(env, project, QuotaLimits(checkpoint_retention_seconds=1))
+        assert store.prune(
+            env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+        )["count"] == 1
+    preview = store.cleanup_preview(
+        env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+    )
     assert preview["candidates"] == []
     assert preview["protected"] == [checkpoint]
     assert preview["plan_digest"] and preview["expires_at"] > preview["created_at"]
@@ -115,12 +120,14 @@ def test_unknown_job_reference_protects_from_prune_and_gc(checkpoints):
     assert next(r for r in store.list(env, project))["pinned"] is False
     with pytest.MonkeyPatch.context() as patch:
         _age(patch, 10**6 + 1)
-        assert store.prune(env, project, QuotaLimits(checkpoint_retention_seconds=1))["count"] == 0
+        assert store.prune(
+            env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+        )["count"] == 0
 
 
 def test_legacy_pin_protected_until_explicit_migration(checkpoints):
     store, env, project = checkpoints
-    limits = QuotaLimits(checkpoint_retention_seconds=1)
+    limits = QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
     row = store.capture(env, project, {"a": b"legacy"}, [], limits)
     checkpoint, commit = row["checkpoint_id"], row["commit"]
     repo = store.root / env / "objects.git"
@@ -147,9 +154,12 @@ def test_legacy_pin_protected_until_explicit_migration(checkpoints):
     assert _object_missing(store, env, commit)
 
 
-def test_count_limit_pin_and_actual_object_gc(checkpoints):
+def test_count_limit_pin_and_actual_object_gc(checkpoints, monkeypatch):
     store, env, project = checkpoints
-    limits = QuotaLimits(checkpoint_count=1)
+    # Coarse/frozen clocks must not let UUID ordering delete the newly published checkpoint.
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    limits = QuotaLimits(resource_policy="limited", checkpoint_count=1)
     first = store.capture(env, project, {"a": b"one"}, [], limits)
     store.pin(env, project, first["checkpoint_id"], pinned=True)
     with pytest.raises(ServiceError, match="sandbox_limit"):
@@ -166,7 +176,7 @@ def test_count_limit_pin_and_actual_object_gc(checkpoints):
 
 def test_expiry_is_not_allowed_to_remove_pinned_content(checkpoints, monkeypatch):
     store, env, project = checkpoints
-    limits = QuotaLimits(checkpoint_retention_seconds=1)
+    limits = QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
     row = store.capture(env, project, {"keep": b"important"}, [], limits)
     store.pin(env, project, row["checkpoint_id"], pinned=True)
     _age(monkeypatch, 10)
@@ -175,13 +185,19 @@ def test_expiry_is_not_allowed_to_remove_pinned_content(checkpoints, monkeypatch
     assert store.prune(env, project, limits)["count"] == 0
 
 
-def test_reject_secret_paths_and_oversized_capture(checkpoints):
+def test_reject_secret_paths_and_limited_oversized_capture(checkpoints):
     store, env, project = checkpoints
     for path in ["../escape", ".git/config", ".env", "/etc/passwd"]:
         with pytest.raises(ServiceError):
             store.capture(env, project, {path: b"secret"}, [], QuotaLimits())
+    # limited 旧协议保留单文件/总量边界；unlimited 不设内容上限（见 test_unlimited_checkpoints）。
+    limited = QuotaLimits(resource_policy="limited")
     with pytest.raises(ServiceError, match="artifact_limit"):
-        store.capture(env, project, {"big": b"x" * (4 * 1024**2 + 1)}, [], QuotaLimits())
+        store.capture(env, project, {"big": b"x" * (4 * 1024**2 + 1)}, [], limited)
+    with pytest.raises(ServiceError, match="artifact_limit"):
+        store.capture(
+            env, project, {"a": b"x" * (16 * 1024**2), "b": b"y" * (16 * 1024**2 + 1)}, [], limited
+        )
     with pytest.raises(ServiceError, match="sandbox_limit"):
         store.capture(env, project, {"a": b"ok"}, [], QuotaLimits(checkpoint_count=0))
 
@@ -232,7 +248,11 @@ def test_cleanup_confirm_removes_candidates_and_objects(checkpoints):
         second = store.capture(env, project, {"a": b"new"}, [], limits)
         store.pin(env, project, second["checkpoint_id"], pinned=True)
         plan = store.cleanup_preview(
-            env, project, QuotaLimits(checkpoint_retention_seconds=1, checkpoint_count=1)
+            env,
+            project,
+            QuotaLimits(
+                resource_policy="limited", checkpoint_retention_seconds=1, checkpoint_count=1
+            ),
         )
     assert [c["checkpoint_id"] for c in plan["candidates"]] == [first["checkpoint_id"]]
     assert plan["candidates"][0]["reason"] == "expired"
@@ -254,7 +274,9 @@ def test_cleanup_confirm_removes_candidates_and_objects(checkpoints):
     again = store.cleanup_confirm(env, project, plan["plan_id"], plan["plan_digest"], key)
     assert again == result
     # 同键不同计划冲突。
-    other = store.cleanup_preview(env, project, QuotaLimits(checkpoint_retention_seconds=1))
+    other = store.cleanup_preview(
+        env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+    )
     with pytest.raises(ServiceError, match="key_conflict"):
         store.cleanup_confirm(env, project, other["plan_id"], other["plan_digest"], key)
     # 摘要不匹配拒绝执行。
@@ -272,7 +294,11 @@ def test_cleanup_candidate_changed_conflicts_without_deletion(checkpoints):
     checkpoint, commit = row["checkpoint_id"], row["commit"]
     other = store.capture(env, project, {"b": b"two"}, [], QuotaLimits())
     plan = store.cleanup_preview(
-        env, project, QuotaLimits(checkpoint_retention_seconds=1, checkpoint_count=1)
+        env,
+        project,
+        QuotaLimits(
+            resource_policy="limited", checkpoint_retention_seconds=1, checkpoint_count=1
+        ),
     )
     assert [c["checkpoint_id"] for c in plan["candidates"]] == [checkpoint]
     # 候选被引用保护后计划失效：零删除。
@@ -302,19 +328,14 @@ def test_cleanup_candidate_changed_conflicts_without_deletion(checkpoints):
     assert not _object_missing(store, env, commit)
     # 计划过期拒绝执行。
     plan = store.cleanup_preview(
-        env, project, QuotaLimits(checkpoint_retention_seconds=1, checkpoint_count=1)
+        env,
+        project,
+        QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1, checkpoint_count=1),
     )
     with pytest.MonkeyPatch.context() as patch:
         _age(patch, 901)
         with pytest.raises(ServiceError, match="approval_expired"):
             store.cleanup_confirm(env, project, plan["plan_id"], plan["plan_digest"], "conflict-4")
-    # 候选超过64KiB的计划拒绝落盘。
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(checkpoint_module, "PLAN_MAX_BYTES", 64)
-        with pytest.raises(ServiceError, match="artifact_limit"):
-            store.cleanup_preview(
-                env, project, QuotaLimits(checkpoint_retention_seconds=1, checkpoint_count=1)
-            )
 
 
 def test_gc_failure_saves_reclaim_pending_and_same_key_retry(checkpoints):
@@ -323,7 +344,9 @@ def test_gc_failure_saves_reclaim_pending_and_same_key_retry(checkpoints):
     checkpoint, commit = row["checkpoint_id"], row["commit"]
     with pytest.MonkeyPatch.context() as patch:
         _age(patch, 10)
-        plan = store.cleanup_preview(env, project, QuotaLimits(checkpoint_retention_seconds=1))
+        plan = store.cleanup_preview(
+            env, project, QuotaLimits(resource_policy="limited", checkpoint_retention_seconds=1)
+        )
     assert [c["checkpoint_id"] for c in plan["candidates"]] == [checkpoint]
     original = store._reclaim
     attempts = []
@@ -361,7 +384,7 @@ def test_active_holds_fill_count_budget_before_publishing_new_checkpoint(checkpo
     import uuid
 
     store, env, project = checkpoints
-    limits = QuotaLimits(checkpoint_count=1)
+    limits = QuotaLimits(resource_policy="limited", checkpoint_count=1)
     original = store.capture(env, project, {"a": b"protected"}, [], limits)
     store.reference(env, project, original["checkpoint_id"], "job", str(uuid.uuid4()))
     with pytest.raises(ServiceError, match="sandbox_limit"):
@@ -370,11 +393,11 @@ def test_active_holds_fill_count_budget_before_publishing_new_checkpoint(checkpo
     assert len(rows) == 1 and rows[0]["checkpoint_id"] == original["checkpoint_id"]
 
 
-def test_capture_high_watermark_refuses_new_content_but_can_reuse_unchanged(
+def test_limited_capture_high_watermark_refuses_new_content_but_can_reuse_unchanged(
     checkpoints, monkeypatch
 ):
     store, env, project = checkpoints
-    limits = QuotaLimits()
+    limits = QuotaLimits(resource_policy="limited")
     first = store.capture(env, project, {"a": b"same"}, [], limits)
     monkeypatch.setattr(store, "_size", lambda repo: int(limits.checkpoint_bytes * 0.9))
     assert (

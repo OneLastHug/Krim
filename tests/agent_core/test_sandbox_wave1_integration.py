@@ -259,12 +259,15 @@ def test_edit_tools_are_registered_as_private_scoped_writes(name, model):
 
 
 def test_search_tools_fit_in_sandbox_registry_and_remain_private():
+    """搜索/文件发现可通过offset继续分页，单页limit仍有合理上限。"""
     assert FileFind(include_glob="*.py", offset=4095, limit=1).offset == 4095
-    with pytest.raises(ValueError):
-        FileFind(include_glob="*.py", offset=4095, limit=2)
+    assert FileFind(include_glob="*.py", offset=4095, limit=2).offset == 4095
     assert FileSearch(query="needle", offset=4095, limit=1).offset == 4095
+    assert FileSearch(query="needle", offset=4095, limit=2).offset == 4095
     with pytest.raises(ValueError):
-        FileSearch(query="needle", offset=4095, limit=2)
+        FileFind(include_glob="*.py", offset=4095, limit=101)
+    with pytest.raises(ValueError):
+        FileSearch(query="needle", offset=4095, limit=101)
     registry = SandboxOperations(None).registry()
     assert len(registry.schemas()) == 17
     find_schema = registry.get("sandbox_find").descriptor()["output_schema"]

@@ -106,6 +106,7 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
     broker = ProjectBroker(environments)
     app.sandbox.broker = broker
     writes = []
+    input_bodies = []
 
     async def start(handle):
         from dataclasses import replace
@@ -119,7 +120,7 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
         await development.repositories.environments.compare_and_swap(record, ready)
         return ready.environment
 
-    async def terminal_submit(request):
+    async def terminal_submit(request, *, stdin_chunks=None):
         await development.authorize_terminal(request, "submit")
         from krim_agent.development.ports import command_digest
 
@@ -127,6 +128,16 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
             request, command_digest(request)
         )
         assert reservation.execute
+        if stdin_chunks is not None:
+            import hashlib
+            import json
+
+            chunks = list(stdin_chunks)
+            assert all(len(chunk.encode("ascii")) <= 8192 for chunk in chunks)
+            body = "".join(chunks).encode("ascii")
+            assert request.command.endswith(hashlib.sha256(body).hexdigest())
+            input_bodies.append(json.loads(body))
+            assert request.timeout_seconds is None and request.wait_seconds == 0
         writes.append(request)
         return ProcessHandle(
             **{**reservation.record.handle.model_dump(), "state": "exited", "exit_code": 0}
@@ -167,7 +178,14 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
                 item["name"] for item in catalog
             }
             assert not any(item["name"].startswith("dev_") for item in catalog)
-            assert all(item["policy_version"] == "development/1" for item in catalog)
+            from krim_agent.tools.session import SESSION_CAPABILITIES
+
+            assert all(item["policy_version"] == (
+                "session/1" if item["name"] in SESSION_CAPABILITIES else "development/1"
+            ) for item in catalog)
+            assert {"plan_update", "ask_user", "compact_context", "goal_update"} <= {
+                item["name"] for item in catalog
+            }
             workspace = me["workspaces"][0]["workspace_id"]
             project = await client.post(
                 "/v2/me/sandbox/projects",
@@ -258,6 +276,9 @@ async def test_project_api_and_session_sdk_authorize_the_same_command(
             assert writes[0].ownership.session_id == session_id
             assert model.calls == 2
             if tool != "shell":
+                assert len(input_bodies) == 1
+                assert input_bodies[0]["operation"] == tool
+                assert input_bodies[0]["path"] == "new.py"
                 assert writes[0].command.startswith("exec /usr/bin/python3 -I -c ")
                 assert writes[0].authorization.secret_refs == ()
                 assert writes[0].authorization.network_policy_ref is None

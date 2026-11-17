@@ -6,6 +6,15 @@ owner='owner'，其余 owner 为严格 UUID，不接受路径。旧 refs/retaine
 保护，永不自动释放，只能显式迁移。GC 走两阶段：cleanup_preview 落盘计划，
 cleanup_confirm 持锁重校验候选与保护根后以 update-ref --stdin 事务删引用，
 再 reflog expire + gc 并计量物理回收；失败存 reclaim_pending，同键可重试。
+
+资源策略语义：unlimited（默认）下 checkpoint 数值预算只作能力开关（bytes/count/
+retention 为 0 即拒绝捕获），不构成单文件、捕获总量、条目数、manifest 或对象库
+水位上限，也不按期限/数量删除任何引用——capture 后不自动修剪，prune/两阶段 GC
+在 unlimited 下只物理回收不可达对象，0 预算同样不成为清理授权；完整历史默认
+保留。按期限/数量的删除只发生在显式传入 limited 标准时（旧协议或用户明确的
+生命周期选择），limited 同时保留旧有限额协议（条目/单文件/总量边界、水位拒绝、
+捕获后按期限与数量修剪）。retention_seconds=0 沿旧语义禁用捕获：未配置保留期
+即不启用检查点生命周期。
 """
 
 from __future__ import annotations
@@ -40,8 +49,6 @@ PLAN_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 OWNER_KINDS = ("job", "restore-target", "restore-before", "capture-staging", "user")
 USER_OWNER = "owner"
 PLAN_TTL_SECONDS = 900
-PLAN_MAX_BYTES = 64 * 1024
-PLAN_MAX_CANDIDATES = 1000
 CANDIDATE_REASONS = ("expired", "count_excess")
 
 
@@ -178,8 +185,6 @@ class ShadowCheckpoints:
             raise ServiceError("sandbox_backend_unavailable", 503) from None
         if process.returncode:
             raise ServiceError("sandbox_backend_unavailable", 503)
-        if len(stdout) > MAX_FILE + 1:
-            raise ServiceError("artifact_limit")
         return stdout
 
     def _oid(self, repo: Path, arguments: list[str], data: bytes | None = None) -> str:
@@ -191,12 +196,8 @@ class ShadowCheckpoints:
     @staticmethod
     def _size(repo: Path) -> int:
         total = 0
-        count = 0
         for directory, folders, files in os.walk(repo, followlinks=False):
             for name in [*folders, *files]:
-                count += 1
-                if count > 20000:
-                    raise ServiceError("artifact_limit")
                 info = os.lstat(Path(directory) / name)
                 if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                     raise ServiceError("facts_corrupt")
@@ -214,8 +215,6 @@ class ShadowCheckpoints:
             .decode()
             .splitlines()
         )
-        if len(listing) > 2000:
-            raise ServiceError("artifact_limit")
         holds: dict[str, list[dict[str, str]]] = {}
         for refname in listing:
             parts = refname.split("/")
@@ -254,8 +253,6 @@ class ShadowCheckpoints:
             .decode()
             .splitlines()
         )
-        if len(refs) > 1000:
-            raise ServiceError("artifact_limit")
         retained = set(
             self._git(
                 repo, ["for-each-ref", "--format=%(refname)", "refs/retained/" + project_id + "/"]
@@ -294,16 +291,25 @@ class ShadowCheckpoints:
     def _protected(row: dict[str, Any]) -> bool:
         return bool(row["pinned"]) or bool(row["references"])
 
-    def _prune(self, repo: Path, project_id: str, limits: QuotaLimits, *, reserve: int = 0) -> None:
+    def _prune(
+        self, repo: Path, project_id: str, limits: QuotaLimits, *, reserve: int = 0,
+        preserve: str | None = None,
+    ) -> None:
+        # unlimited 的数值预算不是清理授权：任何策略为 unlimited 的调用都不删引用，
+        # 0 预算也不成为删除触发器。只有显式 limited 标准进入期限/数量删除。
+        if limits.resource_policy != "limited":
+            return
         rows = self._metadata(repo, project_id)
         cutoff = time.time() - limits.checkpoint_retention_seconds
         remove = []
         for row in rows:
-            if row["created_at"] < cutoff and not self._protected(row):
+            if (row["created_at"] < cutoff and not self._protected(row)
+                    and row["checkpoint_id"] != preserve):
                 remove.append(row)
         remaining = [row for row in rows if row not in remove]
         excess = max(0, len(remaining) + reserve - limits.checkpoint_count)
-        candidates = [row for row in remaining if not self._protected(row)]
+        candidates = [row for row in remaining
+                      if not self._protected(row) and row["checkpoint_id"] != preserve]
         if len(candidates) < excess:
             raise ServiceError("sandbox_limit")
         remove.extend(candidates[:excess])
@@ -322,6 +328,9 @@ class ShadowCheckpoints:
             return self._metadata(repo, project_id)
 
     def prune(self, environment_id: str, project_id: str, limits: QuotaLimits) -> dict[str, int]:
+        """unlimited 只物理回收不可达对象，不按期限/数量删任何引用；0 预算同样
+        不触发删除（禁用语义不变为清理授权）。按期限/数量清理必须显式 limited 标准
+        （两阶段 preview/confirm 或本入口传 limited）。"""
         internal_id(project_id)
         with self._account(environment_id) as repo:
             self._prune(repo, project_id, limits)
@@ -340,21 +349,25 @@ class ShadowCheckpoints:
         limits: QuotaLimits,
     ) -> dict[str, Any]:
         internal_id(project_id)
+        unlimited = limits.resource_policy == "unlimited"
+        # 0 预算/0 保留期是能力禁用开关，两种策略一致：没有可用的检查点额度即拒绝捕获。
         if (
             not limits.checkpoint_bytes
             or not limits.checkpoint_count
             or not limits.checkpoint_retention_seconds
         ):
             raise ServiceError("sandbox_limit")
-        if type(files) is not dict or len(files) > 4096 or len(excluded) > 4096:
+        if type(files) is not dict:
+            raise ServiceError("artifact_limit")
+        if not unlimited and (len(files) > 4096 or len(excluded) > 4096):
             raise ServiceError("artifact_limit")
         total = 0
         for name, body in files.items():
             _parts(name)
-            if type(body) is not bytes or len(body) > MAX_FILE:
+            if type(body) is not bytes or (not unlimited and len(body) > MAX_FILE):
                 raise ServiceError("artifact_limit")
             total += len(body)
-        if total > 32 * 1024**2:
+        if not unlimited and total > 32 * 1024**2:
             raise ServiceError("artifact_limit")
         digest = hashlib.sha256(
             json.dumps(
@@ -372,13 +385,15 @@ class ShadowCheckpoints:
                 and existing[-1]["created_at"] >= time.time() - limits.checkpoint_retention_seconds
             ):
                 return {**existing[-1], "unchanged": True}
-            if sum(self._protected(row) for row in existing) >= limits.checkpoint_count:
-                raise ServiceError("sandbox_limit")
-            physical = self._size(repo)
-            if physical >= limits.checkpoint_bytes * 0.85:
-                raise ServiceError("sandbox_limit")
-            if physical + total + 65536 > limits.checkpoint_bytes:
-                raise ServiceError("sandbox_limit")
+            if not unlimited:
+                # limited 旧协议：保护引用计入数量预算，水位与总量比较照旧。
+                if sum(self._protected(row) for row in existing) >= limits.checkpoint_count:
+                    raise ServiceError("sandbox_limit")
+                physical = self._size(repo)
+                if physical >= limits.checkpoint_bytes * 0.85:
+                    raise ServiceError("sandbox_limit")
+                if physical + total + 65536 > limits.checkpoint_bytes:
+                    raise ServiceError("sandbox_limit")
             checkpoint_id = str(uuid.uuid4())
             manifest = []
             tree = bytearray()
@@ -403,7 +418,7 @@ class ShadowCheckpoints:
                 "total_bytes": total,
             }
             payload = json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode()
-            if len(payload) > 1024**2:
+            if not unlimited and len(payload) > 1024**2:
                 raise ServiceError("artifact_limit")
             meta_oid = self._oid(repo, ["hash-object", "-w", "--stdin"], payload)
             tree.extend(f"100644 blob {meta_oid}\tmanifest.json".encode() + b"\0")
@@ -411,12 +426,15 @@ class ShadowCheckpoints:
             commit = self._oid(repo, ["commit-tree", tree_oid, "-m", "Project checkpoint"])
             ref = f"refs/krim/{project_id}/{checkpoint_id}"
             self._git(repo, ["update-ref", ref, commit, "0" * 40])
-            if self._size(repo) > limits.checkpoint_bytes:
-                self._git(repo, ["update-ref", "-d", ref, commit])
-                self._reclaim(repo)
-                raise ServiceError("sandbox_limit")
-            # 新引用成功后才清理旧项；准备失败不能删除最后可用的回滚点。
-            self._prune(repo, project_id, limits)
+            if not unlimited:
+                # limited 旧协议：发布后核实物理总量并按期限/数量修剪旧项；
+                # unlimited 不做任何自动修剪，完整历史保留。
+                if self._size(repo) > limits.checkpoint_bytes:
+                    self._git(repo, ["update-ref", "-d", ref, commit])
+                    self._reclaim(repo)
+                    raise ServiceError("sandbox_limit")
+                # 新引用成功后才清理旧项；准备失败不能删除最后可用的回滚点。
+                self._prune(repo, project_id, limits, preserve=checkpoint_id)
             return {**metadata, "ref": ref, "commit": commit, "unchanged": False}
 
     def _get(self, repo: Path, project_id: str, checkpoint_id: str) -> dict[str, Any]:
@@ -539,7 +557,7 @@ class ShadowCheckpoints:
             if not isinstance(oid, str) or not OID.fullmatch(oid):
                 raise ServiceError("facts_corrupt")
             size = int(self._git(repo, ["cat-file", "-s", oid]))
-            if size > MAX_FILE or size != item["size"]:
+            if size != item["size"]:
                 raise ServiceError("artifact_limit")
             data = self._git(repo, ["cat-file", "blob", oid])
             if hashlib.sha256(data).hexdigest() != item["sha256"]:
@@ -560,8 +578,6 @@ class ShadowCheckpoints:
 
     def _write_record(self, path: Path, record: dict[str, Any]) -> None:
         payload = self._encode(record)
-        if len(payload) > PLAN_MAX_BYTES:
-            raise ServiceError("artifact_limit")
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(path.parent)
         temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
@@ -587,17 +603,11 @@ class ShadowCheckpoints:
             raise ServiceError("not_found", 404) from None
         try:
             info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_nlink != 1
-                or info.st_size > PLAN_MAX_BYTES
-            ):
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ServiceError("artifact_invalid")
             data = os.read(descriptor, info.st_size + 1)
         finally:
             os.close(descriptor)
-        if len(data) > PLAN_MAX_BYTES:
-            raise ServiceError("artifact_limit")
         try:
             record = json.loads(data)
         except ValueError:
@@ -615,10 +625,7 @@ class ShadowCheckpoints:
         builtins.list[dict[str, Any]],
     ]:
         rows = self._metadata(repo, project_id)
-        cutoff = time.time() - limits.checkpoint_retention_seconds
-        candidates: list[dict[str, str]] = []
-        chosen: set[str] = set()
-        logical = 0
+        protected = [row["checkpoint_id"] for row in rows if self._protected(row)]
         state = [
             {
                 "checkpoint_id": row["checkpoint_id"],
@@ -628,6 +635,15 @@ class ShadowCheckpoints:
             }
             for row in rows
         ]
+        # unlimited 的数值字段是账面值，不构成自动清理依据：默认不生成任何候选，
+        # 完整历史不会被调度清理丢弃。清理标准必须显式按 limited 传入（用户明确
+        # 的生命周期选择），生成候选后仍需两阶段确认。
+        if limits.resource_policy != "limited":
+            return [], protected, 0, state
+        candidates: list[dict[str, str]] = []
+        chosen: set[str] = set()
+        logical = 0
+        cutoff = time.time() - limits.checkpoint_retention_seconds
         for row in rows:
             if row["created_at"] < cutoff and not self._protected(row):
                 candidates.append(
@@ -668,7 +684,6 @@ class ShadowCheckpoints:
                 logical += int(row["total_bytes"])
                 if logical >= self._size(repo) - limits.checkpoint_bytes * 0.60:
                     break
-        protected = [row["checkpoint_id"] for row in rows if self._protected(row)]
         return candidates, protected, logical, state
 
     def cleanup_preview(
@@ -680,8 +695,6 @@ class ShadowCheckpoints:
             raise ServiceError("invalid_input", 422)
         with self._account(environment_id) as repo:
             candidates, protected, logical, state = self._candidates(repo, project_id, limits)
-            if len(candidates) > PLAN_MAX_CANDIDATES:
-                raise ServiceError("artifact_limit")
             created = time.time()
             plan_id = str(uuid.uuid4())
             core = {
@@ -735,8 +748,6 @@ class ShadowCheckpoints:
         protected = plan.get("protected")
         if type(candidates) is not list or type(protected) is not list:
             raise ServiceError("facts_corrupt")
-        if len(candidates) > PLAN_MAX_CANDIDATES:
-            raise ServiceError("artifact_limit")
         for item in candidates:
             checkpoint = item.get("checkpoint_id") if type(item) is dict else None
             if (
@@ -757,7 +768,7 @@ class ShadowCheckpoints:
             except (ServiceError, TypeError):
                 raise ServiceError("facts_corrupt") from None
         state = plan.get("state")
-        if type(state) is not list or len(state) > PLAN_MAX_CANDIDATES:
+        if type(state) is not list:
             raise ServiceError("facts_corrupt")
         for entry in state:
             if (

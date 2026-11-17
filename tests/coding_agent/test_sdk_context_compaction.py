@@ -109,10 +109,10 @@ class FixtureCompactor(Compactor):
 
     async def summarize(self, refs, messages):
         assert self.passes not in self.rows, "same summary pass must never be reissued"
-        assert self.passes < self.compaction.max_passes
+        assert self.compaction.max_passes is None or self.passes < self.compaction.max_passes
         step_index = self.step.index
         response = await self.step.call(
-            messages, [], purpose="summary", summary_bytes=self.compaction.summary_bytes,
+            messages, [], purpose="summary", summary_bytes=self.summary_capacity(),
             request_budget=self.step.request_budget(
                 self.max_group, self.remaining_tools, purpose="summary"),
             request_prepared=True,

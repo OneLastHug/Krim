@@ -8,6 +8,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -129,6 +130,17 @@ class RunBinding:
 
         result += tuple(source_digest(cast(str, module.__file__)) for module in (
             sdk_adapter, sdk_context, sdk_host, sdk_model, sdk_response,
+        ))
+        result += tuple(map(id, (
+            loop.context_service, loop.session_tool_host, loop.session_media,
+        )))
+        if loop.context_service is not None:
+            result += (id(loop.context_service.snapshots),)
+        root = Path(__file__).parents[1]
+        result += tuple(source_digest(root / path) for path in (
+            "storage/session_context.py", "context/serialization.py", "context/service.py",
+            "runtime/session_tools.py", "runtime/session_snapshots.py", "runtime/run_tools.py",
+            "runtime/session_media.py", "tools/bundles.py",
         ))
         if isinstance(loop, DevelopmentSDKLoop):
             from krim_agent.context import compaction, compaction_source
@@ -395,8 +407,14 @@ class RunService:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
+        self._input_lock = asyncio.Lock()
+        self.input_gate = asyncio.Lock()
         self._execution_budgets: dict[str, ExecutionBudget] = {}
         self.account_mcp: Any | None = None
+        self.interactions: Any | None = None
+        self.session_tool_host: Any | None = None
+        self.tool_runtime: Any | None = None
+        self.run_tool_factory: Any | None = None
         self._cancelled: set[str] = set()
         self._finalizing: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
@@ -460,7 +478,8 @@ class RunService:
             raise ServiceError("closed", 503)
         if not self.store.healthy:
             raise ServiceError("storage_unavailable", 503)
-        if len(request.text.encode()) > self.settings.max_input_bytes:
+        if (self.settings.max_input_bytes is not None
+                and len(request.text.encode()) > self.settings.max_input_bytes):
             raise ServiceError("input_limit", 422)
         existing = await self.store.by_key(request.request_key)
         if existing is not None:
@@ -485,10 +504,11 @@ class RunService:
             raise ServiceError("workspace_contract_required")
         if expected is not None and fingerprint(parse_json(binding.descriptor_json)) != expected:
             raise ServiceError("target_binding_changed")
-        if len(request.text.encode()) > binding.settings.max_input_bytes:
+        if (binding.settings.max_input_bytes is not None
+                and len(request.text.encode()) > binding.settings.max_input_bytes):
             raise ServiceError("input_limit", 422)
         if (
-            existing is None
+            existing is None and self.settings.max_active_runs is not None
             and sum(not t.done() for t in self.tasks.values()) >= self.settings.max_active_runs
         ):
             raise ServiceError("capacity", 429)
@@ -500,7 +520,7 @@ class RunService:
         else:
             executor = None
             try:
-                if self.account_mcp is not None:
+                if self.account_mcp is not None and self.run_tool_factory is None:
                     configs = await self.account_mcp.configurations_for_turn(turn_id)
                     if configs:
                         executor, provisional_connections = await self.account_mcp.build_runtime(
@@ -569,6 +589,8 @@ class RunService:
             budget: ExecutionBudget | None = None
             parked = False
             recovery_checkpoint = None
+            run_tools = None
+            session_scope = None
             executing: RunBinding | TurnBinding = binding
             base = binding.base if isinstance(binding, TurnBinding) else binding
             try:
@@ -578,15 +600,18 @@ class RunService:
                     if recovery_checkpoint is None:
                         raise ServiceError("facts_corrupt")
                     data, _stored = recovery_checkpoint
-                    deadline = asyncio.get_running_loop().time() + max(
-                        0.0, float(data.get("budget_remaining") or 0.0))
+                    remaining = data.get("budget_remaining")
+                    deadline = (None if remaining is None
+                                else asyncio.get_running_loop().time()
+                                + max(0.0, float(remaining)))
                 else:
                     timeout = (
                         binding.loop.work.profile.runtime.run_timeout_seconds
                         if binding.loop.work is not None else binding.settings.run_timeout
                     )
-                    deadline = asyncio.get_running_loop().time() + max(
-                        0, run.created_at + timeout - time.time())
+                    deadline = (None if timeout is None else
+                                asyncio.get_running_loop().time() + max(
+                                    0, run.created_at + timeout - time.time()))
                 budget = ExecutionBudget(deadline)
                 self._execution_budgets[run.id] = budget
                 timeout_context = asyncio.timeout_at(deadline)
@@ -610,7 +635,7 @@ class RunService:
 
                             try:
                                 executing = TurnBinding(base, context_builder.binding_token())
-                                if self.account_mcp is not None:
+                                if self.account_mcp is not None and self.run_tool_factory is None:
                                     configs = await self.account_mcp.configurations_for_turn(
                                         snapshot.session_context.turn_id
                                     )
@@ -647,6 +672,16 @@ class RunService:
                         }
                         data, stored = recovery_checkpoint
                         recovery = sdk_resume(data, stored, replies)
+                    if self.session_tool_host is not None:
+                        current = await self.store.snapshot(run.id)
+                        if current.session_context is not None:
+                            session_scope = await self.session_tool_host.by_run(
+                                run.id, executing.assert_current,
+                            )
+                            if self.run_tool_factory is not None:
+                                run_tools = await self.run_tool_factory(
+                                    session_scope, executing.loop.executor,
+                                )
                     try:
                         await executing.loop.run(
                             run.id,
@@ -655,8 +690,11 @@ class RunService:
                             execution_budget=budget,
                             resume=cast(Any, recovery),
                             executor=(
+                                run_tools.executor if run_tools is not None else
                                 executing.executor if isinstance(executing, TurnBinding) else None
                             ),
+                            **({"run_tools": run_tools, "session_scope": session_scope}
+                               if run_tools is not None or session_scope is not None else {}),
                         )
                     except BaseException:
                         if isinstance(executing, TurnBinding) and executing.account_mcp_connections:
@@ -680,6 +718,8 @@ class RunService:
             except Exception:
                 status, code = "failed", "execution_error"
             finally:
+                if run_tools is not None:
+                    await asyncio.gather(run_tools.close(), return_exceptions=True)
                 if isinstance(binding, TurnBinding) and binding.account_mcp_connections:
                     await asyncio.gather(
                         *(connection.close() for connection in binding.account_mcp_connections),
@@ -943,9 +983,70 @@ class RunService:
             and str(event.data["request_id"]) not in answered
         ]
 
+    def _all_waits_answered(self, snapshot: RunSnapshot) -> bool:
+        if self._unanswered_requests(snapshot):
+            return False
+        replies = {event.data.get("request_id") for event in snapshot.events
+                   if event.kind == "user_input_reply"}
+        return not any(event.kind == "user_input_request"
+                       and event.data.get("request_id") not in replies
+                       for event in snapshot.events)
+
+    async def reconcile_inputs(self) -> None:
+        """The session dispatcher reconciles durable answers at its admission fence."""
+        if self.interactions is None or self.closed:
+            return
+        async with self.input_gate, self._input_lock:
+            await self._reconcile_inputs()
+
+    async def _reconcile_inputs(self) -> None:
+        from krim_agent.storage.interaction_models import interaction_requests
+        from krim_agent.storage.models import runs
+
+        async def read(conn: Any) -> list[dict[str, Any]]:
+            return [dict(row) for row in (await conn.execute(
+                select(interaction_requests).join(
+                    runs, interaction_requests.c.run_id == runs.c.id,
+                ).where(runs.c.status == "awaiting")
+            )).mappings().all()]
+
+        rows = await self.store.work_read(read)
+        run_ids: set[str] = set()
+        for row in rows:
+            if row["status"] == "pending":
+                continue
+            if row["status"] == "superseded":
+                await self.cancel(row["run_id"])
+                continue
+            snapshot = await self.store.snapshot(row["run_id"])
+            if snapshot.run.stop_requested or snapshot.run.status != "awaiting":
+                continue
+            request = next((event.data for event in snapshot.events
+                            if event.kind == "user_input_request"
+                            and event.data.get("request_id") == row["id"]), None)
+            if request is None:
+                continue
+            if not any(event.kind == "user_input_reply"
+                       and event.data.get("request_id") == row["id"]
+                       for event in snapshot.events):
+                await self.store.append(row["run_id"], "user_input_reply", {
+                    "request_id": row["id"], "status": row["status"],
+                }, event_id="user-input-reply:" + row["id"])
+            run_ids.add(row["run_id"])
+        for run_id in run_ids:
+            snapshot = await self.store.snapshot(run_id)
+            if self._all_waits_answered(snapshot):
+                self._trigger_resume(run_id, snapshot)
+
+    async def input_answered(self, _result: dict[str, Any]) -> None:
+        # No direct resume here: new-user-message admission and reconciliation
+        # share the SessionService dispatcher fence, including notification races.
+        self.slot_changed.set()
+
     def _trigger_resume(self, run_id: str, snapshot: RunSnapshot) -> bool:
         """停靠批全部答复后启动恢复驱动；已有驱动在跑则不动（幂等）。"""
-        if snapshot.run.stop_requested or snapshot.run.status != "awaiting":
+        if (snapshot.run.stop_requested or snapshot.run.status != "awaiting"
+                or not self._all_waits_answered(snapshot)):
             return False
         task = self.tasks.get(run_id)
         if task is not None and not task.done():
@@ -958,6 +1059,7 @@ class RunService:
         )
         self.tasks[run_id] = resumed
         resumed.add_done_callback(self._task_done)
+        resumed.add_done_callback(lambda _task: self.slot_changed.set())
         return True
 
     async def approvals(self, run_id: str) -> list[dict[str, JsonValue]]:
@@ -984,7 +1086,7 @@ class RunService:
     async def _reply_approval(
         self, run_id: str, request_id: str, reply: ApprovalReply
     ) -> dict[str, JsonValue]:
-        async with self._approval_lock:
+        async with self.input_gate, self._approval_lock:
             snapshot = await self.store.snapshot(run_id)
             request = next(
                 (
@@ -1011,7 +1113,7 @@ class RunService:
             if previous is not None:
                 if previous.get("reply") != body:
                     raise ServiceError("approval_conflict")
-                if snapshot.run.status == "awaiting" and not self._unanswered_requests(snapshot):
+                if snapshot.run.status == "awaiting" and self._all_waits_answered(snapshot):
                     # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
                     self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
@@ -1031,7 +1133,7 @@ class RunService:
                 event_id="approval:" + request_id,
             )
             snapshot = await self.store.snapshot(run_id)
-            if not self._unanswered_requests(snapshot):  # 停靠批全部答复 → 恢复驱动
+            if self._all_waits_answered(snapshot):  # Both approvals and user answers are required.
                 self._trigger_resume(run_id, snapshot)
             return {"request_id": request_id, "allow": reply.allow, "replayed": False}
 

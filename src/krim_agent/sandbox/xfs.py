@@ -110,6 +110,7 @@ class XfsAccounts:
             raise ServiceError("sandbox_backend_unavailable", 503) from None
 
     def provision(self, environment_id: str, limits: QuotaLimits) -> dict[str, Any]:
+        """登记project标志并写内核限额；unlimited策略写0/0（XFS 0=unlimited）并读回核实。"""
         self.current()
         number = self.project_number(environment_id)
         path = self.root / environment_id
@@ -124,6 +125,18 @@ class XfsAccounts:
             path.mkdir(mode=0o700)
         # 父目录由Broker持有，不挂给租户；初始化project标志后子目录自动继承。
         self.command(f"project -s -p {path} {number}")
+        if limits.resource_policy == "unlimited":
+            # unlimited不再设存储限额；显式写0同时清除该号上可能残留的旧有限额。
+            self.command(f"limit -p bhard=0 ihard=0 {number}")
+            usage = self.usage(number)
+            if usage["byte_limit"] != 0 or usage["inode_limit"] != 0:
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            return {
+                "project_number": number,
+                "limits": limits.model_dump(mode="json"),
+                "usage": usage,
+                "enforcement": "xfs_project_quota",
+            }
         kib = limits.environment_bytes // 1024
         self.command(f"limit -p bhard={kib}k ihard={limits.environment_inodes} {number}")
         usage = self.usage(number)
@@ -137,7 +150,12 @@ class XfsAccounts:
         }
 
     def checkpoint_partition(self, environment_id: str, limits: QuotaLimits) -> dict[str, Any]:
-        """从账号总额内拆分独立检查点预算；project quota不假装具有父子叠加。"""
+        """从账号总额内拆分独立检查点预算；project quota不假装具有父子叠加。
+
+        unlimited策略不写内核限额：检查点区登记后写0/0（unlimited）并读回核实，
+        数据区不动（其限额由调额协议管理）；检查点能力预算仍由检查点服务按
+        limits数值执行。
+        """
         self.current()
         number = self.project_number(environment_id)
         checkpoint_number = number + 0x40000000
@@ -148,6 +166,17 @@ class XfsAccounts:
             path.mkdir(mode=0o700)
         if not limits.checkpoint_bytes or not limits.checkpoint_count:
             raise ServiceError("sandbox_limit")
+        if limits.resource_policy == "unlimited":
+            self.command(f"project -s -p {path} {checkpoint_number}")
+            self.command(f"limit -p bhard=0 ihard=0 {checkpoint_number}")
+            checkpoint = self.usage(checkpoint_number)
+            if checkpoint["byte_limit"] != 0 or checkpoint["inode_limit"] != 0:
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            return {
+                "checkpoint_number": checkpoint_number,
+                "checkpoint_bytes": 0,
+                "data_bytes": 0,
+            }
         ck_inodes = min(limits.environment_inodes // 4, max(128, limits.checkpoint_count * 64))
         data_bytes = (limits.environment_bytes - limits.checkpoint_bytes) // 1024 * 1024
         data_inodes = limits.environment_inodes - ck_inodes

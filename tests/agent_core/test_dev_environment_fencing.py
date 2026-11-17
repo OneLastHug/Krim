@@ -139,22 +139,18 @@ async def test_prepare_rejects_persisted_nonready_state_even_when_daemon_is_runn
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["accepted", "running", "unknown"])
-async def test_prepare_counts_all_active_rows_before_admitting_over_capacity(
-    execution_env, state: str,
-):
+async def test_prepare_ignores_obsolete_process_count_field(execution_env, state: str):
     executions, _backend, bindings, processes, runner, record, request, process = execution_env
     bindings.record = replace(record, max_processes=1)
     extra_request = make_request(record.environment, operation_id=f"operation-{state}")
     extra = make_process(extra_request, process_id=f"process-{state}", state=state)
     processes.set_row(extra)
 
-    with pytest.raises(EnvironmentError) as raised:
-        async with executions.prepare(request, process.handle.process_id):
-            raise AssertionError("prepare must not yield")
+    async with executions.prepare(request, process.handle.process_id) as execution:
+        processes.persist_execution(process.handle.process_id, execution.execution_id)
 
-    assert raised.value.code == "execution_capacity"
-    assert runner.create_attempts == 0
-    assert runner.calls == []
+    assert runner.create_attempts == 1
+    assert execution.execution_id in runner.containers
 
 
 @pytest.mark.asyncio

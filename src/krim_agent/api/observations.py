@@ -93,9 +93,7 @@ async def _compaction_rows(
 def mount_observations(app: FastAPI) -> None:
     router = APIRouter()
 
-    @router.get(
-        "/v2/workspaces/{workspace_id}/observations", response_model=ObservationPage
-    )
+    @router.get("/v2/workspaces/{workspace_id}/observations", response_model=ObservationPage)
     async def listing(
         workspace_id: str,
         request: Request,
@@ -133,9 +131,12 @@ def mount_observations(app: FastAPI) -> None:
             try:
                 snapshot = await store.snapshot(str(row["run_id"]))
                 context = snapshot.session_context
-                if (context is None or context.workspace_id != workspace_id
-                        or context.session_id != row["session_id"]
-                        or context.turn_id != row["turn_id"]):
+                if (
+                    context is None
+                    or context.workspace_id != workspace_id
+                    or context.session_id != row["session_id"]
+                    or context.turn_id != row["turn_id"]
+                ):
                     raise ServiceError("facts_corrupt")
             except ServiceError as error:
                 # 单条run事实损坏/缺失不拖垮整页；存储整体故障仍按503上抛。
@@ -197,9 +198,19 @@ def mount_observations(app: FastAPI) -> None:
         ):
             raise ServiceError("facts_corrupt")
         rows = await _compaction_rows(store, turn.run_id, session_id)
-        history_turns = (
-            len(snapshot.work.source_refs) if snapshot.work is not None else None
-        )
+        history_turns: int | None
+        if snapshot.work is not None:
+            history_turns = len(snapshot.work.source_refs)
+        else:
+            frozen = getattr(context, "frozen", None)
+            legacy = getattr(context, "context", None)
+            history_turns = (
+                len(frozen.sources)
+                if frozen is not None
+                else len(legacy.sources)
+                if legacy is not None
+                else None
+            )
         return project_detail(
             snapshot,
             session_id=session_id,

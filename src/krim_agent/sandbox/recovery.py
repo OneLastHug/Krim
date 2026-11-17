@@ -1,9 +1,17 @@
-"""多文件恢复账本；只执行已确认摘要计划，中断后按原/目标状态核实。"""
+"""多文件恢复账本；只执行已确认摘要计划，中断后按原/目标状态核实。
+
+preview 与账本不再设 changes 数量或记录总量上限，preserved/excluded 完整返回
+（截断会隐藏需用户确认的保护路径）；逐文件应用保留"每批一步/5 秒窗口后 paused"
+的批次窗口与 resume 链路，属调度窗口而非总量上限。恢复准备期的容量余量按内核
+读回逐分量判断：XFS byte_limit/inode_limit 为 0 表示该分量无限（unlimited 语义），
+对应比较跳过；有限额分量照常拒绝。恢复前备份捕获使用环境记录的有效策略（经
+limits_from_record 解读，旧记录缺 resource_policy 按 limited，不静默升级为
+unlimited）。哈希前置、恢复冲突、租约、维护/配额操作忙碌与授权协议保持不变。
+"""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 import uuid
 from collections.abc import Callable
@@ -11,7 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.sandbox.checkpoints import ShadowCheckpoints
-from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.quota import limits_from_record
 from krim_agent.sandbox.xfs import internal_id
 
 if TYPE_CHECKING:
@@ -114,8 +122,6 @@ class Recovery:
                                 "selected_by_default": False,
                             }
                         )
-            if len(changes) > 256:
-                raise ServiceError("artifact_limit")
             plan = {
                 "plan_id": str(uuid.uuid4()),
                 "environment_id": environment,
@@ -126,9 +132,10 @@ class Recovery:
                 "created_at": time.time(),
                 "expires_at": time.time() + 900,
                 "changes": changes,
-                "preserved": preserved[:256],
-                "excluded": captured["excluded"][:128],
-                "target_excluded": target["excluded"][:128],
+                # preserved/excluded 不是分页字段：截断会隐藏需用户确认的保护路径，返回完整。
+                "preserved": preserved,
+                "excluded": captured["excluded"],
+                "target_excluded": target["excluded"],
             }
             plan["plan_digest"] = fingerprint(plan)
             self.broker._save("restore-plan-" + plan["plan_id"] + ".json", plan)
@@ -194,12 +201,7 @@ class Recovery:
             "reason": None,
             "next_step": 0,
         }
-        # 为每步临时inode、状态及结算字段预留日志空间；不能恢复中途才因64KiB上限失去账本。
-        if (
-            len(json.dumps(row, ensure_ascii=False).encode()) + len(row["steps"]) * 256 + 2048
-            > 65536
-        ):
-            raise ServiceError("artifact_limit")
+        # 账本随差异规模增长，不再有总量预检；记录面由 broker._save 原子落盘。
         self.broker._save(self.name(operation), row)
         return self._apply(row, preparing=True)
 
@@ -285,10 +287,15 @@ class Recovery:
                     if s["action"] == "write"
                 )
                 scratch = max((s["size"] for s in row["steps"]), default=0) + 65536
-                if usage["byte_limit"] - usage["environment_bytes"] < growth + scratch:
+                # 内核读回 0 的分量无限（XFS 0=unlimited），对应 headroom 比较跳过；
+                # 有限额分量继续逐项拒绝。
+                if (
+                    usage["byte_limit"]
+                    and usage["byte_limit"] - usage["environment_bytes"] < growth + scratch
+                ):
                     raise ServiceError("sandbox_limit")
                 new_files = sum(s["expected_sha256"] is None for s in row["steps"])
-                if (
+                if usage["inode_limit"] and (
                     usage["inode_limit"] - usage["environment_inodes"]
                     < new_files + len(row["steps"]) * 16 + 2
                 ):
@@ -296,7 +303,7 @@ class Recovery:
                 target.reference(
                     environment, project, row["checkpoint_id"], "restore-target", operation
                 )
-                limits = QuotaLimits.model_validate(env["limits"])
+                limits = limits_from_record(env["limits"])
                 before = target.capture(
                     environment, project, captured["files"], captured["excluded"], limits
                 )

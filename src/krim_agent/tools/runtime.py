@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
+import math
 import os
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 
-from krim_agent.contracts import ServiceError, parse_json
+from krim_agent.contracts import ServiceError
 from krim_agent.mcp import MCPConnection, MCPServerConfig
 from krim_agent.network.egress_policy import EgressPolicy, EgressViolation
 from krim_agent.runtime.contracts import settled
@@ -24,9 +26,11 @@ from krim_agent.web_access import TavilyWebAccess, WebAccessConfig
 
 from .bindings import resolve_tool_overrides
 from .builtins import demo_policy
-from .core import Decision, Invocation, Policy
+from .catalog_search import scope_key
+from .core import Decision, Invocation, Policy, ToolSpec
 from .mcp import mcp_tools
 from .registry import ToolRegistry
+from .session import SessionScopeResolver, ToolBundle
 from .web import web_tools
 
 
@@ -36,28 +40,28 @@ class ToolRuntimeConfig:
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     tool_overrides: Mapping[str, str] = field(default_factory=dict)
     public_tools: tuple[str, ...] | None = None
+    web_result_root: Path | None = None
 
     def __post_init__(self) -> None:
         servers = tuple(self.mcp_servers)
         if (
-            len(servers) > 8
-            or any(type(item) is not MCPServerConfig for item in servers)
+            any(type(item) is not MCPServerConfig for item in servers)
             or len({item.name for item in servers}) != len(servers)
             or self.web is not None
             and type(self.web) is not WebAccessConfig
         ):
             raise ValueError("外部工具配置无效")
+        if self.web_result_root is not None and (
+            not isinstance(self.web_result_root, Path) or not self.web_result_root.is_absolute()
+        ):
+            raise ValueError("Web结果目录须为宿主绝对路径")
         copied = dict(self.tool_overrides)
-        if len(copied) > 16:
-            raise ServiceError("tool_limit", 422)
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in copied.items()):
             raise ValueError("工具覆盖配置无效")
         object.__setattr__(self, "mcp_servers", servers)
         object.__setattr__(self, "tool_overrides", MappingProxyType(copied))
         if self.public_tools is not None:
             names = tuple(self.public_tools)
-            if len(names) > 16:
-                raise ServiceError("tool_limit", 422)
             if len(names) != len(set(names)):
                 raise ValueError("公开工具选择无效")
             object.__setattr__(self, "public_tools", names)
@@ -67,8 +71,7 @@ class ToolRuntimeConfig:
         """JSON只引用凭据变量名，不接受浏览器上传或配置内的明文Key。"""
         environment = os.environ if environment is None else environment
         try:
-            config_bytes = _read_runtime_config(path)
-            body = parse_json(config_bytes.decode("utf-8"))
+            body = _read_runtime_config(path)
             if not isinstance(body, dict) or set(body) - {
                 "web",
                 "mcp_servers",
@@ -77,9 +80,12 @@ class ToolRuntimeConfig:
             }:
                 raise ValueError("配置字段无效")
             web = None
+            result_root = None
             if "web" in body:
                 raw_web = body["web"]
-                if not isinstance(raw_web, dict) or set(raw_web) - {"endpoint", "api_key_env"}:
+                if not isinstance(raw_web, dict) or set(raw_web) - {
+                    "endpoint", "api_key_env", "result_root",
+                }:
                     raise ValueError("网页配置字段无效")
                 key = _credential(
                     raw_web.get("api_key_env", "KRIM_AGENT_WEB_API_KEY"),
@@ -90,8 +96,13 @@ class ToolRuntimeConfig:
                     api_key=SecretStr(key) if key else None,
                     endpoint=cast(str, raw_web.get("endpoint", "https://api.tavily.com")),
                 )
+                raw_root = raw_web.get("result_root")
+                if raw_root is not None:
+                    if not isinstance(raw_root, str) or not raw_root:
+                        raise ValueError("Web结果目录无效")
+                    result_root = Path(raw_root)
             raw_servers = body.get("mcp_servers", [])
-            if not isinstance(raw_servers, list) or len(raw_servers) > 8:
+            if not isinstance(raw_servers, list):
                 raise ValueError("MCP配置无效")
             servers: list[MCPServerConfig] = []
             for raw_server in raw_servers:
@@ -135,8 +146,9 @@ class ToolRuntimeConfig:
                 tuple(servers),
                 cast(dict[str, str], mapping),
                 tuple(cast(list[str], public)) if public is not None else None,
+                web_result_root=result_root,
             )
-        except (OSError, ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
             raise ServiceError("invalid_input", 422) from None
 
 
@@ -320,7 +332,27 @@ def _validate_windows_acl(descriptor: int) -> None:
             kernel32.LocalFree(security_descriptor)
 
 
-def _read_runtime_config(path: Path) -> bytes:
+def _config_object(items: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {}
+    for name, value in items:
+        if name in result:
+            raise ValueError("配置含重复JSON字段")
+        result[name] = value
+    return result
+
+
+def _config_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("配置含非有限JSON数值")
+    return number
+
+
+def _config_constant(value: str) -> None:
+    raise ValueError("配置含非有限JSON数值")
+
+
+def _read_runtime_config(path: Path) -> JsonValue:
     if not isinstance(path, Path):
         raise ValueError("配置路径无效")
     path = path.absolute()
@@ -340,7 +372,6 @@ def _read_runtime_config(path: Path) -> bytes:
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_size > 65536
             or identity != known_identity
             or os.name == "posix"
             and (
@@ -349,32 +380,33 @@ def _read_runtime_config(path: Path) -> bytes:
                 or info.st_uid != os.geteuid()
             )
         ):
-            raise ValueError("配置必须是权限受限的有界普通文件")
+            raise ValueError("配置必须是权限受限的普通文件")
         try:
             _validate_windows_acl(descriptor)
         except Exception:
             raise ValueError("配置文件ACL无效") from None
-        chunks: list[bytes] = []
-        remaining = 65537
-        while remaining:
-            chunk = os.read(descriptor, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
+        # Parse the trusted file directly instead of retaining chunks + joined
+        # bytes + decoded text, and avoid the generic transport JSON byte quota.
+        # json.load still allocates the catalog itself; that is the requested
+        # configuration, not an unbounded response cache.
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            body = json.load(
+                stream, object_pairs_hook=_config_object,
+                parse_float=_config_float, parse_constant=_config_constant,
+            )
         after = os.fstat(descriptor)
         path_after = path.lstat()
         if (
-            len(raw) != info.st_size
-            or len(raw) > 65536
-            or (after.st_dev, after.st_ino, after.st_size, after.st_nlink)
-            != (info.st_dev, info.st_ino, info.st_size, info.st_nlink)
+            os.lseek(descriptor, 0, os.SEEK_CUR) != info.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_nlink,
+                after.st_mtime_ns, after.st_ctime_ns)
+            != (info.st_dev, info.st_ino, info.st_size, info.st_nlink,
+                info.st_mtime_ns, info.st_ctime_ns)
             or (path_after.st_dev, path_after.st_ino) != (info.st_dev, info.st_ino)
             or any(part.is_symlink() for part in (path, *path.parents))
         ):
             raise ValueError("配置文件在读取期间发生变化")
-        return raw
+        return cast(JsonValue, body)
     finally:
         os.close(descriptor)
 
@@ -422,6 +454,50 @@ class ToolRuntime:
     web: TavilyWebAccess | None = None
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
+    def bundle(self, resolve: SessionScopeResolver) -> ToolBundle:
+        """Borrow host external capabilities without copying base/workspace tools.
+
+        The runtime remains the sole connection owner. Each session receives
+        fresh wrappers, while the external source and binding fingerprints stay
+        intact. An explicit MCP override still checks both alias and target.
+        """
+        self.registry.assert_current()
+        cache: dict[int, ToolSpec] = {}
+
+        def scoped(spec: ToolSpec) -> ToolSpec:
+            if id(spec) in cache:
+                return cache[id(spec)]
+            execute = spec.external_executor
+            assert execute is not None
+            if spec.binding_target is not None:
+                target = scoped(spec.binding_target)
+                result = replace(
+                    spec, external_executor=target.external_executor, binding_target=target,
+                )
+            else:
+                async def invoke(invocation: Invocation, arguments: Any) -> Any:
+                    scope = await resolve(invocation)
+                    key = scope_key(scope)
+                    value = await execute(invocation, arguments)
+                    if scope_key(await resolve(invocation)) != key:
+                        raise ServiceError("permission_denied", 403)
+                    return value
+                result = replace(spec, external_executor=invoke)
+            cache[id(spec)] = result
+            return result
+
+        specs = tuple(scoped(spec) for spec, _ in self.registry._frozen if spec.source is not None)
+        names = {spec.name for spec in specs}
+        names.update(spec.binding_target.name for spec in specs if spec.binding_target is not None)
+
+        async def policy(invocation: Invocation) -> Decision:
+            scope_key(await resolve(invocation))
+            if invocation.name not in names:
+                return "deny"
+            return await self.policy(invocation) if self.policy is not None else "ask"
+
+        return ToolBundle(specs, policy)
+
     @classmethod
     async def open(
         cls, base: ToolRegistry, config: ToolRuntimeConfig, policy: Policy | None
@@ -432,7 +508,9 @@ class ToolRuntime:
         web = None
         try:
             if config.web is not None or set(config.tool_overrides) & {"web_search", "web_fetch"}:
-                web = TavilyWebAccess(config.web or WebAccessConfig())
+                web = TavilyWebAccess(
+                    config.web or WebAccessConfig(), result_root=config.web_result_root,
+                )
                 specs.extend(web_tools(web))
             for server in config.mcp_servers:
                 if server.transport == "streamable_http":
@@ -444,8 +522,16 @@ class ToolRuntime:
                 connections.append(connection)
                 await connection.connect()
                 specs.extend(mcp_tools(connection))
+            if config.web is None or config.web.api_key is None:
+                # Override placeholders are needed only during binding; never
+                # advertise an HTTP capability lacking its configured credential.
+                original_ids = {id(spec) for spec, _ in base._frozen}
+                specs = [spec for spec in specs if id(spec) in original_ids
+                         or spec.source is None or spec.source.kind != "http"
+                         or spec.name in config.tool_overrides]
             registry = resolve_tool_overrides(
-                tuple(specs), config.tool_overrides, config.public_tools
+                tuple(specs), config.tool_overrides, config.public_tools,
+                dependencies=(base,),
             )
             effective = policy
             if policy is demo_policy:

@@ -180,17 +180,27 @@ async def test_images_are_disabled_by_default_and_urls_are_never_fetched():
         pytest.param(_image(PNG[:-1] + bytes([PNG[-1] ^ 1])), id="bad-crc"),
         pytest.param(_image(PNG + b"trailing"), id="trailing-bytes"),
         pytest.param(_image(PNG, "image/jpeg"), id="mime-mismatch"),
-        pytest.param(
-            _image(_entropy_png(400, 400)), id="over-single-image-limit"
-        ),
     ],
 )
-async def test_invalid_or_oversized_images_are_rejected(image: HostImageMessage):
+async def test_invalid_images_are_rejected(image: HostImageMessage):
     provider, captured = await _provider(allow_images=True, max_request_bytes=1_048_576)
     try:
         with pytest.raises(ServiceError, match="invalid_input"):
             _ = [event async for event in provider.stream([image], [])]
         assert captured == []
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_images_above_old_product_quota_fit_actual_provider_request():
+    payload = _entropy_png(400, 400)
+    assert len(payload) > 512 * 1024
+    provider, captured = await _provider(allow_images=True, max_request_bytes=1_048_576)
+    try:
+        _ = [event async for event in provider.stream([_image(payload)], [])]
+        image = captured[0]["messages"][-1]["content"][1]
+        assert base64.b64decode(image["image_url"]["url"].partition(",")[2]) == payload
     finally:
         await provider.close()
 
@@ -217,12 +227,10 @@ def test_request_limit_can_be_explicitly_raised_but_default_stays_small():
         allow_images=True,
         max_request_bytes=1_048_576,
     ).max_request_bytes == 1_048_576
-    with pytest.raises(ValueError):
-        OpenAICompatibleConfig(
-            base_url="https://example.invalid/v1",
-            model="fixture",
-            max_request_bytes=1_048_577,
-        )
+    assert OpenAICompatibleConfig(
+        base_url="https://example.invalid/v1", model="fixture",
+        max_request_bytes=8_388_608,
+    ).max_request_bytes == 8_388_608
     with pytest.raises(ValueError):
         OpenAICompatibleConfig(
             base_url="https://example.invalid/v1",

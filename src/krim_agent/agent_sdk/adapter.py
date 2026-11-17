@@ -37,6 +37,7 @@ from krim_agent.development.contracts import (
     OperationStore,
     RunOwnership,
 )
+from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import RunStore
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Admission, ToolContext, ToolExecutor
@@ -44,6 +45,8 @@ from krim_agent.tools.executor import Admission, ToolContext, ToolExecutor
 from .host import CURRENT_OPERATION, HostExecution, sdk_lifetime
 from .media import DEFAULT_MEDIA_LIMITS, MediaLimits, authorize_history
 from .response import CompleteResponseProvider
+
+INPUT_TOOLS = frozenset({"ask_user", "exit_plan_mode"})
 
 
 class ProbeStopped(RuntimeError):
@@ -64,6 +67,7 @@ class _Entry:
     identity: OperationIdentity | None
     gate: asyncio.Event
     predecessors: tuple[asyncio.Event, ...] = ()
+    input_request: dict[str, Any] | None = None
 
 
 class _OrderedAgent(ai.Agent):
@@ -85,7 +89,8 @@ class _OrderedAgent(ai.Agent):
                 await predecessor.wait()
             try:
                 await owner.check_stop()
-                if owner.deferred and not owner.batch_approvals:
+                if owner.deferred and (not owner.batch_approvals
+                        or owner.deferred.metadata.get("interaction_request_id")):
                     # Do not start a later call while an earlier one is parked.
                     # It remains in the checkpoint's assistant turn for replay.
                     return deferred_tool_result(
@@ -118,6 +123,31 @@ class _OrderedAgent(ai.Agent):
                         decision="ask" if approval.granted else "deny",
                         code=None if approval.granted else "approval_denied",
                     )
+                if entry.invocation.name in INPUT_TOOLS and part.cached_result is None:
+                    try:
+                        result = await owner.execute(entry)
+                    except RequestPending as pending:
+                        entry.input_request = dict(pending.request)
+                        try:
+                            await ai.hook(
+                                "input_" + str(pending.request["id"]), payload=ToolApproval,
+                                metadata={
+                                    "interaction_request_id": pending.request["id"],
+                                    "call_id": entry.invocation.call_id,
+                                    "tool": entry.invocation.name,
+                                }, tool_call_id=part.tool_call_id,
+                            )
+                        except HookDeferredException as error:
+                            owner.deferred = error.hook
+                            return deferred_tool_result(error.hook,
+                                tool_call_id=part.tool_call_id, tool_name=part.tool_name)
+                        raise ServiceError("interaction_pending") from None
+                    result_part = messages.ToolResultPart(
+                        tool_call_id=part.tool_call_id, tool_name=part.tool_name,
+                        result=result, result_kind="json",
+                    )
+                    message = messages.Message(role="tool", parts=[result_part])
+                    return events.ToolCallResult(message=message, results=message.tool_results)
                 return cast(events.ToolCallResult, await native())
             finally:
                 entry.gate.set()
@@ -183,10 +213,15 @@ class SDKAdapter:
         self.deferred: messages.HookPart[Any] | None = None
         self.step = 0
         self.failure: Exception | None = None
-        self.tool_fingerprint = fingerprint(executor.registry.schemas())
+        descriptors = executor.registry.schemas()
+        self.tool_fingerprint = fingerprint(descriptors)
+        schemas = {str(item["name"]): item["input_schema"] for item in descriptors}
+        specs = {spec.name: spec for spec, _ in executor.registry._frozen}
         bridged: list[ai.AgentTool] = []
         for tool in tools:
-            spec = executor.registry.get(tool.name)
+            spec = specs.get(tool.name)
+            if spec is None:
+                raise ServiceError("unknown_tool")
 
             async def invoke(**kwargs: Any) -> JsonValue:
                 # The SDK has validated kwargs; the host's strict admission was
@@ -204,12 +239,13 @@ class SDKAdapter:
                 update={
                     "spec": SDKToolSpec(
                         description=spec.description or None,
-                        params=spec.parameters.model_json_schema(),
+                        params=cast(dict[str, Any], schemas[tool.name]),
                     ),
                     "require_approval": False,
                 }
             )
             bridged.append(replace(tool, fn=invoke, tool=declaration, validator=spec.parameters))
+        executor.registry.assert_current()
         if len({tool.name for tool in bridged}) != len(bridged):
             raise ValueError("duplicate tool registration")
         self.tool_names = frozenset(tool.name for tool in bridged)
@@ -309,7 +345,8 @@ class SDKAdapter:
                 invocation, context, timeout_seconds=context.timeout,
             )
             identity = None
-            if spec.risk != "read" and self.operations is not None:
+            if (spec.risk != "read" and self.operations is not None
+                    and spec.name not in INPUT_TOOLS):
                 assert self.environment is not None and self.ownership is not None
                 identity = OperationIdentity(
                     operation_id=f"op-{uuid4().hex}",
@@ -392,7 +429,8 @@ class SDKAdapter:
                         raise ServiceError("facts_corrupt")
                     if observed.status == "ok" and observed.result_available is True:
                         return observed.model_dump(mode="json")
-                raise ServiceError("facts_corrupt")
+                if entry.invocation.name not in INPUT_TOOLS:
+                    raise ServiceError("facts_corrupt")
         if self.operations is None and entry.admission.decision == "deny":
             # A denied legacy batch item never entered execute/wrap. Preserve
             # that boundary, including an explicit rejected approval observation.
@@ -472,6 +510,7 @@ class SDKAdapter:
                     "identity": entry.identity.model_dump(mode="json") if entry.identity else None,
                     "decision": entry.admission.decision,
                     "code": entry.admission.code,
+                    "input_request": entry.input_request,
                 }
                 for call_id, entry in self.entries.items()
             },
@@ -516,7 +555,8 @@ class SDKAdapter:
             identity = (
                 OperationIdentity.model_validate(item["identity"]) if item["identity"] else None
             )
-            if (spec.risk != "read" and self.operations is not None) != (identity is not None):
+            if (spec.risk != "read" and self.operations is not None
+                    and spec.name not in INPUT_TOOLS) != (identity is not None):
                 raise ValueError("checkpoint lost operation identity")
             if identity is not None and (
                 identity.environment != self.environment
@@ -534,7 +574,8 @@ class SDKAdapter:
                 raise ValueError("checkpoint operation binding changed")
             admission = Admission(spec, parsed, item["decision"], item["code"], start_emitted=True)
             self.entries[call_id] = _Entry(
-                invocation, admission, identity, asyncio.Event()
+                invocation, admission, identity, asyncio.Event(),
+                input_request=item.get("input_request"),
             )
         history = [messages.Message.model_validate(item) for item in checkpoint["messages"]]
         # Only the final incomplete assistant batch will be replayed by the SDK.
@@ -556,6 +597,25 @@ class SDKAdapter:
             if call_id not in pending:
                 entry.gate.set()
         return history
+
+    async def append_input_request(self, hook: messages.HookPart[Any]) -> None:
+        entry = self.entries.get(hook.tool_call_id or "")
+        if entry is None or entry.invocation.name not in INPUT_TOOLS:
+            raise ServiceError("facts_corrupt")
+        request = entry.input_request
+        if (not isinstance(request, dict)
+                or request.get("id") != hook.metadata.get("interaction_request_id")
+                or request.get("run_id") != self.run_id
+                or hook.metadata.get("call_id") != entry.invocation.call_id
+                or hook.metadata.get("tool") != entry.invocation.name):
+            raise ServiceError("facts_corrupt")
+        await self.check_stop()
+        await self.store.append(self.run_id, "user_input_request", {
+            "request_id": request["id"], "hook_id": hook.hook_id,
+            "call_id": entry.invocation.call_id, "name": entry.invocation.name,
+            "request": request,
+        }, event_id="user-input:" + str(request["id"]))
+        await self.check_stop()
 
     async def append_approval_request(self, hook: messages.HookPart[Any]) -> None:
         """Use the host's existing approval event and verify its invocation binding."""
@@ -645,6 +705,11 @@ class SDKAdapter:
         registry = HookRegistry()
         for call_id, granted in (replies or {}).items():
             ai.resolve_hook(f"approve_{call_id}", {"granted": granted}, registry=registry)
+        snapshot = await self.store.snapshot(self.run_id)
+        for event in getattr(snapshot, "events", ()):
+            if event.kind == "user_input_reply":
+                ai.resolve_hook("input_" + str(event.data["request_id"]),
+                                {"granted": True}, registry=registry)
         model = ai.Model(
             id=model.id,
             provider=CompleteResponseProvider(
@@ -660,7 +725,10 @@ class SDKAdapter:
             async for event in stream:
                 collected.append(event)
                 if isinstance(event, events.HookEvent) and event.hook.status == "pending":
-                    await self.append_approval_request(event.hook)
+                    if event.hook.metadata.get("interaction_request_id"):
+                        await self.append_input_request(event.hook)
+                    else:
+                        await self.append_approval_request(event.hook)
                     ai.defer_hook(event.hook, registry=registry)
             current = list(stream.messages)
         await self.check_stop()

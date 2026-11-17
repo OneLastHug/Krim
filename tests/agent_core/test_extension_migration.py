@@ -68,6 +68,10 @@ for version, additions in (
           "project_access_records"}),
     (16, {"development_previews", "development_preview_credentials"}),
     (17, {"session_sidebars"}),
+    (18, {"session_plans", "session_plan_versions", "session_plan_steps",
+          "session_plan_requests", "interaction_modes", "interaction_requests",
+          "interaction_mutations", "context_requests", "session_goals", "goal_versions",
+          "goal_requests", "goal_continuations", "session_media_artifacts"}),
 ):
     HISTORICAL_TABLES[version] = HISTORICAL_TABLES[version - 1] | additions
 
@@ -80,6 +84,13 @@ def downgrade_to_version(path, version):
         }
         for name in sorted(names - HISTORICAL_TABLES[version]):
             conn.execute(f'DROP TABLE "{name}"')
+        if 11 <= version < 18:
+            conn.execute("DROP INDEX IF EXISTS ix_memories_owner_scope_updated")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+            for column in ("authorization_turn_id", "memory_kind", "source_kind",
+                           "project_id", "workspace_id"):
+                if column in columns:
+                    conn.execute(f'ALTER TABLE memories DROP COLUMN "{column}"')
         conn.execute(f"PRAGMA user_version={version}")
 
 
@@ -97,12 +108,12 @@ async def seed_run(path):
 
 
 @pytest.mark.asyncio
-async def test_fresh_schema17_registers_all_feature_tables(tmp_path):
+async def test_fresh_schema18_registers_all_feature_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 17
-        assert table_names(database) == HISTORICAL_TABLES[17]
+        assert store.schema_version == SCHEMA_VERSION == 18
+        assert table_names(database) == HISTORICAL_TABLES[18]
         assert EXTENSION_TABLE_NAMES <= table_names(database)
     finally:
         await store.close()
@@ -118,8 +129,8 @@ async def test_feature_upgrade_preserves_data(tmp_path, version):
     assert table_names(database) == HISTORICAL_TABLES[version]
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 17
-        assert table_names(database) == HISTORICAL_TABLES[17]
+        assert store.schema_version == SCHEMA_VERSION == 18
+        assert table_names(database) == HISTORICAL_TABLES[18]
         assert rows(database, "runs") == before
         assert (await store.snapshot(run.id)).request.text == "保留的运行"
     finally:
@@ -150,8 +161,8 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 17
-        assert table_names(database) == HISTORICAL_TABLES[17]
+        assert writer.schema_version == SCHEMA_VERSION == 18
+        assert table_names(database) == HISTORICAL_TABLES[18]
         assert (await writer.snapshot(run.id)).request.text == "保留的运行"
         for name in expected:
             assert rows(database, name) == before_rows[name]
@@ -159,13 +170,16 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
             after_schema = dict(
                 conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")
             )
-        assert {name: after_schema[name] for name in expected} == before_schema
+        unchanged = expected - {"memories"}
+        assert {name: after_schema[name] for name in unchanged} == {
+            name: before_schema[name] for name in unchanged
+        }
     finally:
         await writer.close()
 
     reader = await SQLiteStore.open(database, readonly=True)
     try:
-        assert reader.schema_version == 17
+        assert reader.schema_version == 18
         assert (await reader.snapshot(run.id)).run.id == run.id
     finally:
         await reader.close()

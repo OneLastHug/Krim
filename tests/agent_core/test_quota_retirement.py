@@ -14,7 +14,10 @@ from krim_agent.sandbox.quota_retirement import QuotaRetirement
 
 MIB = 1024**2
 ENV = "e1000000-0000-4000-8000-000000000001"
+# 本文件覆盖旧的有限额退役协议（keep旧内核限额、data扩到有限额）；unlimited目标的
+# 退役（强制清0）由test_unlimited_storage.py覆盖。
 TARGET_LIMITS = {
+    "resource_policy": "limited",
     "environment_bytes": 500 * MIB,
     "environment_inodes": 100_000,
     "checkpoint_bytes": 0,

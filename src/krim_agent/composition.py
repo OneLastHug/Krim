@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 from typing import cast
@@ -16,6 +17,8 @@ from krim_agent.account_mcp.secrets import AuthenticatedSecretVault, MasterKeyri
 from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings
+from krim_agent.context.service import ContextService
+from krim_agent.context.tools import compact_context_bundle
 from krim_agent.contracts import ServiceError, fingerprint
 from krim_agent.development.configuration import DevelopmentConfiguration
 from krim_agent.development.service import DevelopmentService
@@ -28,13 +31,23 @@ from krim_agent.evaluation.service import EvaluationService
 from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
 from krim_agent.execution.linux import SandboxRunner
 from krim_agent.extensions import ExtensionService
+from krim_agent.goals import GoalService
+from krim_agent.interaction import InteractionService
+from krim_agent.media.artifacts import SQLiteMediaArtifacts
+from krim_agent.media.ffmpeg import FFmpegImageTransform
+from krim_agent.media.service import ImageCapabilities
+from krim_agent.planning.service import PlanningService
 from krim_agent.providers.fake import FakeProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.providers.types import ModelProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
+from krim_agent.runtime.run_tools import RunTools, open_run_tools
 from krim_agent.runtime.sdk_loop import DevelopmentSDKLoop
 from krim_agent.runtime.service import RunBinding, RunService
+from krim_agent.runtime.session_media import SessionMediaHost
+from krim_agent.runtime.session_snapshots import SessionSnapshotProvider
+from krim_agent.runtime.session_tools import SessionToolHost
 from krim_agent.sandbox.configuration import SandboxConfiguration
 from krim_agent.sandbox.operations import SandboxOperations
 from krim_agent.sandbox.service import SandboxService
@@ -43,11 +56,14 @@ from krim_agent.sessions.service import SessionService
 from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.builtins import builtin_registry, demo_policy
-from krim_agent.tools.core import Policy, PostHook, PreHook
+from krim_agent.tools.bundles import compose_executor, policy_spec
+from krim_agent.tools.core import Decision, Invocation, Policy, PostHook, PreHook
 from krim_agent.tools.executor import ToolExecutor
+from krim_agent.tools.memory import MemoryToolService
 from krim_agent.tools.pipeline import Middleware, Wrap
 from krim_agent.tools.registry import ToolRegistry
 from krim_agent.tools.runtime import ToolRuntime, ToolRuntimeConfig
+from krim_agent.tools.session import SessionToolScope
 from krim_agent.tools.workspace import registry as workspace_registry
 from krim_agent.workspace.artifacts import ArtifactStore
 from krim_agent.workspace.operations import WorkspaceOperations
@@ -78,6 +94,12 @@ class Application:
     extensions: ExtensionService | None = None
     account_mcp: AccountMCPService | None = None
     development: DevelopmentService | None = None
+    planning: PlanningService | None = None
+    interactions: InteractionService | None = None
+    memory_tools: MemoryToolService | None = None
+    context_service: ContextService | None = None
+    goals: GoalService | None = None
+    media: SessionMediaHost | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -236,10 +258,14 @@ async def open_application(
             workspace.profile.max_tools_per_step
             if workspace is not None
             else (
-                min(config.max_tools_per_step, provider.config.max_tool_calls) if agent_http else 1
+                min(config.max_tools_per_step,
+                    provider.config.max_tool_calls or config.max_tools_per_step)
+                if agent_http else 1
             )
         )
-        if provider.binding_token() != provider._sealed or provider.config.max_tool_calls != cap:
+        if (provider.binding_token() != provider._sealed
+                or provider.config.max_tool_calls is not None
+                and provider.config.max_tool_calls != cap):
             raise ProviderError("provider_config", 422)
         if workspace is not None and http_config is not None:
             raise ProviderError("provider_config", 422)
@@ -247,9 +273,9 @@ async def open_application(
         cap = (
             workspace.profile.max_tools_per_step
             if workspace is not None
-            else (min(config.max_tools_per_step, 4) if agent_http else 1)
+            else (config.max_tools_per_step if agent_http else 1)
         )
-        if "max_tool_calls" in raw_http_fields:
+        if "max_tool_calls" in raw_http_fields and http_config.max_tool_calls is not None:
             if agent_http and workspace is None:
                 if http_config.max_tool_calls > cap:
                     raise ProviderError("provider_config", 422)
@@ -299,8 +325,12 @@ async def open_application(
                 "target_version": config.target_version
                 if "target_version" in specified
                 else ("agent-http/1"),
-                "max_tools_per_step": min(config.max_tools_per_step, http_config.max_tool_calls),
-                "max_request_bytes": min(config.max_request_bytes, http_config.max_request_bytes),
+                "max_tools_per_step": min(
+                    config.max_tools_per_step,
+                    http_config.max_tool_calls or config.max_tools_per_step,
+                ),
+                "max_request_bytes": min(config.max_request_bytes or http_config.max_request_bytes,
+                                         http_config.max_request_bytes),
             }
         )
     elif live:
@@ -312,9 +342,9 @@ async def open_application(
             or http_config.reasoning_effort != "xhigh"
             or not http_config.api_key.get_secret_value()
             or not 60 <= http_config.read_timeout_seconds <= 90
-            or not 180 <= config.run_timeout <= 240
+            or config.run_timeout is None or not 180 <= config.run_timeout <= 240
             or config.max_active_runs != 1
-            or config.max_steps < 2
+            or config.max_steps is None or config.max_steps < 2
             or "system_prompt" in specified
             and config.system_prompt != prompt
             or "target_version" in specified
@@ -330,10 +360,10 @@ async def open_application(
                     "max_steps": 2,
                     "max_tools_per_step": 1,
                     "max_tool_calls": 1,
-                    "max_input_bytes": min(4096, config.max_input_bytes),
-                    "max_output_bytes": min(8192, config.max_output_bytes),
-                    "max_request_bytes": min(32768, config.max_request_bytes),
-                    "tool_timeout": min(2, config.tool_timeout),
+                    "max_input_bytes": min(4096, config.max_input_bytes or 4096),
+                    "max_output_bytes": min(8192, config.max_output_bytes or 8192),
+                    "max_request_bytes": min(32768, config.max_request_bytes or 32768),
+                    "tool_timeout": min(2, config.tool_timeout or 2),
                 }
             )
         except ValueError:
@@ -369,6 +399,12 @@ async def open_application(
         if config.tool_config_file is not None
         else None
     )
+    if external_config is not None and external_config.web_result_root is None:
+        database_path = await asyncio.to_thread(path.absolute)
+        external_config = replace(
+            external_config,
+            web_result_root=database_path.with_name(database_path.name + ".web-results"),
+        )
     evaluation_path = (
         _evaluation_database_path(path, config.product_eval_database)
         if config.product_eval_enabled
@@ -414,7 +450,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if store.schema_version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
+                if 3 <= store.schema_version <= 18:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -434,7 +470,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
+                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
@@ -513,10 +549,7 @@ async def open_application(
                         "你是 Krim Agent。使用获授权工作区工具完成任务；模型陈述不等于完成核验。"
                     ),
                     "target_version": "workspace/1",
-                    "max_request_bytes": min(
-                        config.max_request_bytes,
-                        http_binding.loop.provider.config.max_request_bytes,
-                    ),
+                    "max_request_bytes": config.request_capacity(http_binding.loop.provider),
                 }
             )
             work_loop = AgentLoop(
@@ -547,7 +580,7 @@ async def open_application(
                 raise ServiceError("sandbox_config_invalid", 422)
             sandbox_operations = SandboxOperations(sandbox_service)
             sandbox_settings = base_binding.settings.model_copy(
-                update={"target_version": "sandbox/1", "run_timeout": 180.0, "tool_timeout": 30.0}
+                update={"target_version": "sandbox/1"}
             )
             sandbox_loop = AgentLoop(
                 store,
@@ -573,7 +606,8 @@ async def open_application(
             await development.start_supervisor()
             await development.recover_secret_executions()
             development_settings = config.model_copy(update={
-                "target_version": "development/1", "run_timeout": 300.0, "tool_timeout": 30.0,
+                "target_version": "development/1",
+                "run_timeout": config.run_timeout, "tool_timeout": config.tool_timeout,
                 "max_steps": development_configuration.max_steps,
                 "max_tool_calls": development_configuration.max_tool_calls,
                 "development_history_compaction": development_configuration.history_compaction,
@@ -605,13 +639,100 @@ async def open_application(
             bindings["target-development"] = RunBinding.freeze(
                 "target-development", development_loop, development_settings,
             )
+        feature_identities = identities if identities.managed else None
+        session_tools = SessionToolHost(store, feature_identities, active_access)
+        planning = PlanningService(store, feature_identities)
+        interactions = InteractionService(store, feature_identities)
+        extensions = ExtensionService(store, feature_identities)
+        memory_tools = MemoryToolService(store, feature_identities, extensions=extensions)
+        goals = GoalService(store, feature_identities, snapshots=planning.snapshot)
+        context_service = ContextService(
+            store,
+            feature_identities,
+            snapshots=SessionSnapshotProvider(
+                store, planning=planning, memory_tools=memory_tools, goals=goals,
+            ),
+        )
+
+        async def image_capabilities(scope: SessionToolScope) -> ImageCapabilities:
+            scope.check()
+            snapshot = await store.snapshot(scope.run_id)
+            active_binding = bindings.get(snapshot.request.target)
+            active_provider = active_binding.loop.provider if active_binding is not None else None
+            return ImageCapabilities(vision=(
+                isinstance(active_provider, OpenAICompatibleProvider)
+                and active_provider.config.allow_images
+            ))
+
+        image_converter = shutil.which("ffmpeg")
+        media = SessionMediaHost(
+            store, session_tools, capabilities=image_capabilities, sandbox=sandbox_service,
+            screenshots=(development if development_configuration is not None
+                         and development_configuration.model_images else None),
+            artifacts=SQLiteMediaArtifacts(store),
+            include_screenshots=(development_configuration is not None
+                                 and development_configuration.model_images),
+            transform=(FFmpegImageTransform(image_converter)
+                       if image_converter is not None else None),
+        )
+        shared_bundles = (
+            planning.bundle(session_tools.resolve),
+            interactions.bundle(session_tools.resolve),
+            memory_tools.bundle(session_tools.resolve),
+            compact_context_bundle(context_service, session_tools.resolve),
+            goals.bundle(session_tools.resolve),
+            media.bundle(),
+        )
+        assembled_loops: set[int] = set()
+        for key in ("demo", "target-http", "target-development"):
+            binding = bindings.get(key)
+            if binding is None:
+                continue
+            if id(binding.loop) in assembled_loops:
+                bindings[key] = RunBinding.freeze(key, binding.loop, binding.settings)
+                continue
+            assembled_loops.add(id(binding.loop))
+            binding.loop.context_service = context_service
+            binding.loop.session_tool_host = session_tools
+            binding.loop.session_media = media
+            # Plan mode is checked once on the complete per-run registry, after
+            # account/host tools and trusted read-only configuration are known.
+            binding.loop.executor = compose_executor(binding.loop.executor, shared_bundles)
+            bindings[key] = RunBinding.freeze(key, binding.loop, binding.settings)
+        target["tools"] = cast(JsonValue, loop.executor.registry.schemas())
         service = RunService(store, loop, config, target, bindings)
+        session_tools.runtime = service
+        service.interactions = interactions
+        interactions.on_answer = service.input_answered
+        service.session_tool_host = session_tools
+        service.tool_runtime = tool_runtime
         account_mcp = AccountMCPService(
             store,
             identities if identities.managed else None,
             personal_mcp_vault,
         )
         service.account_mcp = account_mcp if identities.managed else None
+
+        async def open_tools(scope: SessionToolScope, base: ToolExecutor) -> RunTools:
+            state: dict[str, RunTools] = {}
+
+            async def guard(invocation: Invocation) -> Decision:
+                current_scope = await session_tools.resolve(invocation)
+                spec = policy_spec(state["runtime"].executor.registry, invocation)
+                return "allow" if await interactions.permits(
+                    current_scope, spec,
+                    trusted_readonly_names=state["runtime"].trusted_readonly_names,
+                ) else "deny"
+
+            runtime = await open_run_tools(
+                base, scope=scope, resolve=session_tools.resolve,
+                host=tool_runtime, account_mcp=service.account_mcp, guard=guard,
+                media_sink=media.media_sink,
+            )
+            state["runtime"] = runtime
+            return runtime
+
+        service.run_tool_factory = open_tools
         application = Application(
             store,
             service,
@@ -626,6 +747,7 @@ async def open_application(
                 config,
                 identities=identities if identities.managed else None,
                 account_mcp=account_mcp if identities.managed else None,
+                goals=goals,
             ),
             active_access,
             work=operations,
@@ -634,10 +756,17 @@ async def open_application(
             tool_runtime=tool_runtime,
             identities=identities,
             sandbox=sandbox_service,
-            extensions=ExtensionService(store, identities if identities.managed else None),
+            extensions=extensions,
+            planning=planning,
+            interactions=interactions,
+            memory_tools=memory_tools,
+            context_service=context_service,
+            goals=goals,
+            media=media,
             account_mcp=account_mcp if identities.managed else None,
             development=development,
         )
+        goals.queue = application.sessions
         if evaluation_path is not None:
             adapters = {
                 "krim-script-" + key.removeprefix("target-"): AdapterLease(
@@ -753,14 +882,11 @@ def _make_http_binding(
         update={
             "system_prompt": "使用受控工具回答任务；保持数值精度。",
             "target_version": "target-http/1",
-            "max_input_bytes": min(4096, settings.max_input_bytes),
-            "max_output_bytes": min(8192, settings.max_output_bytes),
-            "max_request_bytes": min(32768, settings.max_request_bytes),
-            "max_steps": min(4, settings.max_steps),
-            "max_tools_per_step": 1,
-            "max_tool_calls": 1,
-            "run_timeout": min(10, settings.run_timeout),
-            "tool_timeout": min(2, settings.tool_timeout),
+            "max_request_bytes": settings.request_capacity(provider),
+            "max_tools_per_step": min(
+                settings.max_tools_per_step,
+                provider.config.max_tool_calls or settings.max_tools_per_step,
+            ),
         }
     )
     loop = AgentLoop(

@@ -1,4 +1,4 @@
-"""A3有界文本补丁与显式rename的请求与计划模型；复用StrictModel与既有错误码。"""
+"""A3精确文本补丁与显式rename的请求与计划模型；复用StrictModel与既有错误码。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from krim_agent.sandbox.filesystem import _parts
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 PlanId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
-MAX_PATCH_FILE_BYTES = 4 * 1024**2
-MAX_REPLACEMENT_BYTES = 16 * 1024
 
 
 def validate_edit_path(path: str) -> str:
@@ -22,13 +20,18 @@ def validate_edit_path(path: str) -> str:
 
 
 class PatchRequest(StrictModel):
-    """单段精确补丁；offset/delete_length为UTF-8字节偏移，必须落在码点边界上。"""
+    """单段精确补丁；offset/delete_length为UTF-8字节偏移，必须落在码点边界上。
+
+    不设应用内容大小上限：offset/delete_length只要求非负整数，replacement只要求
+    有效UTF-8文本；实际可行性（范围是否越界、码点边界、源hash一致）由计划期
+    对真实文件内容校验。
+    """
 
     path: str = Field(min_length=1, max_length=512)
     expected_sha256: Digest
     expected_generation: int = Field(ge=0)
-    offset: int = Field(ge=0, le=MAX_PATCH_FILE_BYTES)
-    delete_length: int = Field(ge=0, le=MAX_PATCH_FILE_BYTES)
+    offset: int = Field(ge=0)
+    delete_length: int = Field(ge=0)
     replacement: str = ""
 
     @field_validator("path")
@@ -37,13 +40,11 @@ class PatchRequest(StrictModel):
         return validate_edit_path(value)
 
     @model_validator(mode="after")
-    def bounded_replacement(self) -> Self:
+    def valid_replacement(self) -> Self:
         try:
-            encoded = self.replacement.encode("utf-8")
+            self.replacement.encode("utf-8")
         except UnicodeEncodeError:
             raise ValueError("replacement必须为有效UTF-8文本") from None
-        if len(encoded) > MAX_REPLACEMENT_BYTES:
-            raise ValueError("replacement超过16KiB限制")
         return self
 
 
@@ -91,8 +92,6 @@ class PatchPlan(_EditPlan):
             self.replacement_bytes.decode("utf-8")
         except UnicodeDecodeError:
             raise ValueError("replacement_bytes必须为有效UTF-8") from None
-        if len(self.replacement_bytes) > MAX_REPLACEMENT_BYTES:
-            raise ValueError("replacement超过16KiB限制")
         return self
 
 

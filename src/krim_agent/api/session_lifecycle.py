@@ -36,7 +36,7 @@ def mount_session_lifecycle(app: FastAPI) -> None:
     async def archived(
         workspace_id: str,
         request: Request,
-        offset: int = Query(default=0, ge=0, le=100000),
+        offset: int = Query(default=0, ge=0),
         limit: int = Query(default=20, ge=1, le=50),
     ) -> list[SessionView]:
         actor = _principal(request)
@@ -48,7 +48,7 @@ def mount_session_lifecycle(app: FastAPI) -> None:
     async def trash(
         workspace_id: str,
         request: Request,
-        offset: int = Query(default=0, ge=0, le=100000),
+        offset: int = Query(default=0, ge=0),
         limit: int = Query(default=20, ge=1, le=50),
     ) -> list[SessionView]:
         return await _service(request).list(

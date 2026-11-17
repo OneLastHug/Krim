@@ -585,7 +585,9 @@ async def log(
 async def wait(
     service: SandboxService, scope: SessionCommandScope, values: TaskWait, invocation: Invocation
 ) -> dict[str, JsonValue]:
-    deadline = min(scope.deadline, time.monotonic() + values.seconds)
+    deadline = time.monotonic() + values.seconds
+    if scope.deadline is not None:
+        deadline = min(scope.deadline, deadline)
     operation = await _operation(service, scope.actor, values.operation_id, scope.session_id)
     if operation["project_id"] != values.project_id:
         raise ServiceError("permission_denied")
@@ -696,12 +698,14 @@ async def verify_completion(
     session_id: str,
     contract: SandboxCompletion,
     *,
-    deadline: float,
+    deadline: float | None,
     check: Callable[[], None],
 ) -> dict[str, JsonValue]:
     """Evaluate receipts and bounded file checks; polling never renews job permits."""
     rows = await _run_operations(service, run_id)
-    deadline_mono = min(deadline, time.monotonic() + 150)
+    deadline_mono = time.monotonic() + 150
+    if deadline is not None:
+        deadline_mono = min(deadline, deadline_mono)
     while rows:
         check()
         pending = False

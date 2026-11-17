@@ -40,18 +40,22 @@ type ModelEvent = ModelText | ModelToolCall | ModelUsage
 class ModelRequestBudget:
     """单次请求的剩余执行预算；不进入持久会话历史。"""
 
-    remaining_steps: int
-    remaining_tool_calls: int
+    remaining_steps: int | None
+    remaining_tool_calls: int | None
     max_tool_calls_this_step: int
 
     def __post_init__(self) -> None:
-        values = (self.remaining_steps, self.remaining_tool_calls, self.max_tool_calls_this_step)
-        if any(type(value) is not int for value in values):
-            raise TypeError("model request budgets must be integers")
+        if any(value is not None and type(value) is not int
+               for value in (self.remaining_steps, self.remaining_tool_calls)):
+            raise TypeError("model run budgets must be integers or None")
+        if type(self.max_tool_calls_this_step) is not int:
+            raise TypeError("per-request tool budget must be an integer")
         if (
-            self.remaining_steps < 1
-            or self.remaining_tool_calls < 0
-            or not 0 <= self.max_tool_calls_this_step <= self.remaining_tool_calls
+            self.remaining_steps is not None and self.remaining_steps < 1
+            or self.remaining_tool_calls is not None and self.remaining_tool_calls < 0
+            or self.max_tool_calls_this_step < 0
+            or self.remaining_tool_calls is not None
+            and self.max_tool_calls_this_step > self.remaining_tool_calls
         ):
             raise ValueError("model request budget is out of range")
 

@@ -24,7 +24,7 @@ def mount_sandbox_maintenance(app: FastAPI) -> None:
     async def checkpoints(
         project_id: str,
         request: Request,
-        offset: int = Query(default=0, ge=0, le=1000),
+        offset: int = Query(default=0, ge=0),
         limit: int = Query(default=20, ge=1, le=100),
     ) -> Any:
         return await project_action(

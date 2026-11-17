@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { KNOWN_TOOL_NAMES, canonicalToolName, displayToolName } from "../src/lib/tool-names";
+import { NEW_TOOL_NAMES, KNOWN_TOOL_NAMES, canonicalToolName, displayToolName } from "../src/lib/tool-names";
 import { registeredPreviews } from "../src/lib/development-previews";
 import type { SessionState } from "../src/hooks/use-session";
 
@@ -14,6 +14,14 @@ test("已知旧名显示为迁移后的新名，新名原样显示", () => {
   expect(displayToolName("dev_output")).toBe("read_output");
   expect(displayToolName("shell")).toBe("shell");
   expect(displayToolName("process_status")).toBe("process_status");
+});
+
+test("公共会话工具按原名显示，不套用旧开发工具映射", () => {
+  for (const name of ["plan_read", "plan_update", "ask_user", "enter_plan_mode", "exit_plan_mode", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "view_image", "memory_search", "memory_read", "memory_write", "memory_delete", "goal_update", "goal_status", "compact_context"]) {
+    expect(NEW_TOOL_NAMES).toContain(name);
+    expect(displayToolName(name)).toBe(name);
+    expect(canonicalToolName(name)).toBe(name);
+  }
 });
 
 test("表外名称与未知 dev_* 原样显示，不粗暴剥前缀", () => {

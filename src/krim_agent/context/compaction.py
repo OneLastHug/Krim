@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from krim_agent.context import builder, compaction_source
 from krim_agent.context.compaction_source import CompactionSource, WorkspaceCompactionSource
 from krim_agent.context.manifest import Category, ItemMetadata
+from krim_agent.context.serialization import encoded, fingerprint
 from krim_agent.context.types import CompactionPolicy, ContextPolicy, HistorySource, PreparedContext
-from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
+from krim_agent.contracts import Message, ServiceError
 from krim_agent.extensions import _extension_snapshot, extension_messages
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.model_step import ModelStep
@@ -52,8 +53,13 @@ class Compactor:
 
     @classmethod
     def from_source(
-        cls, store: SQLiteStore, source: CompactionSource, step: ModelStep,
-        check: Callable[[], None], system: str, request_limit: int,
+        cls,
+        store: SQLiteStore,
+        source: CompactionSource,
+        step: ModelStep,
+        check: Callable[[], None],
+        system: str,
+        request_limit: int,
         provider_identity: dict[str, JsonValue],
     ) -> Compactor:
         instance = cls.__new__(cls)
@@ -61,23 +67,34 @@ class Compactor:
         return instance
 
     def _initialize(
-        self, store: SQLiteStore, source: CompactionSource, step: ModelStep,
-        check: Callable[[], None], system: str, request_limit: int,
+        self,
+        store: SQLiteStore,
+        source: CompactionSource,
+        step: ModelStep,
+        check: Callable[[], None],
+        system: str,
+        request_limit: int,
         provider_identity: dict[str, JsonValue],
     ) -> None:
         self.store, self.source, self.step, self.check = store, source, step, check
         self.session_id = source.session_id
         self.anchor_refs = tuple(json.loads(encoded(list(source.source_refs))))
         self.source_anchor = source.source_fingerprint
-        if (not source.domain or not self.session_id
-                or not isinstance(self.source_anchor, str) or not self.source_anchor):
+        if (
+            not source.domain
+            or not self.session_id
+            or not isinstance(self.source_anchor, str)
+            or not self.source_anchor
+        ):
             raise ServiceError("facts_corrupt")
         self.system, self.request_limit = system, request_limit
         self.policy = ContextPolicy.model_validate_json(source.context_policy.model_dump_json())
         self.compaction = CompactionPolicy.model_validate_json(
-            source.compaction_policy.model_dump_json())
+            source.compaction_policy.model_dump_json()
+        )
         self.provider_identity = cast(dict[str, JsonValue], json.loads(encoded(provider_identity)))
         self.history: list[dict[str, Any]] | None = None
+        self.live_memory = False
         self.covered, self.passes, self.summary = 0, 0, ""
         self.compaction_changes: list[dict[str, JsonValue]] = []
         self.producer = asyncio.current_task()
@@ -94,7 +111,8 @@ class Compactor:
             ),
             "counter_version": "approx-utf8/1",
             "source": {
-                "domain": source.domain, "binding": json.loads(encoded(source.policy_binding)),
+                "domain": source.domain,
+                "binding": json.loads(encoded(source.policy_binding)),
                 "implementation": source_digest(Path(__file__).with_name("compaction_source.py")),
             },
         }
@@ -104,8 +122,10 @@ class Compactor:
     def _source_descriptor(self) -> dict[str, Any]:
         source = self.source
         return {
-            "domain": source.domain, "session_id": source.session_id,
-            "refs": list(source.source_refs), "anchor": source.source_fingerprint,
+            "domain": source.domain,
+            "session_id": source.session_id,
+            "refs": list(source.source_refs),
+            "anchor": source.source_fingerprint,
             "binding": source.policy_binding,
             "policy": source.context_policy.model_dump(mode="json"),
             "compaction": source.compaction_policy.model_dump(mode="json"),
@@ -120,6 +140,36 @@ class Compactor:
         self.check()
         if self.producer is not None and self.producer.cancelling():
             raise asyncio.CancelledError
+
+    def input_capacity(self) -> int:
+        """Capacity supplied by the host's actual model/transport configuration."""
+        return max(
+            0,
+            min(
+                self.request_limit - 1024,
+                self.policy.max_bytes - 1024 - self.policy.reserved_output_tokens * 4,
+            ),
+        )
+
+    def summary_capacity(self) -> int:
+        # A summary must fit when projected into the next request. The policy's
+        # output reservation is input-budget accounting, not a UTF-8 output cap;
+        # the provider enforces its actual completion-token limit. An explicit
+        # legacy summary_bytes value remains binding.
+        limits = [self.input_capacity()]
+        if self.compaction.summary_bytes is not None:
+            limits.append(self.compaction.summary_bytes)
+        return max(1, min(limits))
+
+    def valid_summary(self, value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value.strip())
+            and (
+                self.compaction.summary_bytes is None
+                or len(value.encode()) <= self.compaction.summary_bytes
+            )
+        )
 
     def measure(
         self,
@@ -148,7 +198,8 @@ class Compactor:
             self.policy.max_bytes - 1024 - self.policy.reserved_output_tokens * 4,
         )
         return size, (
-            size >= cap * self.compaction.trigger_ratio or len(messages) > self.policy.max_messages
+            size >= cap * self.compaction.trigger_ratio
+            or (self.policy.max_messages is not None and len(messages) > self.policy.max_messages)
         )
 
     async def verify(self, conn: AsyncConnection) -> None:
@@ -163,7 +214,7 @@ class Compactor:
             raise ServiceError("facts_corrupt")
         await self.verify(conn)
         rows = await self.source.page(conn, self.run_id, offset, limit)
-        expected = self.anchor_refs[offset:offset + limit]
+        expected = self.anchor_refs[offset : offset + limit]
         if len(rows) != len(expected):
             raise ServiceError("facts_corrupt")
         for row, ref in zip(rows, expected, strict=True):
@@ -222,13 +273,24 @@ class Compactor:
 
         return await self.store.work_read(read)
 
+    def projected_extensions(self) -> dict[str, JsonValue]:
+        """Keep the frozen audit anchor; live recall replaces memory at request time."""
+        if not getattr(self, "live_memory", False):
+            return self.extension_snapshot
+        items = cast(list[dict[str, JsonValue]], self.extension_snapshot["items"])
+        return {
+            **self.extension_snapshot,
+            "items": [item for item in items if item.get("kind") != "memory"],
+        }
+
     def snapshot(self, summary: str, covered: int) -> PreparedContext:
         assert self.history is not None
         messages = [
             Message(role="system", content=self.system),
             *([Message(role="user", content="[不可信历史摘要] " + summary)] if summary else []),
             *[m for turn in self.history[covered:] for m in turn["messages"]],
-            *extension_messages(self.extension_snapshot),
+            *extension_messages(self.projected_extensions()),
+            *self.projections,
             *self.conversation,
         ]
         size, _ = self.measure(messages, self.tools, self.max_group, self.remaining_tools)
@@ -236,7 +298,9 @@ class Compactor:
             self.request_limit - 1024,
             self.policy.max_bytes - 1024 - self.policy.reserved_output_tokens * 4,
         )
-        if size > cap or len(messages) > self.policy.max_messages:
+        if size > cap or (
+            self.policy.max_messages is not None and len(messages) > self.policy.max_messages
+        ):
             raise ServiceError("context_budget", 422)
         return PreparedContext(
             messages=tuple(messages),
@@ -258,7 +322,7 @@ class Compactor:
 
     async def complete(self, index: int, output: str) -> dict[str, Any]:
         """同pass同内容幂等，冲突不覆盖；丢回程只核实已提交行。"""
-        if not output.strip() or len(output.encode()) > self.compaction.summary_bytes:
+        if not self.valid_summary(output):
             raise ServiceError("summary_failed")
         digest = hashlib.sha256(output.encode()).hexdigest()
 
@@ -329,7 +393,7 @@ class Compactor:
         if not refs or refs != list(self.anchor_refs[: len(refs)]):
             raise ServiceError("facts_corrupt")
         index = self.passes
-        if index >= self.compaction.max_passes:
+        if self.compaction.max_passes is not None and index >= self.compaction.max_passes:
             raise ServiceError("compaction_budget")
         args = {
             "run_id": self.run_id,
@@ -394,7 +458,7 @@ class Compactor:
                 messages,
                 [],
                 purpose="summary",
-                summary_bytes=self.compaction.summary_bytes,
+                summary_bytes=self.summary_capacity(),
                 request_budget=self.step.request_budget(
                     self.max_group, self.remaining_tools, purpose="summary"
                 ),
@@ -448,8 +512,22 @@ class Compactor:
         tools: list[dict[str, JsonValue]],
         *,
         max_group: int,
-        remaining_tools: int,
+        remaining_tools: int | None,
+        force: bool = False,
+        projections: list[Message] | None = None,
+        projection_metadata: list[ItemMetadata | None] | None = None,
+        live_memory: bool = False,
     ) -> list[Message]:
+        # Never summarize or persist a projection across an unresolved tool group.
+        builder.validate_groups(conversation)
+        self.live_memory = live_memory
+        self.projections = [
+            Message.model_validate_json(m.model_dump_json()) for m in (projections or [])
+        ]
+        builder.validate_groups(self.projections)
+        self.projection_metadata = list(projection_metadata or [None] * len(self.projections))
+        if len(self.projection_metadata) != len(self.projections):
+            raise ServiceError("facts_corrupt")
         self.run_id = run_id
         self.compaction_changes = []
         self.conversation = [Message.model_validate_json(m.model_dump_json()) for m in conversation]
@@ -470,33 +548,64 @@ class Compactor:
 
             async def reusable(conn: AsyncConnection) -> list[dict[str, Any]]:
                 await self.verify(conn)
-                rows = (
-                    (
-                        await conn.execute(
-                            select(compactions)
-                            .join(runs, compactions.c.run_id == runs.c.id)
-                            .where(
-                                compactions.c.session_id == self.session_id,
-                                compactions.c.status == "complete",
-                                compactions.c.run_id != run_id,
-                                (runs.c.status == "completed")
-                                | (
-                                    (runs.c.status == "failed")
-                                    & (runs.c.code == "completion_unverified")
-                                ),
-                            )
-                            .order_by(compactions.c.created_at.desc())
-                            .limit(32)
+                candidates: list[dict[str, Any]] = []
+                after: tuple[float, str, int] | None = None
+                while True:
+                    query = (
+                        select(compactions)
+                        .join(runs, compactions.c.run_id == runs.c.id)
+                        .where(
+                            compactions.c.session_id == self.session_id,
+                            compactions.c.status == "complete",
+                            compactions.c.run_id != run_id,
+                            (runs.c.status == "completed")
+                            | (
+                                (runs.c.status == "failed")
+                                & (runs.c.code == "completion_unverified")
+                            ),
                         )
                     )
-                    .mappings()
-                    .all()
-                )
+                    if after is not None:
+                        stamp, prior_run, prior_pass = after
+                        query = query.where(
+                            (compactions.c.created_at < stamp)
+                            | (
+                                (compactions.c.created_at == stamp)
+                                & (compactions.c.run_id > prior_run)
+                            )
+                            | (
+                                (compactions.c.created_at == stamp)
+                                & (compactions.c.run_id == prior_run)
+                                & (compactions.c.pass_index > prior_pass)
+                            )
+                        )
+                    rows = (
+                        (
+                            await conn.execute(
+                                query.order_by(
+                                    compactions.c.created_at.desc(),
+                                    compactions.c.run_id,
+                                    compactions.c.pass_index,
+                                ).limit(32)
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                    if not rows:
+                        break
+                    candidates.extend(dict(row) for row in rows)
+                    last = rows[-1]
+                    cursor = (last["created_at"], last["run_id"], last["pass_index"])
+                    if cursor == after:
+                        raise ServiceError("facts_corrupt")
+                    after = cursor
+                    self.guard()
                 await self.verify(conn)
-                return [dict(row) for row in rows]
+                return candidates
 
             candidates = await self.store.work_read(reusable)
-            await self.store.work_read(self.verify)
+            # reusable already verifies both ends of this same transaction.
             self.guard()
             for row in sorted(candidates, key=lambda row: len(row["source_refs"]), reverse=True):
                 count = len(row["source_refs"])
@@ -507,8 +616,7 @@ class Compactor:
                     and row["policy"] == self.record_policy
                     and row["provider_identity"] == self.provider_identity
                     and row["prompt_hash"] == fingerprint(PROMPT)
-                    and row["output"]
-                    and len(row["output"].encode()) <= self.compaction.summary_bytes
+                    and self.valid_summary(row["output"])
                     and hashlib.sha256(row["output"].encode()).hexdigest() == row["output_hash"]
                 ):
                     self.summary, self.covered = row["output"], count
@@ -559,7 +667,8 @@ class Compactor:
                     else []
                 ),
                 *[m for turn in history[self.covered :] for m in turn["messages"]],
-                *extension_messages(self.extension_snapshot),
+                *extension_messages(self.projected_extensions()),
+                *self.projections,
                 *conversation,
             ]
 
@@ -567,7 +676,7 @@ class Compactor:
             messages = compose()
             size, trigger = self.measure(messages, tools, self.max_group, self.remaining_tools)
             remaining = len(history) - self.compaction.keep_turns
-            if not trigger or self.covered >= remaining:
+            if not (trigger or force) or self.covered >= remaining:
                 break
             end = self.covered
             selected: list[Message] = []
@@ -583,7 +692,7 @@ class Compactor:
                 end += 1
             if end == self.covered:
                 raise ServiceError("compaction_budget")
-            # 原始连续Turn前缀，不用摘要ID代替来源；最多2次仍由summarize拒绝。
+            # A contiguous prefix of complete turns; no synthetic source IDs.
             refs = [dict(ref) for ref in self.anchor_refs[:end]]
             self.candidate_end = end
             pass_index, summary_step = self.passes, self.step.index
@@ -591,6 +700,11 @@ class Compactor:
             self.guard()
             self.summary, self.covered = output, end
             after_size, _ = self.measure(compose(), tools, self.max_group, self.remaining_tools)
+            if after_size >= size:
+                # More provider calls cannot justify a projection which is not
+                # getting smaller. The complete ledger remains available.
+                raise ServiceError("compaction_budget", 422)
+            force = False
             self.compaction_changes.append(
                 {
                     "pass_index": pass_index,
@@ -602,7 +716,9 @@ class Compactor:
                     "output_hash": hashlib.sha256(output.encode()).hexdigest(),
                 }
             )
-        if size > cap or len(messages) > self.policy.max_messages:
+        if size > cap or (
+            self.policy.max_messages is not None and len(messages) > self.policy.max_messages
+        ):
             raise ServiceError("context_budget", 422)
         try:
             budget = self.step.request_budget(self.max_group, self.remaining_tools)
@@ -615,16 +731,13 @@ class Compactor:
 
         async def save(conn: AsyncConnection) -> bool:
             self.guard()
-            await self.verify(conn)
+            # save_prepared owns the before/after authorization and source checks.
             await self.save_prepared(conn, prepared)
-            await self.verify(conn)
             return True
 
         async def known() -> bool | None:
             async def read(conn: AsyncConnection) -> bool | None:
-                await self.verify(conn)
                 row = await self.read_prepared(conn)
-                await self.verify(conn)
                 return True if row == prepared else None
 
             return await self.store.work_read(read)
@@ -659,11 +772,12 @@ class Compactor:
                         source_refs=refs,
                     )
                     cursor += 1
-        raw_items = self.extension_snapshot.get("items", [])
+        raw_items = self.projected_extensions().get("items", [])
         extension_items = (
             cast(list[dict[str, JsonValue]], raw_items) if isinstance(raw_items, list) else []
         )
-        extension_cursor = len(messages) - len(self.conversation) - len(extension_items)
+        projection_cursor = len(messages) - len(self.conversation) - len(self.projections)
+        extension_cursor = projection_cursor - len(extension_items)
         for offset, item in enumerate(extension_items):
             index = extension_cursor + offset
             if index >= len(messages) - len(self.conversation):
@@ -677,6 +791,10 @@ class Compactor:
                 label=label,
                 source_refs=({"fingerprint": fingerprint(item)},),
             )
+        for offset, metadata in enumerate(self.projection_metadata):
+            index = projection_cursor + offset
+            if 0 <= index < len(messages) - len(self.conversation):
+                result[index] = metadata
         return result
 
 
@@ -694,7 +812,8 @@ def binding_token() -> tuple[object, ...]:
         id(Compactor.snapshot),
         id(Compactor.manifest_metadata),
         id(Compactor.__dict__["from_source"].__func__),
-        id(Compactor._initialize), id(Compactor._assert_source),
+        id(Compactor._initialize),
+        id(Compactor._assert_source),
         id(Compactor._source_descriptor),
         id(Compactor.page),
         id(Compactor.save_prepared),

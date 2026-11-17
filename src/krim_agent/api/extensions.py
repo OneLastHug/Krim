@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Query, Request
 
 from krim_agent.contracts import ServiceError
 from krim_agent.extensions import (
@@ -54,6 +54,21 @@ def mount_extensions(app: FastAPI) -> None:
     async def memories(request: Request) -> Any:
         return await _extensions(request).list_memories(principal(request))
 
+    @router.get("/v2/me/memories/page")
+    async def memory_page(
+        request: Request,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=200),
+        query: str = "",
+    ) -> Any:
+        return await _extensions(request).memory_page(
+            principal(request), offset=offset, limit=limit, query=query
+        )
+
+    @router.get("/v2/me/memories/{memory_id}")
+    async def read_memory(memory_id: str, request: Request) -> Any:
+        return await _extensions(request).read_memory(principal(request), memory_id)
+
     @router.post("/v2/me/memories", status_code=201)
     async def create_memory(body: MemoryCreate, request: Request) -> Any:
         return await _extensions(request).memory(principal(request), body)
@@ -65,6 +80,58 @@ def mount_extensions(app: FastAPI) -> None:
     @router.delete("/v2/me/memories/{memory_id}")
     async def delete_memory(memory_id: str, body: MemoryDelete, request: Request) -> Any:
         return await _extensions(request).memory(principal(request), body, memory_id)
+
+    project_base = "/v2/workspaces/{workspace_id}/projects/{project_id}/memories"
+
+    @router.get(project_base)
+    async def project_memories(
+        workspace_id: str,
+        project_id: str,
+        request: Request,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=200),
+        query: str = "",
+    ) -> Any:
+        return await _extensions(request).memory_page(
+            principal(request),
+            workspace_id=workspace_id,
+            project_id=project_id,
+            offset=offset,
+            limit=limit,
+            query=query,
+        )
+
+    @router.get(project_base + "/{memory_id}")
+    async def project_memory(
+        workspace_id: str, project_id: str, memory_id: str, request: Request
+    ) -> Any:
+        return await _extensions(request).read_memory(
+            principal(request), memory_id, workspace_id=workspace_id, project_id=project_id
+        )
+
+    @router.post(project_base, status_code=201)
+    async def create_project_memory(
+        workspace_id: str, project_id: str, body: MemoryCreate, request: Request
+    ) -> Any:
+        return await _extensions(request).memory(
+            principal(request), body, workspace_id=workspace_id, project_id=project_id
+        )
+
+    @router.put(project_base + "/{memory_id}")
+    async def update_project_memory(
+        workspace_id: str, project_id: str, memory_id: str, body: MemoryUpdate, request: Request
+    ) -> Any:
+        return await _extensions(request).memory(
+            principal(request), body, memory_id, workspace_id=workspace_id, project_id=project_id
+        )
+
+    @router.delete(project_base + "/{memory_id}")
+    async def delete_project_memory(
+        workspace_id: str, project_id: str, memory_id: str, body: MemoryDelete, request: Request
+    ) -> Any:
+        return await _extensions(request).memory(
+            principal(request), body, memory_id, workspace_id=workspace_id, project_id=project_id
+        )
 
     @router.get("/v2/me/memory-preference")
     async def read_preference(request: Request) -> Any:

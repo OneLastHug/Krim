@@ -147,7 +147,7 @@ class LegacyRepository:
                 execution["effective_timeouts"] = {
                     "schema_version": 1,
                     "source": "trusted-http-host/1",
-                    "item_timeout_seconds": binding.settings.run_timeout + 30,
+                    "item_timeout_seconds": (binding.settings.run_timeout or 570) + 30,
                     "batch_timeout_seconds": 600,
                 }
             return await self.store.begin_eval(request, target, execution)
@@ -175,7 +175,7 @@ class LegacyRepository:
                 or type(timeouts.get("item_timeout_seconds")) not in {int, float}
                 # 只要求与冻结目标的运行时限及固定余量完全一致；合法短时配置不套绝对区间。
                 or timeouts["item_timeout_seconds"]
-                != snapshot["target"]["limits"]["run_timeout"] + 30
+                != (snapshot["target"]["limits"]["run_timeout"] or 570) + 30
             ):
                 raise ServiceError("facts_corrupt")
             item_timeout = float(timeouts["item_timeout_seconds"])

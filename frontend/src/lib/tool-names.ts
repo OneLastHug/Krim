@@ -9,6 +9,10 @@ export const NEW_TOOL_NAMES = [
   "preview_register", "preview_status", "preview_stop",
   "browser_open", "browser_action", "browser_upload", "browser_screenshot", "browser_close",
   "git_clone", "git_diff", "git_tree", "git_commit", "git_push",
+  "plan_read", "plan_update", "ask_user", "enter_plan_mode", "exit_plan_mode",
+  "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "view_image", "memory_search", "memory_read", "memory_write", "memory_delete",
+  "goal_update", "goal_status", "compact_context",
 ] as const;
 
 /** 旧名 → 新名的固定映射。只收录确知条目；表外名称（含外部 dev_* 工具）不剥前缀。 */

@@ -11,7 +11,7 @@
 - request_key同输入幂等：同键同参数回放当前状态；同键不同参数拒绝。
 - finish只表示受管暂存对象完整且与expected_sha256一致，不写入任何项目
   目录；后续写入由授权与租约门内的其他模块完成。
-- 每账号按声明total_size预留字节，并受对象数量与TTL约束；元数据为定长
+- 应用层不设字节或对象数配额；暂存对象仅受TTL清理约束。元数据为定长
   JSON，不保留逐chunk日志，任意chunk次数不会撑大状态。
 
 并发：POSIX上每账号flock串行化（跨线程与跨进程）；其他平台按单调用方
@@ -42,8 +42,8 @@ except ImportError:  # pragma: no cover — Windows开发环境仅静态加载
     _fcntl = None  # type: ignore[assignment]
     _HAS_FLOCK = False
 
-DEFAULT_MAX_BYTES = 64 * 1024 * 1024
-DEFAULT_MAX_FILES = 128
+DEFAULT_MAX_BYTES = 64 * 1024 * 1024  # compatibility default; no longer enforced
+DEFAULT_MAX_FILES = 128  # compatibility default; no longer enforced
 DEFAULT_TTL_SECONDS = 3600
 DEFAULT_CHUNK_SIZE = 65536
 
@@ -66,10 +66,6 @@ class InvalidRequest(TransferError):
 
 class HashMismatch(TransferError):
     """块或整体摘要与声明不符。"""
-
-
-class QuotaExceeded(TransferError):
-    """超出每账号字节预算或对象数量上限。"""
 
 
 class NotFound(TransferError):
@@ -132,11 +128,10 @@ def _validate_id(value: object, field: str) -> str:
     return value
 
 
-def _validate_size(total_size: object, max_bytes: int) -> int:
+def _validate_size(total_size: object) -> int:
+    """声明总量只做类型与非负校验；应用层不设上传总量配额。"""
     if isinstance(total_size, bool) or not isinstance(total_size, int) or total_size < 0:
         raise InvalidRequest("total_size must be a non-negative integer")
-    if total_size > max_bytes:
-        raise QuotaExceeded("total_size exceeds the per-account staging budget")
     return total_size
 
 
@@ -205,11 +200,10 @@ class TransferStore:
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        if max_bytes <= 0 or max_files <= 0 or ttl_seconds <= 0:
-            raise ValueError("max_bytes, max_files and ttl_seconds must be positive")
+        # max_bytes/max_files remain accepted for old callers but are not stored or enforced.
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
         self._root = Path(root)
-        self._max_bytes = max_bytes
-        self._max_files = max_files
         self._ttl_seconds = ttl_seconds
         self._clock: Callable[[], float] = clock if clock is not None else time.time
         self._ensure_dir(self._root)
@@ -223,7 +217,7 @@ class TransferStore:
         """声明一次分块上传；同principal同request_key同参数幂等回放。"""
         _validate_principal(principal_id)
         _validate_request_key(request_key)
-        declared = _validate_size(total_size, self._max_bytes)
+        declared = _validate_size(total_size)
         digest = _validate_digest(expected_sha256, "expected_sha256")
         base = self._ensure_principal(principal_id)
         key_hash = self._request_key_hash(request_key)
@@ -233,11 +227,6 @@ class TransferStore:
             replay = self._replay_request(base, key_path, fingerprint, principal_id)
             if replay is not None:
                 return replay
-            reserved, count = self._staged_usage(base)
-            if count + 1 > self._max_files:
-                raise QuotaExceeded("per-account staged object limit reached")
-            if reserved + declared > self._max_bytes:
-                raise QuotaExceeded("per-account staging byte budget exhausted")
             now = self._clock()
             transfer_id = uuid.uuid4().hex
             transfer_dir = self._transfer_dir(base, transfer_id)
@@ -390,7 +379,7 @@ class TransferStore:
         return self._transfer_state(principal_id, meta)
 
     def cancel(self, principal_id: str, transfer_id: str) -> dict[str, object]:
-        """放弃一次未完成上传并释放其预留额度。"""
+        """放弃一次未完成上传并删除其暂存数据。"""
         _validate_principal(principal_id)
         _validate_id(transfer_id, "transfer_id")
         base = self._require_principal_dir(principal_id)
@@ -753,28 +742,6 @@ class TransferStore:
         key_hash = meta.get("request_key_hash")
         if isinstance(key_hash, str) and key_hash:
             self._unlink(self._keys_dir(base) / f"{key_hash}.json")
-
-    def _staged_usage(self, base: Path) -> tuple[int, int]:
-        """返回（已按声明预留的字节, 元数据完好的暂存对象数）。"""
-        reserved = 0
-        count = 0
-        for candidate in self._list_children(base / "transfers"):
-            meta = self._read_json(candidate / "meta.json")
-            if meta is None or meta.get("kind") != "transfer":
-                continue
-            size = _meta_number(meta, "total_size")
-            if size is not None:
-                reserved += int(size)
-            count += 1
-        for candidate in self._list_children(base / "contents"):
-            meta = self._read_json(candidate / "meta.json")
-            if meta is None or meta.get("kind") != "content":
-                continue
-            size = _meta_number(meta, "size")
-            if size is not None:
-                reserved += int(size)
-            count += 1
-        return reserved, count
 
     def _transfer_state(self, principal_id: str, meta: dict[str, object]) -> dict[str, object]:
         received = _require_int(meta, "received_bytes")

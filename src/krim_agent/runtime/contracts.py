@@ -1,7 +1,7 @@
 """运行事实写口；不依赖 SDK、ORM 或具体工具后端。"""
 
 import asyncio
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -11,6 +11,7 @@ from pydantic import JsonValue
 from krim_agent.config import Settings
 from krim_agent.context.types import (
     DevelopmentSessionContext,
+    OrdinarySessionContext,
     SessionContext,
     WorkspaceSessionContext,
 )
@@ -24,7 +25,10 @@ class RunSnapshot:
     request: RunRequest
     target: dict[str, JsonValue]
     events: tuple[RunEvent, ...]
-    session_context: SessionContext | DevelopmentSessionContext | WorkspaceSessionContext | None = None
+    session_context: (
+        SessionContext | DevelopmentSessionContext | OrdinarySessionContext
+        | WorkspaceSessionContext | None
+    ) = None
     work: WorkFrame | None = None
 
 
@@ -66,12 +70,13 @@ class RunStore(Protocol):
     async def child_request(
         self, eval_id: str, case_id: str, repetition: int
     ) -> tuple[RunRequest, str]: ...
+    async def work_read(self, operation: Callable[[Any], Awaitable[Any]]) -> Any: ...
 
 
 class ExecutionBudget:
     """当前run或工具的可暂停执行时间；仅持有单轮运行期状态。"""
 
-    def __init__(self, deadline: float) -> None:
+    def __init__(self, deadline: float | None) -> None:
         self._loop = asyncio.get_running_loop()
         self._deadline = deadline
         self._timeout: asyncio.Timeout | None = None
@@ -80,15 +85,17 @@ class ExecutionBudget:
         self._finished = False
 
     @property
-    def deadline(self) -> float:
+    def deadline(self) -> float | None:
         if self._pause_count and self._remaining is not None:
             return self._loop.time() + self._remaining
         return self._deadline
 
     @property
-    def remaining(self) -> float:
+    def remaining(self) -> float | None:
         if self._pause_count and self._remaining is not None:
             return self._remaining
+        if self._deadline is None:
+            return None
         return max(0.0, self._deadline - self._loop.time())
 
     @property
@@ -109,7 +116,7 @@ class ExecutionBudget:
     def pause(self) -> Iterator[None]:
         timeout = self._timeout
         counted = False
-        if not self._finished and timeout is not None:
+        if not self._finished and timeout is not None and self._deadline is not None:
             if self._pause_count:
                 self._pause_count += 1
                 counted = True
@@ -126,11 +133,11 @@ class ExecutionBudget:
             if counted:
                 self._pause_count -= 1
                 if self._pause_count == 0:
-                    remaining = self._remaining
+                    remaining_on_resume = self._remaining
                     self._remaining = None
-                    if not self._finished and remaining is not None:
-                        self._deadline = self._loop.time() + remaining
-                        if not timeout.expired():
+                    if not self._finished and remaining_on_resume is not None:
+                        self._deadline = self._loop.time() + remaining_on_resume
+                        if timeout is not None and not timeout.expired():
                             timeout.reschedule(self._deadline)
 
     def finish(self) -> None:

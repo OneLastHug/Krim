@@ -72,7 +72,6 @@ class ContainerExecutions:
                 raise EnvironmentError("execution_already_prepared")
             rows = await self.processes.list_environment(handle)
             seen = set()
-            active = 0
             admitted = False
             for reserved in rows:
                 self._validate_row(reserved, reserved.request, reserved.handle.process_id)
@@ -80,13 +79,10 @@ class ContainerExecutions:
                         or reserved.handle.process_id in seen):
                     raise EnvironmentError("execution_binding_drift")
                 seen.add(reserved.handle.process_id)
-                active += reserved.handle.state in {"accepted", "running", "unknown"}
                 if reserved.handle.process_id == process_id:
                     admitted = reserved == row
             if not admitted:
                 raise EnvironmentError("execution_reservation_missing")
-            if active > env.record.max_processes:
-                raise EnvironmentError("execution_capacity")
             state, cid = await self.environments._observation(env)
             if state != "ready" or cid is None:
                 raise EnvironmentError("environment_not_ready")

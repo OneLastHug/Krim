@@ -6,11 +6,13 @@ from sqlalchemy import (
     Column,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
     UniqueConstraint,
 )
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .models import metadata
 
@@ -44,6 +46,13 @@ memories = Table(
     Column("revision", Integer, nullable=False),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    # Append in the same order as ALTER TABLE for exact historical schema validation.
+    # NULL/NULL preserves the historical account-private scope.
+    Column("workspace_id", String(128)),
+    Column("project_id", String(36)),
+    Column("source_kind", String(16), nullable=False, server_default="user"),
+    Column("memory_kind", String(16), nullable=False, server_default="note"),
+    Column("authorization_turn_id", String(36)),
 )
 memory_preferences = Table(
     "memory_preferences",
@@ -86,3 +95,36 @@ EXTENSION_TABLES = (
     extension_requests,
 )
 EXTENSION_TABLE_NAMES = frozenset(table.name for table in EXTENSION_TABLES)
+
+memory_scope_index = Index(
+    "ix_memories_owner_scope_updated",
+    memories.c.principal_id,
+    memories.c.workspace_id,
+    memories.c.project_id,
+    memories.c.updated_at,
+    memories.c.id,
+)
+
+
+async def migrate_memory_scopes(conn: AsyncConnection) -> None:
+    """Called by the central migration transaction; does not change schema_version.
+
+    Existing records, receipts, preference switches and frozen snapshots are untouched.
+    Safe to call again after an interrupted migration or on a fresh database.
+    """
+    from sqlalchemy import inspect
+
+    columns = await conn.run_sync(
+        lambda sync: {column["name"] for column in inspect(sync).get_columns("memories")}
+    )
+    additions = {
+        "workspace_id": "VARCHAR(128)",
+        "project_id": "VARCHAR(36)",
+        "source_kind": "VARCHAR(16) NOT NULL DEFAULT 'user'",
+        "memory_kind": "VARCHAR(16) NOT NULL DEFAULT 'note'",
+        "authorization_turn_id": "VARCHAR(36)",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            await conn.exec_driver_sql(f"ALTER TABLE memories ADD COLUMN {name} {declaration}")
+    await conn.run_sync(lambda sync: memory_scope_index.create(sync, checkfirst=True))

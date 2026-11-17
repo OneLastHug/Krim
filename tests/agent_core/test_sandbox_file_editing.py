@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from krim_agent.contracts import ServiceError
-from krim_agent.sandbox.edit_models import MAX_PATCH_FILE_BYTES, MAX_REPLACEMENT_BYTES
 from krim_agent.sandbox.file_editing import OperationJournal, ProjectFileEditor
 from krim_agent.sandbox.ports import ProjectRef
 
@@ -245,22 +244,20 @@ def test_patch_range_overflow_and_missing_file_rejected() -> None:
     assert port.writes == []
 
 
-def test_patch_file_size_and_replacement_limits() -> None:
-    big = b"a" * (MAX_PATCH_FILE_BYTES + 1)
+def test_patch_beyond_old_content_limits_accepted() -> None:
+    """应用内容上限已移除：超过原4MiB的文件可补丁，delete_length越过4MiB、
+    replacement越过16KiB同样接受。"""
+    big = b"a" * (4 * 1024**2 + 1)
     service, port = editor({"notes.md": big})
-    with pytest.raises(ServiceError) as raised:
-        service.plan_patch(PROJECT, **patch_kwargs(big, 0, 0, "x"))
-    assert raised.value.code == "sandbox_limit"
-    full = b"a" * MAX_PATCH_FILE_BYTES
-    service, port = editor({"notes.md": full})
-    with pytest.raises(ServiceError) as raised:
-        service.plan_patch(PROJECT, **patch_kwargs(full, 0, 0, "x" * (MAX_REPLACEMENT_BYTES + 1)))
-    assert raised.value.code == "invalid_input"
+    plan = service.plan_patch(PROJECT, **patch_kwargs(big, 0, 0, "x"))
+    service.apply_patch(plan)
+    assert port.files["notes.md"] == b"x" + big  # delete_length=0为纯前插
+    service, port = editor({"notes.md": big})
     plan = service.plan_patch(
-        PROJECT, **patch_kwargs(full, 0, MAX_PATCH_FILE_BYTES, "x" * MAX_REPLACEMENT_BYTES)
+        PROJECT, **patch_kwargs(big, 0, len(big), "x" * (16 * 1024 + 1))
     )
     service.apply_patch(plan)
-    assert port.files["notes.md"] == b"x" * MAX_REPLACEMENT_BYTES  # 16KiB整字节替换成功
+    assert port.files["notes.md"] == b"x" * (16 * 1024 + 1)  # 整文件替换，delete>4MiB
 
 
 def test_patch_rejects_binary_and_surrogate_replacement() -> None:
@@ -606,15 +603,15 @@ def test_rename_destination_created_between_plan_and_apply_rejected() -> None:
     assert port.renames == []  # apply复核仍拒绝，不触端口
 
 
-def test_patch_plan_rejects_result_over_file_limit() -> None:
-    full = b"a" * MAX_PATCH_FILE_BYTES
+def test_patch_appends_at_end_beyond_old_result_limit() -> None:
+    """结果超过原4MiB不再拒绝：在4MiB文件末尾追加成功落地。"""
+    full = b"a" * (4 * 1024**2)
     service, port = editor({"notes.md": full})
-    with pytest.raises(ServiceError) as raised:  # 末尾追加16KiB，结果超过4MiB
-        service.plan_patch(
-            PROJECT, **patch_kwargs(full, MAX_PATCH_FILE_BYTES, 0, "x" * MAX_REPLACEMENT_BYTES)
-        )
-    assert raised.value.code == "sandbox_limit"
-    assert port.writes == []
+    plan = service.plan_patch(
+        PROJECT, **patch_kwargs(full, 4 * 1024**2, 0, "x" * (16 * 1024 + 1))
+    )
+    service.apply_patch(plan)
+    assert port.files["notes.md"] == full + b"x" * (16 * 1024 + 1)
 
 
 def test_resolve_rename_outcome_rewritten_destination_is_diverged() -> None:

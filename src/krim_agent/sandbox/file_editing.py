@@ -16,7 +16,6 @@ from pydantic import ValidationError
 
 from krim_agent.contracts import ServiceError
 from krim_agent.sandbox.edit_models import (
-    MAX_PATCH_FILE_BYTES,
     PatchPlan,
     PatchRequest,
     RenamePlan,
@@ -117,8 +116,7 @@ class ProjectFileEditor:
         old = self._mutation.read(project, request.path)
         if old is None:
             raise ServiceError("not_found", 404)
-        if len(old) > MAX_PATCH_FILE_BYTES:
-            raise ServiceError("sandbox_limit")
+        # 定位范围依据真实文件校验；不再按内容总量限制补丁。
         end = request.offset + request.delete_length
         if end > len(old):
             raise ServiceError("invalid_input", 422)
@@ -132,8 +130,6 @@ class ProjectFileEditor:
             raise ServiceError("source_changed")
         replacement_bytes = request.replacement.encode("utf-8")
         updated = old[: request.offset] + replacement_bytes + old[end:]
-        if len(updated) > MAX_PATCH_FILE_BYTES:
-            raise ServiceError("sandbox_limit")  # 结果内容同样受4MiB文件上限约束
         return PatchPlan(
             plan_id=_plan_id(
                 "patch",
@@ -398,4 +394,4 @@ class ProjectFileEditor:
         return outcome if outcome in {"applied", "rejected"} else "unknown"
 
 
-__all__ = ["MAX_PATCH_FILE_BYTES", "OperationJournal", "ProjectFileEditor"]
+__all__ = ["OperationJournal", "ProjectFileEditor"]

@@ -112,6 +112,26 @@ def wait_result(jobs, environment, project, operation):
         time.sleep(0.01)
 
 
+def test_legacy_environment_checkpoint_keeps_limited_policy(command_jobs, monkeypatch):
+    broker, jobs, env, project = command_jobs
+    record = broker._environment(env)
+    record["limits"].pop("resource_policy")
+    broker._save("env-" + env + ".json", record)
+    policies = []
+    original = Checkpoints.capture
+
+    def capture(self, environment, project, files, excluded, limits):
+        policies.append(limits.resource_policy)
+        return original(self, environment, project, files, excluded, limits)
+
+    monkeypatch.setattr(Checkpoints, "capture", capture)
+    operation = str(uuid.uuid4())
+    jobs.submit(env, project, operation, command(project))
+    result = wait_result(jobs, env, project, operation)
+    assert result["status"] == "finished" and result["receipt"]["exit_code"] == 0
+    assert policies == ["limited"]
+
+
 def test_catalog_mode_lazily_constructs_only_requested_program(command_jobs, monkeypatch):
     broker, jobs, env, project = command_jobs
     jobs.close()

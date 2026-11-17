@@ -22,7 +22,7 @@ from krim_agent.sandbox.broker_client import MAX_MESSAGE
 from krim_agent.sandbox.filesystem import ProjectFiles
 from krim_agent.sandbox.jobs import CommandJobs
 from krim_agent.sandbox.leases import ProjectLeases
-from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.quota import limits_from_record
 from krim_agent.sandbox.quota_management import QuotaChanges
 from krim_agent.sandbox.quota_retirement import QuotaRetirement
 from krim_agent.sandbox.quota_retirement_adapter import BrokerRetirementPort
@@ -120,10 +120,16 @@ class StorageBroker:
             return None
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ServiceError("facts_corrupt")
-            raw = os.read(fd, 65537)
-            value = json.loads(raw)
+            # 分块读至EOF：单次os.read可能短读；记录没有大小配额（登记簿可超64KiB）。
+            blocks = []
+            while True:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                blocks.append(block)
+            value = json.loads(b"".join(blocks))
             if not isinstance(value, dict):
                 raise ValueError("记录无效")
             return value
@@ -133,28 +139,9 @@ class StorageBroker:
             os.close(fd)
 
     def _save(self, name: str, value: dict[str, Any]) -> None:
+        # 记录单项与状态目录总量都不设配额：实例/登记数量与记录大小不是天花板；
+        # RPC单页消息上限由broker_client/serve另行保留。
         raw = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
-        if len(raw) > 65536:
-            raise ServiceError("sandbox_limit")
-        total = 0
-        count = 0
-        exists = False
-        with os.scandir(self.fd) as entries:
-            for entry in entries:
-                info = entry.stat(follow_symlinks=False)
-                if stat.S_ISREG(info.st_mode):
-                    total += info.st_size
-                    count += 1
-                if entry.name == name:
-                    exists = True
-                    total -= info.st_size
-        # 保留4MiB给已有动作的停止/结算更新，不能任意创建无限预览日志。
-        if (
-            not exists
-            and (count >= 4096 or total + len(raw) > 60 * 1024**2)
-            or total + len(raw) > 64 * 1024**2
-        ):
-            raise ServiceError("sandbox_limit")
         temporary = ".tmp-" + uuid.uuid4().hex
         fd = os.open(
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd
@@ -190,7 +177,9 @@ class StorageBroker:
 
     def provision_environment(self, environment_id: str, limits: dict[str, Any]) -> dict[str, Any]:
         internal_id(environment_id)
-        quota = QuotaLimits.model_validate(limits)
+        # 旧记录面（缺 resource_policy）按 limited 解读，与内核当时已应用限额一致。
+        quota = limits_from_record(limits)
+        unlimited = quota.resource_policy == "unlimited"
         registry = self._read("accounts.json") or {"allocations": {}}
         allocations = registry["allocations"]
         number = self.quota.project_number(environment_id)
@@ -204,24 +193,33 @@ class StorageBroker:
             raise ServiceError("revision_conflict")
         usage = os.statvfs(self.storage)
         capacity = usage.f_blocks * usage.f_frsize
+
+        def reserved_bytes(key: str, allocation: dict[str, Any]) -> int:
+            # unlimited不参与节点预约；旧有限额记录仍按原值计，直到显式迁移。
+            limits = allocation.get("limits", {})
+            value = limits.get("environment_bytes", 0)
+            return 0 if limits.get("resource_policy") == "unlimited" else value
+
         reserved = sum(
-            v["limits"]["environment_bytes"]
-            for key, v in allocations.items()
-            if key != environment_id
+            reserved_bytes(key, v) for key, v in allocations.items() if key != environment_id
         )
-        if (environment_id not in allocations and len(allocations) >= 128) or (
-            reserved + quota.environment_bytes > capacity * 0.85
-        ):
+        own = 0 if unlimited else quota.environment_bytes
+        if reserved + own > capacity * 0.85:
+            # 实例数量没有准入上限（无实例数配额）；唯一的拒绝理由是有限额预约
+            # 超出节点容量。登记簿本身受_state记录大小约束，不按数量拒绝。
             raise ServiceError("sandbox_limit")
         allocations[environment_id] = {"project_number": number, "limits": limits}
         self._save("accounts.json", registry)
         previous = self._read("env-" + environment_id + ".json")
         if previous is not None and previous.get("status") == "ready":
             actual = self.quota.account_usage(previous)
-            if (
-                actual["byte_limit"] != quota.environment_bytes // 1024 * 1024
-                or actual["inode_limit"] != quota.environment_inodes
-            ):
+            if unlimited:
+                expected_bytes = expected_inodes = 0  # XFS读回0即unlimited，非0硬限额
+            else:
+                expected_bytes = quota.environment_bytes // 1024 * 1024
+                expected_inodes = quota.environment_inodes
+            if actual["byte_limit"] != expected_bytes or actual["inode_limit"] != expected_inodes:
+                # 内核实际值与目标策略不符：如实拒绝，迁移必须经显式调额操作完成。
                 raise ServiceError("sandbox_backend_unavailable", 503)
             return {"environment_id": environment_id, **previous, "usage": actual}
         result = self.quota.provision(environment_id, quota)

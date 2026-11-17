@@ -60,7 +60,11 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     if (turnId) url.searchParams.set("turn", turnId); else url.searchParams.delete("turn");
     historyReplace(url);
     if (selected.current.workspace !== ws) setList([]);
-    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setEvents([]); setApprovals([]); setNotice(null);
+    // A turn receipt refreshes the current session; retain its transcript until reload.
+    if (selected.current.workspace !== ws || selected.current.id !== sessionId) {
+      setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setEvents([]); setApprovals([]);
+    }
+    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setNotice(null);
     setDraft(readDraft(localStorage, target)); setVersion(v => v + 1);
   }
   function historyReplace(url: URL) { window.history.replaceState(null, "", url); }
@@ -330,8 +334,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   async function submit() {
     let marker = "", ownsFlight = false; let current = () => false;
     try {
-      if (!session || session.id !== id) return;
-      if (new TextEncoder().encode(draft).length > 32768) { setNotice("输入超出容量，请修改后提交"); return; }
+      if (!session || session.id !== id || reading) return;
       const targetScope = scope(id); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
       flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1);
       const { intent, first } = prepareIntent(localStorage, targetScope, "turn", { text: draft, expected_revision: session.revision }); refreshPending();

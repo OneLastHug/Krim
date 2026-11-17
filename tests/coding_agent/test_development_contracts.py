@@ -43,8 +43,10 @@ def test_project_service_retains_creating_run_but_has_independent_lifetime() -> 
     request = command(lifecycle="project_service", timeout_seconds=None)
     assert request.ownership.run_id == "run-a"
     assert request.timeout_seconds is None
+    assert command(timeout_seconds=None).timeout_seconds is None
+    assert command(timeout_seconds=172800).timeout_seconds == 172800
     with pytest.raises(ValidationError):
-        command(timeout_seconds=None)
+        command(timeout_seconds=0)
 
 
 def test_scope_drift_is_not_accepted() -> None:

@@ -7,6 +7,7 @@ import pytest
 
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
+from krim_agent.context.types import OrdinarySessionContext
 from krim_agent.contracts import ApprovalReply, RunRequest, ServiceError
 from krim_agent.evaluation.types import EvalRequest, FreezeRequest, rule
 from krim_agent.security import LOCAL
@@ -116,7 +117,8 @@ async def test_fifo_context_and_shared_capacity_with_eval(tmp_path, wire):
         b = await app.sessions.turn(LOCAL, "local", first.id, b.id)
         assert (await app.service.result(b.run_id)).text == "20"
         snapshot = await app.store.snapshot(b.run_id)
-        assert snapshot.session_context.context.sources[0].turn_id == a.id
+        assert isinstance(snapshot.session_context, OrdinarySessionContext)
+        assert snapshot.session_context.frozen.sources[0].turn_id == a.id
         assert len(wire.requests) == 6 and len(wire.executions) == 3
 
 

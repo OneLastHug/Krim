@@ -12,6 +12,7 @@ from krim_agent.contracts import ServiceError
 from krim_agent.development.file_tools import (
     EditInput,
     WriteInput,
+    mutation_chunks,
     mutation_command,
     text_page,
     worker_source,
@@ -148,6 +149,45 @@ def test_interrupted_staging_is_cleaned_and_hidden(tmp_path):
         files.close()
 
 
+def test_invalid_utf8_and_nonunique_large_edit_preserve_original(tmp_path):
+    path = tmp_path / "a.py"
+    original = b"a" * (2 * 1024 * 1024) + b"\xff"
+    path.write_bytes(original)
+    with pytest.raises(UnicodeError):
+        mutate(tmp_path, edit(sha(original), old_string="a", replace_all=True))
+    assert path.read_bytes() == original
+    text = "before" + "x" * (2 * 1024 * 1024) + "before"
+    path.write_text(text)
+    with pytest.raises(FileRejected, match="text_not_unique"):
+        mutate(tmp_path, edit(sha(text.encode())))
+    assert path.read_text() == text
+    assert not list((tmp_path / ".krim-file-staging").iterdir())
+
+
+def test_concurrent_source_change_after_read_is_rejected(tmp_path, monkeypatch):
+    import krim_agent.development.file_worker as worker
+
+    original = "before" + "x" * (2 * 1024 * 1024)
+    mutate(tmp_path, write(content=original))
+    real_transform = worker.transformed
+
+    def raced_transform(source, request, original_hash):
+        yield from real_transform(source, request, original_hash)
+        (tmp_path / "a.py").write_text("concurrent")
+
+    monkeypatch.setattr(worker, "transformed", raced_transform)
+    with pytest.raises(FileRejected, match="source_changed"):
+        mutate(tmp_path, edit(sha(original.encode())))
+    assert (tmp_path / "a.py").read_text() == "concurrent"
+    assert not list((tmp_path / ".krim-file-staging").iterdir())
+
+
+def test_stale_hash_precedes_edit_matching(tmp_path):
+    mutate(tmp_path, write(content="current content"))
+    with pytest.raises(FileRejected, match="source_changed"):
+        mutate(tmp_path, edit(sha(b"old version")))
+
+
 def test_read_utf8_boundary_and_binary_rejection():
     raw = "a中".encode()
     value = {
@@ -168,24 +208,75 @@ def test_read_utf8_boundary_and_binary_rejection():
 
 
 def test_quoted_payload_round_trip_and_command_bound():
-    request = WriteInput(path="quote'file.py", content="'\"$()`\\\n" * 1000)
+    import io
+
+    from krim_agent.development.file_worker import read_request
+
+    request = WriteInput(path="quote'file.py", content="'\"$()`\\\n" * 300000)
     command = mutation_command(request, worker_source())
     argv = shlex.split(command)
     assert argv[:4] == ["exec", "/usr/bin/python3", "-I", "-c"]
-    import json
-
-    assert base64.b64decode(json.loads(argv[-1])["content"]).decode() == request.content
+    chunks = list(mutation_chunks(request))
+    assert all(len(chunk.encode()) <= 8192 for chunk in chunks)
+    payload = "".join(chunks).encode()
+    assert read_request(io.BytesIO(payload), argv[-1])["content"] == request.content
     assert len(command) < 32768
-    for content in ("\x01" * 16384, "\"" * 16384, "\\" * 16384, "\n" * 16384):
-        maximum = WriteInput(path="a.py", content=content)
-        maximum_command = mutation_command(maximum, worker_source())
-        assert len(maximum_command) < 32768
-        body = json.loads(shlex.split(maximum_command)[-1])
-        assert base64.b64decode(body["content"]).decode() == content
+    assert request.content not in command
+    with pytest.raises(FileRejected, match="input_digest_mismatch"):
+        read_request(io.BytesIO(payload + b" "), argv[-1])
+    small = mutation_command(WriteInput(path="a.py", content="a"), worker_source())
+    assert len(small) == len(command)
 
 
-def test_edit_byte_budget_and_noop_rejected():
+def test_worker_process_consumes_large_stdin_before_mutating(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    # Execute the shipped worker with only the sandbox root replaced for the test.
+    source = worker_source().replace('mutate("/workspace", request)',
+                                     f"mutate({str(tmp_path)!r}, request)")
+    request = WriteInput(path="a.py", content="large 中😀\n" * 180000)
+    argv = shlex.split(mutation_command(request, source))[1:]
+    argv[0] = sys.executable
+    payload = "".join(mutation_chunks(request)).encode("ascii")
+    completed = subprocess.run(argv, input=payload, capture_output=True, check=True, timeout=30)
+    result = json.loads(completed.stdout)
+    assert result["ok"] and result["sha256"] == sha(request.content.encode())
+    assert (tmp_path / "a.py").read_text() == request.content
+    rejected = subprocess.run(argv, input=payload + b" ", capture_output=True, timeout=30)
+    assert rejected.returncode == 1
+    assert json.loads(rejected.stdout)["code"] == "input_digest_mismatch"
+    assert (tmp_path / "a.py").read_text() == request.content
+
+
+def test_large_body_supported_and_noop_rejected():
     with pytest.raises(ValidationError):
         EditInput(path="a.py", old_string="x", new_string="x", expected_sha256="0" * 64)
-    with pytest.raises(ValidationError):
-        WriteInput(path="a.py", content="中" * 6000)
+    assert len(WriteInput(path="a.py", content="中" * 600000).content) == 600000
+
+
+def test_large_edit_crosses_stream_boundaries(tmp_path):
+    before = "中" * 500000 + "needle" + "😀" * 500000
+    result = mutate(tmp_path, write(content=before))
+    replacement = "replacement" * 10000
+    changed = mutate(tmp_path, edit(result["sha256"], old_string="中needle😀",
+                                    new_string=replacement))
+    expected = before.replace("中needle😀", replacement)
+    assert (tmp_path / "a.py").read_text() == expected
+    assert changed["sha256"] == sha(expected.encode())
+    assert changed["size"] == len(expected.encode())
+    assert changed["replacements"] == 1
+
+
+@pytest.mark.parametrize("old,new,text", [
+    ("aba", "X", "ababa" * 100000),
+    ("a" * 100000, "X", "a" * 200001),
+    ("boundary", "", "a" * 65533 + "boundary" + "z" * 65536),
+])
+def test_streaming_replacement_matches_python(tmp_path, old, new, text):
+    result = mutate(tmp_path, write(content=text))
+    changed = mutate(tmp_path, edit(result["sha256"], old_string=old,
+                                    new_string=new, replace_all=True))
+    assert (tmp_path / "a.py").read_text() == text.replace(old, new)
+    assert changed["replacements"] == text.count(old)

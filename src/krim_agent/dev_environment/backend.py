@@ -134,6 +134,122 @@ class DevelopmentBackend:
             raise EnvironmentError("environment_not_ready")
         return record.handle
 
+    async def _require_idle_execution_units(self, record: RuntimeSpec) -> None:
+        if self.processes is not None:
+            rows = await self.processes.list_environment(record.handle)
+            if any(row.handle.state in {"accepted", "running", "unknown"} for row in rows):
+                raise EnvironmentError("environment_migration_active_execution")
+        output = await docker.checked(self.runner, (
+            "container", "ls", "--all", "--quiet", "--no-trunc",
+            "--filter", "label=" + docker.LABEL + "owner=" + record.handle.owner_id,
+            "--filter", "label=" + docker.LABEL + "project=" + record.handle.project_id,
+            "--filter", "label=" + docker.LABEL + "environment=" + record.handle.environment_id,
+            "--filter", "label=" + docker.LABEL + "generation=" + str(record.handle.generation),
+            "--filter", "label=" + docker.LABEL + "kind=execution",
+        ))
+        if output.splitlines():
+            # A persisted row is not proof that an execution container is idle;
+            # require the normal execution cleanup path to retire it first.
+            raise EnvironmentError("environment_migration_execution_present")
+
+    async def migrate_to_unlimited(self, environment: EnvironmentHandle) -> EnvironmentHandle:
+        """Verify and replace a legacy idle container with an unlimited one.
+
+        The project lock fences execution preparation. A legacy container is
+        never reused under the new resource policy, and execution containers or
+        active process receipts make migration fail closed.
+        """
+        async with self.locks.hold(environment.owner_id, environment.project_id):
+            original = await self.repository.resolve(environment)
+            if identity(original.environment) != identity(environment):
+                raise EnvironmentError("environment_binding_drift")
+            if original.environment.state == "stopping":
+                raise EnvironmentError("environment_stopping")
+            stored_policy = getattr(original, "resource_policy", "legacy")
+            if (not isinstance(stored_policy, str)
+                    or stored_policy not in {"unlimited", "legacy", "limited"}):
+                raise EnvironmentError("environment_configuration_invalid")
+            try:
+                target_record = replace(original, resource_policy="unlimited")
+            except TypeError:
+                raise EnvironmentError("unlimited_policy_unavailable") from None
+            target = RuntimeSpec(target_record)
+            if original.configuration_digest == target.fingerprint:
+                return await self._ensure(target, start=True)
+
+            value = await docker.inspect(self.runner, target)
+            old: RuntimeSpec | None = None
+            old_state: str | None = None
+            if value is None:
+                if (original.container_id is None and original.environment.state == "creating"
+                        and original.configuration_digest is None
+                        and stored_policy == "unlimited"):
+                    await self._require_idle_execution_units(target)
+                    return await self._ensure(target, start=True)
+                old = RuntimeSpec.legacy(original)
+                if (original.configuration_digest is not None
+                        and original.configuration_digest != old.fingerprint):
+                    raise EnvironmentError("environment_configuration_drift")
+            else:
+                try:
+                    state = docker.verify(target, value)
+                except EnvironmentError:
+                    old = RuntimeSpec.legacy(original)
+                    old_state = docker.verify(old, value)
+                    if (original.configuration_digest is not None
+                            and original.configuration_digest not in {
+                                old.fingerprint, target.fingerprint,
+                            }):
+                        raise EnvironmentError("environment_configuration_drift") from None
+                else:
+                    if state not in {"ready", "stopped"}:
+                        raise EnvironmentError("environment_migration_state_unknown")
+                    await self._require_idle_execution_units(target)
+                    await self.authorizer(target.handle, "recreate")
+                    cid = str(value["Id"])
+                    updated = replace(
+                        target_record,
+                        environment=target_record.environment.model_copy(
+                            update={"state": state}
+                        ),
+                        container_id=cid,
+                        configuration_digest=target.fingerprint,
+                        revision=original.revision + 1,
+                    )
+                    if updated != original:
+                        saved = await self.repository.compare_and_swap(original, updated)
+                        if saved != updated:
+                            raise EnvironmentError("environment_cas_invalid")
+                    else:
+                        updated = original
+                    return await self._ensure(RuntimeSpec(updated), start=True)
+
+            if old is not None and old_state not in (None, "ready", "stopped"):
+                raise EnvironmentError("environment_migration_state_unknown")
+            await self._require_idle_execution_units(target)
+            await self.authorizer(target.handle, "recreate")
+            self.mount_check(target)
+            container_to_remove = str(value["Id"]) if value is not None else None
+            await self._exclusive_container(target, container_to_remove)
+            transitioning = replace(
+                target_record,
+                environment=target_record.environment.model_copy(update={"state": "creating"}),
+                container_id=None,
+                configuration_digest=None,
+                revision=original.revision + 1,
+            )
+            if transitioning != original:
+                saved = await self.repository.compare_and_swap(original, transitioning)
+                if saved != transitioning:
+                    raise EnvironmentError("environment_cas_invalid")
+            else:
+                transitioning = original
+            if container_to_remove is not None:
+                # The prior unit was verified above. Clearing the durable pointer
+                # first makes a crash/retry fail closed rather than reuse its limits.
+                await docker.checked(self.runner, ("rm", "--force", container_to_remove))
+            return await self._ensure(RuntimeSpec(transitioning), start=True)
+
     async def create(self, environment: EnvironmentHandle) -> EnvironmentHandle:
         async with self.locks.hold(environment.owner_id, environment.project_id):
             return await self._ensure(await self._resolve(environment, "create"), start=False)

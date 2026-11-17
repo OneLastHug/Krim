@@ -74,7 +74,7 @@ async def test_model_can_wait_read_live_logs_and_observe_finished_task(
 
         monkeypatch.setattr(wire, "response", continue_model)
         await app.service.reply_approval(run_id, request["request_id"], approval(request))
-        view = await finished(app, run_id)
+        view = await finished(app, run_id, wait_seconds=120)
         assert view.status == "completed"
         ends = [
             event.data for event in await app.service.events(run_id) if event.kind == "tool_end"

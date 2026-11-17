@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from dataclasses import replace
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from krim_agent.contracts import ServiceError
 from krim_agent.development.contracts import (
@@ -27,7 +27,33 @@ from krim_agent.development.ports import (
 from .client import WorkerClient, WorkerError
 
 Authorize = Callable[[CommandRequest, str], Awaitable[None]]
+T = TypeVar("T")
 TERMINAL = {"exited", "cancelled", "failed"}
+STDIN_CHUNK_BYTES = 8192
+
+
+def stdin_chunks(data: str, limit: int = STDIN_CHUNK_BYTES) -> Iterator[str]:
+    """Split input into worker RPCs of at most ``limit`` encoded bytes.
+
+    Cuts only step back over UTF-8 continuation bytes, so every chunk decodes
+    cleanly and the concatenation reproduces the input exactly. The worker keeps
+    its own 65536-byte per-RPC cap; this small default keeps each control
+    message far below the supervisor MAX_MESSAGE envelope.
+    """
+    if type(limit) is not int or not 4 <= limit <= STDIN_CHUNK_BYTES:
+        raise ValueError("invalid stdin chunk window")
+    encoded = data.encode()
+    if len(encoded) <= limit:
+        yield data
+        return
+    begin = 0
+    while begin < len(encoded):
+        end = min(begin + limit, len(encoded))
+        if end < len(encoded):
+            while (encoded[end] & 0b11000000) == 0b10000000:
+                end -= 1
+        yield encoded[begin:end].decode()
+        begin = end
 
 
 class SecretLifecycle(Protocol):
@@ -58,12 +84,13 @@ class TerminalBackend:
         self.secrets = secrets
         self._launch_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
+        self._input_locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
 
     def _lock(self, process_id: str) -> asyncio.Lock:
         return self._locks.setdefault(process_id, asyncio.Lock())
 
-    async def _settled(self, operation: Coroutine[Any, Any, Any]) -> Any:
+    async def _settled(self, operation: Coroutine[Any, Any, T]) -> T:
         # A cancelled HTTP/tool wait must not leave an accepted launch or
         # requested cancellation halfway through its durable handoff.
         task = asyncio.create_task(operation)
@@ -84,6 +111,24 @@ class TerminalBackend:
         if cancelled:
             raise asyncio.CancelledError
         return result
+
+    async def _settled_result(
+        self, operation: Coroutine[Any, Any, T],
+    ) -> tuple[T, bool]:
+        """Finish a durable launch and report caller cancellation to its owner."""
+        task = asyncio.create_task(operation)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        cancelled = False
+        while True:
+            try:
+                return await asyncio.shield(task), cancelled
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+                if task.done():
+                    return task.result(), cancelled
 
     @staticmethod
     def _execution(record: ProcessRecord) -> RuntimeExecution:
@@ -179,13 +224,37 @@ class TerminalBackend:
         # recoverable. Do not run attach_argv again or call prepare again.
         return await self._save_state(record, "unknown", None)
 
-    async def submit(self, request: CommandRequest) -> ProcessHandle:
+    async def submit(
+        self, request: CommandRequest, *,
+        stdin_chunks: Iterable[str] | None = None,
+    ) -> ProcessHandle:
         if request.authorization.secret_refs and (
             self.secrets is None or request.timeout_seconds is None
         ):
             raise ServiceError("permission_denied", 403)
         await self.authorize(request, "submit")
-        record: ProcessRecord = await self._settled(self._admit_and_attach(request))
+        if stdin_chunks is None:
+            record, _ = await self._settled(self._admit_and_attach(request))
+        else:
+            (record, execute), cancelled = await self._settled_result(
+                self._admit_and_attach(request),
+            )
+            if cancelled:
+                if execute:
+                    await self._settled(self._abort_initial_input(record, cancelled=True))
+                raise asyncio.CancelledError
+            if execute and record.handle.state == "running":
+                try:
+                    await self._send_initial_input(record, stdin_chunks)
+                    async with self._lock(record.handle.process_id):
+                        current = await self._bound(record.handle, "inspect")
+                        record = await self._refresh(current)
+                except asyncio.CancelledError:
+                    await self._settled(self._abort_initial_input(record, cancelled=True))
+                    raise
+                except Exception:
+                    await self._settled(self._abort_initial_input(record, cancelled=False))
+                    raise
         if request.wait_seconds and record.handle.state not in TERMINAL:
             try:
                 async with asyncio.timeout(request.wait_seconds):
@@ -197,7 +266,9 @@ class TerminalBackend:
                 pass
         return record.handle
 
-    async def _admit_and_attach(self, request: CommandRequest) -> ProcessRecord:
+    async def _admit_and_attach(
+        self, request: CommandRequest,
+    ) -> tuple[ProcessRecord, bool]:
         async with self._launch_lock:
             reservation = await self.repository.reserve(request, command_digest(request))
             record = reservation.record
@@ -206,7 +277,7 @@ class TerminalBackend:
                 raise ValueError("reservation request binding changed")
             async with self._lock(record.handle.process_id):
                 if not reservation.execute:
-                    return await self._refresh(record)
+                    return await self._refresh(record), False
                 if record.handle.state != "accepted" or record.execution_id is not None:
                     raise ValueError("only fresh accepted reservations may launch")
                 execution: RuntimeExecution | None = None
@@ -250,7 +321,7 @@ class TerminalBackend:
                         state = "exited" if status.exit_code is not None else "unknown"
                     return await self._save_state(
                         record, state, status.exit_code if state == "exited" else None,
-                    )
+                    ), True
                 except Exception as error:
                     # The immutable admission is never undone. Best-effort
                     # cleanup can prove cancellation; otherwise retain unknown.
@@ -285,7 +356,78 @@ class TerminalBackend:
                         }
                     ):
                         raise
-                    return record
+                    return record, True
+
+    async def _send_initial_input(
+        self, record: ProcessRecord, source: Iterable[str],
+    ) -> None:
+        """Send one fresh command's input only after its launch is confirmed."""
+        async with self._input_locks.setdefault(record.handle.process_id, asyncio.Lock()):
+            def bounded_chunks() -> Iterator[str]:
+                for text in source:
+                    yield from stdin_chunks(text)
+
+            chunks = iter(bounded_chunks())
+            current = next(chunks, None)
+            if current is None:
+                await self._send_initial_input_chunk(record, "", close=True)
+                return
+
+            following = next(chunks, None)
+            while True:
+                await self._send_initial_input_chunk(
+                    record, current, close=following is None,
+                )
+                if following is None:
+                    break
+                current = following
+                following = next(chunks, None)
+
+    async def _send_initial_input_chunk(
+        self, record: ProcessRecord, data: str, *, close: bool,
+    ) -> None:
+        async with self._lock(record.handle.process_id):
+            current_record = await self._bound(record.handle, "write_stdin")
+            current_record = await self._refresh(current_record)
+            if current_record.handle.state != "running":
+                raise ValueError("process is not running")
+            reply = await self.worker.invoke(self.worker.control(
+                current_record.request, current_record.handle, "stdin",
+                data=data, close=close,
+            ))
+            if reply.get("state") == "unknown":
+                raise WorkerError("terminal_worker_failed")
+
+    async def _abort_initial_input(
+        self, record: ProcessRecord, *, cancelled: bool,
+    ) -> ProcessRecord:
+        """Stop the exact newly admitted execution after an incomplete handoff."""
+        async with self._launch_lock:
+            async with self._lock(record.handle.process_id):
+                current = await self.repository.get(record.handle.process_id)
+                current.handle.require_binding(record.handle)
+                if current.execution_id != record.execution_id:
+                    return current
+                if current.handle.state in TERMINAL:
+                    return current
+                if current.execution_id is None:
+                    return await self._save_state(current, "unknown", None)
+
+                execution = self._execution(current)
+                try:
+                    status = await self.executions.cancel(execution)
+                    self._check_runtime(status, execution)
+                except Exception:
+                    return await self._save_state(current, "unknown", None)
+                if status.state != "exited":
+                    return await self._save_state(current, "unknown", None)
+
+                await self._close_attachment(current)
+                state = "cancelled" if cancelled else "failed"
+                current = await self._save_state(current, state, status.exit_code)
+                if self.secrets is not None:
+                    await self.secrets.finished(current)
+                return current
 
     async def inspect(self, process: ProcessHandle) -> ProcessHandle:
         async with self._lock(process.process_id):
@@ -326,16 +468,33 @@ class TerminalBackend:
     async def write_stdin(
         self, process: ProcessHandle, data: str, *, close: bool = False,
     ) -> None:
-        if len(data.encode()) > 65536:
-            raise ValueError("stdin exceeds limit")
-        async with self._lock(process.process_id):
-            record = await self._bound(process, "write_stdin")
-            record = await self._refresh(record)
-            if record.handle.state != "running":
-                raise ValueError("process is not running")
-            await self.worker.invoke(self.worker.control(
-                record.request, record.handle, "stdin", data=data, close=close,
-            ))
+        # Total input length is unbounded; it streams as independent bound and
+        # authorized RPCs. A revoked grant, a stopped unit, a lost worker
+        # receipt, or one failed chunk ends the stream without resending that
+        # chunk, and only the final RPC carries close. The lock is re-acquired
+        # per chunk so cancellation and stop stay responsive while a large
+        # stream is in flight.
+        # Serialize separate input calls without holding the cancellation lock
+        # across the full stream; chunks from concurrent callers must not mix.
+        async with self._input_locks.setdefault(process.process_id, asyncio.Lock()):
+            chunks = iter(stdin_chunks(data))
+            current = next(chunks)
+            while True:
+                following = next(chunks, None)
+                final = close and following is None
+                async with self._lock(process.process_id):
+                    record = await self._bound(process, "write_stdin")
+                    record = await self._refresh(record)
+                    if record.handle.state != "running":
+                        raise ValueError("process is not running")
+                    reply = await self.worker.invoke(self.worker.control(
+                        record.request, record.handle, "stdin", data=current, close=final,
+                    ))
+                    if reply.get("state") == "unknown":
+                        raise WorkerError("terminal_worker_failed")
+                if following is None:
+                    break
+                current = following
 
     async def _close_attachment(self, record: ProcessRecord) -> None:
         try:

@@ -277,6 +277,7 @@ async def test_responses_never_releases_unverified_tools(mode, code):
                 model="fixture",
                 wire_api="responses",
                 max_tool_calls=2,
+                max_arguments_bytes=4096 if mode == "oversize_arguments" else None,
             )
         )
         emitted = []

@@ -478,6 +478,9 @@ def binding_loop(operations: WorkspaceOperations, settings: Settings) -> SimpleN
         settings=settings,
         work=operations,
         sandbox=None,
+        context_service=None,
+        session_tool_host=None,
+        session_media=None,
         _verifier=verifier,
     )
 
@@ -734,6 +737,11 @@ async def test_revoke_principal_cancels_only_target(tmp_path, wire):
         # 幂等：重复撤销不再产生动作。
         again = await app.sessions.revoke_principal("alice")
         assert again["cancelled_runs"] == [] and again["failed_queued"] == []
+        # The unrelated held request has survived revocation. Release it before
+        # running another model round, independently of the HTTP read deadline.
+        wire.release.set()
+        completed = await wait_turn(app.store, bob_turn.id, {"completed"})
+        assert completed.status == "completed"
         # 撤销门仅在收敛期间生效：重新认证的主体立即恢复正常排队派发
         # （重新启用/新签发key场景），不永久拉黑。
         assert "alice" not in app.sessions._revoked
@@ -750,9 +758,6 @@ async def test_revoke_principal_cancels_only_target(tmp_path, wire):
             ),
         )
         assert (await wait_turn(app.store, resumed.id, {"completed"})).status == "completed"
-        wire.release.set()
-        completed = await wait_turn(app.store, bob_turn.id, {"completed"})
-        assert completed.status == "completed"
 
 
 def stub_automation(identities, principals=()):

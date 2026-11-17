@@ -52,6 +52,7 @@ def _environment_json(record: EnvironmentRecord) -> dict[str, Any]:
 
 def _environment_record(value: dict[str, Any]) -> EnvironmentRecord:
     return EnvironmentRecord(**{
+        "resource_policy": "legacy",
         **value, "environment": EnvironmentHandle.model_validate(value["environment"]),
         "content_path": Path(value["content_path"]),
     })
@@ -151,7 +152,9 @@ class EnvironmentRecords:
         """Trusted provisioning entry; it does not create directories or containers."""
         self.owner.require()
         if (record.revision != 1 or record.container_id is not None
-                or type(record.max_processes) is not int or not 1 <= record.max_processes <= 32):
+                or record.resource_policy not in {"unlimited", "limited", "legacy"}
+                or record.max_processes is not None
+                and (type(record.max_processes) is not int or record.max_processes < 1)):
             raise ServiceError("invalid_input", 422)
 
         async def write(conn: AsyncConnection) -> EnvironmentRecord:
@@ -285,9 +288,13 @@ class EnvironmentRecords:
         self, expected: EnvironmentRecord, updated: EnvironmentRecord,
     ) -> EnvironmentRecord:
         self.owner.require()
+        migrating = (expected.resource_policy in {"limited", "legacy"}
+                     and updated.resource_policy == "unlimited")
+        comparable = (replace(expected, resource_policy=updated.resource_policy)
+                      if migrating else expected)
         if (environment_binding(expected.environment) != environment_binding(updated.environment)
                 or updated.revision != expected.revision + 1
-                or replace(expected, environment=updated.environment,
+                or replace(comparable, environment=updated.environment,
                            revision=updated.revision, container_id=updated.container_id,
                            configuration_digest=updated.configuration_digest) != updated):
             raise ServiceError("input_revision_conflict")
@@ -446,7 +453,9 @@ class ProcessRecords:
                 processes.c.environment_id == request.environment.environment_id,
                 processes.c.state.in_(["accepted", "running", "unknown"]),
             ))
-            if (active or 0) >= environment.max_processes:
+            if (environment.max_processes is not None
+                    and environment.resource_policy != "unlimited"
+                    and (active or 0) >= environment.max_processes):
                 raise ServiceError("capacity", 429)
             # SDK may have admitted this same operation just before invoking the
             # command tool. Join it, never dispatch or create a second ledger.

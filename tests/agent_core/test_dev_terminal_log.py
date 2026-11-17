@@ -24,6 +24,67 @@ def test_byte_cursor_utf8_boundaries(tmp_path: Path) -> None:
         log.close()
 
 
+def test_default_log_preserves_all_pages_beyond_old_capacity(tmp_path: Path) -> None:
+    path = tmp_path / "log"
+    payload = ("中🙂 complete log\n" * 150000).encode()
+    log = ByteLog(path)
+    try:
+        for offset in range(0, len(payload), 32768):
+            log.append(payload[offset:offset + 32768])
+        assert log.start == 0 and log.end == len(payload)
+        assert path.stat().st_size == len(payload)
+        cursor = 0
+        pages = []
+        while cursor < log.end:
+            page = log.read(cursor, 65536, eof=True)
+            assert not page["truncated"] and page["next_cursor"] > cursor
+            cursor = page["next_cursor"]
+            pages.append(page["text"])
+        assert "".join(pages).encode() == payload
+    finally:
+        log.close()
+
+
+def test_append_recovery_keeps_uncheckpointed_tail(tmp_path: Path) -> None:
+    path = tmp_path / "log"
+    log = ByteLog(path)
+    log.append(b"acknowledged")
+    checkpoint = log.end
+    log.append(b" plus tail")
+    log.close()
+    restored = ByteLog(path, end=checkpoint, recover=True)
+    try:
+        assert restored.read(0, 65536, eof=True)["text"] == "acknowledged plus tail"
+        assert restored.end == path.stat().st_size
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
+def test_spool_rejects_links_and_special_files(tmp_path: Path, kind: str) -> None:
+    import os
+
+    target = tmp_path / "target"
+    target.write_bytes(b"private")
+    path = tmp_path / "log"
+    if kind == "symlink":
+        path.symlink_to(target)
+    elif kind == "hardlink":
+        os.link(target, path)
+    else:
+        os.mkfifo(path)
+    with pytest.raises((OSError, ValueError)):
+        ByteLog(path)
+    assert target.read_bytes() == b"private"
+
+
+def test_recovery_rejects_missing_acknowledged_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "log"
+    path.write_bytes(b"short")
+    with pytest.raises(OSError, match="incomplete"):
+        ByteLog(path, end=10, recover=True)
+
+
 def test_ring_wrap_and_truncation(tmp_path: Path) -> None:
     log = ByteLog(tmp_path / "log", 8)
     try:

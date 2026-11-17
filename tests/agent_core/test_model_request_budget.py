@@ -451,9 +451,11 @@ async def test_open_application_session_carries_budgets_across_real_tool_steps(
         assert f"Remaining model steps including this request: {steps}" in budget
         assert f"remaining tool calls for this run: {remaining}" in budget
         assert "tool calls allowed in this request: 4" in budget
-    assert len(requests[0]["tools"]) == 3
-    assert len(requests[1]["tools"]) == 3
-    assert len(requests[2]["tools"]) == 3
+    from krim_agent.tools.session import SESSION_CAPABILITIES
+
+    expected_tools = {"add", "echo", "lookup_note"} | set(SESSION_CAPABILITIES)
+    for request in requests:
+        assert {item["function"]["name"] for item in request["tools"]} == expected_tools
     assert any(message.get("tool_call_id") == "echo-first" for message in requests[1]["messages"])
     assert snapshot.request.text == request_text
     canonical_history = encoded([turn.model_dump(mode="json") for turn in history])

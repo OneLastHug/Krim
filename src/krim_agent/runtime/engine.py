@@ -17,13 +17,15 @@ from krim_agent.agent_sdk.host import HostExecution
 from krim_agent.agent_sdk.model import HostModelProvider, agent_tools, sdk_messages
 from krim_agent.config import Settings
 from krim_agent.context import builder, compaction
-from krim_agent.context.types import SessionContext
+from krim_agent.context.types import OrdinarySessionContext, SessionContext
 from krim_agent.contracts import Message, RunEvent, ServiceError, encoded, fingerprint
 from krim_agent.providers.types import ModelProvider
 from krim_agent.sandbox.operations import SandboxOperations
+from krim_agent.storage.session_context import OrdinaryCompactionSource
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Approve, ToolContext, ToolExecutor
+from krim_agent.tools.session import SessionToolScope
 from krim_agent.workspace.operations import WorkspaceOperations
 from krim_agent.workspace.verification import Verifier, stage_result
 
@@ -64,6 +66,9 @@ class AgentLoop:
             raise ServiceError("sandbox_config_invalid", 422)
         self.sandbox = sandbox
         self.work = work
+        self.context_service: Any | None = None
+        self.session_tool_host: Any | None = None
+        self.session_media: Any | None = None
         self._verifier = Verifier(self.store, self.work.artifacts) if self.work else None
         self._d4_seal = self._verifier.assert_current if self._verifier else None
         self._d3_seal = (
@@ -78,6 +83,8 @@ class AgentLoop:
         execution_budget: ExecutionBudget | None = None,
         resume: SDKResume | None = None,
         executor: ToolExecutor | None = None,
+        run_tools: Any | None = None,
+        session_scope: SessionToolScope | None = None,
     ) -> None:
         active_executor = executor or self.executor
 
@@ -97,6 +104,23 @@ class AgentLoop:
             Message(role="system", content=self.settings.system_prompt),
             Message(role="user", content=snapshot.request.text),
         ]
+        ordinary = (snapshot.session_context
+                    if isinstance(snapshot.session_context, OrdinarySessionContext) else None)
+        ordinary_source = None
+        if ordinary is not None:
+            if session_scope is None:
+                if self.session_tool_host is None:
+                    raise ServiceError("workspace_contract_required")
+                session_scope = await self.session_tool_host.by_run(run_id, check)
+            if (ordinary.owner_id != session_scope.actor.principal_id
+                    or ordinary.workspace_id != session_scope.workspace_id
+                    or ordinary.session_id != session_scope.session_id
+                    or ordinary.turn_id != session_scope.turn_id
+                    or ordinary.frozen.run_id != run_id):
+                raise ServiceError("permission_denied")
+            ordinary_source = OrdinaryCompactionSource(
+                ordinary.frozen, legacy_actor=session_scope.actor,
+            )
         operations = self.work
         frame = None
         runtime: dict[str, JsonValue] = {}
@@ -106,6 +130,8 @@ class AgentLoop:
             check()
             runtime = cast(dict[str, JsonValue], frame.conditions["runtime"])
             messages = [Message(role="user", content=snapshot.request.text)]
+        elif ordinary is not None:
+            messages = [ordinary.frozen.current]
         elif snapshot.session_context is not None:
             if not isinstance(snapshot.session_context, SessionContext):
                 raise ServiceError("workspace_contract_required")
@@ -114,12 +140,16 @@ class AgentLoop:
             timeout = (
                 cast(float, runtime["run_timeout_seconds"]) if frame else self.settings.run_timeout
             )
-            deadline = asyncio.get_running_loop().time() + max(
-                0, snapshot.run.created_at + timeout - time.time()
-            )
+            deadline = (None if timeout is None else
+                        asyncio.get_running_loop().time() + max(
+                            0, snapshot.run.created_at + timeout - time.time()
+                        ))
             execution_budget = ExecutionBudget(deadline)
         if frame is not None and operations is not None:
-            scope = operations.scope(frame, check, execution_budget.deadline, execution_budget)
+            legacy_deadline = execution_budget.deadline
+            if legacy_deadline is None:
+                raise ServiceError("facts_corrupt")
+            scope = operations.scope(frame, check, legacy_deadline, execution_budget)
         if self.sandbox is not None:
             scope = await self.sandbox.scope(run_id, check, execution_budget)
         max_steps = cast(int, runtime["model_steps"]) if frame else self.settings.max_steps
@@ -136,6 +166,10 @@ class AgentLoop:
         compressor: compaction.Compactor | None = None
 
         async def emit(kind: str, data: dict[str, JsonValue]) -> RunEvent:
+            if kind == "model_start" and ordinary_source is not None:
+                await cast(SQLiteStore, self.store).work_read(
+                    lambda conn: ordinary_source.verify(conn, run_id)
+                )
             event = await self.store.append(run_id, kind, data)
             if kind == "model_start" and compressor is not None:
                 await compressor.store.work_read(compressor.verify)
@@ -150,15 +184,11 @@ class AgentLoop:
             max_output=self.settings.max_output_bytes,
             # Legacy frozen workspace frames retain their historical 20s step budget.
             model_timeout=20 if frame else self.settings.model_timeout,
-            deadline=scope.deadline if scope else None,
-            workspace=frame is not None,
-            execution_budget=execution_budget if frame is not None else None,
+            deadline=execution_budget.deadline,
+            workspace=frame is not None or ordinary is not None,
+            execution_budget=execution_budget,
         )
-        provider_limit = getattr(
-            getattr(self.provider, "config", None),
-            "max_request_bytes", self.settings.max_request_bytes
-        )
-        request_limit = min(self.settings.max_request_bytes, provider_limit)
+        request_limit = self.settings.request_capacity(self.provider)
         if frame is not None and scope is not None:
             compressor = compaction.Compactor(
                 cast(SQLiteStore, self.store),
@@ -172,6 +202,15 @@ class AgentLoop:
                 source_anchor=cast(
                     str, getattr(snapshot.session_context, "source_fingerprint", None)
                 ),
+            )
+
+        if ordinary is not None and ordinary_source is not None:
+            identity = snapshot.target.get("provider")
+            if not isinstance(identity, dict):
+                raise ServiceError("facts_corrupt")
+            compressor = compaction.Compactor.from_source(
+                cast(SQLiteStore, self.store), ordinary_source, stepper, check,
+                ordinary.frozen.system_prompt, request_limit, identity,
             )
 
         if resume is not None and not isinstance(resume, SDKResume):
@@ -191,7 +230,21 @@ class AgentLoop:
             if isinstance(snapshot.session_context, SessionContext)
             else None
         )
-        history = CompactorHistory(compressor, run_id) if compressor is not None else None
+        boundary = None
+        if (compressor is not None and self.context_service is not None
+                and snapshot.session_context is not None):
+            if session_scope is None and self.session_tool_host is not None:
+                session_scope = await self.session_tool_host.by_run(run_id, check)
+            if session_scope is not None:
+                boundary = self.context_service.boundary(
+                    session_scope.actor, session_scope.workspace_id,
+                    session_scope.session_id, run_id, scope=session_scope,
+                )
+        history = (CompactorHistory(
+            compressor, run_id, boundary=boundary,
+            live_memory=(boundary is not None and self.context_service is not None
+                         and self.context_service.snapshots is not None),
+        ) if compressor is not None else None)
         host_provider = HostModelProvider(
             stepper,
             active_executor.registry,
@@ -201,6 +254,10 @@ class AgentLoop:
             context_policy=context_policy,
             history=history,
             session_sources=session_sources,
+            run_tools=run_tools,
+            host_media=(self.session_media.for_run(run_id, check)
+                        if self.session_media is not None
+                        and snapshot.session_context is not None else None),
         )
         tool_context = ToolContext(
             emit,
@@ -242,6 +299,10 @@ class AgentLoop:
             approval_request=cast(ApprovalRequest, approval_request),
             host=host,
         )
+        if ordinary_source is not None:
+            await cast(SQLiteStore, self.store).work_read(
+                lambda conn: ordinary_source.verify(conn, run_id)
+            )
         try:
             result = await adapter.run(
                 ai.Model(id="krim-host", provider=host_provider),

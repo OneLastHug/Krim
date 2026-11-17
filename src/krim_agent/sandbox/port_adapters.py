@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from krim_agent.contracts import ServiceError
@@ -43,9 +44,16 @@ class AcceptedProjectMutation:
             raise ServiceError("sandbox_operation_unknown") from None
 
     def read(self, project: ProjectRef, path: str) -> bytes | None:
+        """按ContentSource单页窗口分页取回完整内容；不设应用内容总量上限。
+
+        每页沿用files.read的整文件sha256复核（页间一致才继续），每页前后重查
+        租约与generation，EOF时再核对拼接长度/摘要，避免漏页或并发改写被当作完整读取。
+        单页窗口（65536字节）不变；返回bytes是现有端口协议，调用方按全内容处理。
+        """
         self._current(project)
         body = bytearray()
         expected = None
+        size = None
         offset = 0
         while True:
             try:
@@ -58,14 +66,15 @@ class AcceptedProjectMutation:
                 raise
             if expected is None:
                 expected = chunk["sha256"]
-            if expected != chunk["sha256"]:
+                size = chunk["size"]
+            if expected != chunk["sha256"] or size != chunk["size"]:
                 raise ServiceError("artifact_conflict")
             data = base64.b64decode(chunk["data"], validate=True)
             body.extend(data)
-            if len(body) > 4 * 1024**2:
-                raise ServiceError("artifact_limit")
             self._current(project)
             if chunk["eof"]:
+                if len(body) != size or hashlib.sha256(body).hexdigest() != expected:
+                    raise ServiceError("artifact_conflict")
                 return bytes(body)
             if not data:
                 raise ServiceError("artifact_conflict")

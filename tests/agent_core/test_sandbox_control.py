@@ -356,15 +356,18 @@ def test_trusted_configuration_limits_permissions_and_symlinks(tmp_path):
         SandboxConfiguration.load(path)
 
 
-async def test_project_cap_does_not_block_replay(tmp_path):
-    configuration = SandboxConfiguration(max_projects_per_account=1)
+@pytest.mark.parametrize("legacy_count", [None, 0, 1, 128, 1000])
+async def test_legacy_project_cap_is_removed_and_replay_remains_idempotent(tmp_path, legacy_count):
+    configuration = SandboxConfiguration(max_projects_per_account=legacy_count)
+    assert configuration.max_projects_per_account is None
     async with managed(tmp_path / "cap.sqlite", configuration) as (_, _, service, _, member, *_):
-        body = {"workspace_id": member.memberships[0].workspace_id, "title": "唯一项目"}
+        body = {"workspace_id": member.memberships[0].workspace_id, "title": "项目"}
         first = await service.create_project(member, body, request_key="first")
         assert await service.create_project(member, body, request_key="first") == first
-        with pytest.raises(ServiceError, match="sandbox_limit"):
-            await service.create_project(member, body, request_key="second")
-        assert (await service.list_projects(member))["total"] == 1
+        second = await service.create_project(member, body, request_key="second")
+        assert second["project_id"] != first["project_id"]
+        assert (await service.list_projects(member))["total"] == 2
+        assert (await service.list_projects(member, offset=1000000))["items"] == []
 
 
 async def test_auth_is_rechecked_after_waiting_for_database_lock(tmp_path):
@@ -405,7 +408,8 @@ def test_invalid_profile_combination_is_rejected_at_startup():
 
     with pytest.raises(ValidationError):
         SandboxConfiguration.model_validate(
-            {"quotas": {"profiles": {"invalid": {"environment_bytes": 1024**2}}}}
+            {"quotas": {"defaults": {"resource_policy": "limited"},
+                        "profiles": {"invalid": {"environment_bytes": 1024**2}}}}
         )
 
 
