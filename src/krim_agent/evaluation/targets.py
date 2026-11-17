@@ -57,14 +57,14 @@ def make_eval_bindings(store: RunStore, settings: Settings) -> dict[str, RunBind
             update={
                 "system_prompt": "使用整数加法。" if key == "target-v1" else "保留小数精度。",
                 "target_version": key + "/1",
-                "max_input_bytes": min(4096, settings.max_input_bytes),
-                "max_output_bytes": min(8192, settings.max_output_bytes),
-                "max_request_bytes": min(32768, settings.max_request_bytes),
-                "max_steps": min(4, settings.max_steps),
+                "max_input_bytes": min(4096, settings.max_input_bytes or 4096),
+                "max_output_bytes": min(8192, settings.max_output_bytes or 8192),
+                "max_request_bytes": min(32768, settings.max_request_bytes or 32768),
+                "max_steps": min(4, settings.max_steps or 4),
                 "max_tools_per_step": 1,
                 "max_tool_calls": 1,
-                "run_timeout": min(10, settings.run_timeout),
-                "tool_timeout": min(2, settings.tool_timeout),
+                "run_timeout": min(10, settings.run_timeout or 10),
+                "tool_timeout": min(2, settings.tool_timeout or 2),
             }
         )
         loop = AgentLoop(store, provider, ToolExecutor(registry, controlled_policy), config)

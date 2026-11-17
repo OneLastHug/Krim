@@ -139,6 +139,84 @@ afterEach(async () => {
   window.innerWidth = previousWidth;
 });
 
+const compactPath = (id = "session-A") => `/v2/workspaces/local/sessions/${id}/context/compactions`;
+function compactReceipt(body: unknown, sessionId = "session-A") {
+  return { request_key: (body as { request_key: string }).request_key, session_id: sessionId, revision: 1, reason: null, status: "pending", created_at: 1, created: true };
+}
+
+test("Compact session点击现有按钮仅排队，不将接纳称为压缩完成", async () => {
+  readApi.mockImplementation((path, _key, body) => path === compactPath()
+    ? Promise.resolve(compactReceipt(body)) : Promise.reject(new Error("not provided")));
+  await render();
+  const compact = findButton(host, "Compact session");
+  expect(compact.className).toContain("outline");
+  await act(async () => { compact.click(); compact.click(); });
+  const posts = readApi.mock.calls.filter(([path]) => path === compactPath());
+  expect(posts).toHaveLength(1);
+  expect(posts[0]![2]).toEqual({ request_key: expect.any(String) });
+  expect(host.textContent).toContain("整理请求已排队");
+  expect(host.textContent).toContain("下次安全的模型请求边界执行");
+  expect(host.textContent).not.toContain("压缩完成");
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+test("Compact session断网后重挂载仍以原键重试，确认后下次生成新键", async () => {
+  let fail = true;
+  readApi.mockImplementation((path, _key, body) => {
+    if (path !== compactPath()) return Promise.reject(new Error("not provided"));
+    return fail ? Promise.reject(new TypeError("offline")) : Promise.resolve(compactReceipt(body));
+  });
+  await render();
+  await act(async () => findButton(host, "Compact session").click());
+  expect(host.textContent).toContain("重试原请求");
+  const original = readApi.mock.calls.find(([path]) => path === compactPath())![2];
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  await render();
+  fail = false;
+  await act(async () => findButton(host, "Compact session").click());
+  const retried = readApi.mock.calls.filter(([path]) => path === compactPath());
+  expect(retried).toHaveLength(2);
+  expect(retried[1]![2]).toEqual(original);
+  await act(async () => findButton(host, "Compact session").click());
+  const fresh = readApi.mock.calls.filter(([path]) => path === compactPath());
+  expect(fresh).toHaveLength(3);
+  expect(fresh[2]![2]).not.toEqual(original);
+});
+
+test("Compact session丢弃旧scope响应，新的会话不串提示和请求键", async () => {
+  let release!: (value: unknown) => void;
+  readApi.mockImplementation((path, _key, body) => {
+    if (path === compactPath()) return new Promise(resolve => { release = resolve; });
+    if (path === compactPath("session-B")) return Promise.resolve(compactReceipt(body, "session-B"));
+    return Promise.reject(new Error("not provided"));
+  });
+  await render();
+  await act(async () => findButton(host, "Compact session").click());
+  const original = readApi.mock.calls.find(([path]) => path === compactPath())![2];
+  const next = { ...baseProps, chat: fakeChat({ id: "session-B" }, { id: "session-B" }) };
+  await render(next);
+  expect(findButton(host, "Compact session").disabled).toBe(false);
+  await act(async () => { release(compactReceipt(original)); await Promise.resolve(); });
+  expect(host.textContent).not.toContain("整理请求已排队");
+  await act(async () => findButton(host, "Compact session").click());
+  const fresh = readApi.mock.calls.find(([path]) => path === compactPath("session-B"))![2];
+  expect(fresh).not.toEqual(original);
+  expect(host.textContent).toContain("整理请求已排队");
+});
+
+test("Compact session拒绝错会话回执并保留原键", async () => {
+  readApi.mockImplementation((path, _key, body) => path === compactPath()
+    ? Promise.resolve(compactReceipt(body, "another-session")) : Promise.reject(new Error("not provided")));
+  await render();
+  await act(async () => findButton(host, "Compact session").click());
+  expect(host.textContent).toContain("重试原请求");
+  await act(async () => findButton(host, "Compact session").click());
+  const posts = readApi.mock.calls.filter(([path]) => path === compactPath());
+  expect(posts[1]![2]).toEqual(posts[0]![2]);
+  expect(host.textContent).not.toContain("整理请求已排队");
+});
+
 test("绑定项目后环境行、工具目录与账号连接显示真实数据，无百分比构成", async () => {
   readApi.mockImplementation((path: string) => route(path, {
     "/v2/me/sandbox/sessions/session-A/project": bindingBound,
@@ -164,6 +242,26 @@ test("绑定项目后环境行、工具目录与账号连接显示真实数据�
   expect(host.textContent).toContain("上下文用量未提供");
   expect(host.textContent).toContain("记忆来源未提供");
   expect(host.textContent).toContain("Memory files—");
+});
+
+test("null消息上限在信息栏与Context弹窗均显示不设上限", async () => {
+  readApi.mockImplementation((path: string) => route(path, {
+    "/v2/me/sandbox/sessions/session-A/project": bindingUnbound,
+    "/v2/targets/target-development/tools": [],
+    "/v2/me/mcp-connections": [],
+  }));
+  await render({ ...baseProps, chat: fakeChat({}, {
+    context_policy: { max_bytes: 131072, max_messages: null, reserved_output_tokens: 2048, counter_version: "approx-utf8/1" },
+  }) });
+  expect(host.querySelector(".g-context-overview")?.textContent).toContain("不设消息数上限");
+  const row = [...host.querySelectorAll(".g-context-table tr")].find(item => item.textContent?.includes("消息上限"))!;
+  expect(row.querySelectorAll("td")[1]?.textContent).toBe("不设消息数上限");
+  expect(row.textContent).not.toContain("— 条");
+  await act(async () => findButtonByLabel(host, "上下文用量说明").click());
+  const dialog = dialogElement();
+  const label = [...dialog.querySelectorAll("dt")].find(item => item.textContent === "消息上限")!;
+  expect(label.nextElementSibling?.textContent).toBe("不设消息数上限");
+  expect(dialog.textContent).not.toContain("— 条");
 });
 
 test("未绑定会话显示未准备，不显示凭据管理", async () => {

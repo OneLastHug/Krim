@@ -362,14 +362,16 @@ class BrokerRetirementPort(RetirementPort):
     def apply_data_limit(
         self, environment_id: str, operation_id: str, byte_limit: int, inode_limit: int
     ) -> dict[str, Any]:
+        """写内核data区限额并读回核实；0/0表示解除限额（unlimited），两个分量必须一致。"""
         environment_id = internal_id(environment_id)
         operation_id = internal_id(operation_id)
         if (
             type(byte_limit) is not int
             or type(inode_limit) is not int
-            or byte_limit <= 0
-            or inode_limit <= 0
+            or byte_limit < 0
+            or inode_limit < 0
             or byte_limit % 1024 != 0  # 内核KiB粒度：非对齐输入静默截断即误差，直接拒绝
+            or (byte_limit == 0) != (inode_limit == 0)
         ):
             raise ServiceError("invalid_input", 422)
         self._bind_gate(environment_id, operation_id)
@@ -386,11 +388,16 @@ class BrokerRetirementPort(RetirementPort):
         number = int(record["project_number"])
         desired = {
             **limits,
-            "environment_bytes": byte_limit,
-            "environment_inodes": inode_limit,
             "checkpoint_bytes": 0,
             "checkpoint_count": 0,
         }
+        if byte_limit:
+            desired["environment_bytes"] = byte_limit
+            desired["environment_inodes"] = inode_limit
+        else:
+            # unlimited目标：内核写0/0并读回0（unlimited非0硬限额）；配置数值字段
+            # 保留记录原值，显式标记策略，不把0塞进旧数值字段重解释。
+            desired["resource_policy"] = "unlimited"
         try:
             applied = QuotaLimits.model_validate(desired)
         except ValueError:
@@ -548,7 +555,11 @@ class BrokerRetirementPort(RetirementPort):
         mine = 0
         for key, allocation in allocations.items():
             limits = allocation.get("limits", {}) if isinstance(allocation, dict) else {}
-            value = int(limits.get("environment_bytes") or 0)
+            # unlimited不参与节点预约；旧有限额记录仍按原值计，直到显式迁移。
+            value = (
+                0 if limits.get("resource_policy") == "unlimited"
+                else int(limits.get("environment_bytes") or 0)
+            )
             reserved += value
             if key == environment_id:
                 mine = value

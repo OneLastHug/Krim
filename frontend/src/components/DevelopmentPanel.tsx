@@ -11,6 +11,7 @@ import {
 } from "../lib/development-contracts.ts";
 import { fetchDirectory, fetchFileBytes, fetchProjectsPage, useDevelopment, type DevelopmentState } from "../hooks/use-development.ts";
 import type { SessionState } from "../hooks/use-session.ts";
+import { useSessionCompaction } from "../hooks/use-session-compaction";
 import { request } from "../api.ts";
 import { parsePreviewBootstrap, registeredPreviews } from "../lib/development-previews";
 import { displayToolName } from "../lib/tool-names";
@@ -66,6 +67,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
   chat: SessionState; apiKey: string; active: boolean; fence: { current: number };
 }) {
   const dev = useDevelopment(chat, apiKey, active, fence);
+  const compaction = useSessionCompaction(chat, apiKey, active, fence);
   const narrow = useMediaQuery("(max-width: 1180px)", 1180);
   const workInline = useMediaQuery("(min-width: 1440px)", 1439);
   const [infoOpen, setInfoOpen] = useState(() => window.innerWidth > 1180);
@@ -170,7 +172,8 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
       <Button variant="ghost" className="dev-rail-button" aria-label={workOpen ? "关闭工作区" : "打开工作区"} aria-pressed={workOpen} onClick={toggleWork}><Columns2 aria-hidden="true" /></Button>
     </div>}
     {infoOpen && <section className="g-info" aria-label="开发信息栏">
-      {(dev.notice || dev.writes.length > 0) && <div className="dev-panel-status">
+      {(dev.notice || compaction.notice || dev.writes.length > 0) && <div className="dev-panel-status">
+        {compaction.notice && <div className="dev-panel-notice" role="status"><p>{compaction.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭整理提示" onClick={compaction.dismiss}><X aria-hidden="true" /></Button></div>}
         {dev.notice && <div className="dev-panel-notice" role="status"><p>{dev.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭提示" onClick={dev.dismissNotice}><X aria-hidden="true" /></Button></div>}
         {dev.writes.map(intent => <div className="dev-panel-notice dev-pending" key={intent.request_key} role="status">
           <p>{intent.kind === "bind-project" ? "绑定项目结果未确认" : "准备环境结果未确认"}{intent.rejected ? "；原请求被拒绝" : ""}</p>
@@ -203,12 +206,12 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
         <div className="g-section-body g-context-scroll">
           <div className="g-context-overview">
             <span>{policy ? "会话上下文策略" : "会话载入后显示上下文容量"}</span>
-            {policy && <span>{fmtBytes(policy.max_bytes)} · {fmtCount(policy.max_messages)} 条消息</span>}
+            {policy && <span>{fmtBytes(policy.max_bytes)} · {policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条消息`}</span>}
           </div>
           {policy && <table className="g-context-table" aria-label="上下文策略容量">
             <tbody>
               <tr><td>总容量</td><td>{fmtBytes(policy.max_bytes)}</td><td>—</td></tr>
-              <tr><td>消息上限</td><td>{fmtCount(policy.max_messages)} 条</td><td>—</td></tr>
+              <tr><td>消息上限</td><td>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</td><td>—</td></tr>
               <tr><td>输出预留</td><td>{fmtCount(policy.reserved_output_tokens)} tokens</td><td>—</td></tr>
             </tbody>
           </table>}
@@ -242,7 +245,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
           </details>
           <div className="g-context-end">
             <span>整理在运行时内自动进行</span>
-            <Button variant="outline" size="sm" onClick={() => comingSoon("整理上下文")}>Compact session</Button>
+            <Button variant="outline" size="sm" disabled={compaction.disabled} onClick={() => void compaction.compact()}>Compact session</Button>
           </div>
         </div>
       </section>
@@ -788,7 +791,7 @@ function ContextDialogBody({ chat }: { chat: SessionState }) {
     <DialogHeader><DialogTitle>Context</DialogTitle><DialogDescription>当前会话的策略容量</DialogDescription></DialogHeader>
     {policy ? <dl className="g-description-list">
       <dt>总容量</dt><dd>{fmtBytes(policy.max_bytes)}</dd>
-      <dt>消息上限</dt><dd>{fmtCount(policy.max_messages)} 条</dd>
+      <dt>消息上限</dt><dd>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</dd>
       <dt>输出预留</dt><dd>{fmtCount(policy.reserved_output_tokens)} tokens</dd>
       <dt>计数口径</dt><dd className="g-mono">{policy.counter_version}</dd>
     </dl> : <p className="g-empty">会话载入后显示上下文容量。</p>}

@@ -170,6 +170,126 @@ class LocalRuntime:
         self.targets.pop(execution.execution_id, None)
 
 
+class MockRuntime:
+    """B double for stdin stream tests: no real unit; states change on demand."""
+
+    def __init__(self):
+        self.prepared = 0
+        self.states = {}
+        self.exit_codes = {}
+        self.cancel_calls = []
+        self.allow_cancel = True
+        self.inspect_calls = 0
+
+    @asynccontextmanager
+    async def prepare(self, request, process_id):
+        self.prepared += 1
+        yield RuntimeExecution(
+            execution_id=f"execution-{self.prepared}", environment=request.environment,
+            operation_id=request.operation_id, process_id=process_id,
+            attach_argv=("/bin/true",), pty=request.pty,
+        )
+
+    async def inspect(self, execution):
+        self.inspect_calls += 1
+        return RuntimeStatus(
+            execution.execution_id, self.states.get(execution.execution_id, "running"),
+            self.exit_codes.get(execution.execution_id),
+        )
+
+    async def cancel(self, execution):
+        self.cancel_calls.append(execution.execution_id)
+        if not self.allow_cancel:
+            return RuntimeStatus(execution.execution_id, "unknown")
+        self.states[execution.execution_id] = "exited"
+        self.exit_codes[execution.execution_id] = 0
+        return RuntimeStatus(execution.execution_id, "exited", 0)
+
+    async def release(self, execution):
+        return None
+
+
+class RecordingWorker:
+    """C double: records every stdin RPC; no socket, no container, no child."""
+
+    def __init__(self):
+        self.payloads = []
+        self.stdin_delay = 0.0
+        self.fail_stdin_at = None
+        self.unknown_stdin_after = None
+        self.error = WorkerError("terminal_worker_failed")
+        self.on_stdin = None
+
+    async def __call__(self, payload):
+        action = payload.get("action")
+        self.payloads.append(payload)
+        if action != "stdin":
+            if action == "submit":
+                result = {"state": "running", "exit_code": None}
+            elif action == "inspect":
+                result = {"state": "running", "exit_code": None}
+            elif action == "cancel":
+                result = {"state": "cancelled", "exit_code": None}
+            else:
+                raise AssertionError(f"unexpected worker action {action}")
+            return {"ok": True, "result": {
+                "process_id": payload["process_id"],
+                "request_digest": payload["request_digest"], **result,
+            }}
+        if self.stdin_delay:
+            await asyncio.sleep(self.stdin_delay)
+        if self.on_stdin is not None:
+            await self.on_stdin(payload)
+        if self.fail_stdin_at is not None:
+            self.fail_stdin_at -= 1
+            if self.fail_stdin_at == 0:
+                raise self.error
+        if self.unknown_stdin_after is not None:
+            self.unknown_stdin_after -= 1
+            if self.unknown_stdin_after == 0:
+                return {"ok": True, "result": {
+                    "process_id": payload["process_id"], "state": "unknown",
+                    "exit_code": None, "reason": "receipt_missing",
+                    "request_digest": None,
+                }}
+        return {"ok": True, "result": {"written": True}}
+
+
+class TrackingSecrets:
+    """SecretLifecycle double mirroring the real tracked-reservation set."""
+
+    def __init__(self):
+        self.launched_ids = []
+        self.finished_ids = []
+
+    async def launched(self, record, execution):
+        self.launched_ids.append(record.handle.process_id)
+
+    async def finished(self, record):
+        self.finished_ids.append(record.handle.process_id)
+
+    def tracks(self, record):
+        return record.handle.process_id in self.launched_ids
+
+
+def stdin_payloads(worker):
+    return [payload for payload in worker.payloads if payload["action"] == "stdin"]
+
+
+@pytest.fixture
+def stream_stack():
+    repository = Repository()
+    runtime = MockRuntime()
+    worker = RecordingWorker()
+    authorizations = []
+
+    async def authorize(request, action):
+        authorizations.append((request.operation_id, action))
+
+    backend = TerminalBackend(repository, runtime, WorkerClient(worker), authorize=authorize)
+    return backend, repository, runtime, worker, authorizations
+
+
 @pytest_asyncio.fixture
 async def stack(tmp_path: Path):
     project = tmp_path / "project"
@@ -197,6 +317,53 @@ async def stack(tmp_path: Path):
         for task in runtime.watchdogs:
             task.cancel()
         await asyncio.gather(*runtime.watchdogs, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_large_unicode_input_through_real_worker_pipe(stack):
+    import hashlib
+
+    backend, _, _, worker, _ = stack
+    data = "中😀 full stdin\n" * 100000
+    process = await backend.submit(command(
+        command="/usr/bin/python3 -I -c 'import sys,hashlib; "
+                "print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'",
+        timeout_seconds=None, wait_seconds=0,
+    ))
+    await backend.write_stdin(process, data, close=True)
+    await asyncio.wait_for(worker.processes[process.process_id].finished.wait(), 10)
+    assert (await backend.inspect(process)).exit_code == 0
+    page = await backend.read_output(process, 0)
+    assert page.text.strip() == hashlib.sha256(data.encode()).hexdigest()
+    assert page.eof and not page.truncated
+
+
+@pytest.mark.asyncio
+async def test_initial_input_real_worker_hash_and_duplicate_never_consumes(stack):
+    import hashlib
+
+    backend, repository, runtime, worker, _ = stack
+    data = "one-time 中😀 stdin\n" * 100000
+    request = command(
+        command="/usr/bin/python3 -I -c 'import sys,hashlib; "
+                "print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'",
+        timeout_seconds=None, wait_seconds=0,
+    )
+    source = (data[offset:offset + 4096] for offset in range(0, len(data), 4096))
+    process = await backend.submit(request, stdin_chunks=source)
+    await asyncio.wait_for(worker.processes[process.process_id].finished.wait(), 10)
+    assert (await backend.inspect(process)).exit_code == 0
+    page = await backend.read_output(process, 0)
+    assert page.text.strip() == hashlib.sha256(data.encode()).hexdigest()
+
+    def forbidden_source():
+        raise AssertionError("duplicate must not consume input")
+        yield "not reached"
+
+    repeated = await backend.submit(request, stdin_chunks=forbidden_source())
+    assert repeated.process_id == process.process_id and repeated.state == "exited"
+    assert repository.reservations == 1 and runtime.prepared == 1
+    assert (await backend.read_output(process, 0)).text == page.text
 
 
 @pytest.mark.asyncio
@@ -526,3 +693,363 @@ async def test_backend_supplies_each_revision_and_unchanged_inspect_does_not_sav
     assert cancelled.state == "cancelled" and saved.revision == 4
     assert (await backend.inspect(cancelled)).state == "cancelled"
     assert await repository.get(process.process_id) == saved
+
+
+@pytest.mark.asyncio
+async def test_large_unicode_stdin_streams_in_utf8_safe_chunks(stream_stack):
+    backend, repository, runtime, worker, authorizations = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    unit = "a中€😀\n"  # 12 encoded bytes per unit: 1 + 3 + 3 + 4 + 1
+    data = "x" * 8190 + "€" + unit * 9000
+    assert len(data.encode()) > 65536  # above the removed total-body threshold
+    await backend.write_stdin(process, data, close=True)
+    payloads = stdin_payloads(worker)
+    assert "".join(payload["data"] for payload in payloads) == data
+    assert sum(len(payload["data"].encode()) for payload in payloads) == len(data.encode())
+    assert all(payload["data"].encode() for payload in payloads)
+    assert all(len(payload["data"].encode()) <= 8192 for payload in payloads)
+    assert all(len(payload["data"].encode()) <= 65536 for payload in payloads)
+    assert payloads[0]["data"] == "x" * 8190 and payloads[1]["data"].startswith("€")
+    assert all(payload["close"] is False for payload in payloads[:-1])
+    assert payloads[-1]["close"] is True
+    record = await repository.get(process.process_id)
+    digest = command_digest(record.request)
+    assert {payload["request_digest"] for payload in payloads} == {digest}
+    assert authorizations.count(("operation", "write_stdin")) == len(payloads)
+    assert runtime.prepared == 1
+
+
+@pytest.mark.parametrize("window", [0, 1, 3, 8193, True])
+def test_invalid_stdin_window_rejected(window):
+    from krim_agent.dev_terminal.backend import stdin_chunks
+
+    with pytest.raises(ValueError, match="window"):
+        list(stdin_chunks("😀", window))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_input_streams_do_not_interleave(stream_stack):
+    backend, _, _, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    worker.stdin_delay = 0.01
+    first = "a" * (8192 * 3)
+    second = "b" * (8192 * 2)
+    await asyncio.gather(backend.write_stdin(process, first),
+                         backend.write_stdin(process, second))
+    assert "".join(payload["data"] for payload in stdin_payloads(worker)) == first + second
+
+
+@pytest.mark.asyncio
+async def test_stdin_chunk_sizes_follow_the_wire_limit(stream_stack):
+    backend, _, _, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    await backend.write_stdin(process, "y" * 8192)
+    await backend.write_stdin(process, "z" * 8193)
+    payloads = stdin_payloads(worker)
+    assert [len(payload["data"].encode()) for payload in payloads] == [8192, 8192, 1]
+    assert not any(payload["close"] for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_empty_stdin_stays_a_single_rpc_with_close_passthrough(stream_stack):
+    backend, _, _, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    await backend.write_stdin(process, "")
+    await backend.write_stdin(process, "", close=True)
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == ["", ""]
+    assert [payload["close"] for payload in payloads] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_failed_stdin_chunk_is_not_retried_and_stops_the_stream(stream_stack):
+    backend, _, _, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    worker.fail_stdin_at = 2
+    data = "abcd" * 4096  # 16384 bytes -> exactly two chunks
+    with pytest.raises(WorkerError):
+        await backend.write_stdin(process, data)
+    payloads = stdin_payloads(worker)
+    # The failing chunk was sent exactly once and no later chunk followed.
+    assert [payload["data"] for payload in payloads] == [data[:8192], data[8192:]]
+    assert not any(payload["close"] for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_unknown_stdin_receipt_stops_the_stream_without_repeating(stream_stack):
+    backend, _, _, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    worker.unknown_stdin_after = 2
+    data = "?" * (8192 * 3)
+    with pytest.raises(WorkerError):
+        await backend.write_stdin(process, data)
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == [data[:8192], data[8192:16384]]
+
+
+@pytest.mark.asyncio
+async def test_authorization_revocation_between_chunks_stops_the_stream(stream_stack):
+    backend, _, _, worker, authorizations = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    grants = 0
+
+    async def deny_third(request, action):
+        nonlocal grants
+        grants += 1
+        if grants > 2:
+            raise PermissionError("revoked")
+
+    backend.authorize = deny_third
+    data = "#" * (8192 * 3)
+    with pytest.raises(PermissionError, match="revoked"):
+        await backend.write_stdin(process, data)
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == [data[:8192], data[8192:16384]]
+    assert grants == 3
+    assert authorizations == [("operation", "submit")]
+
+
+@pytest.mark.asyncio
+async def test_process_exit_between_chunks_stops_the_stream(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+
+    async def exit_unit(payload):
+        execution = (await repository.get(process.process_id)).execution_id
+        runtime.states[execution] = "exited"
+        runtime.exit_codes[execution] = 0
+
+    worker.on_stdin = exit_unit
+    data = "-" * (8192 * 2)
+    with pytest.raises(ValueError, match="not running"):
+        await backend.write_stdin(process, data)
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == [data[:8192]]
+    record = await repository.get(process.process_id)
+    assert record.handle.state == "exited" and record.handle.exit_code == 0
+    assert (await backend.inspect(process)).state == "exited"
+
+
+@pytest.mark.asyncio
+async def test_cancel_between_chunks_stops_input_and_outruns_the_stream(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    process = await backend.submit(command(command="cat", wait_seconds=0))
+    worker.stdin_delay = 0.05
+    stopping = None
+
+    async def start_stop(payload):
+        nonlocal stopping
+        if stopping is None:
+            stopping = asyncio.create_task(backend.cancel(process))
+            await asyncio.sleep(0.01)
+
+    worker.on_stdin = start_stop
+    data = "!" * (8192 * 3)
+    with pytest.raises(ValueError, match="not running"):
+        await backend.write_stdin(process, data)
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == [data[:8192]]
+    assert stopping is not None
+    assert (await stopping).state == "cancelled"
+    assert runtime.cancel_calls == [(await repository.get(process.process_id)).execution_id]
+    assert (await backend.inspect(process)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_secret_input_keeps_explicit_deadline_and_per_chunk_authorization(stream_stack):
+    backend, repository, runtime, worker, authorizations = stream_stack
+    secrets = TrackingSecrets()
+    guarded = TerminalBackend(
+        repository, runtime, WorkerClient(worker), authorize=backend.authorize,
+        secrets=secrets,
+    )
+    request = command(command="cat", wait_seconds=0, timeout_seconds=None)
+    request = request.model_copy(update={
+        "authorization": request.authorization.model_copy(update={"secret_refs": ("api",)}),
+    })
+    with pytest.raises(ServiceError) as captured:
+        await guarded.submit(request)
+    assert captured.value.code == "permission_denied"
+    assert not repository.records and not worker.payloads
+
+    process = await guarded.submit(request.model_copy(update={"timeout_seconds": 2}))
+    assert secrets.launched_ids == [process.process_id]
+    await guarded.write_stdin(process, "中" * 6000, close=True)  # 18000 bytes -> 3 chunks
+    payloads = stdin_payloads(worker)
+    assert len(payloads) == 3
+    assert authorizations.count(("operation", "write_stdin")) == 3
+    assert payloads[-1]["close"] is True
+    assert secrets.finished_ids == []
+    assert sum(payload["action"] == "submit" for payload in worker.payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_untracked_secret_process_stops_on_next_input_without_delivery(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    secrets = TrackingSecrets()
+    guarded = TerminalBackend(
+        repository, runtime, WorkerClient(worker), authorize=backend.authorize,
+        secrets=secrets,
+    )
+    base = command(command="cat", wait_seconds=0)
+    request = base.model_copy(update={
+        "authorization": base.authorization.model_copy(update={"secret_refs": ("api",)}),
+    })
+    process = await guarded.submit(request)
+    secrets.launched_ids.clear()  # the monitoring reservation was lost across restart
+    with pytest.raises(ValueError, match="not running"):
+        await guarded.write_stdin(process, "%" * (8192 * 2))
+    assert stdin_payloads(worker) == []
+    assert secrets.finished_ids == [process.process_id]
+    record = await repository.get(process.process_id)
+    assert record.handle.state == "cancelled"
+    assert runtime.cancel_calls == [record.execution_id]
+
+
+@pytest.mark.asyncio
+async def test_submit_initial_stdin_sends_only_after_confirmed_fresh_attach(stream_stack):
+    backend, repository, runtime, worker, authorizations = stream_stack
+    request = command(command="cat", wait_seconds=0)
+
+    def body():
+        assert runtime.inspect_calls == 1
+        yield "start-"
+        yield "中😀"
+
+    process = await backend.submit(request, stdin_chunks=body())
+
+    payloads = stdin_payloads(worker)
+    assert [payload["data"] for payload in payloads] == ["start-", "中😀"]
+    assert [payload["close"] for payload in payloads] == [False, True]
+    assert all(payload["request_digest"] == command_digest(request) for payload in payloads)
+    assert runtime.inspect_calls >= 3  # launch confirmation and each chunk check
+    assert authorizations.count((request.operation_id, "write_stdin")) == 2
+    assert (await repository.get(process.process_id)).handle.state == "running"
+    assert runtime.prepared == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_submit_never_consumes_initial_stdin_iterator(stream_stack):
+    backend, _, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    first = await backend.submit(request, stdin_chunks=["once"])
+
+    def forbidden():
+        raise AssertionError("duplicate request consumed stdin iterator")
+        yield "unreachable"
+
+    duplicate = await backend.submit(request, stdin_chunks=forbidden())
+    assert duplicate.process_id == first.process_id
+    assert [payload["data"] for payload in stdin_payloads(worker)] == ["once"]
+    assert runtime.prepared == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_stdin_failure_cancels_execution_and_records_failed(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    worker.fail_stdin_at = 2
+    body = "x" * (8192 * 3)
+
+    with pytest.raises(WorkerError):
+        await backend.submit(request, stdin_chunks=[body])
+
+    record = next(iter(repository.records.values()))
+    assert [payload["data"] for payload in stdin_payloads(worker)] == [
+        body[:8192], body[8192:16384],
+    ]
+    assert runtime.cancel_calls == [record.execution_id]
+    assert record.handle.state == "failed"
+    assert sum(payload["action"] == "submit" for payload in worker.payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_stdin_revocation_cancels_execution(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    grants = 0
+
+    async def revoke_after_first_chunk(bound_request, action):
+        nonlocal grants
+        if action == "write_stdin":
+            grants += 1
+            if grants == 2:
+                raise PermissionError("revoked")
+
+    backend.authorize = revoke_after_first_chunk
+    body = "r" * (8192 * 3)
+    with pytest.raises(PermissionError, match="revoked"):
+        await backend.submit(request, stdin_chunks=[body])
+
+    record = next(iter(repository.records.values()))
+    assert [payload["data"] for payload in stdin_payloads(worker)] == [body[:8192]]
+    assert runtime.cancel_calls == [record.execution_id]
+    assert record.handle.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initial_stdin_stops_iteration_and_cancels_execution(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block_first_chunk(payload):
+        entered.set()
+        await release.wait()
+
+    worker.on_stdin = block_first_chunk
+    consumed = []
+
+    def body():
+        consumed.append("first")
+        yield "first"
+        consumed.append("second")
+        yield "second"
+
+    task = asyncio.create_task(backend.submit(request, stdin_chunks=body()))
+    await entered.wait()
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record = next(iter(repository.records.values()))
+    assert consumed == ["first", "second"]  # one-item lookahead only
+    assert [payload["data"] for payload in stdin_payloads(worker)] == ["first"]
+    assert runtime.cancel_calls == [record.execution_id]
+    assert record.handle.state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_initial_stdin_cancel_without_runtime_proof_records_unknown(stream_stack):
+    backend, repository, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    runtime.allow_cancel = False
+    worker.fail_stdin_at = 1
+
+    with pytest.raises(WorkerError):
+        await backend.submit(request, stdin_chunks=["input"])
+
+    record = next(iter(repository.records.values()))
+    assert runtime.cancel_calls == [record.execution_id]
+    assert record.handle.state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_initial_stdin_close_and_existing_inspect_result(stream_stack):
+    backend, _, runtime, worker, _ = stream_stack
+    request = command(command="cat", wait_seconds=0)
+    process = await backend.submit(request, stdin_chunks=[])
+    payloads = stdin_payloads(worker)
+    assert len(payloads) == 1 and payloads[0]["data"] == "" and payloads[0]["close"]
+    assert (await backend.inspect(process)).state == "running"
+
+    def forbidden():
+        raise AssertionError("existing result must not consume stdin")
+        yield "unreachable"
+
+    duplicate = await backend.submit(request, stdin_chunks=forbidden())
+    assert duplicate == process
+    assert len(stdin_payloads(worker)) == 1
+    assert runtime.prepared == 1

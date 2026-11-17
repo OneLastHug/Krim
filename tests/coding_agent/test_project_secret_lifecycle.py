@@ -47,7 +47,8 @@ def fixture_binding():
     request = CommandRequest(operation_id="operation", environment=environment,
                              ownership=RunOwnership(owner_id="owner", session_id="session",
                                                     run_id="run"),
-                             authorization=ref, command="fixture", wait_seconds=0)
+                             authorization=ref, command="fixture", timeout_seconds=60,
+                             wait_seconds=0)
     intent = command_intent(request, workspace_id="workspace")
     request = request.model_copy(update={"authorization": ref.model_copy(
         update={"arguments_digest": intent.digest(ref)},

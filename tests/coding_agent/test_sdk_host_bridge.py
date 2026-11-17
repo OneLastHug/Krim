@@ -115,6 +115,28 @@ async def test_host_failures_still_precede_unapproved_side_effects(scenario: str
     assert harness.counts['write'] == (1 if scenario == 'step_budget' else 0)
 
 
+def test_sdk_tool_declarations_validate_the_catalog_at_batch_boundaries(monkeypatch):
+    harness = setup()
+    adapter = harness.adapter()
+    registry = adapter.executor.registry
+    original = registry._checked_schemas
+    checks = []
+
+    def checked():
+        checks.append(True)
+        return original()
+
+    monkeypatch.setattr(registry, "_checked_schemas", checked)
+    declared = agent_tools(registry)
+    assert [tool.name for tool in declared] == ["read", "write"]
+    assert len(checks) == 2
+    checks.clear()
+    rebuilt = harness.adapter()
+    assert rebuilt.tool_names == {"read", "write"}
+    assert len(checks) == 2
+    assert rebuilt.executor is adapter.executor
+
+
 def test_legacy_messages_roundtrip_retains_tool_pairing() -> None:
     history = [Message(role='user', content='go'), Message(role='assistant', content='checking',
                tool_calls=[{'kind': 'tool_call', 'id': 'wire', 'name': 'read',

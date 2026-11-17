@@ -280,15 +280,15 @@ def test_runtime_config_rejects_untrusted_file_links_and_permissions(tmp_path):
         ToolRuntimeConfig.load(hard, environment={"KRIM_AGENT_WEB_API_KEY": ""})
 
 
-def test_registry_capacity_is_a_stable_service_error():
+def test_registry_accepts_large_catalog_and_rejects_duplicate_names():
     from dataclasses import replace
 
     base = builtin_registry()
     spec = next(item for item, _ in base._frozen)
-    specs = tuple(replace(spec, name=f"tool_{index}") for index in range(17))
-    with pytest.raises(ServiceError) as raised:
-        ToolRegistry(specs)
-    assert (raised.value.code, raised.value.status) == ("tool_limit", 422)
+    specs = tuple(replace(spec, name=f"tool_{index}") for index in range(70))
+    assert len(ToolRegistry(specs).schemas()) == 70
+    with pytest.raises(ValueError, match="工具名称冲突"):
+        ToolRegistry(specs + specs[:1])
 
 
 async def test_runtime_config_injects_pinned_policy_for_http_mcp(monkeypatch):

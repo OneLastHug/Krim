@@ -29,6 +29,7 @@ from krim_agent.storage.development_context import DevelopmentCompactionSource
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.executor import Approve, ToolContext, ToolExecutor
 from krim_agent.tools.pipeline import Scope
+from krim_agent.tools.session import SessionToolScope
 
 from .contracts import ExecutionBudget
 from .engine import AgentLoop, ApprovalRequest, Parked, _no_inprocess_wait
@@ -80,6 +81,8 @@ class DevelopmentSDKLoop(AgentLoop):
         execution_budget: ExecutionBudget | None = None,
         resume: SDKResume | None = None,
         executor: ToolExecutor | None = None,
+        run_tools: Any | None = None,
+        session_scope: SessionToolScope | None = None,
     ) -> None:
         if execution_budget is None:
             raise ServiceError("execution_error")
@@ -148,14 +151,7 @@ class DevelopmentSDKLoop(AgentLoop):
             workspace=development_context is not None,
             execution_budget=execution_budget,
         )
-        request_limit = min(
-            self.settings.max_request_bytes,
-            getattr(
-                getattr(self.provider, "config", None),
-                "max_request_bytes",
-                self.settings.max_request_bytes,
-            ),
-        )
+        request_limit = self.settings.request_capacity(self.provider)
         history = None
         legacy_context = (snapshot.session_context
                           if isinstance(snapshot.session_context, SessionContext) else None)
@@ -175,7 +171,22 @@ class DevelopmentSDKLoop(AgentLoop):
                 request_limit,
                 provider_identity,
             )
-            history = CompactorHistory(compactor, run_id)
+            boundary = None
+            if self.context_service is not None:
+                if session_scope is None and self.session_tool_host is not None:
+                    session_scope = await self.session_tool_host.by_run(
+                        run_id, assert_target_current,
+                    )
+                if session_scope is not None:
+                    boundary = self.context_service.boundary(
+                        session_scope.actor, session_scope.workspace_id,
+                        session_scope.session_id, run_id, scope=session_scope,
+                    )
+            history = CompactorHistory(
+                compactor, run_id, boundary=boundary,
+                live_memory=(boundary is not None and self.context_service is not None
+                             and self.context_service.snapshots is not None),
+            )
         provider = HostModelProvider(
             stepper,
             active.registry,
@@ -184,7 +195,10 @@ class DevelopmentSDKLoop(AgentLoop):
             request_bytes=request_limit,
             context_policy=context_policy,
             history=history,
+            run_tools=run_tools,
             host_media=(
+                self.session_media.for_run(run_id, assert_target_current)
+                if self.session_media is not None else
                 self.development_media_for_run(run_id)
                 if self.development_media_for_run is not None
                 else None

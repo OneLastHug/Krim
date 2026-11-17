@@ -51,20 +51,21 @@ class OpenAICompatibleConfig(StrictModel):
     model: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
     wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
-    max_output_tokens: int = Field(default=512, ge=1, le=4096)
+    # Per-request generation budget, not a cumulative agent output quota.
+    max_output_tokens: int = Field(default=512, ge=1)
     reasoning_effort: Literal["xhigh"] | None = None
     thinking: Literal["disabled"] | None = None
     connect_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
     write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
     pool_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
-    max_request_bytes: int = Field(default=32768, ge=256, le=1048576)
+    max_request_bytes: int = Field(default=32768, ge=256)
     allow_images: bool = Field(default=False, strict=True)
-    max_response_bytes: int = Field(default=131072, ge=256, le=1048576)
-    max_event_bytes: int = Field(default=16384, ge=128, le=1048576)
-    max_events: int = Field(default=1024, ge=1, le=16384)
-    max_arguments_bytes: int = Field(default=4096, ge=2, le=65536)
-    max_tool_calls: int = Field(default=1, ge=1, le=4, strict=True)
+    max_response_bytes: int | None = Field(default=None, ge=1)
+    max_event_bytes: int | None = Field(default=None, ge=1)
+    max_events: int | None = Field(default=None, ge=1)
+    max_arguments_bytes: int | None = Field(default=None, ge=2)
+    max_tool_calls: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("base_url")
     @classmethod
@@ -116,10 +117,10 @@ class OpenAICompatibleConfig(StrictModel):
 
     @model_validator(mode="after")
     def bounds(self) -> Self:
-        if (
-            self.max_event_bytes > self.max_response_bytes
-            or self.max_arguments_bytes > self.max_event_bytes
-        ):
+        # Arguments may span many events; a finite aggregate argument bound need
+        # not fit one event. Only two explicitly finite wire bounds are related.
+        if (self.max_event_bytes is not None and self.max_response_bytes is not None
+                and self.max_event_bytes > self.max_response_bytes):
             raise ValueError("Provider容量关系无效")
         return self
 
@@ -162,6 +163,10 @@ class OpenAICompatibleConfig(StrictModel):
                 "max_tool_calls",
             ):
                 if name in values:
+                    if (name not in {"max_output_tokens", "max_request_bytes"}
+                            and values[name].lower() in {"none", "unlimited"}):
+                        arguments[name] = None
+                        continue
                     if re.fullmatch(r"[0-9]+", values[name]) is None:
                         raise ValueError
                     arguments[name] = int(values[name])
@@ -188,7 +193,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
 
     def event_limit() -> ProviderError:
         logging.getLogger(__name__).warning(
-            "Provider SSE limit: event_bytes=%d/%d events=%d/%d response_bytes=%d/%d",
+            "Provider SSE limit: event_bytes=%d/%s events=%d/%s response_bytes=%d/%s",
             event_size,
             config.max_event_bytes,
             count,
@@ -215,7 +220,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
             return None
         if has_frame:
             count += 1
-            if count > config.max_events:
+            if config.max_events is not None and count > config.max_events:
                 raise event_limit()
         try:
             payload = b"\n".join(lines).decode("utf-8", errors="strict") if lines else None
@@ -227,14 +232,14 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
 
     async for chunk in response.aiter_raw():
         response_size += len(chunk)
-        if response_size > config.max_response_bytes:
+        if config.max_response_bytes is not None and response_size > config.max_response_bytes:
             raise ProviderError("provider_response_limit")
         for byte in chunk:
             if pending_cr:
                 pending_cr = False
                 if byte == 10:
                     event_size += 1
-                    if event_size > config.max_event_bytes:
+                    if config.max_event_bytes is not None and event_size > config.max_event_bytes:
                         raise event_limit()
                     payload = finish_line()
                     if payload is not None:
@@ -244,7 +249,7 @@ async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) ->
                 if payload is not None:
                     yield payload
             event_size += 1
-            if event_size > config.max_event_bytes:
+            if config.max_event_bytes is not None and event_size > config.max_event_bytes:
                 raise event_limit()
             if byte == 13:
                 pending_cr = True
@@ -289,7 +294,8 @@ class _ToolBuffer:
                     setattr(self, field, current + value)
         if len(self.identifier) > 128 or len(self.name) > 64:
             raise ProviderError("provider_protocol")
-        if len(self.arguments.encode()) > config.max_arguments_bytes:
+        if (config.max_arguments_bytes is not None
+                and len(self.arguments.encode()) > config.max_arguments_bytes):
             raise ProviderError("provider_tool_arguments")
 
     def collect(self) -> ModelToolCall:
@@ -418,7 +424,7 @@ def _sdk_messages(messages: Sequence[Message], *, allow_images: bool = False) ->
                 parts.extend(
                     FilePart(
                         data=payload,
-                        media_type="image/png",
+                        media_type=image.media_type,
                         filename=image.filename,
                     )
                     for image, payload in zip(
@@ -444,7 +450,7 @@ class _StreamBoundary:
     """保留 Krim 的资源与完整性约束；模型事件的解析和聚合交给 SDK。"""
 
     config: OpenAICompatibleConfig
-    max_tool_calls: int
+    max_tool_calls: int | None
     calls: dict[int, _ToolBuffer] = dataclass_field(default_factory=dict)
     sdk_ids: dict[int, str] = dataclass_field(default_factory=dict)
     snapshots: list[TokenUsage] = dataclass_field(default_factory=list)
@@ -511,7 +517,7 @@ class _StreamBoundary:
             if not isinstance(raw, dict):
                 raise ProviderError("provider_protocol")
             index = raw.get("index")
-            if type(index) is not int or not 0 <= index < self.config.max_response_bytes:
+            if type(index) is not int or index < 0:
                 raise ProviderError("provider_protocol")
             buffer = self.calls.setdefault(index, _ToolBuffer())
             buffer.append(raw, self.config)
@@ -539,7 +545,7 @@ class _StreamBoundary:
         return encoded(event)
 
     def complete(self) -> list[ModelToolCall]:
-        if sorted(self.calls) != list(range(len(self.calls))):
+        if any(index != expected for expected, index in enumerate(sorted(self.calls))):
             raise ProviderError("provider_protocol")
         if not self.done or self.finish is None:
             raise ProviderError("provider_incomplete_stream")
@@ -548,7 +554,7 @@ class _StreamBoundary:
         complete = [self.calls[index].collect() for index in sorted(self.calls)]
         if len({call.id for call in complete}) != len(complete):
             raise ProviderError("provider_protocol")
-        if len(complete) > self.max_tool_calls:
+        if self.max_tool_calls is not None and len(complete) > self.max_tool_calls:
             raise ProviderError("tool_limit")
         return complete
 
@@ -558,7 +564,7 @@ class _ResponsesBoundary:
     """Bound Responses SSE; SDK still owns message conversion and tool hydration."""
 
     config: OpenAICompatibleConfig
-    max_tool_calls: int
+    max_tool_calls: int | None
     calls: dict[str, _ToolBuffer] = dataclass_field(default_factory=dict)
     finished: set[str] = dataclass_field(default_factory=set)
     indices: dict[int, str] = dataclass_field(default_factory=dict)
@@ -613,7 +619,7 @@ class _ResponsesBoundary:
                 key, buffer = self._item(item)
                 if key in self.calls:
                     raise ProviderError("provider_protocol")
-                if len(self.calls) >= self.max_tool_calls:
+                if self.max_tool_calls is not None and len(self.calls) >= self.max_tool_calls:
                     raise ProviderError("tool_limit")
                 index = event.get("output_index")
                 if type(index) is not int or index < 0 or index in self.indices:
@@ -636,7 +642,7 @@ class _ResponsesBoundary:
             delta_buffer = self.calls[delta_key]
             if delta_key in self.finished:
                 raise ProviderError("provider_protocol")
-            if kind.endswith(".delta"):
+            if kind == "response.function_call_arguments.delta":
                 delta = event.get("delta")
                 if not isinstance(delta, str):
                     raise ProviderError("provider_protocol")
@@ -755,8 +761,12 @@ class _GuardedStream(httpx.AsyncByteStream):
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, config: OpenAICompatibleConfig, *, max_connections: int = 4) -> None:
-        if type(max_connections) is not int or not 1 <= max_connections <= 16:
+    def __init__(
+        self, config: OpenAICompatibleConfig, *, max_connections: int | None = None,
+    ) -> None:
+        if max_connections is not None and (
+            type(max_connections) is not int or max_connections < 1
+        ):
             raise ProviderError("provider_config", 422)
         # 拒绝绕过Pydantic构造/修改后的配置；错误不暴露输入。
         try:
@@ -925,7 +935,11 @@ class OpenAICompatibleProvider:
         result: dict[str, JsonValue] = self.config.model_dump(
             mode="json", exclude={"api_key", "base_url", "model"}, exclude_none=True
         )
-        # Preserve the old execution fingerprint for text-only default configs.
+        # Explicit None binds the absence of provider aggregate quotas on resume.
+        result.update({name: getattr(self.config, name) for name in (
+            "max_response_bytes", "max_event_bytes", "max_events",
+            "max_arguments_bytes", "max_tool_calls",
+        )})
         if not self.config.allow_images:
             result.pop("allow_images", None)
         if self.config.wire_api == "chat_completions":
@@ -970,7 +984,8 @@ class OpenAICompatibleProvider:
             raise ServiceError("target_binding_changed")
         max_tool_calls = self.config.max_tool_calls
         if budget is not None:
-            max_tool_calls = min(max_tool_calls, budget.max_tool_calls_this_step)
+            max_tool_calls = (budget.max_tool_calls_this_step if max_tool_calls is None
+                              else min(max_tool_calls, budget.max_tool_calls_this_step))
         responses = self.config.wire_api == "responses"
         boundary = (
             _ResponsesBoundary(self.config, max_tool_calls)
@@ -1004,7 +1019,7 @@ class OpenAICompatibleProvider:
                 )
                 for tool in tools
             ]
-            if max_tool_calls
+            if max_tool_calls is None or max_tool_calls > 0
             else []
         )
         if declarations and max_tool_calls == 1:

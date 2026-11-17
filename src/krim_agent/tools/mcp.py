@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from collections import Counter
 from copy import deepcopy
 from typing import Any, cast
 
@@ -50,16 +51,42 @@ async def _without_invocation(arguments: BaseModel) -> JsonValue:
     raise ServiceError("tool_binding_changed")
 
 
-def mcp_tools(connection: MCPConnection) -> tuple[ToolSpec, ...]:
+def mcp_tools(
+    connection: MCPConnection, *, namespace: str | None = None,
+) -> tuple[ToolSpec, ...]:
     config = connection.config
+    if namespace is not None and re.fullmatch(r"[a-z][a-z0-9_]*", namespace) is None:
+        raise ValueError("invalid MCP tool namespace")
+
+    def normalized(remote: str) -> str:
+        prefix = namespace + "__" if namespace is not None else ""
+        return re.sub(r"[^a-z0-9_]", "_", (prefix + config.name + "__" + remote).lower())
+
     selected = set(config.selected_tools)
+    if any(len(remote) > 128 or any(ord(char) < 32 for char in remote) for remote in selected):
+        raise ServiceError("invalid_input", 422)
+    normalized_names = Counter(normalized(remote) for remote in selected)
+    public_names = {remote: normalized(remote) for remote in selected}
+    needs_hash = {remote for remote, name in public_names.items()
+                  if len(name) > 64 or normalized_names[name] > 1}
+    used = {name for remote, name in public_names.items() if remote not in needs_hash}
+    for remote in sorted(needs_hash):
+        base = public_names[remote]
+        material = {"namespace": namespace, "server": config.name, "tool": remote}
+        candidate = base[:47] + "_" + fingerprint(material)[:16]
+        nonce = 0
+        while candidate in used:
+            nonce += 1
+            candidate = base[:47] + "_" + fingerprint({**material, "collision": nonce})[:16]
+        public_names[remote] = candidate
+        used.add(candidate)
     available = {item.name: item for item in connection.tools}
     if selected - set(available):
         raise ServiceError("unknown_tool")
     result: list[ToolSpec] = []
     for remote in config.selected_tools:
         item = available[remote]
-        name = (config.name + "__" + remote).replace("-", "_").replace(".", "_").lower()
+        name = public_names[remote]
         if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) is None:
             raise ServiceError("invalid_input", 422)
         parameters = arguments_model("MCP_" + name, deepcopy(item.input_schema))

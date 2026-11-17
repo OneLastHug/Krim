@@ -86,13 +86,19 @@ class QuotaRetirement:
     def preview(
         self, environment_id: str, limits: dict[str, Any], *, kernel_zero: bool = False
     ) -> dict[str, Any]:
-        """无副作用预览：保护根、写者、节点容量与内核实际值分开返回；只落盘计划。"""
+        """无副作用预览：保护根、写者、节点容量与内核实际值分开返回；只落盘计划。
+
+        unlimited目标必须清0旧检查点区限额（数据区由data_grow步骤写0/0），因此
+        kernel_zero对unlimited策略强制生效；有限额目标的默认keep语义不变。
+        """
         environment_id = internal_id(environment_id)
         target = QuotaChanges._limits(limits)
         normalized = QuotaChanges._normalized(target)
-        if normalized["checkpoint_bytes"] != 0:
+        if target.checkpoint_bytes != 0:
             # 本模块只收尾C=0目标；开启检查点的调整仍走QuotaChanges。
             raise ServiceError("invalid_input", 422)
+        if target.resource_policy == "unlimited":
+            kernel_zero = True
         snapshot = self._port.inspect(environment_id)
         record = _map(snapshot.get("record"))
         if record.get("checkpoint_number") is None:

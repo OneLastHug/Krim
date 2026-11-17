@@ -24,15 +24,16 @@ class SessionCreate(StrictModel):
 
 class TurnRequest(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    text: str = Field(min_length=1, max_length=32768)
+    text: str = Field(min_length=1)
     expected_revision: int = Field(ge=0)
     completion: SandboxCompletion | None = None
 
     @field_validator("text")
     @classmethod
-    def bounded(cls, text: str) -> str:
-        if not text.strip() or len(text.encode()) > 32768:
-            raise ValueError("输入为空或超限")
+    def nonempty(cls, text: str) -> str:
+        if not text.strip():
+            raise ValueError("输入为空")
+        text.encode("utf-8")
         return text
 
 

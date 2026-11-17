@@ -16,8 +16,9 @@ GIB = 1024**3
 
 
 def test_default_limits_match_plan_baseline():
-    """默认额度对应方案基线：环境 5 GiB/10 万 inode，检查点 500 MiB/20 个/7 天，冻结未启用。"""
+    """默认额度对应方案基线：unlimited资源策略；数值字段保留旧默认作账面与能力预算。"""
     limits = QuotaLimits()
+    assert limits.resource_policy == "unlimited"
     assert limits.environment_bytes == 5 * GIB
     assert limits.environment_inodes == 100_000
     assert limits.checkpoint_bytes == 500 * MIB
@@ -175,31 +176,40 @@ def test_unknown_fields_rejected():
 
 
 def test_checkpoint_budget_must_leave_room_in_environment():
-    """检查点预算计入环境总量：超过一半拒绝，正好一半是允许的边界。"""
+    """limited 下检查点预算计入环境总量：超过一半拒绝，正好一半是允许的边界；
+    unlimited 没有容量天花板，比例校验不适用（见 test_unlimited_storage.py）。"""
     with pytest.raises(ValidationError):
-        QuotaLimits(environment_bytes=1 * GIB, checkpoint_bytes=512 * MIB + 1)
-    edge = QuotaLimits(environment_bytes=1 * GIB, checkpoint_bytes=512 * MIB)
+        QuotaLimits(
+            resource_policy="limited", environment_bytes=1 * GIB, checkpoint_bytes=512 * MIB + 1
+        )
+    edge = QuotaLimits(
+        resource_policy="limited", environment_bytes=1 * GIB, checkpoint_bytes=512 * MIB
+    )
     assert edge.checkpoint_bytes == 512 * MIB
 
 
 def test_merged_result_is_validated_as_a_whole():
     """模板与账号覆盖合并后整体校验：单项合法的组合仍可能非法。"""
     policy = QuotaPolicy(
-        defaults=QuotaLimits(environment_bytes=1 * GIB),
+        defaults=QuotaLimits(resource_policy="limited", environment_bytes=1 * GIB),
         profiles={"big": QuotaOverrides(checkpoint_bytes=600 * MIB)},
     )
     with pytest.raises(ValidationError):
         policy.resolve("big")
     with pytest.raises(ValidationError):
-        QuotaPolicy().resolve(overrides={"checkpoint_bytes": 3 * GIB})
+        QuotaPolicy(defaults=QuotaLimits(resource_policy="limited")).resolve(
+            overrides={"checkpoint_bytes": 3 * GIB}
+        )
 
 
 def test_frozen_budget_is_independent_of_environment():
-    """冻结预算独立于环境总量：大于环境总量也合法；检查点预算仍受环境约束。"""
+    """冻结预算独立于环境总量：大于环境总量也合法；limited 下检查点预算仍受环境约束。"""
     limits = QuotaLimits(environment_bytes=1 * GIB, checkpoint_bytes=0, frozen_bytes=100 * GIB)
     assert limits.frozen_bytes == 100 * GIB
     with pytest.raises(ValidationError):
-        QuotaLimits(environment_bytes=1 * GIB, checkpoint_bytes=600 * MIB)
+        QuotaLimits(
+            resource_policy="limited", environment_bytes=1 * GIB, checkpoint_bytes=600 * MIB
+        )
 
 
 def test_unknown_profile_rejected():
@@ -252,8 +262,13 @@ def test_usage_rejects_non_counts(value):
 
 
 def test_evaluate_reports_only_exceeded_fields_at_exact_boundary():
-    """正好用满不算超额；超 1 即超额，报告项按固定顺序给出 used 与 limit。"""
+    """正好用满不算超额；超 1 即超额，报告项按固定顺序给出 used 与 limit。
+
+    显式 limited 继续覆盖旧的有限额全量协议；unlimited 的评估规则见
+    test_unlimited_storage.py。
+    """
     limits = QuotaLimits(
+        resource_policy="limited",
         environment_bytes=1 * GIB,
         environment_inodes=1000,
         checkpoint_bytes=256 * MIB,
@@ -276,7 +291,9 @@ def test_evaluate_reports_only_exceeded_fields_at_exact_boundary():
 
 def test_evaluate_keeps_frozen_separate_from_environment():
     """冻结用量不并入环境用量；冻结启用时只按自身预算判断。"""
-    enabled = QuotaLimits(environment_bytes=1 * GIB, frozen_bytes=1 * GIB)
+    enabled = QuotaLimits(
+        resource_policy="limited", environment_bytes=1 * GIB, frozen_bytes=1 * GIB
+    )
     usage = QuotaUsage(environment_bytes=1 * GIB, checkpoint_bytes=256 * MIB, frozen_bytes=1 * GIB)
     # 环境与检查点正好用满环境预算，冻结也正好用满：全部未超额
     assert enabled.evaluate(usage) == ()
@@ -286,14 +303,19 @@ def test_evaluate_keeps_frozen_separate_from_environment():
 
 
 def test_evaluate_reports_any_frozen_usage_when_disabled():
-    """frozen_bytes=None 表示冻结能力未配置：任何冻结用量都按超额报告，limit 视为 0。"""
+    """frozen_bytes=None 表示冻结能力未配置：任何冻结用量都按超额报告，limit 视为 0。
+
+    该禁用规则在 unlimited 策略下同样生效（默认构造即 unlimited）。
+    """
     usage = QuotaUsage(environment_bytes=100, frozen_bytes=5)
     assert QuotaLimits().evaluate(usage) == (QuotaOverage(field="frozen_bytes", used=5, limit=0),)
 
 
 def test_usage_above_lowered_quota_is_representable():
     """额度调低到当前用量以下时，用量对象仍然合法；评估只报告超额，不触发删除。"""
-    limits = QuotaLimits(environment_bytes=1 * GIB, checkpoint_count=2)
+    limits = QuotaLimits(
+        resource_policy="limited", environment_bytes=1 * GIB, checkpoint_count=2
+    )
     usage = QuotaUsage(environment_bytes=4 * GIB, checkpoint_count=9)
     assert limits.evaluate(usage) == (
         QuotaOverage(field="environment_bytes", used=4 * GIB, limit=1 * GIB),

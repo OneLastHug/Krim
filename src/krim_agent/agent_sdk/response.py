@@ -1,4 +1,4 @@
-"""A bounded completion gate around a real SDK provider, not an agent loop."""
+"""A complete-response gate around a real SDK provider, not an agent loop."""
 
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ class CompleteResponseProvider(ai.Provider):
     _prepare_input: (
         Callable[[list[sdk_messages.Message]], Awaitable[list[sdk_messages.Message]]] | None
     ) = PrivateAttr(default=None)
-    _max_events: int = PrivateAttr(default=4096)
-    _max_bytes: int = PrivateAttr(default=1_048_576)
+    _max_events: int | None = PrivateAttr(default=None)
+    _max_bytes: int | None = PrivateAttr(default=None)
 
     def __init__(
         self,
@@ -47,10 +47,13 @@ class CompleteResponseProvider(ai.Provider):
         guard: Callable[[], Awaitable[None]] | None = None,
         prepare_input: Callable[[list[sdk_messages.Message]],
                                 Awaitable[list[sdk_messages.Message]]] | None = None,
-        max_events: int = 4096,
-        max_bytes: int = 1_048_576,
+        max_events: int | None = None,
+        max_bytes: int | None = None,
     ) -> None:
         super().__init__()
+        if any(value is not None and (type(value) is not int or value < 1)
+               for value in (max_events, max_bytes)):
+            raise ValueError("invalid response capacity")
         self._source, self._prepare = source, prepare
         self._commit, self._guard = commit, guard
         self._prepare_input = prepare_input
@@ -81,8 +84,9 @@ class CompleteResponseProvider(ai.Provider):
                 # SDK snapshots accumulate the entire response. Count payloads,
                 # not the repeated hydrated message, to keep the bound linear.
                 size += len(event.model_dump_json(exclude={"message"}).encode())
-                if len(buffered) >= self._max_events or size > self._max_bytes:
-                    raise IncompleteTurn("response exceeds probe limit")
+                if (self._max_events is not None and len(buffered) >= self._max_events
+                        or self._max_bytes is not None and size > self._max_bytes):
+                    raise IncompleteTurn("response exceeds configured capacity")
                 if isinstance(event, events.ToolStart):
                     starts.append(event.tool_call_id)
                 elif isinstance(event, events.ToolEnd):

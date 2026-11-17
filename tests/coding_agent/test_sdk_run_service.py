@@ -24,7 +24,10 @@ async def application(path: Path, *, approval: bool):
     harness = setup(approval=approval)
     executor = harness.adapter().executor
     provider = HostScript()
-    settings = Settings(run_timeout=30, max_request_bytes=65536)
+    settings = Settings(
+        run_timeout=30, max_request_bytes=65536, history_compaction=False,
+        development_history_compaction=False,
+    )
     cleanup = []
 
     async def scope(run_id, check, budget):

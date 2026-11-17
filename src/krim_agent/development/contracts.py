@@ -57,7 +57,7 @@ class CommandRequest(StrictModel):
     cwd: str = Field(default=".", min_length=1, max_length=4096)
     pty: bool = False
     lifecycle: Lifecycle = "run"
-    timeout_seconds: float | None = Field(default=60.0, gt=0, le=86400)
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     wait_seconds: float = Field(default=1.0, ge=0, le=30)
 
     @field_validator("command")
@@ -83,8 +83,6 @@ class CommandRequest(StrictModel):
             raise ValueError("authorization and environment project differ")
         if self.ownership.owner_id != self.environment.owner_id:
             raise ValueError("run and environment owner differ")
-        if self.lifecycle == "run" and self.timeout_seconds is None:
-            raise ValueError("run commands require a deadline")
         return self
 
 

@@ -33,7 +33,7 @@ class _FakeSession:
         self.closed = True
 
     async def initialize(self):
-        return SimpleNamespace()
+        return SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
 
     async def list_tools(self, cursor=None):
         if not self.pages:
@@ -269,7 +269,8 @@ async def test_mock_discovery_rejects_cursor_cycles_and_unknown_selection(
     await connection.close()
 
 
-async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success(monkeypatch):
+async def test_mock_call_errors_are_not_returned_as_success_and_large_output_completes(monkeypatch):
+    oversized = {"value": "x" * (64 * 1024 + 17)}
     _install_fake_sdk(
         monkeypatch,
         pages=[_page(_tool("echo"))],
@@ -277,11 +278,7 @@ async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success
             SimpleNamespace(
                 isError=True, structuredContent={"secret": "server detail"}, content=[]
             ),
-            SimpleNamespace(
-                isError=False,
-                structuredContent={"value": "x" * (64 * 1024)},
-                content=[],
-            ),
+            SimpleNamespace(isError=False, structuredContent=oversized, content=[]),
         ],
     )
     connection = MCPConnection(_stdio_config())
@@ -292,10 +289,7 @@ async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success
         assert error.value.status == 502
         assert error.value.code == "mcp_tool_failed"
         assert "server detail" not in str(error.value)
-        with pytest.raises(ServiceError) as oversized:
-            await connection.call_tool("echo", {})
-        assert oversized.value.status == 502
-        assert oversized.value.code == "mcp_output_too_large"
+        assert await connection.call_tool("echo", {}) == oversized
     finally:
         await connection.close()
 

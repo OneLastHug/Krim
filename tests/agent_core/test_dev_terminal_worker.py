@@ -70,6 +70,30 @@ async def test_real_shell_cwd_exit_and_stdout_stderr(worker):
 
 
 @pytest.mark.asyncio
+async def test_real_process_large_output_is_preserved_and_paged(worker):
+    import hashlib
+
+    # A few MiB exceed the old default log capacity without stressing the host.
+    size = 3 * 1024 * 1024 + 17
+    submit = payload(f"/usr/bin/python3 -I -c 'import os; os.write(1, b\"x\" * {size})'",
+                     timeout_seconds=None)
+    await worker.dispatch(submit)
+    assert (await done(worker, submit))["exit_code"] == 0
+    cursor = 0
+    digest = hashlib.sha256()
+    while True:
+        page = await worker.dispatch(action(submit, "output", cursor=cursor))
+        assert not page["truncated"]
+        digest.update(page["text"].encode())
+        assert page["next_cursor"] > cursor
+        cursor = page["next_cursor"]
+        if page["eof"]:
+            break
+    assert cursor == size and digest.hexdigest() == hashlib.sha256(b"x" * size).hexdigest()
+    assert worker.processes[submit["process_id"]].log.start == 0
+
+
+@pytest.mark.asyncio
 async def test_pipe_stdin_and_eof(worker):
     submit = payload("cat; printf eof")
     await worker.dispatch(submit)
@@ -146,6 +170,72 @@ async def test_duplicate_process_never_executes_again_and_drift_rejected(worker)
         await worker.dispatch(payload("echo twice >> effect"))
     with pytest.raises(ValueError, match="binding"):
         await worker.dispatch({**action(submit, "output", cursor=0), "request_digest": "0" * 64})
+
+
+@pytest.mark.asyncio
+async def test_run_without_deadline_retains_control_and_cancel(worker):
+    submit = payload("printf ready; cat; printf finished", timeout_seconds=None)
+    await worker.dispatch(submit)
+    await output_contains(worker, submit, "ready")
+    await worker.dispatch(action(submit, "stdin", data="中🙂\n", close=True))
+    assert (await done(worker, submit))["exit_code"] == 0
+    assert (await worker.dispatch(action(submit, "output", cursor=0)))["text"] == (
+        "ready中🙂\nfinished"
+    )
+    second = payload("printf cancellable; sleep 30", "no-deadline", timeout_seconds=None)
+    await worker.dispatch(second)
+    await output_contains(worker, second, "cancellable")
+    assert (await worker.dispatch(action(second, "cancel")))["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_continuous_output_without_deadline_remains_cancellable(worker):
+    submit = payload("while :; do printf 'continuous output\\n'; done", timeout_seconds=None)
+    await worker.dispatch(submit)
+    await output_contains(worker, submit, "continuous output")
+    stopped = await asyncio.wait_for(worker.dispatch(action(submit, "cancel")), 5)
+    assert stopped["state"] == "cancelled"
+    page = await worker.dispatch(action(submit, "output", cursor=0))
+    assert not page["truncated"] and page["next_cursor"] > 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_deadline_over_one_day_is_valid(worker):
+    submit = payload("printf finished", timeout_seconds=172800)
+    await worker.dispatch(submit)
+    assert (await done(worker, submit))["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deadline_value", [0, -1, float("inf"), float("nan"), True, "60"])
+async def test_deadline_validation_remains_strict(worker, deadline_value):
+    with pytest.raises(ValueError, match="timeout"):
+        await worker.dispatch(payload("printf invalid", timeout_seconds=deadline_value))
+    assert not worker.processes
+
+
+@pytest.mark.asyncio
+async def test_more_than_previous_active_and_receipt_limits_without_spawn(worker, monkeypatch):
+    from types import SimpleNamespace
+
+    from krim_agent.dev_terminal.worker import Process
+
+    # Exercise admission against old thresholds without spawning thousands of children.
+    worker.processes.update({
+        f"existing-{index}": SimpleNamespace(record={"state": "running", "request": {}})
+        for index in range(4100)
+    })
+    monkeypatch.setattr(Process, "launch", lambda self: self.record.update(state="running"))
+    submit = payload("printf admitted", "new-process", timeout_seconds=None)
+    try:
+        assert (await worker.dispatch(submit))["state"] == "running"
+        assert len(worker.processes) == 4101
+    finally:
+        process = worker.processes["new-process"]
+        process.record["state"] = "exited"
+        process.finished.set()
+        process.reader_done.set()
+        worker.processes = {"new-process": process}
 
 
 @pytest.mark.asyncio

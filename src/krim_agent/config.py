@@ -1,4 +1,4 @@
-"""可信宿主的有界运行配置；不从浏览器接收供应商凭据。"""
+"""Trusted host runtime configuration; credentials never come from the browser."""
 
 import os
 from pathlib import Path
@@ -17,18 +17,18 @@ class Settings(BaseModel):
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     system_prompt: str = "你是 Krim Agent 离线演示。"
     target_version: str = "demo-v1"
-    max_steps: int = Field(default=8, ge=1, le=32)
-    max_tools_per_step: int = Field(default=4, ge=1, le=16)
-    read_parallelism: int = Field(default=4, ge=1, le=16)  # 相邻只读调用并发上限
-    max_tool_calls: int = Field(default=32, ge=1, le=128)
-    max_active_runs: int = Field(default=4, ge=1, le=16)
-    max_events: int = Field(default=2048, ge=4, le=8192)
-    max_output_bytes: int = Field(default=262144, ge=1, le=1048576)
-    max_input_bytes: int = Field(default=32768, ge=1, le=32768)
-    max_request_bytes: int = Field(default=262144, ge=256, le=1048576)
-    run_timeout: float = Field(default=30, gt=0, le=300)
-    model_timeout: float = Field(default=20, gt=0, le=300)
-    tool_timeout: float = Field(default=5, gt=0, le=30)
+    max_steps: int | None = Field(default=None, ge=1)
+    max_tools_per_step: int = Field(default=4, ge=1)
+    read_parallelism: int = Field(default=4, ge=1)  # 执行调度宽度，不限制任务总量
+    max_tool_calls: int | None = Field(default=None, ge=1)
+    max_active_runs: int | None = Field(default=None, ge=1)
+    max_events: int | None = Field(default=None, ge=4)
+    max_output_bytes: int | None = Field(default=None, ge=1)
+    max_input_bytes: int | None = Field(default=None, ge=1)
+    max_request_bytes: int | None = Field(default=None, ge=256)
+    run_timeout: float | None = Field(default=None, gt=0)
+    model_timeout: float | None = Field(default=None, gt=0)
+    tool_timeout: float | None = Field(default=None, gt=0)
     # 上限 86400：无状态停靠的人类尺度批复窗口（ADR-0015 §5）；默认 300 兼容 ADR-0014
     approval_timeout: float = Field(default=300, gt=0, le=86400)
 
@@ -43,16 +43,17 @@ class Settings(BaseModel):
     product_eval_enabled: bool = False
     product_eval_database: Path | None = None
     evaluation_automation_enabled: bool = False
-    session_max_queued: int = Field(default=8, ge=1, le=16)
-    session_max_open: int = Field(default=32, ge=1, le=64)
-    session_max_turns: int = Field(default=256, ge=1, le=1024)
-    session_max_history_bytes: int = Field(default=4194304, ge=32768, le=16777216)
-    session_queue_timeout: float = Field(default=300, gt=0, le=900)
-    context_max_bytes: int = Field(default=131072, ge=256, le=1048576)
-    context_max_messages: int = Field(default=256, ge=2, le=1024)
-    context_reserved_output_tokens: int | None = Field(default=None, ge=1, le=32768)
+    session_max_queued: int | None = Field(default=None, ge=1)
+    session_max_open: int | None = Field(default=None, ge=1)
+    session_max_turns: int | None = Field(default=None, ge=1)
+    session_max_history_bytes: int | None = Field(default=None, ge=1)
+    session_queue_timeout: float | None = Field(default=None, gt=0)
+    context_max_bytes: int | None = Field(default=None, ge=256)
+    context_max_messages: int | None = Field(default=None, ge=2)
+    context_reserved_output_tokens: int | None = Field(default=None, ge=1)
     context_counter: Literal["approx-utf8/1"] = "approx-utf8/1"
-    development_history_compaction: bool = False
+    history_compaction: bool = True
+    development_history_compaction: bool = True
 
     @field_validator("gateway_display_name")
     @classmethod
@@ -66,12 +67,18 @@ class Settings(BaseModel):
             raise ValueError("网关显示名无效")
         return normalized
 
-    @field_validator("system_prompt")
-    @classmethod
-    def prompt_size(cls, value: str) -> str:
-        if len(value.encode()) > 16384:
-            raise ValueError("系统指令字节超限")
-        return value
+    def request_capacity(self, provider: object | None = None) -> int:
+        """Resolve request capacity from a host override and provider declaration.
+
+        Scripted/local fixtures use the default ContextPolicy. HTTP providers
+        declare their accepted request size in their trusted configuration.
+        """
+        from krim_agent.context.types import ContextPolicy
+
+        declared = getattr(getattr(provider, "config", None), "max_request_bytes", None)
+        candidates = [value for value in (self.max_request_bytes, declared)
+                      if isinstance(value, int) and not isinstance(value, bool)]
+        return min(candidates) if candidates else ContextPolicy().max_bytes
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -105,6 +112,7 @@ SESSION_FIELDS = frozenset(
         "context_max_messages",
         "context_reserved_output_tokens",
         "context_counter",
+        "history_compaction",
         "development_history_compaction",
     }
 )

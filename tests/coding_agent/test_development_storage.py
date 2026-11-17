@@ -1,7 +1,6 @@
 """Real SQLite admission, ownership fencing and schema-14 preservation."""
 
 import asyncio
-import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,15 +23,12 @@ from krim_agent.sandbox.service import SandboxService
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.development import DevelopmentStore
-from krim_agent.storage.development_models import DEVELOPMENT_TABLES
-from krim_agent.storage.preview_models import PREVIEW_TABLES
-from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
 async def prepare(
-    path: Path, *, max_processes: int = 4, image_id: str | None = None,
-    creating: bool = False, content_path: Path | None = None,
+    path: Path, *, max_processes: int | None = 4, image_id: str | None = None,
+    creating: bool = False, content_path: Path | None = None, resource_policy: str = "limited",
 ):
     store = await SQLiteStore.open(path)
     identities = await IdentityService.open(store)
@@ -42,7 +38,7 @@ async def prepare(
     project = await sandbox.create_project(actor, {
         'workspace_id': actor.memberships[0].workspace_id, 'title': 'development',
     }, request_key='project')
-    settings = Settings()
+    settings = Settings(history_compaction=False)
     target = {'fixture': True, 'tools': []}
     session = await session_sql.create_session(
         store, actor.memberships[0].workspace_id, actor.principal_id,
@@ -65,7 +61,8 @@ async def prepare(
     info = content.stat()
     repositories = DevelopmentStore(store)
     record = EnvironmentRecord(environment, image_id or 'sha256:' + 'a' * 64, content,
-                               info.st_dev, info.st_ino, max_processes=max_processes)
+                               info.st_dev, info.st_ino, max_processes=max_processes,
+                               resource_policy=resource_policy)
     await repositories.environments.register(record)
     request = CommandRequest(
         operation_id='command-1', environment=environment, ownership=ownership,
@@ -77,6 +74,46 @@ async def prepare(
     await sandbox.close()
     await identities.close()
     return store, repositories, record, request
+
+
+@pytest.mark.parametrize("max_processes", [None, 1])
+async def test_unlimited_policy_does_not_inherit_an_old_process_cap(tmp_path, max_processes):
+    path = tmp_path / 'dev.sqlite'
+    store, repositories, record, request = await prepare(
+        path, max_processes=max_processes, resource_policy="unlimited",
+    )
+    try:
+        for number in range(40):
+            command = request.model_copy(update={"operation_id": f"command-{number}"})
+            assert (await repositories.processes.reserve(command, command_digest(command))).execute
+    finally:
+        await store.close()
+    reopened = await SQLiteStore.open(path)
+    try:
+        restored = await DevelopmentStore(reopened).environments.resolve(record.environment)
+        assert restored.resource_policy == "unlimited"
+        assert restored.max_processes == max_processes
+    finally:
+        await reopened.close()
+
+
+async def test_policy_migration_cas_preserves_all_other_resource_fields(tmp_path):
+    store, repositories, record, _ = await prepare(tmp_path / 'dev.sqlite')
+    try:
+        migrated = replace(record, resource_policy="unlimited", revision=record.revision + 1)
+        assert await repositories.environments.compare_and_swap(record, migrated) == migrated
+        assert migrated.max_processes == record.max_processes
+        with pytest.raises(ServiceError, match="input_revision_conflict"):
+            await repositories.environments.compare_and_swap(
+                migrated, replace(migrated, max_processes=None, revision=migrated.revision + 1),
+            )
+        with pytest.raises(ServiceError, match="input_revision_conflict"):
+            await repositories.environments.compare_and_swap(
+                migrated, replace(migrated, resource_policy="limited",
+                                  revision=migrated.revision + 1),
+            )
+    finally:
+        await store.close()
 
 
 async def test_atomic_first_reservation_and_reopen_never_redispatch(tmp_path: Path) -> None:
@@ -324,10 +361,9 @@ async def test_schema14_readonly_and_upgrade_preserve_original_rows(tmp_path: Pa
     store = await SQLiteStore.open(path)
     run, _ = await store.begin(RunRequest(text='legacy', request_key='legacy'), {})
     await store.close()
-    with sqlite3.connect(path) as connection:
-        for table in reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES, *SIDEBAR_TABLES)):
-            connection.execute(f'DROP TABLE "{table.name}"')
-        connection.execute('PRAGMA user_version=14')
+    from tests.agent_core.test_extension_migration import downgrade_to_version
+
+    downgrade_to_version(path, 14)
     original = path.read_bytes()
     reader = await SQLiteStore.open(path, readonly=True)
     try:
@@ -340,7 +376,7 @@ async def test_schema14_readonly_and_upgrade_preserve_original_rows(tmp_path: Pa
     assert path.read_bytes() == original
     writer = await SQLiteStore.open(path)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 17
+        assert writer.schema_version == SCHEMA_VERSION == 18
         assert (await writer.snapshot(run.id)).request.text == 'legacy'
     finally:
         await writer.close()

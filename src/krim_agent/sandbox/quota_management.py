@@ -8,6 +8,9 @@
 - 多区调整先收缩后扩张，任何收缩失败停止后续扩容；目标低于当前用量的收缩
   不写内核，标记 pending_reclaim，读取与明确清理始终可用，绝不自动删除文件。
 - xfs limit 值 0 表示 unlimited；任何读回与比较都不得把它当成 0 硬限额。
+- unlimited 目标（resource_policy=unlimited）的内核限额向量全为0：数据与检查点区
+  都解除内核限额，检查点能力预算保留在limits由服务层执行；对已存有限额的账号，
+  这就是经授权操作安全清零并读回校验的迁移路径（账号与检查点两个project ID）。
 - 每步先持久化"即将执行"，再写内核并读回实际值；回包丢失按原操作核实内核
   实际值，不盲写补偿。desired_revision 与鉴权由控制面负责，不在本模块。
 """
@@ -26,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from krim_agent.contracts import ServiceError, fingerprint
-from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.quota import QuotaLimits, limits_from_record
 from krim_agent.sandbox.xfs import internal_id, private_directory
 
 if TYPE_CHECKING:
@@ -56,7 +59,7 @@ class QuotaChanges:
         record = self.broker._environment(environment_id)
         current = self._snapshot(record)
         normalized = self._normalized(target)
-        target_layout = "split" if normalized["checkpoint_bytes"] > 0 else "unsplit"
+        target_layout = self._layout(target)
         usage = self._usage_view(record)
         node = self._node_view(environment_id, target)
         busy = self._active_writers(environment_id) or {
@@ -65,7 +68,7 @@ class QuotaChanges:
             "leases": [],
             "maintenance_lock": False,
         }
-        reclaim = self._reclaim(record, normalized)
+        reclaim = self._reclaim(record, target, normalized)
         now = time.time()
         plan_id = str(uuid.uuid4())
         target_limits = target.model_dump(mode="json")
@@ -102,9 +105,9 @@ class QuotaChanges:
             "target": {
                 "layout": target_layout,
                 "limits": target_limits,
-                "checkpoint_enabled": normalized["checkpoint_bytes"] > 0,
+                "checkpoint_enabled": target.checkpoint_bytes > 0,
                 "normalized": normalized,
-                "zone_actions": self._zone_actions(current, normalized),
+                "zone_actions": self._zone_actions(current, target, normalized),
             },
             "usage": usage,
             "node": node,
@@ -159,7 +162,7 @@ class QuotaChanges:
             "desired": {
                 "limits": target_limits,
                 "normalized": normalized,
-                "layout": "split" if normalized["checkpoint_bytes"] > 0 else "unsplit",
+                "layout": self._layout(target),
             },
             "old_applied": self._snapshot(record),
             "steps": steps,
@@ -276,12 +279,16 @@ class QuotaChanges:
             if step["state"] == "verified":
                 continue
             # pending_reclaim/failed步骤每轮复核：清理降低用量或瞬态故障消失后按原计划继续。
+            # 限额0表示unlimited：该分量没有硬限额，不参与用量比较。
             if step["kind"] != "init":
                 used = self.broker.quota.usage(step["project_number"])
-                if (
+                byte_over = bool(step["byte_limit"]) and (
                     used["environment_bytes"] > step["byte_limit"]
-                    or used["environment_inodes"] > step["inode_limit"]
-                ):
+                )
+                inode_over = bool(step["inode_limit"]) and (
+                    used["environment_inodes"] > step["inode_limit"]
+                )
+                if byte_over or inode_over:
                     step["state"] = "pending_reclaim"
                     step["reason"] = "usage_above_target"
                     self._halt(operation)
@@ -400,13 +407,17 @@ class QuotaChanges:
     def _build_steps(
         self, environment_id: str, record: dict[str, Any], target: QuotaLimits
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """返回(有序步骤, blocked原因)；unsplit目标先缩data再登记空检查点区。"""
+        """返回(有序步骤, blocked原因)；unsplit目标先缩data再登记空检查点区。
+
+        检查点开关取目标limits的数值（checkpoint_bytes>0启用），与资源策略无关；
+        unlimited目标的内核限额向量全为0，启用时仍初始化检查点区（写0/0）。
+        """
         number = record["project_number"]
         checkpoint_number = record.get("checkpoint_number")
         if checkpoint_number is not None:
             checkpoint_number = int(checkpoint_number)
         normalized = self._normalized(target)
-        enabled = normalized["checkpoint_bytes"] > 0
+        enabled = target.checkpoint_bytes > 0
         if not enabled and checkpoint_number is not None:
             # 关闭检查点：保留旧区applied直到无受保护内容并被明确清理；本协议不做GC。
             return [], "checkpoint_disable_requires_reclaim"
@@ -456,21 +467,22 @@ class QuotaChanges:
         return self._ordered(entries), None
 
     @staticmethod
+    def _layout(target: QuotaLimits) -> str:
+        """布局开关跟随检查点能力（checkpoint_bytes>0），不跟随资源策略。"""
+        return "split" if target.checkpoint_bytes > 0 else "unsplit"
+
+    @staticmethod
     def _ordered(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """先缩后扩；同级保持data→checkpoint→init的稳定顺序。"""
         expanded = []
         for step in entries:
             before = step.get("before")
             if before is not None and step["action"] == "shrink":
-                low_bytes = (
-                    step["byte_limit"]
-                    if before["byte_limit_unlimited"]
-                    else min(before["byte_limit"], step["byte_limit"])
+                low_bytes = QuotaChanges._low_component(
+                    before["byte_limit"], before["byte_limit_unlimited"], step["byte_limit"]
                 )
-                low_inodes = (
-                    step["inode_limit"]
-                    if before["inode_limit_unlimited"]
-                    else min(before["inode_limit"], step["inode_limit"])
+                low_inodes = QuotaChanges._low_component(
+                    before["inode_limit"], before["inode_limit_unlimited"], step["inode_limit"]
                 )
                 if low_bytes != step["byte_limit"] or low_inodes != step["inode_limit"]:
                     expanded.append(
@@ -488,6 +500,16 @@ class QuotaChanges:
         for index, step in enumerate(ordered, start=1):
             step["step_id"] = index
         return ordered
+
+    @staticmethod
+    def _low_component(before: int, before_unlimited: bool, target: int) -> int:
+        """收缩阶段的分量目标：解除限额（目标0）的分量保持现值，由grow阶段写目标。"""
+        if before_unlimited:
+            return target
+        if target == 0:
+            return before
+        return min(before, target)
+
 
     @staticmethod
     def _maybe_step(
@@ -517,13 +539,27 @@ class QuotaChanges:
 
     @staticmethod
     def _direction(current: dict[str, Any], byte_limit: int, inode_limit: int) -> str:
-        """unlimited按无穷大处理：任何分量收紧即视为收缩，排在扩容之前。"""
-        shrink = (current["byte_limit_unlimited"] or byte_limit < current["byte_limit"]) or (
-            current["inode_limit_unlimited"] or inode_limit < current["inode_limit"]
+        """unlimited按无穷大处理：任何分量收紧即收缩排在扩容之前；解除限额（目标0）
+        是扩容方向，不把它当作缩到0硬限额。"""
+        cur_bu = current["byte_limit_unlimited"]
+        cur_iu = current["inode_limit_unlimited"]
+        tgt_bu = byte_limit == 0
+        tgt_iu = inode_limit == 0
+        shrink = (
+            (not cur_bu and not tgt_bu and byte_limit < current["byte_limit"])
+            or (cur_bu and not tgt_bu)
+            or (not cur_iu and not tgt_iu and inode_limit < current["inode_limit"])
+            or (cur_iu and not tgt_iu)
         )
         if shrink:
             return "shrink"
-        if byte_limit > current["byte_limit"] or inode_limit > current["inode_limit"]:
+        grow = (
+            (not cur_bu and tgt_bu)
+            or (not cur_bu and not tgt_bu and byte_limit > current["byte_limit"])
+            or (not cur_iu and tgt_iu)
+            or (not cur_iu and not tgt_iu and inode_limit > current["inode_limit"])
+        )
+        if grow:
             return "grow"
         return "none"
 
@@ -557,7 +593,9 @@ class QuotaChanges:
         }
 
     def _zone_statuses(self, operation: dict[str, Any], applied: dict[str, Any]) -> dict[str, Any]:
-        desired = operation["desired"]["normalized"]
+        desired_limits = operation["desired"]["limits"]
+        # 检查点开关跟目标limits能力值：unlimited下normalized内核向量全为0，不能当开关。
+        checkpoint_enabled = bool(desired_limits.get("checkpoint_bytes", 0) > 0)
         blocked = operation.get("blocked_reason")
         result: dict[str, Any] = {}
         for zone, actual in (("data", applied["data"]), ("checkpoint", applied["checkpoint"])):
@@ -577,7 +615,7 @@ class QuotaChanges:
             elif blocked == "checkpoint_directory_not_empty" and zone == "checkpoint":
                 status = "unavailable"
             elif zone == "checkpoint":
-                if desired["checkpoint_bytes"] == 0 and actual is not None:
+                if not checkpoint_enabled and actual is not None:
                     status = "kept_applied"
                 else:
                     status = "not_provisioned" if actual is None else "applied"
@@ -634,18 +672,21 @@ class QuotaChanges:
             "inode_limit_unlimited": row["inode_limit"] == 0,
         }
 
-    def _reclaim(self, record: dict[str, Any], normalized: dict[str, int]) -> dict[str, Any]:
+    def _reclaim(
+        self, record: dict[str, Any], target: QuotaLimits, normalized: dict[str, int]
+    ) -> dict[str, Any]:
         reasons: list[str] = []
         data = self.broker.quota.usage(record["project_number"])
-        if (
+        # 限额0表示unlimited：该分量不设硬限额，不产生reclaim要求。
+        if normalized["data_bytes"] and (
             data["environment_bytes"] > normalized["data_bytes"]
             or data["environment_inodes"] > normalized["data_inodes"]
         ):
             reasons.append("data_usage_above_target")
         checkpoint_number = record.get("checkpoint_number")
-        if normalized["checkpoint_bytes"] == 0 and checkpoint_number is not None:
+        if target.checkpoint_bytes == 0 and checkpoint_number is not None:
             reasons.append("checkpoint_disable_requires_reclaim")
-        elif checkpoint_number is not None:
+        elif checkpoint_number is not None and normalized["checkpoint_bytes"]:
             checkpoint = self.broker.quota.usage(checkpoint_number)
             if (
                 checkpoint["environment_bytes"] > normalized["checkpoint_bytes"]
@@ -655,14 +696,16 @@ class QuotaChanges:
         return {"required": bool(reasons), "reasons": reasons}
 
     @staticmethod
-    def _zone_actions(current: dict[str, Any], normalized: dict[str, int]) -> dict[str, str]:
+    def _zone_actions(
+        current: dict[str, Any], target: QuotaLimits, normalized: dict[str, int]
+    ) -> dict[str, str]:
         actions = {
             "data": QuotaChanges._direction(
                 current["data"], normalized["data_bytes"], normalized["data_inodes"]
             )
         }
         checkpoint = current["checkpoint"]
-        if normalized["checkpoint_bytes"] == 0:
+        if target.checkpoint_bytes == 0:
             actions["checkpoint"] = "not_provisioned" if checkpoint is None else "pending_reclaim"
         elif checkpoint is None:
             actions["checkpoint"] = "initialize"
@@ -674,7 +717,20 @@ class QuotaChanges:
 
     @staticmethod
     def _normalized(target: QuotaLimits) -> dict[str, int]:
-        """按内核KiB粒度规范化并显式拆分；规范化值在预览中明示，确认按它应用。"""
+        """按内核KiB粒度规范化并显式拆分；规范化值在预览中明示，确认按它应用。
+
+        返回的是内核限额向量：unlimited策略下全部为0（XFS 0=unlimited），数据与
+        检查点区都不设内核限额；检查点能力预算保留在target limits由服务层执行。
+        """
+        if target.resource_policy == "unlimited":
+            return {
+                "environment_bytes": target.environment_bytes,
+                "environment_inodes": target.environment_inodes,
+                "data_bytes": 0,
+                "data_inodes": 0,
+                "checkpoint_bytes": 0,
+                "checkpoint_inodes": 0,
+            }
         checkpoint_bytes = target.checkpoint_bytes // 1024 * 1024
         if checkpoint_bytes:
             checkpoint_inodes = min(
@@ -701,13 +757,19 @@ class QuotaChanges:
         reserved = 0
         mine = 0
         for key, allocation in allocations.items():
-            value = allocation.get("limits", {}).get("environment_bytes", 0)
+            limits = allocation.get("limits", {})
+            # unlimited不参与节点预约；旧有限额记录仍按原值计，直到显式迁移。
+            value = (
+                0 if limits.get("resource_policy") == "unlimited"
+                else limits.get("environment_bytes", 0)
+            )
             if key == environment_id:
                 mine = value
             else:
                 reserved += value
         ceiling = int(capacity * RESERVATION_CEILING)
-        target_reserved = reserved + target.environment_bytes
+        own = 0 if target.resource_policy == "unlimited" else target.environment_bytes
+        target_reserved = reserved + own
         return {
             "capacity_bytes": capacity,
             "ceiling_bytes": ceiling,
@@ -720,7 +782,7 @@ class QuotaChanges:
         registry = self.broker._read("accounts.json") or {"allocations": {}}
         allocation = registry.get("allocations", {}).get(environment_id) or {}
         previous = allocation.get("limits", {}).get("environment_bytes", 0)
-        new = target.environment_bytes
+        new = 0 if target.resource_policy == "unlimited" else target.environment_bytes
         return {
             "previous_bytes": previous,
             "target_bytes": new,
@@ -900,7 +962,8 @@ class QuotaChanges:
         if not isinstance(limits, dict):
             raise ServiceError("invalid_input", 422)
         try:
-            return QuotaLimits.model_validate(limits)
+            # 旧记录面（缺 resource_policy）按 limited 解读，与新调用（显式策略）区分。
+            return limits_from_record(limits)
         except ValidationError:
             raise ServiceError("invalid_input", 422) from None
 

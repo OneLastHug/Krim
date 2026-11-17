@@ -5,17 +5,11 @@ import sqlite3
 
 import pytest
 from pydantic import SecretStr
+from test_extension_migration import downgrade_to_version
 
 from krim_agent.accounts import IdentityService
 from krim_agent.contracts import RunRequest, ServiceError
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
-from krim_agent.storage.development_models import DEVELOPMENT_TABLES
-from krim_agent.storage.extension_models import EXTENSION_TABLES
-from krim_agent.storage.mcp_models import MCP_TABLES
-from krim_agent.storage.preview_models import PREVIEW_TABLES
-from krim_agent.storage.sandbox_models import SANDBOX_TABLES
-from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
-from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 ACCOUNT_TABLES = [
@@ -37,24 +31,7 @@ def raw(path, names):
 
 
 def drop_accounts(path):
-    conn = sqlite3.connect(path)
-    try:
-        for table in [
-            *reversed(SIDEBAR_TABLES),
-            *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
-            *reversed(SESSION_LIFECYCLE_TABLES),
-            *reversed(MCP_TABLES),
-            *reversed(EXTENSION_TABLES),
-        ]:
-            conn.execute('DROP TABLE "' + table.name + '"')
-        for table in reversed(SANDBOX_TABLES):
-            conn.execute('DROP TABLE "' + table.name + '"')
-        for name in ACCOUNT_TABLES:
-            conn.execute(f'DROP TABLE "{name}"')
-        conn.execute("PRAGMA user_version=6")
-        conn.commit()
-    finally:
-        conn.close()
+    downgrade_to_version(path, 6)
 
 
 def table_names(path):

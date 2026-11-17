@@ -54,6 +54,7 @@ from krim_agent.development.file_tools import (
     SearchInput,
     WriteInput,
     implementation_digest,
+    mutation_chunks,
     mutation_command,
     text_page,
     worker_source,
@@ -122,7 +123,7 @@ class DevelopmentScope:
     invocation: Invocation | None = None
 
     @property
-    def deadline(self) -> float:
+    def deadline(self) -> float | None:
         return self.execution_budget.deadline
 
 
@@ -131,7 +132,7 @@ class ShellInput(StrictModel):
     cwd: str = "."
     pty: bool = False
     lifecycle: Literal["run", "project_service"] = "run"
-    timeout_seconds: float | None = Field(default=60.0, gt=0, le=86400)
+    timeout_seconds: float | None = Field(default=None, gt=0)
     wait_seconds: float = Field(default=1.0, ge=0, le=20)
     download_policy: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
@@ -161,7 +162,7 @@ class OutputInput(ProcessInput):
 
 
 class StdinInput(ProcessInput):
-    data: str = Field(max_length=65536)
+    data: str
     close: bool = False
 
 
@@ -835,8 +836,12 @@ class DevelopmentService:
                 memory_bytes=self.configuration.memory_bytes,
                 pids_limit=self.configuration.pids_limit,
                 max_processes=self.configuration.max_processes,
+                resource_policy=self.configuration.resource_policy,
             )
             registered = await self.repositories.environments.register(record)
+        if (self.configuration.resource_policy == "unlimited"
+                and registered.resource_policy != "unlimited"):
+            return await self.environments.migrate_to_unlimited(registered.environment)
         return await self.environments.start(registered.environment)
 
     async def grant_project(
@@ -1057,7 +1062,7 @@ class DevelopmentService:
 
     def _file_shell(self, values: WriteInput | EditInput) -> ShellInput:
         return ShellInput(command=mutation_command(values, self._file_worker_source),
-                          timeout_seconds=20, wait_seconds=20)
+                          timeout_seconds=None, wait_seconds=0)
 
     async def execute(
         self, invocation: Invocation, parameters: BaseModel, context: Any
@@ -1108,9 +1113,23 @@ class DevelopmentService:
                       if isinstance(parameters, (WriteInput, EditInput)) else parameters)
             request = await self._command(scope, values, identity, cast(str | None, approval))
             await self.repositories.operations.bind_command(identity, request)
-            command_handle = await self.terminal.submit(request)
             if isinstance(parameters, ShellInput):
+                command_handle = await self.terminal.submit(request)
                 return cast(JsonValue, command_handle.model_dump(mode="json"))
+            # Terminal admission owns the once-only stdin send. An existing or
+            # uncertain process is inspected, never given the body a second time.
+            command_handle = await self.terminal.submit(
+                request, stdin_chunks=mutation_chunks(parameters),
+            )
+            response_deadline = asyncio.get_running_loop().time() + 20
+            while command_handle.state in {"accepted", "running"}:
+                scope.check()
+                command_handle = await self.terminal.inspect(command_handle)
+                if command_handle.state not in {"accepted", "running"}:
+                    break
+                if asyncio.get_running_loop().time() >= response_deadline:
+                    break
+                await asyncio.sleep(0.025)
             scope.check()
             if command_handle.state != "exited":
                 return {"state": "pending", "code": "file_operation_pending",
@@ -1364,8 +1383,6 @@ class DevelopmentService:
             )
             if metadata["sha256"] != selected.get("sha256") or len(data) != selected.get("size"):
                 raise ServiceError("browser_artifact_invalid")
-            if len(data) > 512 * 1024:
-                raise ServiceError("provider_request_limit", 422)
             current = await self.store.snapshot(run_id)
             if current.run.stop_requested or current.run.status != "running":
                 raise ServiceError("cancelled")
@@ -1518,7 +1535,7 @@ class DevelopmentService:
             ("find", FindInput, "read", "Find project files by glob, with bounded pagination."),
             ("search", SearchInput, "read", "Search a project file or directory, "
              "returning bounded matches with line numbers and up to 3 context lines."),
-            ("write", WriteInput, "write", "Create a UTF-8 file (content <= 16384 bytes). "
+            ("write", WriteInput, "write", "Create a UTF-8 file. "
              "Existing files require expected_sha256 from read; null means create-only. "
              "Parent directories must exist. Returns ok, size and sha256. "
              "If state=pending/unknown, "
@@ -1585,5 +1602,4 @@ class DevelopmentService:
                 )
                 for name, model, capability, description in specs
             ),
-            max_tools=32,
         )

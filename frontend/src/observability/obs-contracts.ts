@@ -618,7 +618,7 @@ export function parseTurnObservations(raw: unknown, item: Pick<ObservationsIndex
   const configuration = parseConfiguration(value.configuration);
   if (!Array.isArray(value.requests) || value.requests.length > 512
     || !Array.isArray(value.tools) || value.tools.length > 2048
-    || !Array.isArray(value.compactions) || value.compactions.length > 64
+    || !Array.isArray(value.compactions)
     || value.cost !== null || !idText(value.cost_status, 32)) {
     throw new Error("观测详情集合无效");
   }

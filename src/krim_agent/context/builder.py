@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, cast
 
 from pydantic import JsonValue
 
-from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
+from krim_agent.context.serialization import byte_size, encoded, fingerprint
+from krim_agent.contracts import Message, ServiceError
 from krim_agent.source_fingerprints import source_digest
 
 from .types import ContextPolicy, ContextSnapshot, HistorySource
@@ -97,16 +98,15 @@ def check_budget(
     if not messages or messages[0].role != "system":
         raise ServiceError("facts_corrupt")
     validate_groups(messages[1:])
-    raw = encoded(
-        {"messages": [m.model_dump(mode="json") for m in messages], "tools": tools}
-    ).encode()
+    size = byte_size({"messages": [m.model_dump(mode="json") for m in messages], "tools": tools})
     if (
-        len(messages) > policy.max_messages
-        or len(raw) + 1024 > request_limit
-        or len(raw) + 1024 + policy.reserved_output_tokens * 4 > policy.max_bytes
+        policy.max_messages is not None
+        and len(messages) > policy.max_messages
+        or size + 1024 > request_limit
+        or size + 1024 + policy.reserved_output_tokens * 4 > policy.max_bytes
     ):
         raise ServiceError("context_budget", 422)
-    return len(raw)
+    return size
 
 
 def prepare(

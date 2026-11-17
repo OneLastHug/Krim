@@ -251,13 +251,14 @@ async def test_cancel_blocks_replay_of_a_committed_approval_before_resume(
 @pytest.mark.asyncio
 async def test_park_survives_reopen_and_resumes_without_extra_model_call(wire, tmp_path):
     """停靠跨应用重开存活：答复后从恢复点续跑，不多付一次模型调用。"""
-    async with park_application(wire, tmp_path, "park-reopen.sqlite") as app:
+    settings = Settings(run_timeout=None, tool_timeout=2)
+    async with park_application(wire, tmp_path, "park-reopen.sqlite", settings=settings) as app:
         run_id, request = await park_echo_turn(app)
         assert (await app.service.get(run_id)).status == "awaiting"
         await app.close()  # 关闭不误伤停靠（无可取消协程）
     calls_before = len(wire.requests)
     assert calls_before == 1  # 只有停靠步的一次模型请求
-    async with park_application(wire, tmp_path, "park-reopen.sqlite") as app2:
+    async with park_application(wire, tmp_path, "park-reopen.sqlite", settings=settings) as app2:
         assert (await app2.service.get(run_id)).status == "awaiting"  # 重开保留停靠
         request2 = (
             await app2.service.approvals(run_id)
@@ -320,7 +321,7 @@ async def test_policy_deny_feeds_back_and_run_completes(wire, tmp_path):
     provider = Prv(Cfg(base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture"))
     async with await open_app(
         P(tmp_path) / "deny-soft.sqlite",
-        settings=AppSettings(run_timeout=5, tool_timeout=2),
+        settings=AppSettings(run_timeout=None, tool_timeout=2),
         provider=provider,
         registry=Registry(tuple(spec for spec, _ in wire.registry()._frozen)),
         policy=deny_policy,

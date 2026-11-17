@@ -12,18 +12,19 @@ from test_sandbox_control import managed
 from krim_agent.config import Settings
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import ServiceError
+from krim_agent.media.artifacts import MEDIA_TABLE_NAMES
 from krim_agent.sandbox.bindings import bind_project, read_binding
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.development_models import DEVELOPMENT_TABLES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.mcp_models import MCP_TABLES
-from krim_agent.storage.models import turns
+from krim_agent.storage.models import metadata, turns
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_turn_contracts
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
 from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
-from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
+from krim_agent.storage.sqlite import GENERAL_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
 
 
 async def new_session(store, actor):
@@ -236,7 +237,12 @@ async def test_schema8_readonly_and_upgrade_add_only_bindings(tmp_path):
     with sqlite3.connect(database) as conn:
         conn.execute("DROP TABLE sandbox_quota_state")
         conn.execute("DROP TABLE sandbox_session_bindings")
+        from sqlalchemy.sql.ddl import sort_tables
+        general_tables = sort_tables([
+            metadata.tables[name] for name in GENERAL_TABLE_NAMES | MEDIA_TABLE_NAMES
+        ])
         for table in [
+            *reversed(general_tables),
             *reversed(SIDEBAR_TABLES),
             *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
             *reversed(SESSION_LIFECYCLE_TABLES),
@@ -386,8 +392,8 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert names.status_code == 200 and calls[-1][1]["mode"] == "regex"
         assert names.json()["max_result_bytes"] == 64 * 1024
         assert names.json()["regex_limit_bytes"] == 64
-        assert names.json()["max_regex_scan_bytes"] == 512 * 1024
-        assert names.json()["max_regex_line_chars"] == 1024
+        assert names.json()["max_regex_scan_bytes"] is None
+        assert names.json()["max_regex_line_chars"] is None
         literal = await client.get(route + "/search", params={"query": "answer"})
         assert literal.status_code == 200
         assert literal.json()["max_result_bytes"] == 64 * 1024
@@ -395,15 +401,17 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         lookup = await client.get(route + "/search", params={"query": "x", "mode": "glob"})
         assert lookup.status_code == 422
         over_limit_page = await client.get(route + "/search", params={"offset": 4050, "query": "x"})
-        assert over_limit_page.status_code == 422
+        assert over_limit_page.status_code == 200
         search_last_page = await client.get(
             route + "/search", params={"offset": 4095, "limit": 1, "query": "answer"}
         )
         assert search_last_page.status_code == 200
         assert calls[-1][1]["offset"] == 4095 and calls[-1][1]["limit"] == 1
         assert (
-            await client.get(route + "/search", params={"offset": 4095, "limit": 2, "query": "x"})
-        ).status_code == 422
+            await client.get(
+                route + "/search", params={"offset": 1000000, "limit": 2, "query": "x"}
+            )
+        ).status_code == 200
         find_last_page = await client.get(
             route + "/find", params={"offset": 4095, "limit": 1, "include_glob": "**/*.py"}
         )
@@ -411,9 +419,11 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert calls[-1][1]["offset"] == 4095 and calls[-1][1]["limit"] == 1
         assert (
             await client.get(
-                route + "/find", params={"offset": 4095, "limit": 2, "include_glob": "**/*.py"}
+                route + "/find", params={"offset": 1000000, "limit": 2, "include_glob": "**/*.py"}
             )
-        ).status_code == 422
+        ).status_code == 200
+        assert (await client.get(route + "/files", params={"offset": 1000000})).status_code == 200
+        assert (await client.get(route + "/files", params={"limit": 101})).status_code == 422
         assert (await client.get(route + "/files", params={"offset": -1})).status_code == 422
         assert (await client.get(route + "/search", params={"query": ""})).status_code == 422
         invalid_export = await client.get(route + "/export-file", params={"path": "../secret"})
@@ -460,7 +470,7 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         )
         assert unicode_preview["patch"]["offset"] == 1
 
-        large_lines = [f"é line-{index:05d}\n" for index in range(20000)]
+        large_lines = [f"é line-{index:05d}\n" for index in range(350000)]
         large_source = "".join(large_lines).encode()
         large_digest = sha256(large_source)
         stat_token = [1, 2, len(large_source), 3, 4]
@@ -554,6 +564,15 @@ async def test_project_read_routes_forward_pagination_and_search_limits(tmp_path
         assert "-é line-10000" in large_preview["diff"]
         assert "+é LONG" in large_preview["diff"]
         assert large_preview["diff_truncated"] is False
+        chunk_broker.read_calls.clear()
+        unbounded_preview = await app.sandbox.preview_replace(
+            actor, project["project_id"], path="large.txt", expected_generation=0,
+            expected_sha256=large_digest, find="é ", replacement="R" * 20000,
+            occurrence=5000,
+        )
+        assert unbounded_preview["matches"] == 350000
+        assert unbounded_preview["patch"]["offset"] == len("".join(large_lines[:4999]).encode())
+        assert unbounded_preview["patch"]["replacement"] == "R" * 20000
         assert len(chunk_broker.read_calls) > 1
         assert all(
             call["expected_sha256"] == large_digest and call["expected_stat"] == stat_token

@@ -340,7 +340,9 @@ async def prepare_command(
     authorization = original_ref.model_copy(
         update={"secret_refs": secret_ids, "arguments_digest": "0" * 64}
     )
-    request = original_request.model_copy(update={"authorization": authorization})
+    request = original_request.model_copy(update={
+        "authorization": authorization, "timeout_seconds": 60,
+    })
     if command is not None:
         request = request.model_copy(update={"command": command})
     request, intent = await _authorize(request, workspace_id)

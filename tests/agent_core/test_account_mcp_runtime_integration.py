@@ -17,12 +17,10 @@ from pathlib import Path
 import pytest
 from fixtures.session_server import WireFixture
 from mcp.server.fastmcp import FastMCP
-from pydantic import ValidationError
 from uvicorn import Config, Server
 
 from krim_agent.account_mcp.secrets import MasterKeyring
 from krim_agent.account_mcp.service import (
-    MAX_SELECTED_TOOLS,
     ConnectionCreate,
     ConnectionUpdate,
     SessionConnection,
@@ -31,7 +29,7 @@ from krim_agent.account_mcp.service import (
 from krim_agent.accounts.service import IdentityService
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
-from krim_agent.contracts import ApprovalReply, ServiceError
+from krim_agent.contracts import ApprovalReply
 from krim_agent.mcp.types import MCPServerConfig
 from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
@@ -42,7 +40,7 @@ from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import ToolExecutor
-from krim_agent.tools.registry import MAX_TOOLS, ToolRegistry
+from krim_agent.tools.registry import ToolRegistry
 
 CREDENTIAL = "mcp-cred-marker-3f9a"
 ROTATED_CREDENTIAL = "mcp-cred-rotated-7c21"
@@ -57,33 +55,36 @@ class McpWire(WireFixture):
 
     def response(self, body, index):
         last = body["messages"][-1]
-        if last["role"] == "tool":
+        text = next((message["content"] for message in reversed(body["messages"])
+                     if message["role"] == "user" and message["content"].startswith("/docs ")), "")
+        visible = {tool["function"]["name"] for tool in body.get("tools", [])}
+        discovered = last["role"] == "tool" and last.get("name") == "tool_search"
+        # Chat Completions tool results may omit name; resolve the paired call.
+        if last["role"] == "tool" and not discovered:
+            previous = next((message for message in reversed(body["messages"][:-1])
+                             if message["role"] == "assistant" and message.get("tool_calls")), {})
+            discovered = any(call["function"]["name"] == "tool_search"
+                             and call["id"] == last.get("tool_call_id")
+                             for call in previous.get("tool_calls", []))
+        if text and (last["role"] != "tool" or discovered):
+            name = self.tool_name if self.tool_name in visible else "tool_search"
+            arguments = ({"query": text[6:].strip()} if name == self.tool_name
+                         else {"names": [self.tool_name]})
+            delta: dict = {"tool_calls": [{
+                "index": 0, "id": f"call-{index}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }]}
+            finish = "tool_calls"
+        elif last["role"] == "tool":
             try:
                 value = json.loads(last["content"])
             except ValueError:
                 value = last["content"]
-            delta: dict = {"content": "done:" + json.dumps(value, ensure_ascii=False)}
+            delta = {"content": "done:" + json.dumps(value, ensure_ascii=False)}
             finish = "stop"
         else:
-            text = last["content"]
-            if text.startswith("/docs "):
-                delta = {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "id": f"call-{index}",
-                            "type": "function",
-                            "function": {
-                                "name": self.tool_name,
-                                "arguments": json.dumps({"query": text[6:].strip()}),
-                            },
-                        }
-                    ]
-                }
-                finish = "tool_calls"
-            else:
-                delta = {"content": "收到：" + text}
-                finish = "stop"
+            delta = {"content": "收到：" + last["content"]}
+            finish = "stop"
 
         def frame(delta_value, finish_value):
             return (
@@ -115,6 +116,17 @@ class DocsServer:
         async def search(query: str) -> dict:
             server.calls.append({"tool": "search", "query": query})
             return {"result": "found:" + query}
+
+        def make_extra(index: int):
+            async def extra(query: str) -> dict:
+                server.calls.append({"tool": f"tool_{index}", "query": query})
+                return {"result": f"found:tool_{index}:{query}"}
+
+            extra.__name__ = f"tool_{index}"
+            return extra
+
+        for index in range(9):
+            mcp.tool()(make_extra(index))
 
         inner = mcp.streamable_http_app()
 
@@ -177,17 +189,22 @@ async def open_managed_app(
     await identities.close()
     await store.close()
     provider = OpenAICompatibleProvider(
-        OpenAICompatibleConfig(base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture")
+        OpenAICompatibleConfig(
+            base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture",
+            max_request_bytes=1024 * 1024,
+        )
     )
     app = None
     try:
         app = await open_application(
             database,
             settings=Settings(
-                run_timeout=15.0,
+                run_timeout=60.0,
                 tool_timeout=6.0,
                 approval_timeout=60.0,
                 personal_mcp_key_file=key_file,
+                context_max_bytes=512 * 1024,
+                max_request_bytes=1024 * 1024,
             ),
             provider=provider,
             registry=wire.registry() if registry is None else registry,
@@ -251,7 +268,7 @@ async def park_turn(app, owner, workspace, session_id, request_key: str, text: s
         session_id,
         TurnRequest(request_key=request_key, text=text, expected_revision=0),
     )
-    async with asyncio.timeout(20):
+    async with asyncio.timeout(50):
         while True:
             current = await app.sessions.turn(owner, workspace, session_id, turn.id)
             if current.run_id is None and current.status == "failed":
@@ -301,7 +318,7 @@ async def assert_no_credential_leak(app, run_id: str) -> None:
 
 async def _run_case(tmp_path, body, **app_kwargs) -> None:
     """共用装配：wire + 回环MCP服务器 + managed应用；body写断言。"""
-    wire = McpWire("docs__search")
+    wire = McpWire("account__docs__search")
     docs = DocsServer()
     await wire.start()
     await docs.start()
@@ -342,8 +359,9 @@ async def test_personal_mcp_composes_with_full_sandbox_registry(tmp_path):
         result = await app.service.wait(run_id)
         assert result.status == "completed", result.code
         facts = await app.service.result(run_id)
-        assert facts.tools[0].name == "docs__search"
-        assert facts.tools[0].status == "ok"
+        assert facts.tools[0].name == "tool_search"
+        action = next(tool for tool in facts.tools if tool.name == "account__docs__search")
+        assert action.status == "ok"
         assert docs.calls == [{"tool": "search", "query": "find sandbox"}]
 
     await _run_case(tmp_path, body, registry=registry)
@@ -372,8 +390,8 @@ async def test_personal_mcp_recovery_preserves_application_hooks(tmp_path):
         result = await app.service.wait(run_id)
         assert result.status == "completed", result.code
         assert docs.calls == [{"tool": "search", "query": "find hooks"}]
-        assert "docs__search" in pre_calls
-        assert "docs__search" in post_calls
+        assert "account__docs__search" in pre_calls
+        assert "account__docs__search" in post_calls
 
     await _run_case(tmp_path, body, pre=pre, post=post)
 
@@ -432,25 +450,28 @@ async def test_personal_mcp_composition_preserves_host_pipeline_and_base_policy(
     await _run_case(tmp_path, body)
 
 
-@pytest.mark.parametrize("at_limit", [False, True], ids=["exact-limit", "over-limit"])
 @pytest.mark.asyncio
-async def test_personal_mcp_composition_enforces_total_directory_limit(tmp_path, at_limit):
+async def test_personal_mcp_composition_has_no_account_total_tool_limit(tmp_path):
+    """账号侧无所选工具总量上限：>8所选工具与宿主目录自由组合。"""
     async def body(app, wire, _owner, _workspace, _session_id, docs):
         template = wire.registry()._frozen[0][0]
-        count = MAX_TOOLS if at_limit else MAX_TOOLS - 1
         registry = ToolRegistry(
-            tuple(replace(template, name=f"host_{index}") for index in range(count)),
-            max_tools=MAX_TOOLS,
+            tuple(replace(template, name=f"host_{index}") for index in range(3)),
         )
         base = ToolExecutor(registry, None)
-        if at_limit:
-            with pytest.raises(ServiceError, match="tool_limit"):
-                await app.account_mcp.build_runtime((docs_config(docs),), base)
-            assert docs.calls == []
-            return
-        executor, connections = await app.account_mcp.build_runtime((docs_config(docs),), base)
+        many = MCPServerConfig(
+            name="more",
+            transport="streamable_http",
+            url=f"http://127.0.0.1:{docs.port}/mcp",
+            allowed_hosts=frozenset({"127.0.0.1"}),
+            selected_tools=("search", *(f"tool_{index}" for index in range(9))),
+            readonly_tools=frozenset({"search"}),
+        )
+        executor, connections = await app.account_mcp.build_runtime(
+            (docs_config(docs), many), base
+        )
         try:
-            assert len(executor.registry.schemas()) == MAX_TOOLS
+            assert len(executor.registry.schemas()) == 3 + 1 + 10
         finally:
             await asyncio.gather(*(connection.close() for connection in connections))
 
@@ -488,15 +509,24 @@ async def test_personal_mcp_host_pre_hook_can_deny_before_approval(tmp_path):
     await _run_case(tmp_path, body, pre=pre)
 
 
-def test_personal_mcp_selected_tools_limit_is_not_the_total_directory_limit():
-    with pytest.raises(ValidationError):
-        ConnectionCreate(
-            request_key="too-many-selected-tools",
-            name="docs",
-            url="https://docs.example/mcp",
-            allowed_hosts=("docs.example",),
-            selected_tools=tuple(f"tool_{index}" for index in range(MAX_SELECTED_TOOLS + 1)),
-        )
+def test_connection_accepts_over_eight_selected_tools_and_empty_selections():
+    many = ConnectionCreate(
+        request_key="many-selected-tools",
+        name="docs",
+        url="https://docs.example/mcp",
+        allowed_hosts=("docs.example",),
+        selected_tools=tuple(f"tool_{index}" for index in range(9)),
+        readonly_tools=("tool_0",),
+    )
+    assert len(many.selected_tools) == 9
+    resource_only = ConnectionCreate(
+        request_key="resource-only",
+        name="docs",
+        url="https://docs.example/mcp",
+        allowed_hosts=("docs.example",),
+    )
+    assert resource_only.selected_tools == ()
+    assert resource_only.readonly_tools == ()
 
 
 @pytest.mark.asyncio
@@ -515,12 +545,13 @@ async def test_approved_mcp_ask_resumes_over_rebuilt_connection(tmp_path):
         result = await app.service.wait(run_id)
         assert result.status == "completed", result.code
         facts = await app.service.result(run_id)
-        assert facts.tools[0].name == "docs__search"
-        assert facts.tools[0].status == "ok"
-        assert facts.tools[0].executor_started is True
+        assert facts.tools[0].name == "tool_search"
+        action = next(tool for tool in facts.tools if tool.name == "account__docs__search")
+        assert action.status == "ok"
+        assert action.executor_started is True
         assert docs.calls == [{"tool": "search", "query": "find krim"}]
         assert docs.requests[-1]["credential"] == CREDENTIAL
-        assert len(wire.requests) == 2  # 停靠步一次模型请求，恢复收尾一次，无重放
+        assert len(wire.requests) == 3  # 发现、动作停靠、恢复收尾；不重放发现或动作
         await assert_no_credential_leak(app, run_id)
         assert all(task.done() for task in app.service.tasks.values())
 
@@ -542,9 +573,11 @@ async def test_denied_mcp_ask_feeds_back_without_reaching_server(tmp_path):
         result = await app.service.wait(run_id)
         assert result.status == "completed", result.code
         facts = await app.service.result(run_id)
-        assert facts.tools[0].status == "denied"
-        assert facts.tools[0].code == "approval_denied"
-        assert facts.tools[0].executor_started is False
+        assert facts.tools[0].name == "tool_search"
+        action = next(tool for tool in facts.tools if tool.name == "account__docs__search")
+        assert action.status == "denied"
+        assert action.code == "approval_denied"
+        assert action.executor_started is False
         assert docs.calls == []
         assert all(captured["method"] in {"POST", "GET", "DELETE"} for captured in docs.requests)
 

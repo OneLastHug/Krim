@@ -10,9 +10,9 @@ from krim_agent.contracts import Message, StrictModel
 
 
 class ContextPolicy(StrictModel):
-    max_bytes: int = Field(default=131072, ge=256, le=1048576)
-    max_messages: int = Field(default=256, ge=2, le=1024)
-    reserved_output_tokens: int = Field(default=2048, ge=1, le=32768)
+    max_bytes: int = Field(default=131072, ge=256)
+    max_messages: int | None = Field(default=None, ge=2)
+    reserved_output_tokens: int = Field(default=2048, ge=1)
     counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"
 
 
@@ -58,10 +58,12 @@ class CompactionPolicy(StrictModel):
     """D3消费的冻结类型；D1只定义数据，不发摘要请求。"""
 
     version: Literal["compaction/1"] = "compaction/1"
-    trigger_ratio: float = Field(default=0.8, gt=0, le=0.8)
-    keep_turns: int = Field(default=2, ge=2, le=8)
-    summary_bytes: int = Field(default=2048, ge=1, le=2048)
-    max_passes: int = Field(default=2, ge=1, le=2)
+    trigger_ratio: float = Field(default=0.8, gt=0, le=1)
+    keep_turns: int = Field(default=2, ge=0)
+    # None selects the real request/output capacity, not a product quota. Old
+    # frozen policies retain their explicit values and checkpoint semantics.
+    summary_bytes: int | None = Field(default=None, ge=1)
+    max_passes: int | None = Field(default=None, ge=1)
     counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"
 
 
@@ -72,7 +74,7 @@ class PreparedContext(StrictModel):
     policy: CompactionPolicy
     source_fingerprint: str
     summary_hash: str | None
-    input_bytes: int = Field(ge=0, le=1048576)
+    input_bytes: int = Field(ge=0)
     estimated_tokens: int = Field(ge=0)
     counter_version: Literal["approx-utf8/1"] = "approx-utf8/1"
 
@@ -88,7 +90,7 @@ class DevelopmentContextFrozen(StrictModel):
     turn_id: str
     run_id: str
     authorization_generation: int = Field(ge=1)
-    sources: tuple[HistorySource, ...] = Field(max_length=1024)
+    sources: tuple[HistorySource, ...]
     current: Message
     system_prompt: str
     extensions: dict[str, JsonValue] = Field(default_factory=dict)
@@ -106,6 +108,46 @@ class DevelopmentContextState(StrictModel):
     frozen: DevelopmentContextFrozen
     prepared: PreparedContext | None = None
     prepared_hash: str | None = None
+
+
+class OrdinaryContextFrozen(StrictModel):
+    """V4 ordinary-session anchor; full transcripts remain in turns."""
+
+    schema_version: Literal[4] = 4
+    owner_id: str
+    workspace_id: str
+    session_id: str
+    turn_id: str
+    run_id: str
+    target_key: str
+    # None is reserved for a host-authenticated static/legacy principal.
+    authorization_generation: int | None = Field(default=None, ge=1)
+    sources: tuple[HistorySource, ...]
+    current: Message
+    system_prompt: str
+    extensions: dict[str, JsonValue] = Field(default_factory=dict)
+    policy: ContextPolicy
+    compaction: CompactionPolicy
+    tool_fingerprint: str
+    projection_version: str
+    source_fingerprint: str
+
+
+class OrdinaryContextState(StrictModel):
+    schema_version: Literal[4] = 4
+    frozen: OrdinaryContextFrozen
+    prepared: PreparedContext | None = None
+    prepared_hash: str | None = None
+
+
+class OrdinarySessionContext(StrictModel):
+    schema_version: Literal[4] = 4
+    owner_id: str
+    workspace_id: str
+    session_id: str
+    turn_id: str
+    frozen: OrdinaryContextFrozen
+    prepared: PreparedContext | None = None
 
 
 class DevelopmentSessionContext(StrictModel):

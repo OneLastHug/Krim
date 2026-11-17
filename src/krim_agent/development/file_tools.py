@@ -5,13 +5,15 @@ from __future__ import annotations
 import base64
 import codecs
 import hashlib
+import json
 import shlex
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from krim_agent.contracts import ServiceError, StrictModel, encoded
+from krim_agent.contracts import ServiceError, StrictModel
 from krim_agent.sandbox.filesystem import _parts
 
 WORKER = Path(__file__).with_name("file_worker.py")
@@ -28,29 +30,20 @@ class FileInput(StrictModel):
 
 
 class WriteInput(FileInput):
-    content: str = Field(max_length=16384)
+    content: str
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-    @field_validator("content")
-    @classmethod
-    def bounded_content(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 16384:
-            raise ValueError("content exceeds 16384 UTF-8 bytes")
-        return value
 
 
 class EditInput(FileInput):
-    old_string: str = Field(min_length=1, max_length=8192)
-    new_string: str = Field(max_length=16384)
+    old_string: str = Field(min_length=1)
+    new_string: str
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     replace_all: bool = False
 
     @model_validator(mode="after")
-    def bounded_edit(self) -> EditInput:
+    def changed_edit(self) -> EditInput:
         if self.old_string == self.new_string:
             raise ValueError("replacement must differ")
-        if len(self.old_string.encode()) + len(self.new_string.encode()) > 16384:
-            raise ValueError("edit text exceeds 16384 UTF-8 bytes")
         return self
 
 
@@ -83,17 +76,31 @@ def implementation_digest(source: str) -> str:
     ).hexdigest()
 
 
-def mutation_command(request: WriteInput | EditInput, source: str) -> str:
+def mutation_chunks(request: WriteInput | EditInput, chunk_size: int = 8192) -> Iterator[str]:
+    """ASCII JSON chunks for authenticated stdin; chunk_size is a transport window.
+
+    Reiteration produces the identical bytes used by mutation_command's digest.
+    Bodies never enter argv, shell syntax or environment variables.
+    """
+    if not 1 <= chunk_size <= 8192:
+        raise ValueError("invalid stdin chunk size")
     payload = {
         "operation": "edit" if isinstance(request, EditInput) else "write",
         **request.model_dump(mode="json"),
     }
-    # Encode text once before JSON, so quote/newline density cannot expand its budget.
-    for key in ("content", "old_string", "new_string"):
-        if key in payload:
-            payload[key] = base64.b64encode(str(payload[key]).encode("utf-8")).decode("ascii")
-    argument = encoded(payload)
-    command = "exec /usr/bin/python3 -I -c " + shlex.quote(source) + " " + shlex.quote(argument)
+    encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+                               allow_nan=False)
+    for part in encoder.iterencode(payload):
+        for start in range(0, len(part), chunk_size):
+            yield part[start:start + chunk_size]
+
+
+def mutation_command(request: WriteInput | EditInput, source: str) -> str:
+    digest = hashlib.sha256()
+    for chunk in mutation_chunks(request):
+        digest.update(chunk.encode("ascii"))
+    # Only the program and an immutable payload digest are passed through argv.
+    command = "exec /usr/bin/python3 -I -c " + shlex.quote(source) + " " + digest.hexdigest()
     if len(command) > 32768:
         raise ServiceError("invalid_input", 422)
     return command

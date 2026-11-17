@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from krim_agent.contracts import ServiceError
 from krim_agent.sandbox.checkpoints import ShadowCheckpoints
-from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.quota import QuotaLimits, limits_from_record
 from krim_agent.sandbox.xfs import internal_id
 
 if TYPE_CHECKING:
@@ -108,7 +108,7 @@ def dispatch_maintenance(
             getattr(broker.recovery, action.removeprefix("restore_"))(env, project, **args),
         )
     if action == "checkpoint_list" and (
-        type(args["offset"]) is not int or not 0 <= args["offset"] <= 1000
+        type(args["offset"]) is not int or args["offset"] < 0
         or type(args["limit"]) is not int or not 1 <= args["limit"] <= 100
     ):
         raise ServiceError("invalid_input", 422)
@@ -136,7 +136,7 @@ def dispatch_maintenance(
         return {"checkpoint_id": args["checkpoint_id"], "pinned": args["pinned"]}
     if action == "checkpoint_cleanup_preview":
         return checkpoints.cleanup_preview(
-            env, project, QuotaLimits.model_validate(environment["limits"])
+            env, project, limits_from_record(environment["limits"])
         )
     return checkpoints.cleanup_confirm(env, project, **args)
 
@@ -145,12 +145,8 @@ def release_completed_restore_roots(broker: StorageBroker) -> None:
     """只释放已确认结束操作的24h保护；unknown/paused永远不按TTL解除。"""
     import os
 
-    count = 0
     with os.scandir(broker.state) as records:
         for entry in records:
-            count += 1
-            if count > 8192:
-                break
             if not entry.name.startswith("restore-") or entry.name.startswith("restore-plan-"):
                 continue
             if not entry.name.endswith(".json"):
@@ -183,13 +179,9 @@ def scheduled_cleanup(broker: StorageBroker) -> dict[str, Any]:
     import os
 
     release_completed_restore_roots(broker)
-    count = 0
     with os.scandir(broker.state) as records:
         names = []
         for entry in records:
-            count += 1
-            if count > 8192:
-                raise ServiceError("sandbox_limit")
             if entry.name.startswith("project-") and entry.name.endswith(".json"):
                 names.append(entry.name)
     if not names:
@@ -220,7 +212,7 @@ def scheduled_cleanup(broker: StorageBroker) -> dict[str, Any]:
     if not root.is_dir():
         return {"skipped": "not_provisioned"}
     checkpoints = ShadowCheckpoints(root)
-    plan = checkpoints.cleanup_preview(env, project, QuotaLimits.model_validate(state["limits"]))
+    plan = checkpoints.cleanup_preview(env, project, limits_from_record(state["limits"]))
     if not plan["candidates"]:
         return {"skipped": "no_candidates"}
     return checkpoints.cleanup_confirm(

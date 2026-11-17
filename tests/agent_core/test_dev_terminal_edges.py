@@ -83,7 +83,7 @@ async def test_concurrent_cancel_and_submit_settle_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_large_live_log_truncates_and_checkpoints_returned_cursor(tmp_path):
+async def test_large_live_log_preserves_all_bytes_and_checkpoints_cursor(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     state = tmp_path / "state"
@@ -96,11 +96,12 @@ async def test_large_live_log_truncates_and_checkpoints_returned_cursor(tmp_path
                 break
             await asyncio.sleep(0.01)
         page = await worker.dispatch(control(start, "output", cursor=0))
-        assert page["truncated"]
-        assert page["next_cursor"] == 150
+        assert not page["truncated"]
+        assert page["next_cursor"] == 8 and page["text"] == "00000000"
         persisted = json.loads(next(state.glob("*.json")).read_text())
         assert persisted["log_end"] >= page["next_cursor"]
-        assert next(state.glob("*.log")).stat().st_size <= 64
+        assert persisted["log_format"] == "append-v1"
+        assert next(state.glob("*.log")).stat().st_size == 206
         await worker.dispatch(control(start, "cancel"))
     finally:
         await worker.close()

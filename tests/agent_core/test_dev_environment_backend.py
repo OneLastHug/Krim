@@ -146,6 +146,8 @@ class FakeRunner:
                 labels = {
                     "owner": spec.handle.owner_id,
                     "project": spec.handle.project_id,
+                    "environment": spec.handle.environment_id,
+                    "generation": str(spec.handle.generation),
                     "kind": "execution" if spec.request is not None else "environment",
                 }
                 for value in filters:
@@ -261,7 +263,7 @@ class FakeRunner:
                 "CapDrop": ["ALL"],
                 "SecurityOpt": ["no-new-privileges"],
                 "PidMode": "",
-                "IpcMode": "private",
+                "IpcMode": "none" if spec.resource_policy == "unlimited" else "private",
                 "UTSMode": "",
                 "UsernsMode": "",
                 "CgroupnsMode": "private",
@@ -281,12 +283,16 @@ class FakeRunner:
                 "RestartPolicy": {"Name": "no"},
                 "LogConfig": {"Type": "none"},
                 "NetworkMode": network_name,
-                "Memory": limits.memory_bytes,
-                "MemorySwap": limits.memory_bytes,
-                "NanoCpus": limits.nano_cpus,
+                "Memory": limits.memory_bytes or 0,
+                "MemorySwap": limits.memory_bytes or 0,
+                "NanoCpus": limits.nano_cpus or 0,
                 "PidsLimit": limits.pids,
-                "ShmSize": limits.shm_bytes,
-                "Ulimits": [{"Name": "nofile", "Soft": 1024, "Hard": 4096}],
+                "ShmSize": (limits.shm_bytes if spec.legacy_profile
+                            else 64 * 1024 * 1024),
+                "Ulimits": ([{"Name": "nofile", "Soft": 1024, "Hard": 4096}]
+                            if spec.legacy_profile else []),
+                "OomKillDisable": False,
+                "Init": False,
                 "Tmpfs": docker.tmpfs(spec),
                 "Mounts": [
                     {
@@ -308,7 +314,12 @@ class FakeRunner:
                     "Destination": "/workspace",
                     "RW": True,
                     "Propagation": "rprivate",
-                }
+                },
+                *[
+                    {"Type": "tmpfs", "Source": "tmpfs", "Destination": destination,
+                     "RW": True, "Propagation": ""}
+                    for destination in docker.tmpfs(spec)
+                ],
             ],
             "NetworkSettings": {"Networks": {network_name: network_value}},
             "State": {
@@ -591,7 +602,10 @@ def test_runtime_spec_derives_docker_binding_from_shared_record(tmp_path: Path):
     )
     assert observed.image_id == record.image_id
     assert observed.mount.path == record.content_path
-    assert observed.limits.memory_bytes == record.memory_bytes
+    assert observed.limits.memory_bytes is None
+    assert observed.limits.nano_cpus is None
+    assert observed.limits.pids == -1
+    assert observed.resource_policy == "unlimited"
     assert observed.network.network_id == record.network_id
     assert observed.name.startswith("krim-dev-")
     assert observed.fingerprint == RuntimeSpec(record).fingerprint

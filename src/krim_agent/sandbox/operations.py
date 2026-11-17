@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, JsonValue
 from sqlalchemy import select
 
-from krim_agent.context.types import SessionContext
+from krim_agent.context.types import OrdinarySessionContext, SessionContext
 from krim_agent.contracts import ServiceError, StrictModel
 from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.sandbox.command import SandboxCommand
@@ -48,14 +48,14 @@ class SessionCommandScope:
     session_id: str
     operations: SandboxOperations
     check: Callable[[], None]
-    initial_deadline: float
+    initial_deadline: float | None
     execution_budget: ExecutionBudget | None = None
     invocation: Invocation | None = None
     project_id: str | None = None
     binding_revision: int = 0
 
     @property
-    def deadline(self) -> float:
+    def deadline(self) -> float | None:
         return self.execution_budget.deadline if self.execution_budget else self.initial_deadline
 
 
@@ -66,7 +66,7 @@ class SandboxOperations:
     async def scope(self, run_id: str, check: Callable[[], None], budget: ExecutionBudget) -> Scope:
         snapshot = await self.service.store.snapshot(run_id)
         context = snapshot.session_context
-        if not isinstance(context, SessionContext):
+        if not isinstance(context, (SessionContext, OrdinarySessionContext)):
             raise ServiceError("workspace_contract_required")
         async with self.service.store.lock, self.service.store.engine.connect() as conn:
             session = (
@@ -74,6 +74,10 @@ class SandboxOperations:
                 .mappings()
                 .one()
             )
+        if (session["workspace_id"] != context.workspace_id
+                or isinstance(context, OrdinarySessionContext)
+                and session["owner_id"] != context.owner_id):
+            raise ServiceError("permission_denied")
         actor = self.service.identities.resolve(session["owner_id"])
         from krim_agent.sandbox.bindings import read_binding
 
@@ -108,7 +112,8 @@ class SandboxOperations:
         def fence() -> None:
             check()
             current = self.service._live(actor)
-            if current.generation != accepted or time.monotonic() >= budget.deadline:
+            if (current.generation != accepted
+                    or budget.deadline is not None and time.monotonic() >= budget.deadline):
                 raise ServiceError("permission_denied")
             current.member(context.workspace_id, write=True)
 
@@ -203,15 +208,15 @@ class SandboxOperations:
             from krim_agent.sandbox.execution import execute_command
             from krim_agent.sandbox.tasks import start_task
 
+            deadline = scope.deadline
             if isinstance(values, TaskStart):
-                if values.wall_seconds + 10 > scope.deadline - time.monotonic():
+                if deadline is not None and values.wall_seconds + 10 > deadline - time.monotonic():
                     raise ServiceError("run_timeout")
                 result = await start_task(self.service, scope.actor, values, invocation, scope)
                 scope.check()
                 return cast(JsonValue, result)
-            if isinstance(values, SandboxCommand) and values.wall_seconds + 5 > min(
-                30, scope.deadline - time.monotonic()
-            ):
+            if (isinstance(values, SandboxCommand) and deadline is not None
+                    and values.wall_seconds + 5 > deadline - time.monotonic()):
                 raise ServiceError("run_timeout")
             result = await execute_command(self.service, scope.actor, values, invocation, scope)
             if result.get("code") is not None:
@@ -448,4 +453,4 @@ class SandboxOperations:
                     ),
                 )
             )
-        return ToolRegistry(tuple(result), max_tools=24)
+        return ToolRegistry(tuple(result))

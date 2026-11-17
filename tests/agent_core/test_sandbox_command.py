@@ -111,7 +111,8 @@ async def command_app(
         database,
         settings=settings,
         http_config=OpenAICompatibleConfig(
-            base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture", max_tool_calls=1
+            base_url=f"http://127.0.0.1:{wire.port}/v1", model="fixture", max_tool_calls=1,
+            max_request_bytes=262144
         ),
     ) as app:
         actor = app.identities.authenticate("Bearer " + token)
@@ -222,8 +223,8 @@ def approval(request, allow=True):
     )
 
 
-async def finished(app, run_id):
-    async with asyncio.timeout(30):
+async def finished(app, run_id, *, wait_seconds=30):
+    async with asyncio.timeout(wait_seconds):
         while True:
             view = await app.service.get(run_id)
             if view.status not in {"running", "queued", "awaiting"}:
@@ -337,7 +338,7 @@ async def test_cancel_waits_for_broker_stop_and_keeps_generation(tmp_path, wire,
     ):
         broker.waiting = True
         await app.service.reply_approval(run, request["request_id"], approval(request))
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(60):
             await broker.entered.wait()
         await app.service.cancel(run)
         await finished(app, run)

@@ -13,6 +13,7 @@ import asyncio
 import errno
 import fcntl
 import json
+import math
 import os
 import pty
 import signal
@@ -83,14 +84,29 @@ def child_setup(tty: bool, cwd_fd: int | None) -> None:
 
 
 class Process:
-    def __init__(self, manager: Supervisor, record: dict[str, Any]) -> None:
+    def __init__(
+        self, manager: Supervisor, record: dict[str, Any], *, recovering: bool = False,
+    ) -> None:
         self.manager = manager
         self.record = record
         self.key = checked_id(record["process_id"])
         self.receipt = manager.root / f"{self.key}.json"
+        append_log = record.get("log_format") == "append-v1"
+        if record.get("log_format") not in {None, "ring-v1", "append-v1"}:
+            raise ValueError("unknown output log format")
+        log_path = manager.root / f"{self.key}.log"
+        if not recovering and log_path.exists():
+            # An orphan spool with the same ID is not a new process's output.
+            # Do not append to or truncate it under a fresh operation receipt.
+            raise ValueError("output spool already exists without a receipt")
+        capacity = record.get("log_capacity", manager.log_bytes)
+        if (append_log and record.get("log_capacity") is not None
+                or not append_log and (type(capacity) is not int or capacity < 4)):
+            raise ValueError("invalid output log capacity")
         self.log = ByteLog(
-            manager.root / f"{self.key}.log", manager.log_bytes,
+            log_path, None if append_log else capacity,
             start=record.get("log_start", 0), end=record.get("log_end", 0),
+            recover=append_log and recovering,
         )
         self.child: subprocess.Popen[bytes] | None = None
         self.master: int | None = None
@@ -101,6 +117,7 @@ class Process:
         self.cancel_reason: str | None = None
         self.finished = asyncio.Event()
         self.reader_done = asyncio.Event()
+        self.output_bytes = 0
         self.lock = asyncio.Lock()
         self.input_lock = asyncio.Lock()
         self.tasks: set[asyncio.Task[Any]] = set()
@@ -116,6 +133,8 @@ class Process:
         return task
 
     def persist(self) -> None:
+        self.record["log_format"] = "append-v1" if self.log.capacity is None else "ring-v1"
+        self.record["log_capacity"] = self.log.capacity
         self.record["log_start"] = self.log.start
         self.record["log_end"] = self.log.end
         self.log.flush()
@@ -198,12 +217,16 @@ class Process:
                     raise
                 if not data:
                     break
+                self.output_bytes += len(data)
                 # Secret-enabled commands have an opaque output channel: even
                 # accidental print/PTY echo must never enter durable logs or
                 # model-visible pages. Authorized code may still copy its own
                 # secret elsewhere; this is not arbitrary-program DLP.
                 if not self.record["request"].get("authorization", {}).get("secret_refs"):
                     self.log.append(data)
+                # A continuously writable child must not starve cancellation,
+                # authorization monitors or cursor reads on the host event loop.
+                await asyncio.sleep(0)
         except OSError:
             self.record["reason"] = "output_read_failed"
         finally:
@@ -252,13 +275,20 @@ class Process:
         async with self.lock:
             await self.reap_group()
             self.child.wait()
-            try:
-                await asyncio.wait_for(self.reader_done.wait(), 1.0)
-            except TimeoutError:
-                self.record["reason"] = "output_not_closed"
-                if self.reader_task is not None:
-                    self.reader_task.cancel()
-                    await asyncio.gather(self.reader_task, return_exceptions=True)
+            while not self.reader_done.is_set():
+                progress = self.output_bytes
+                try:
+                    await asyncio.wait_for(self.reader_done.wait(), 1.0)
+                except TimeoutError:
+                    if self.output_bytes != progress:
+                        # Large output may still be draining after process exit.
+                        # This is an idle fault detector, not a log deadline.
+                        continue
+                    self.record["reason"] = "output_not_closed"
+                    if self.reader_task is not None:
+                        self.reader_task.cancel()
+                        await asyncio.gather(self.reader_task, return_exceptions=True)
+                    break
             if self.cancel_reason is not None:
                 self.record.update(state="cancelled", reason=self.cancel_reason)
             elif self.record["state"] == "running":
@@ -346,11 +376,12 @@ class Process:
 
 class Supervisor:
     def __init__(
-        self, root: Path, project: Path, *, log_bytes: int = 1048576,
+        self, root: Path, project: Path, *, log_bytes: int | None = None,
         page_bytes: int = 32768, kill_grace: float = 0.15,
         trusted_attachments: bool = False, allow_same_uid_for_tests: bool = False,
     ) -> None:
-        if not 4 <= log_bytes <= 67108864 or not 4 <= page_bytes <= 65536:
+        if (log_bytes is not None and (type(log_bytes) is not int or log_bytes < 4)
+                or not 4 <= page_bytes <= 65536):
             raise ValueError("invalid output limits")
         if not 0 <= kill_grace <= 2:
             raise ValueError("invalid termination grace")
@@ -363,7 +394,9 @@ class Supervisor:
                 or self.project.is_relative_to(self.root)):
             raise ValueError("worker state and project cannot contain each other")
         self.trusted_attachments = trusted_attachments
-        self.log_bytes = log_bytes
+        # Only used to decode old ring files that predate per-record metadata.
+        # New processes always use append-v1 regardless of this legacy hint.
+        self.log_bytes = log_bytes if log_bytes is not None else 1048576
         self.page_bytes = page_bytes
         self.kill_grace = kill_grace
         self.shell_environment = {
@@ -371,8 +404,6 @@ class Supervisor:
             "LANG": "C.UTF-8", "TERM": "xterm-256color",
         }
         self.processes: dict[str, Process] = {}
-        self.active_limit = 64
-        self.receipt_limit = 4096
         self.admission_lock = asyncio.Lock()
         self.stopping = False
         self.closed_runs: set[str] = set()
@@ -384,17 +415,24 @@ class Supervisor:
         except OSError:
             os.close(self.lock_fd)
             raise
-        for path in root.glob("*.json"):
-            record = json.loads(path.read_text())
-            process = Process(self, record)
-            if record["state"] not in TERMINAL:
-                # An interrupted ring write may have overwritten bytes at the
-                # old offsets. Preserve cursor monotonicity but do not present
-                # uncertain bytes as a recovered log page.
-                process.log.start = process.log.end
-                record.update(state="unknown", exit_code=None, reason="worker_lost")
-                process.persist()
-            self.processes[record["process_id"]] = process
+        try:
+            for path in root.glob("*.json"):
+                record = json.loads(path.read_text())
+                process = Process(self, record, recovering=True)
+                self.processes[record["process_id"]] = process
+                if record["state"] not in TERMINAL:
+                    # Old ring writes may have overwritten acknowledged offsets.
+                    # Append logs cannot overwrite that prefix, so retain all bytes
+                    # recovered from the file, including its uncheckpointed tail.
+                    if process.log.capacity is not None:
+                        process.log.start = process.log.end
+                    record.update(state="unknown", exit_code=None, reason="worker_lost")
+                    process.persist()
+        except BaseException:
+            for process in self.processes.values():
+                process.log.close()
+            os.close(self.lock_fd)
+            raise
 
     async def dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = payload["action"]
@@ -428,9 +466,8 @@ class Supervisor:
         if action == "inspect":
             return process.status()
         if action == "output":
-            # Persist offsets before exposing any cursor. After a supervisor
-            # crash the damaged active ring may be discarded, but a cursor
-            # already returned to a client must never move backwards.
+            # Persist bytes and offsets before exposing a cursor. Recovery never
+            # moves acknowledged cursors backwards or replays the process.
             process.persist()
             page = process.log.read(
                 payload["cursor"], self.page_bytes,
@@ -486,23 +523,21 @@ class Supervisor:
             raise ValueError("environment is stopping")
         if canonical_digest(request["ownership"]) in self.closed_runs:
             raise ValueError("creating run is stopped")
-        if (len(self.processes) >= self.receipt_limit
-                or sum(item.record["state"] in {"accepted", "running", "unknown"}
-                       for item in self.processes.values()) >= self.active_limit):
-            raise ValueError("worker process limit reached")
         # Backend-local defense. Host validates the full C0 DTO before this call.
         if (not isinstance(request["command"], str) or not request["command"].strip()
                 or "\x00" in request["command"] or len(request["command"]) > 32768):
             raise ValueError("invalid command")
         timeout = request["timeout_seconds"]
-        if timeout is not None and not 0 < timeout <= 86400:
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0
+        ):
             raise ValueError("invalid process timeout")
         if request["lifecycle"] not in {"run", "project_service"}:
             raise ValueError("invalid lifecycle")
-        if request["lifecycle"] == "run" and timeout is None:
-            raise ValueError("run process requires timeout")
         record = {"process_id": process_id, "request": request, "request_digest": digest,
-                  "state": "accepted", "exit_code": None, "reason": None}
+                  "state": "accepted", "exit_code": None, "reason": None,
+                  "log_format": "append-v1", "log_capacity": None}
         if self.trusted_attachments:
             record["attach_argv"] = payload["attach_argv"]
             record["execution_id"] = payload["execution_id"]

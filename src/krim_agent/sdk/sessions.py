@@ -68,7 +68,8 @@ class SessionSDK:
         return result
 
     async def list(self, offset: int = 0, limit: int = 20) -> list[SessionView]:
-        if not 0 <= offset <= 100000 or not 1 <= limit <= 50:
+        if (type(offset) is not int or offset < 0
+                or type(limit) is not int or not 1 <= limit <= 50):
             raise ServiceError("invalid_input", 422)
         if isinstance(self.backend, AsyncRunClient):
             return [
@@ -142,7 +143,8 @@ class SessionSDK:
     async def history(
         self, session_id: str, offset: int = 0, limit: int = 20
     ) -> builtins.list[TurnView]:
-        if not 0 <= offset <= 100000 or not 1 <= limit <= 50:
+        if (type(offset) is not int or offset < 0
+                or type(limit) is not int or not 1 <= limit <= 50):
             raise ServiceError("invalid_input", 422)
         if isinstance(self.backend, AsyncRunClient):
             return [

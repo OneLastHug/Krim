@@ -1,25 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import os
 import re
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
-from pydantic import JsonValue
+from pydantic import AnyUrl, JsonValue, ValidationError
 
 from krim_agent.contracts import ServiceError
 from krim_agent.mcp.types import MCPServerConfig, MCPTool, _encode_json
 from krim_agent.network.egress_policy import EgressPolicy
 
-_MAX_DISCOVERED_TOOLS = 256
-_MAX_DISCOVERY_PAGES = 32
-_MAX_RESULT_BYTES = 64 * 1024
 _MAX_QUEUED_CALLS = 64
+_MAX_CURSOR_LENGTH = 4096
+_MAX_URI_LENGTH = 2048
 _WORKER_COUNT = 8
 _STOP = object()
 
@@ -104,39 +104,76 @@ def _clone_json(value: object) -> JsonValue:
         raise ServiceError("mcp_invalid_json", 502) from None
 
 
-def _serialized_size(value: JsonValue) -> int:
-    try:
-        return len(_encode_json(value).encode("utf-8"))
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        raise ServiceError("mcp_invalid_json", 502) from None
-
-
 def _normalize_tool_result(result: object) -> JsonValue:
     if bool(_field(result, "isError", "is_error", default=False)):
         raise ServiceError("mcp_tool_failed", 502)
 
     structured = _field(result, "structuredContent", "structured_content", default=None)
     if structured is not None:
-        payload = _clone_json(structured)
-    else:
-        content = _field(result, "content", default=()) or ()
-        text_blocks: list[str] = []
-        json_blocks: list[JsonValue] = []
-        all_text = True
-        for block in content:
-            text = _field(block, "text", default=None)
-            block_type = _field(block, "type", default=None)
-            if block_type == "text" and isinstance(text, str):
-                text_blocks.append(text)
-                json_blocks.append(text)
-            else:
-                all_text = False
-                json_blocks.append(_clone_json(block))
-        payload = "".join(text_blocks) if all_text else json_blocks
+        return _clone_json(structured)
+    content = _field(result, "content", default=()) or ()
+    text_blocks: list[str] = []
+    json_blocks: list[JsonValue] = []
+    all_text = True
+    for block in content:
+        text = _field(block, "text", default=None)
+        block_type = _field(block, "type", default=None)
+        if block_type == "text" and isinstance(text, str):
+            text_blocks.append(text)
+            json_blocks.append(text)
+        else:
+            all_text = False
+            json_blocks.append(_clone_json(block))
+    return "".join(text_blocks) if all_text else json_blocks
 
-    if _serialized_size(payload) > _MAX_RESULT_BYTES:
-        raise ServiceError("mcp_output_too_large", 502)
-    return payload
+
+def _normalize_resource_page(
+    page: object, items_key: str, required_key: str
+) -> dict[str, JsonValue]:
+    """Clone one server listing page as JSON; keep nextCursor for caller-driven paging."""
+    items: list[JsonValue] = []
+    for item in _field(page, items_key, default=()) or ():
+        cloned = _clone_json(item)
+        if (
+            not isinstance(cloned, dict)
+            or not isinstance(cloned.get("name"), str)
+            or not isinstance(cloned.get(required_key), str)
+        ):
+            raise ServiceError("mcp_tool_failed", 502)
+        items.append(cloned)
+    result: dict[str, JsonValue] = {items_key: items}
+    next_cursor = _field(page, "nextCursor", "next_cursor", default=None)
+    if next_cursor is not None:
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise ServiceError("mcp_cursor_invalid", 502)
+        result["nextCursor"] = next_cursor
+    return result
+
+
+def _normalize_read_resource(result: object) -> dict[str, JsonValue]:
+    """Keep text/blob as distinct kinds; a base64 blob is data, never claimed media."""
+    contents: list[JsonValue] = []
+    for block in _field(result, "contents", default=()) or ():
+        raw_uri = _field(block, "uri", default=None)
+        uri = raw_uri if isinstance(raw_uri, str) else str(raw_uri) if raw_uri is not None else ""
+        mime = _field(block, "mimeType", "mime_type", default=None)
+        text = _field(block, "text", default=None)
+        blob = _field(block, "blob", default=None)
+        text_entry = isinstance(text, str) and blob is None
+        blob_entry = isinstance(blob, str) and text is None
+        if not uri or not (text_entry or blob_entry):
+            raise ServiceError("mcp_tool_failed", 502)
+        entry: dict[str, JsonValue] = {"uri": uri}
+        if isinstance(mime, str):
+            entry["mimeType"] = mime
+        if text_entry:
+            entry["kind"] = "text"
+            entry["text"] = text
+        else:
+            entry["kind"] = "blob"
+            entry["blob"] = blob
+        contents.append(entry)
+    return {"contents": contents}
 
 
 def _schema(value: object) -> dict[str, JsonValue]:
@@ -148,9 +185,12 @@ def _schema(value: object) -> dict[str, JsonValue]:
 
 @dataclass(slots=True)
 class _CallRequest:
-    name: str
-    arguments: dict[str, JsonValue]
-    future: asyncio.Future[JsonValue]
+    kind: str  # "tool" | "list_resources" | "list_resource_templates" | "read_resource"
+    name: str = ""
+    arguments: dict[str, JsonValue] = field(default_factory=dict)
+    cursor: str | None = None
+    uri: str = ""
+    future: asyncio.Future[JsonValue] | None = None
     operation: asyncio.Task[JsonValue] | None = None
 
 
@@ -183,6 +223,8 @@ class MCPConnection:
         self._active_callers: set[asyncio.Task[Any]] = set()
         self._tool_records: dict[str, MCPTool] = {}
         self._discovered_records: dict[str, MCPTool] = {}
+        self._resources_capable = False
+        self._tools_capable = False
         self._pending: dict[asyncio.Future[JsonValue], _CallRequest] = {}
 
     async def connect(self) -> MCPConnection:
@@ -221,6 +263,11 @@ class MCPConnection:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def supports_resources(self) -> bool:
+        """服务器是否在initialize时协商了resources能力；未协商的来源应被隐藏。"""
+        return self._resources_capable
+
     async def call_tool(self, name: str, args: dict[str, JsonValue]) -> JsonValue:
         if not isinstance(name, str):
             raise ServiceError("mcp_tool_not_selected", 404)
@@ -230,17 +277,70 @@ class MCPConnection:
             raise ServiceError("mcp_invalid_json", 422) from None
         if not isinstance(cloned_args, dict) or self._contains_private(cloned_args):
             raise ServiceError("mcp_invalid_json", 422)
+        return await self._enqueue(_CallRequest("tool", name=name, arguments=cloned_args))
 
+    async def list_resources(self, cursor: str | None = None) -> dict[str, JsonValue]:
+        """返回一页服务器资源；结果保留 nextCursor，翻页由调用方逐页推进。"""
+        request = _CallRequest("list_resources", cursor=self._validate_cursor(cursor))
+        return cast(
+            "dict[str, JsonValue]", await self._enqueue(request, requires_resources=True)
+        )
+
+    async def list_resource_templates(self, cursor: str | None = None) -> dict[str, JsonValue]:
+        """返回一页资源模板；同 list_resources，保留 nextCursor。"""
+        request = _CallRequest("list_resource_templates", cursor=self._validate_cursor(cursor))
+        return cast(
+            "dict[str, JsonValue]", await self._enqueue(request, requires_resources=True)
+        )
+
+    async def read_resource(self, uri: str) -> dict[str, JsonValue]:
+        """读取单个资源；text 与 base64 blob 分开标注，保留 URI 与 MIME。"""
+        request = _CallRequest("read_resource", uri=self._validate_uri(uri))
+        return cast(
+            "dict[str, JsonValue]", await self._enqueue(request, requires_resources=True)
+        )
+
+    def _validate_cursor(self, cursor: str | None) -> str | None:
+        if cursor is None:
+            return None
+        if (
+            not isinstance(cursor, str)
+            or not cursor
+            or len(cursor) > _MAX_CURSOR_LENGTH
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in cursor)
+        ):
+            raise ServiceError("mcp_invalid_json", 422)
+        return cursor
+
+    def _validate_uri(self, uri: str) -> str:
+        if (
+            not isinstance(uri, str)
+            or not uri
+            or len(uri) > _MAX_URI_LENGTH
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in uri)
+        ):
+            raise ServiceError("mcp_invalid_json", 422)
+        try:
+            AnyUrl(uri)
+        except ValidationError:
+            raise ServiceError("mcp_invalid_json", 422) from None
+        return uri
+
+    async def _enqueue(
+        self, request: _CallRequest, *, requires_resources: bool = False
+    ) -> JsonValue:
         async with self._lifecycle_lock:
             if self._closing or self._closed or not self._connected:
                 raise ServiceError("mcp_connection_closed", 503)
-            if name not in self._tool_records:
+            if requires_resources and not self._resources_capable:
+                raise ServiceError("mcp_unavailable", 501)
+            if request.kind == "tool" and request.name not in self._tool_records:
                 raise ServiceError("mcp_tool_not_selected", 404)
             current = asyncio.current_task()
             if current is not None:
                 self._active_callers.add(current)
             future: asyncio.Future[JsonValue] = asyncio.get_running_loop().create_future()
-            request = _CallRequest(name, cloned_args, future)
+            request.future = future
             self._pending[future] = request
             try:
                 self._queue.put_nowait(request)
@@ -342,7 +442,14 @@ class MCPConnection:
                 await stack.enter_async_context(session)
                 try:
                     async with asyncio.timeout(self._config.timeout_seconds):
-                        await session.initialize()
+                        initialized = await session.initialize()
+                        capabilities = _field(initialized, "capabilities", default=None)
+                        self._resources_capable = (
+                            _field(capabilities, "resources", default=None) is not None
+                        )
+                        self._tools_capable = (
+                            _field(capabilities, "tools", default=None) is not None
+                        )
                         discovered = await self._discover_tools(session)
                 except TimeoutError:
                     self._owner_error = ServiceError("mcp_timeout", 504)
@@ -378,24 +485,27 @@ class MCPConnection:
             self._closed = True
             self._ready.set()
             for request in tuple(self._pending.values()):
-                if not request.future.done():
+                if request.future is not None and not request.future.done():
                     request.future.set_exception(ServiceError("mcp_connection_closed", 503))
 
     async def _discover_tools(self, session: Any) -> dict[str, MCPTool]:
-        discovered: dict[str, MCPTool] = {}
         selected = set(self._config.selected_tools)
+        if not self._tools_capable:
+            # resource-only服务器：不发送其不支持的tools/list；
+            # 声明选中工具即为配置错误，与unknown selection一致。
+            if selected:
+                raise ServiceError("mcp_tool_not_selected", 422)
+            return {}
+
+        discovered: dict[str, MCPTool] = {}
         used_cursors: set[str] = set()
         cursor: str | None = None
-        page_count = 0
 
         while True:
-            if page_count >= _MAX_DISCOVERY_PAGES:
-                raise ServiceError("mcp_discovery_limit", 502)
             if cursor is not None:
                 if cursor in used_cursors:
                     raise ServiceError("mcp_cursor_invalid", 502)
                 used_cursors.add(cursor)
-            page_count += 1
             try:
                 page = await session.list_tools(cursor=cursor)
             except asyncio.CancelledError:
@@ -405,10 +515,15 @@ class MCPConnection:
 
             page_tools = _field(page, "tools", default=()) or ()
             for remote_tool in page_tools:
-                if len(discovered) >= _MAX_DISCOVERED_TOOLS:
-                    raise ServiceError("mcp_discovery_limit", 502)
                 name = _field(remote_tool, "name")
-                if not isinstance(name, str) or not name or name in discovered:
+                # 官方工具名128字符约束与控制字符拒绝；受控失败，非数量配额。
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name) > 128
+                    or any(ord(char) < 0x20 or ord(char) == 0x7F for char in name)
+                    or name in discovered
+                ):
                     raise ServiceError("mcp_discovery_failed", 502)
                 input_schema = _schema(
                     _field(remote_tool, "inputSchema", "input_schema", default={})
@@ -463,11 +578,11 @@ class MCPConnection:
                     return
                 request = entry
                 assert isinstance(request, _CallRequest)
-                if request.future.cancelled():
+                if request.future is None or request.future.cancelled():
                     continue
                 operation = asyncio.create_task(
-                    self._execute_call(session, request.name, request.arguments),
-                    name=f"mcp-tool-{request.name}",
+                    self._execute_call(session, request),
+                    name=f"mcp-call-{request.kind}-{request.name or request.uri}",
                 )
                 request.operation = operation
                 try:
@@ -539,16 +654,56 @@ class MCPConnection:
             return [self._redact_private(item) for item in value]
         return value
 
-    async def _execute_call(
-        self, session: Any, name: str, arguments: dict[str, JsonValue]
-    ) -> JsonValue:
+    def _redact_blobs(self, value: JsonValue) -> JsonValue:
+        """对base64解码字节直接扫描凭据，命中则整体剔除该blob，再做普通字符串替换。"""
+        if isinstance(value, dict):
+            blob = value.get("blob")
+            if isinstance(blob, str) and blob != "[redacted]" and self._blob_has_private(blob):
+                value = {**value, "blob": "[redacted]"}
+            return {str(key): self._redact_blobs(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._redact_blobs(item) for item in value]
+        return value
+
+    def _blob_has_private(self, blob: str) -> bool:
+        """凭据按文本凭据的UTF-8字节扫描；无额外二进制秘密输入。短密钥仅整串相等。"""
+        try:
+            decoded = base64.b64decode(blob)
+        except ValueError:
+            return False
+        if not decoded:
+            return False
+        for secret in self._private_values():
+            encoded = secret.encode("utf-8")
+            if len(encoded) >= 8 and encoded in decoded:
+                return True
+            if decoded == encoded:
+                return True
+        return False
+
+    async def _execute_call(self, session: Any, request: _CallRequest) -> JsonValue:
         try:
             async with asyncio.timeout(self._config.timeout_seconds):
-                result = await session.call_tool(name, arguments=arguments)
+                payload = await self._remote_call(session, request)
         except asyncio.CancelledError:
             raise
         except TimeoutError:
             raise ServiceError("mcp_timeout", 504) from None
+        except ServiceError:
+            raise
         except Exception:
             raise ServiceError("mcp_tool_failed", 502) from None
-        return self._redact_private(_normalize_tool_result(result))
+        return self._redact_private(self._redact_blobs(payload))
+
+    async def _remote_call(self, session: Any, request: _CallRequest) -> JsonValue:
+        if request.kind == "tool":
+            result = await session.call_tool(request.name, arguments=request.arguments)
+            return _normalize_tool_result(result)
+        if request.kind == "list_resources":
+            page = await session.list_resources(cursor=request.cursor)
+            return _normalize_resource_page(page, "resources", "uri")
+        if request.kind == "list_resource_templates":
+            page = await session.list_resource_templates(cursor=request.cursor)
+            return _normalize_resource_page(page, "resourceTemplates", "uriTemplate")
+        result = await session.read_resource(request.uri)
+        return _normalize_read_resource(result)

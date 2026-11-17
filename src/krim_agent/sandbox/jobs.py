@@ -23,7 +23,7 @@ from krim_agent.sandbox.file_models import (
 )
 from krim_agent.sandbox.port_adapters import AcceptedProjectMutation
 from krim_agent.sandbox.ports import ProjectRef
-from krim_agent.sandbox.quota import QuotaLimits
+from krim_agent.sandbox.quota import limits_from_record
 from krim_agent.sandbox.runner import RunscRunner
 from krim_agent.sandbox.runtime_profiles import ProfileProgram, ResolvedRuntime, RuntimeCatalog
 from krim_agent.sandbox.xfs import internal_id
@@ -470,7 +470,7 @@ class CommandJobs:
         try:
             with state["prepare_lock"]:
                 environment = self.broker._environment(environment_id)
-                limits = QuotaLimits.model_validate(environment["limits"])
+                limits = limits_from_record(environment["limits"])
                 if environment.get("checkpoint_number") is None:
                     partition = self.broker.quota.checkpoint_partition(environment_id, limits)
                     environment.update(partition)

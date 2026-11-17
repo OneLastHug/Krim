@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -39,12 +39,89 @@ class _Mount:
 
 @dataclass(frozen=True)
 class _Limits:
-    memory_bytes: int
-    nano_cpus: int
+    memory_bytes: int | None
+    nano_cpus: int | None
     pids: int
-    tmp_bytes: int = 32 * 1024 * 1024
-    home_bytes: int = 64 * 1024 * 1024
-    shm_bytes: int = 64 * 1024 * 1024
+    tmp_bytes: int
+    home_bytes: int
+    shm_bytes: int
+
+
+_LEGACY_TMP_BYTES = 32 * 1024 * 1024
+_LEGACY_HOME_BYTES = 64 * 1024 * 1024
+_LEGACY_SHM_BYTES = 64 * 1024 * 1024
+_UNLIMITED_LIMITS = _Limits(None, None, -1, 0, 0, 0)
+_MISSING = object()
+
+
+def _resource_value(record: EnvironmentRecord, name: str) -> object:
+    """Read a previous resource value from new or legacy record shapes."""
+    resources = getattr(record, "resources", None)
+    if resources is not None:
+        if isinstance(resources, dict):
+            return resources.get(name, _MISSING)
+        return getattr(resources, name, _MISSING)
+    return getattr(record, name, _MISSING)
+
+
+def _bounded_cpu(value: object) -> int:
+    """Validate the previous finite CPU range for legacy-spec matching."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EnvironmentError("environment_configuration_invalid")
+    cpu = float(value)
+    if not math.isfinite(cpu) or not 0.001 <= cpu <= 64:
+        raise EnvironmentError("environment_configuration_invalid")
+    return round(cpu * 1_000_000_000)
+
+
+def _cpu_limit(value: object) -> int:
+    """Convert an explicit positive finite CPU limit without a product ceiling."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EnvironmentError("environment_configuration_invalid")
+    cpu = float(value)
+    if not math.isfinite(cpu) or cpu <= 0:
+        raise EnvironmentError("environment_configuration_invalid")
+    scaled = cpu * 1_000_000_000
+    if not math.isfinite(scaled):
+        raise EnvironmentError("environment_configuration_invalid")
+    nano_cpus = round(scaled)
+    if nano_cpus <= 0:
+        raise EnvironmentError("environment_configuration_invalid")
+    return nano_cpus
+
+
+def _legacy_limits(record: EnvironmentRecord) -> _Limits:
+    cpu = _resource_value(record, "cpu_cores")
+    memory = _resource_value(record, "memory_bytes")
+    pids = _resource_value(record, "pids_limit")
+    nano_cpus = _bounded_cpu(cpu)
+    if (not isinstance(memory, int) or isinstance(memory, bool)
+            or memory < 64 * 1024 * 1024
+            or not isinstance(pids, int) or isinstance(pids, bool)
+            or not 8 <= pids <= 65536):
+        raise EnvironmentError("environment_configuration_invalid")
+    return _Limits(memory, nano_cpus, pids,
+                   _LEGACY_TMP_BYTES, _LEGACY_HOME_BYTES, _LEGACY_SHM_BYTES)
+
+
+def _limited_limits(record: EnvironmentRecord) -> _Limits:
+    cpu = _resource_value(record, "cpu_cores")
+    memory = _resource_value(record, "memory_bytes")
+    pids = _resource_value(record, "pids_limit")
+    nano_cpus = None if cpu is _MISSING or cpu is None else _cpu_limit(cpu)
+    if memory is _MISSING or memory is None:
+        memory_bytes = None
+    elif (not isinstance(memory, int) or isinstance(memory, bool) or memory <= 0):
+        raise EnvironmentError("environment_configuration_invalid")
+    else:
+        memory_bytes = memory
+    if pids is _MISSING or pids is None:
+        pids_limit = -1
+    elif not isinstance(pids, int) or isinstance(pids, bool) or pids <= 0:
+        raise EnvironmentError("environment_configuration_invalid")
+    else:
+        pids_limit = pids
+    return _Limits(memory_bytes, nano_cpus, pids_limit, 0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -61,19 +138,23 @@ class RuntimeSpec:
     request: CommandRequest | None = None
     process_id: str | None = None
     execution_id: str | None = None
+    _legacy_resources: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         r = self.record
         path = r.content_path
+        policy = self.resource_policy
         if (not _IMAGE.fullmatch(r.image_id) or (r.uid, r.gid) != (65532, 65532)
                 or not path.is_absolute() or path == Path("/") or ".." in path.parts
                 or any(c in str(path) for c in (",", "\x00", "\n", "\r"))
                 or r.content_device < 0 or r.content_inode < 1
-                or not math.isfinite(r.cpu_cores) or not 0.001 <= r.cpu_cores <= 64
-                or r.memory_bytes < 64 * 1024 * 1024 or not 8 <= r.pids_limit <= 65536
-                or r.revision < 1 or type(r.max_processes) is not int
-                or not 1 <= r.max_processes <= 32):
+                or r.revision < 1 or not isinstance(policy, str)
+                or policy not in {"unlimited", "limited", "legacy"}):
             raise EnvironmentError("environment_configuration_invalid")
+        if policy == "legacy":
+            _legacy_limits(r)
+        elif policy == "limited":
+            _limited_limits(r)
         if r.container_id is not None and not _HEX.fullmatch(r.container_id):
             raise EnvironmentError("environment_configuration_invalid")
         # An arbitrary Docker bridge ID is not an egress enforcement facility.
@@ -96,6 +177,27 @@ class RuntimeSpec:
             raise EnvironmentError("network_binding_drift")
 
     @property
+    def resource_policy(self) -> str:
+        if self._legacy_resources:
+            return "legacy"
+        value = getattr(self.record, "resource_policy", _MISSING)
+        # Records written before the explicit policy field are bounded records;
+        # missing metadata must never be upgraded to unlimited by assumption.
+        if value is _MISSING:
+            return "legacy"
+        return value if isinstance(value, str) else "invalid"
+
+    @property
+    def legacy_profile(self) -> bool:
+        return self._legacy_resources or self.resource_policy == "legacy"
+
+    @classmethod
+    def legacy(cls, record: EnvironmentRecord, request: CommandRequest | None = None,
+               process_id: str | None = None, execution_id: str | None = None) -> RuntimeSpec:
+        """Reconstruct the previous bounded spec solely for safe migration checks."""
+        return cls(record, request, process_id, execution_id, _legacy_resources=True)
+
+    @property
     def handle(self) -> EnvironmentHandle:
         return self.record.environment
 
@@ -110,8 +212,11 @@ class RuntimeSpec:
 
     @property
     def limits(self) -> _Limits:
-        return _Limits(self.record.memory_bytes, round(self.record.cpu_cores * 1_000_000_000),
-                       self.record.pids_limit)
+        if self.legacy_profile:
+            return _legacy_limits(self.record)
+        if self.resource_policy == "limited":
+            return _limited_limits(self.record)
+        return _UNLIMITED_LIMITS
 
     @property
     def network(self) -> _Network:
@@ -127,11 +232,20 @@ class RuntimeSpec:
     @property
     def fingerprint(self) -> str:
         r = self.record
-        value = {"identity": identity(r.environment), "image": r.image_id,
-                 "content": (str(r.content_path), r.content_device, r.content_inode),
-                 "cpu": self.limits.nano_cpus, "memory": r.memory_bytes, "pids": r.pids_limit,
-                 "network": (self.network.network_id, self.network.policy_ref),
-                 "profile": "krim-development-runsc-v2-uid65532"}
+        if self.legacy_profile:
+            value = {"identity": identity(r.environment), "image": r.image_id,
+                     "content": (str(r.content_path), r.content_device, r.content_inode),
+                     "cpu": self.limits.nano_cpus, "memory": self.limits.memory_bytes,
+                     "pids": self.limits.pids,
+                     "network": (self.network.network_id, self.network.policy_ref),
+                     "profile": "krim-development-runsc-v2-uid65532"}
+        else:
+            value = {"identity": identity(r.environment), "image": r.image_id,
+                     "content": (str(r.content_path), r.content_device, r.content_inode),
+                     "cpu": self.limits.nano_cpus, "memory": self.limits.memory_bytes,
+                     "pids": self.limits.pids, "resource_policy": self.resource_policy,
+                     "network": (self.network.network_id, self.network.policy_ref),
+                     "profile": "krim-development-runsc-v3-uid65532"}
         if self.request is not None:
             value["request"] = command_digest(self.request)
             value["process"] = self.process_id

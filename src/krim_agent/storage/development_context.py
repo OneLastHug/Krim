@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.context import builder
+from krim_agent.context.serialization import encoded, fingerprint
 from krim_agent.context.types import (
     CompactionPolicy,
     ContextPolicy,
@@ -19,15 +20,14 @@ from krim_agent.context.types import (
     HistorySource,
     PreparedContext,
 )
-from krim_agent.contracts import TERMINAL, Message, ServiceError, encoded, fingerprint
+from krim_agent.contracts import TERMINAL, Message, ServiceError
 from krim_agent.project_access.types import ProjectGrant
 from krim_agent.storage.development_models import project_access_records
 from krim_agent.storage.models import run_events, runs, sessions, turns
 from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_session_bindings
 
 DOMAIN = "development-session-history/3"
-MAX_SOURCES = 1024
-MAX_FROZEN_BYTES = 1024 * 1024
+SOURCE_PAGE_SIZE = 128
 
 
 def scope_of(frozen: DevelopmentContextFrozen) -> dict[str, JsonValue]:
@@ -81,8 +81,6 @@ def state_from_raw(raw: Any, context_hash: str | None) -> DevelopmentContextStat
             ):
                 raise ValueError("prepared context drift")
             builder.validate_groups(list(prepared.messages[1:]))
-        if len(encoded(state.model_dump(mode="json")).encode()) > MAX_FROZEN_BYTES:
-            raise ValueError("context storage bound")
         return state
     except (TypeError, ValueError):
         raise ServiceError("facts_corrupt") from None
@@ -136,23 +134,32 @@ async def _previous_rows(
             turns.c.workspace_id,
         )
     )
-    rows = (
-        (
-            await conn.execute(
-                select(*columns)
-                .where(
-                    turns.c.session_id == session_id,
-                    turns.c.ordinal < current["ordinal"],
+    rows: list[Mapping[str, Any]] = []
+    after = -1
+    while True:
+        page = (
+            (
+                await conn.execute(
+                    select(*columns)
+                    .where(
+                        turns.c.session_id == session_id,
+                        turns.c.ordinal < current["ordinal"],
+                        turns.c.ordinal > after,
+                    )
+                    .order_by(turns.c.ordinal)
+                    .limit(SOURCE_PAGE_SIZE)
                 )
-                .order_by(turns.c.ordinal)
-                .limit(MAX_SOURCES + 1)
             )
+            .mappings()
+            .all()
         )
-        .mappings()
-        .all()
-    )
-    if len(rows) > MAX_SOURCES:
-        raise ServiceError("context_budget", 422)
+        if not page:
+            break
+        next_ordinal = page[-1]["ordinal"]
+        if next_ordinal <= after:
+            raise ServiceError("facts_corrupt")
+        rows.extend(dict(row) for row in page)
+        after = next_ordinal
     if any(
         row["owner_id"] != current["owner_id"] or row["workspace_id"] != current["workspace_id"]
         for row in rows
@@ -167,7 +174,14 @@ async def _terminal_sequences(
 ) -> dict[str, int]:
     ids = [row["run_id"] for row in rows if row["run_id"] is not None]
     if not ids:
+        if any(row["status"] in {"queued", "running"} for row in rows):
+            raise ServiceError("capacity", 429)
         return {}
+    if len(rows) > SOURCE_PAGE_SIZE:
+        result: dict[str, int] = {}
+        for offset in range(0, len(rows), SOURCE_PAGE_SIZE):
+            result.update(await _terminal_sequences(conn, rows[offset : offset + SOURCE_PAGE_SIZE]))
+        return result
     latest = (
         select(run_events.c.run_id, func.max(run_events.c.seq).label("seq"))
         .where(run_events.c.run_id.in_(ids))
@@ -293,6 +307,9 @@ class DevelopmentCompactionSource:
         }
 
     async def verify_frozen(self, conn: AsyncConnection, run_id: str) -> None:
+        await self._verify_frozen(conn, run_id)
+
+    async def _verify_frozen(self, conn: AsyncConnection, run_id: str) -> Any:
         frozen = self.frozen
         canonical = (
             (
@@ -302,8 +319,14 @@ class DevelopmentCompactionSource:
                         sessions.c.target_key,
                         sessions.c.owner_id.label("session_owner"),
                         sessions.c.workspace_id.label("session_workspace"),
+                        runs.c.request,
+                        runs.c.target,
+                        runs.c.request_key.label("run_request_key"),
+                        runs.c.status.label("run_status"),
+                        runs.c.stop_requested,
                     )
                     .join(sessions, sessions.c.id == turns.c.session_id)
+                    .join(runs, runs.c.id == turns.c.run_id)
                     .where(
                         turns.c.id == frozen.turn_id,
                     )
@@ -329,20 +352,10 @@ class DevelopmentCompactionSource:
         state = state_from_raw(canonical["context_snapshot"], canonical["context_fingerprint"])
         if state.frozen != frozen:
             raise ServiceError("facts_corrupt")
-        run = (
-            (
-                await conn.execute(
-                    select(runs.c.request, runs.c.target, runs.c.request_key).where(
-                        runs.c.id == run_id,
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
+        run = canonical
         if (
             run is None
-            or run["request_key"] != "ac-turn." + frozen.turn_id
+            or run["run_request_key"] != "ac-turn." + frozen.turn_id
             or run["request"].get("text") != frozen.current.content
             or not isinstance(run["target"], dict)
             or not isinstance(run["target"].get("context"), dict)
@@ -354,9 +367,10 @@ class DevelopmentCompactionSource:
         ):
             raise ServiceError("facts_corrupt")
         await _verify_frozen_refs(conn, frozen)
+        return canonical
 
     async def verify(self, conn: AsyncConnection, run_id: str) -> None:
-        await self.verify_frozen(conn, run_id)
+        canonical = await self._verify_frozen(conn, run_id)
         frozen = self.frozen
         from krim_agent.storage.project_access import SQLiteAccessRepository
 
@@ -389,17 +403,7 @@ class DevelopmentCompactionSource:
             .mappings()
             .first()
         )
-        run = (
-            (
-                await conn.execute(
-                    select(runs.c.status, runs.c.stop_requested).where(
-                        runs.c.id == run_id,
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
+        run = canonical
         if (
             scope is None
             or scope["project_id"] != frozen.project_id
@@ -408,7 +412,7 @@ class DevelopmentCompactionSource:
             or scope["project_status"] != "ready"
             or scope["session_status"] != "open"
             or run is None
-            or run["status"] != "running"
+            or run["run_status"] != "running"
             or run["stop_requested"]
         ):
             raise ServiceError("permission_denied", 403)
@@ -556,6 +560,4 @@ def make_frozen(
         projection_version=builder.VERSION,
         source_fingerprint=source_fingerprint(scope, sources, extensions),
     )
-    if len(encoded(frozen.model_dump(mode="json")).encode()) > MAX_FROZEN_BYTES:
-        raise ServiceError("context_budget", 422)
     return frozen

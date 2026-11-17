@@ -20,9 +20,10 @@ from krim_agent.sessions.types import (
 )
 from krim_agent.storage import session_sidebar as sidebar
 from krim_agent.storage import sessions as session_sql
-from krim_agent.storage.sidebar_models import SIDEBAR_TABLE_NAMES, SIDEBAR_TABLES
+from krim_agent.storage.sidebar_models import SIDEBAR_TABLE_NAMES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 from tests.agent_core.test_account_api import client_for, initialize
+from tests.agent_core.test_extension_migration import downgrade_to_version
 
 
 async def seeded_session(store, owner: str, key: str, workspace: str = "local"):
@@ -51,7 +52,7 @@ async def test_sidebar_defaults_empty_and_survives_reload(tmp_path):
     database = tmp_path / "sidebar.sqlite"
     async with await open_application(database) as host:
         store = host.store
-        assert store.schema_version == SCHEMA_VERSION == 17
+        assert store.schema_version == SCHEMA_VERSION
         session = await seeded_session(store, LOCAL.principal_id, "sidebar-reload")
         empty = await sidebar.get(store, principal=LOCAL, workspace="local")
         assert empty.revision == 0 and empty.groups == () and empty.sessions == ()
@@ -275,10 +276,7 @@ async def test_sidebar_readonly_schema16_gate(tmp_path):
             LOCAL, "local", SessionCreate(request_key="sidebar-schema16-gate")
         )
         await host.close()
-    with sqlite3.connect(database) as connection:
-        for table in reversed(SIDEBAR_TABLES):
-            connection.execute(f'DROP TABLE "{table.name}"')
-        connection.execute("PRAGMA user_version=16")
+    downgrade_to_version(database, 16)
     unchanged = database.read_bytes()
     reader = await SQLiteStore.open(database, readonly=True)
     try:
@@ -301,10 +299,8 @@ async def test_migration_from_schema16_preserves_source_and_enables_sidebar(tmp_
             LOCAL, "local", SessionCreate(request_key="sidebar-migration")
         )
         await host.close()
+    downgrade_to_version(database, 16)
     with sqlite3.connect(database) as connection:
-        for table in reversed(SIDEBAR_TABLES):
-            connection.execute(f'DROP TABLE "{table.name}"')
-        connection.execute("PRAGMA user_version=16")
         before = connection.execute("SELECT * FROM sessions").fetchall()
     reader = await SQLiteStore.open(database, readonly=True)
     try:
@@ -314,7 +310,7 @@ async def test_migration_from_schema16_preserves_source_and_enables_sidebar(tmp_
         await reader.close()
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 17
+        assert writer.schema_version == SCHEMA_VERSION
         assert (await session_sql.get_session(writer, session.id)).id == session.id
         written = await sidebar.put(
             writer, principal=LOCAL, workspace="local", body=layout(session.id)

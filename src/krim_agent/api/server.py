@@ -321,11 +321,19 @@ def create_app(
 
     mount_accounts(app)
 
+    from .context import mount_context
     from .extensions import mount_extensions
+    from .goals import mount_goals
+    from .interaction import mount_interaction
+    from .planning import mount_planning
     from .session_lifecycle import mount_session_lifecycle
     from .session_sidebar import mount_session_sidebar
 
     mount_extensions(app)
+    mount_planning(app)
+    mount_interaction(app)
+    mount_context(app)
+    mount_goals(app)
     mount_session_lifecycle(app)
     mount_session_sidebar(app)
 

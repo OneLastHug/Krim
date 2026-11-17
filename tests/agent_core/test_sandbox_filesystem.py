@@ -1,4 +1,4 @@
-"""真实Linux目录适配：路径/链接拒绝、读写上限、原子替换、glob 作用域与分块读取期望值。"""
+"""真实Linux目录适配：路径/链接拒绝、分页读写、原子替换、glob 作用域与流式写入。"""
 
 import base64
 import hashlib
@@ -111,11 +111,20 @@ def test_limits_and_hidden_names(files):
     (content / ".env").write_bytes(b"private")
     (content / ".git").mkdir()
     assert fs.list(env, project)["entries"] == []
-    (content / "large").write_bytes(b"x" * (4 * 1024**2 + 1))
-    with pytest.raises(ServiceError, match="artifact_limit"):
-        fs.read(env, project, "large")
-    with pytest.raises(ServiceError, match="invalid_input"):
-        fs.write(env, project, "new", b"x" * (1024**2 + 1), None)
+    payload = b"x" * (4 * 1024**2 + 1)
+    (content / "large").write_bytes(payload)
+    # 应用文件字节配额已移除：超过原4MiB上限的文件按页完整可读。
+    first = fs.read(env, project, "large", 0, 65536)
+    assert base64.b64decode(first["data"]) == payload[:65536]
+    assert first["eof"] is False
+    assert first["sha256"] == hashlib.sha256(payload).hexdigest()
+    tail = fs.read(env, project, "large", 4 * 1024**2, 65536)
+    assert base64.b64decode(tail["data"]) == payload[4 * 1024**2 :]
+    assert tail["eof"] is True
+    # 写入同样不再有1MiB上限。
+    written = fs.write(env, project, "written-large", b"y" * (1024**2 + 1), None)
+    assert written["size"] == 1024**2 + 1
+    assert fs.read(env, project, "written-large")["size"] == 1024**2 + 1
     for value in [True, -1, 65537]:
         with pytest.raises(ServiceError):
             fs.read(env, project, "large", limit=value)
@@ -124,10 +133,12 @@ def test_limits_and_hidden_names(files):
     assert page["entries"] == [{"name": "large", "type": "file", "size": 4 * 1024**2 + 1}]
     assert page["offset"] == 0
     assert page["next_offset"] == 1
-    assert page["total"] == 2
-    tail = fs.list(env, project, limit=1, offset=1)
-    assert tail["entries"][0]["name"] == "second"
-    assert tail["next_offset"] is None
+    assert page["total"] == 3
+    middle = fs.list(env, project, limit=1, offset=1)
+    assert middle["entries"][0]["name"] == "second"
+    tail_page = fs.list(env, project, limit=1, offset=2)
+    assert tail_page["entries"][0]["name"] == "written-large"
+    assert tail_page["next_offset"] is None
     with pytest.raises(ServiceError, match="invalid_input"):
         fs.create("../bad", project)
     fs.close()
@@ -258,36 +269,92 @@ def test_search_skips_secrets_links_and_binary(files, tmp_path):
     assert (outside_dir / "inside.txt").read_bytes() == b"needle hidden\n"
 
 
-def test_search_skips_oversize_and_respects_byte_cap(files):
+def test_search_matches_large_files_within_scan_budget(files):
+    """应用文件字节配额移除后，超过原4MiB上限的文件同样参与文本搜索。"""
     fs, env, project, content = files
-    (content / "big.txt").write_bytes(b"needle\n" + b"x" * (4 * 1024**2))
+    big = b"needle\n" + b"x" * (4 * 1024**2)
+    (content / "big.txt").write_bytes(big)
     (content / "small.txt").write_bytes(b"needle here\n")
     result = fs.search(env, project, "needle")
-    assert [m["path"] for m in result["matches"]] == ["small.txt"]
-    assert result["skipped"] == 1
+    assert [m["path"] for m in result["matches"]] == ["big.txt", "small.txt"]
+    assert result["skipped"] == 0
     assert result["byte_cap_reached"] is False
-    for i in range(9):
-        pad = bytes([97 + i]) * (4 * 1024**2 - 7)
-        (content / f"cap_{i:02d}.txt").write_bytes(b"needle\n" + pad)
-    capped = fs.search(env, project, "needle", limit=100)
-    expected = {f"cap_{i:02d}.txt" for i in range(8)}
-    assert {m["path"] for m in capped["matches"]} == expected
-    assert capped["skipped"] == 3
-    assert capped["byte_cap_reached"] is True
-    assert capped["truncated"] is True
-    assert capped["next_offset"] is None
-    assert capped["total_matches"] is None
-    assert capped["scanned_bytes"] == 32 * 1024**2
+    assert result["truncated"] is False
+    assert result["total_matches"] == 2
+    assert result["scanned_bytes"] == len(big) + len(b"needle here\n")
 
 
-def test_search_and_list_entry_hard_cap(files):
+def test_search_has_no_total_scan_byte_budget(files):
+    """单次搜索扫描总字节预算移除，较早大文件之后的内容仍能命中。"""
+    fs, env, project, content = files
+    small = b"needle here\n"
+    large = b"needle\n" + b"0" * (32 * 1024**2)
+    (content / "a.txt").write_bytes(small)
+    (content / "z.bin").write_bytes(large)
+    result = fs.search(env, project, "needle")
+    assert [m["path"] for m in result["matches"]] == ["a.txt", "z.bin"]
+    assert result["skipped"] == 0
+    assert result["byte_cap_reached"] is False
+    assert result["truncated"] is False
+    assert result["total_matches"] == 2
+    assert result["scanned_bytes"] == len(small) + len(large)
+
+
+def test_list_find_and_search_continue_after_4096_items(files):
+    """目录列表、文件发现和搜索可继续到4096以后，单页limit仍受约束。"""
     fs, env, project, content = files
     for i in range(4097):
-        (content / f"f{i:05d}.txt").write_bytes(b"needle\n")
-    partial = fs.search(env, project, "absent")
-    assert partial["entry_cap_reached"] is True and partial["total_matches"] is None
-    with pytest.raises(ServiceError, match="artifact_limit"):
-        fs.list(env, project)
+        (content / f"f{i:05d}.py").write_bytes(b"needle\n")
+
+    listing = fs.list(env, project, limit=1, offset=4096)
+    assert listing["entries"][0]["name"] == "f04096.py"
+    assert listing["total"] == 4097
+    assert listing["next_offset"] is None
+
+    found = fs.find(env, project, include_glob="*.py", limit=1, offset=4096)
+    assert found["files"] == [{"path": "f04096.py", "size": len(b"needle\n")}]
+    assert found["total"] == 4097
+    assert found["next_offset"] is None
+    assert found["entry_cap_reached"] is False
+    assert found["truncated"] is False
+
+    searched = fs.search(env, project, "needle", limit=1, offset=4096)
+    assert searched["matches"] == [{
+        "path": "f04096.py", "line": 1, "preview": "needle", "before": [], "after": [],
+    }]
+    assert searched["total_matches"] == 4097
+    assert searched["next_offset"] is None
+    assert searched["entry_cap_reached"] is False
+    assert searched["match_cap_reached"] is False
+    assert searched["truncated"] is False
+
+
+def test_search_page_byte_cap_returns_resumable_offset(files):
+    """单页64KiB响应保护可经next_offset继续；完整扫描不丢后续匹配。"""
+    fs, env, project, content = files
+    lines = []
+    for index in range(100):
+        lines.extend([
+            f"before-{index}-" + "b" * 240,
+            f"needle-{index}-" + "m" * 240,
+            f"after-{index}-" + "a" * 240,
+        ])
+    (content / "contexts.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    first = fs.search(env, project, "needle", before=1, after=1, limit=100)
+    assert first["match_cap_reached"] is True
+    assert first["next_offset"] == len(first["matches"])
+    assert len(first["matches"]) < 100
+    assert first["total_matches"] == 100
+    assert first["truncated"] is True
+
+    second = fs.search(
+        env, project, "needle", before=1, after=1, limit=100, offset=first["next_offset"]
+    )
+    assert len(second["matches"]) == 100 - len(first["matches"])
+    assert second["next_offset"] is None
+    assert second["total_matches"] == 100
+    assert second["truncated"] is False
 
 
 def test_find_depth_cap_does_not_abort_other_siblings(files):
@@ -572,3 +639,120 @@ def test_remove_requires_exact_hash_and_rejects_specials(files, tmp_path):
         "deleted": True,
     }
     assert not (content / "gone.txt").exists()
+
+
+def _chunks(payload: bytes, size: int) -> list[bytes]:
+    return [payload[index : index + size] for index in range(0, len(payload), size)]
+
+
+def test_stream_write_chunks_atomically_and_verifies_digest(files):
+    """分块流式写入：原子替换，返回值为完整内容的size与SHA-256。"""
+    fs, env, project, content = files
+    payload = b"0123456789abcdef" * 8192
+    result = fs.stream_write(
+        env, project, "stream.bin", iter(_chunks(payload, 3000)), None,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    assert result == {
+        "path": "stream.bin",
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    assert (content / "stream.bin").read_bytes() == payload
+    assert not [p for p in content.iterdir() if p.name.startswith(".krim-write-")]
+
+
+def test_stream_write_requires_digest_and_rejects_bad_chunks(files):
+    fs, env, project, content = files
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.stream_write(env, project, "x.bin", iter([b"a"]), None, None)
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.stream_write(env, project, "x.bin", iter([b"a", "b"]), None, "0" * 64)
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.stream_write(env, project, "x.bin", iter([b"a", b""]), None, "0" * 64)
+    with pytest.raises(ServiceError, match="invalid_input"):
+        fs.stream_write(env, project, "x.bin", iter([b"a"]), None, "nothex")
+    assert not (content / "x.bin").exists()
+
+
+def test_stream_write_digest_mismatch_leaves_target_intact(files):
+    fs, env, project, content = files
+    original = fs.write(env, project, "guarded.bin", b"keep", None)
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        fs.stream_write(
+            env, project, "guarded.bin", iter([b"other"]), original["sha256"],
+            hashlib.sha256(b"expected").hexdigest(),
+        )
+    assert (content / "guarded.bin").read_bytes() == b"keep"
+    assert not [p for p in content.iterdir() if p.name.startswith(".krim-write-")]
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        fs.stream_write(
+            env, project, "missing.bin", iter([b"other"]), None,
+            hashlib.sha256(b"expected").hexdigest(),
+        )
+    assert not (content / "missing.bin").exists()
+
+
+def test_stream_write_precondition_conflict_then_resume(files):
+    fs, env, project, content = files
+    payload = b"z" * 70000
+    written = fs.write(env, project, "pre.bin", b"old-content", None)
+    stale = hashlib.sha256(b"stale-content").hexdigest()
+    with pytest.raises(ServiceError, match="artifact_conflict"):
+        fs.stream_write(
+            env, project, "pre.bin", iter([payload]), stale,
+            hashlib.sha256(payload).hexdigest(),
+        )
+    assert (content / "pre.bin").read_bytes() == b"old-content"
+    result = fs.stream_write(
+        env, project, "pre.bin", iter(_chunks(payload, 65536)), written["sha256"],
+        hashlib.sha256(payload).hexdigest(),
+    )
+    assert result["size"] == len(payload)
+    assert (content / "pre.bin").read_bytes() == payload
+
+
+def test_large_file_roundtrip_through_stream_write_and_paged_read(files):
+    """超过原4MiB上限的文件经分块写入后按页读回，分块读取摘要链条完整。"""
+    fs, env, project, content = files
+    payload = (bytes(range(256)) * 4 + b"\n") * (4 * 1024**2 // 257 + 1)
+    fs.stream_write(
+        env, project, "large.bin", iter(_chunks(payload, 65536)), None,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    gathered = bytearray()
+    offset = 0
+    digest = None
+    while True:
+        page = fs.read(env, project, "large.bin", offset, 65536)
+        if digest is None:
+            digest = page["sha256"]
+        assert page["sha256"] == digest
+        gathered.extend(base64.b64decode(page["data"]))
+        if page["eof"]:
+            break
+        offset += len(base64.b64decode(page["data"]))
+    assert bytes(gathered) == payload
+    assert digest == hashlib.sha256(payload).hexdigest()
+    removed = fs.remove(env, project, "large.bin", digest)
+    assert removed == {"path": "large.bin", "deleted": True}
+
+
+def test_snapshot_has_no_file_total_bytes_or_entry_count_cap(files):
+    """快照捕获超过旧文件/总字节/4096项上限的普通文件，继续过滤敏感路径和链接。"""
+    fs, env, project, content = files
+    large_file = b"L" * (4 * 1024**2 + 1)
+    bulk_file = b"B" * (32 * 1024**2)
+    (content / "large.bin").write_bytes(large_file)
+    (content / "bulk.bin").write_bytes(bulk_file)
+    for index in range(4097):
+        (content / f"item-{index:05d}.txt").write_bytes(b"x")
+    (content / ".env").write_text("sensitive", encoding="utf-8")
+    (content / "link.txt").symlink_to(content / "large.bin")
+
+    snapshot = fs.snapshot(env, project)
+    assert len(snapshot["files"]) == 4099
+    assert snapshot["files"]["large.bin"] == large_file
+    assert snapshot["files"]["bulk.bin"] == bulk_file
+    assert snapshot["total_bytes"] == len(large_file) + len(bulk_file) + 4097
+    assert {item["path"] for item in snapshot["excluded"]} == {".env", "link.txt"}

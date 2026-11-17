@@ -108,6 +108,7 @@ async def test_secret_command_refs_remain_only_in_authorization(wired):
     )
     request = ShellInput.model_validate({
         "command": "read provided descriptor", "secret_refs": ["app-token"],
+        "timeout_seconds": 30,
     }, strict=True)
     from krim_agent.development.contracts import OperationIdentity
 

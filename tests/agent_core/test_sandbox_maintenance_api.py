@@ -44,6 +44,10 @@ async def test_restore_http_requires_confirmation_and_replays_original_result(tm
             await client.post(prefix + "/provision", json={"request_key": "prepare"})
         ).status_code == 200
         assert (await client.get(prefix + "/checkpoints")).json()["items"] == []
+        later = await client.get(prefix + "/checkpoints?offset=10001&limit=100")
+        assert later.status_code == 200 and later.json()["offset"] == 10001
+        assert (await client.get(prefix + "/checkpoints?offset=-1")).status_code == 422
+        assert (await client.get(prefix + "/checkpoints?limit=101")).status_code == 422
         checkpoint = str(uuid.uuid4())
         plan = (await client.post(prefix + f"/checkpoints/{checkpoint}/restore-plans")).json()
         endpoint = prefix + f"/restore-plans/{plan['plan_id']}/confirm"

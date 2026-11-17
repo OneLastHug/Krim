@@ -35,7 +35,7 @@ def test_development_environment_preserves_small_text_defaults(monkeypatch):
     assert config is not None
     assert config.allow_images is False
     assert config.max_request_bytes == 32768
-    assert config.max_tool_calls == 1
+    assert config.max_tool_calls is None
     assert config.max_output_tokens == 512
     assert config.read_timeout_seconds == 5
 
@@ -193,17 +193,15 @@ def test_image_environment_reaches_real_development_composition(monkeypatch, tmp
         ("allow_images", "yes"),
         ("allow_images", "TRUE"),
         ("allow_images", ""),
-        ("max_request_bytes", "1048577"),
         ("max_request_bytes", "255"),
         ("max_request_bytes", "1e6"),
         ("max_request_bytes", " 32768"),
         ("max_request_bytes", "32768.0"),
-        ("max_response_bytes", "1048577"),
-        ("max_event_bytes", "1048577"),
-        ("max_events", "16385"),
-        ("max_arguments_bytes", "65537"),
+        ("max_response_bytes", "0"),
+        ("max_event_bytes", "0"),
+        ("max_events", "0"),
+        ("max_arguments_bytes", "1"),
         ("max_tool_calls", "0"),
-        ("max_tool_calls", "5"),
         ("max_tool_calls", "true"),
         ("max_tool_calls", "1.0"),
     ],

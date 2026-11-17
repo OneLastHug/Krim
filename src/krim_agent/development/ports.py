@@ -42,12 +42,13 @@ class EnvironmentRecord:
     configuration_digest: str | None = None
     uid: int = 65532
     gid: int = 65532
-    cpu_cores: float = 1.0
-    memory_bytes: int = 1_073_741_824
-    pids_limit: int = 256
-    max_processes: int = 4
+    cpu_cores: float | None = None
+    memory_bytes: int | None = None
+    pids_limit: int | None = None
+    max_processes: int | None = None
     network_id: str | None = None
     network_policy_ref: str | None = None
+    resource_policy: Literal["unlimited", "limited", "legacy"] = "unlimited"
 
 
 class EnvironmentRepository(Protocol):

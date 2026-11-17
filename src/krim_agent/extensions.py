@@ -1,16 +1,17 @@
-"""Owner-managed Skills and private memory; no model write tools."""
+"""Owner-managed Skills and private memory, shared by API and scoped tools."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pydantic import Field, model_validator
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import Message, ServiceError, StrictModel, encoded, fingerprint
@@ -27,15 +28,14 @@ from krim_agent.storage.extension_models import (
     turn_extensions,
 )
 from krim_agent.storage.models import session_controls, sessions
+from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_session_bindings
 
 if TYPE_CHECKING:
     from krim_agent.accounts.service import IdentityService
     from krim_agent.storage.sqlite import SQLiteStore
 
 RETENTION = "已从未来记忆中移除；历史运行记录、上下文快照、对话和备份仍按其保留策略保存。"
-MAX_MEMORIES = 100
-MAX_MEMORY_BYTES = 4096
-MAX_RECALL_BYTES = 8192
+DEFAULT_RECALL_CHARS = 8192
 MAX_SKILL_CONTEXT_BYTES = 65536
 BUILTIN_ID = "builtin-task-checklist"
 BUILTIN = """---
@@ -66,8 +66,18 @@ class SkillRemove(Mutation):
 
 
 class MemoryCreate(Mutation):
-    body: str = Field(min_length=1, max_length=4096)
+    body: str = Field(min_length=1)
     source_ref: str | None = Field(default=None, max_length=256)
+    source_kind: Literal["user", "web", "mcp", "task"] = "user"
+    memory_kind: Literal["note", "preference"] = "note"
+
+    @model_validator(mode="after")
+    def preference_source(self) -> MemoryCreate:
+        if self.memory_kind == "preference" and self.source_kind != "user":
+            raise ValueError("用户偏好只能来自用户")
+        if self.source_kind in {"web", "mcp"} and not self.source_ref:
+            raise ValueError("外部内容须保留来源")
+        return self
 
 
 class MemoryUpdate(MemoryCreate):
@@ -108,6 +118,18 @@ class SessionExtensions(Mutation):
 
 def body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+async def _memory_search_function(conn: AsyncConnection) -> None:
+    # Register on the current SQLite connection, without changing shared engine hooks.
+    def register(sync: Any) -> None:
+        sync.connection.dbapi_connection.run_async(
+            lambda raw: raw.create_function(
+                "krim_memory_casefold", 1, lambda value: value.casefold(), deterministic=True
+            )
+        )
+
+    await conn.run_sync(register)
 
 
 def _extension_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -182,12 +204,16 @@ class ExtensionService:
     ) -> Any:
         membership = self.actor(actor).member(workspace, write=write)
         row = (
-            await conn.execute(
-                select(sessions).where(
-                    sessions.c.id == session_id, sessions.c.workspace_id == workspace
+            (
+                await conn.execute(
+                    select(sessions).where(
+                        sessions.c.id == session_id, sessions.c.workspace_id == workspace
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None or (row["owner_id"] != actor.principal_id and membership.role != "admin"):
             raise ServiceError("not_found", 404)
         if write and row["owner_id"] != actor.principal_id:
@@ -211,12 +237,39 @@ class ExtensionService:
         body: Mutation,
         action: str,
         operation: Callable[[AsyncConnection], Awaitable[dict[str, Any]]],
+        *,
+        guard: Callable[[AsyncConnection], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         self.actor(actor)
-        digest = fingerprint({"action": action, "body": body.model_dump(mode="json")})
+        document = body.model_dump(mode="json")
+        # Preserve hashes of pre-scope account-memory receipts after migration.
+        if isinstance(body, MemoryCreate):
+            for key, default in (("source_kind", "user"), ("memory_kind", "note")):
+                if document.get(key) == default:
+                    document.pop(key)
+                    if isinstance(body, MemoryUpdate) and key in body.model_fields_set:
+                        document["explicit_" + key] = default
+        request = {"action": action, "body": document}
+        # Identical canonical JSON/hash to fingerprint, without its generic 1MiB guard.
+        # Memory text is persisted as a SQL parameter, not an inline tool result.
+        digest = (
+            hashlib.sha256(
+                json.dumps(
+                    request,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
+            if isinstance(body, MemoryCreate)
+            else fingerprint(request)
+        )
 
         async def known(conn: AsyncConnection) -> dict[str, Any] | None:
             self.actor(actor)
+            if guard is not None:
+                await guard(conn)
             row = (
                 (
                     await conn.execute(
@@ -241,6 +294,8 @@ class ExtensionService:
                 return previous
             result = await operation(conn)
             self.actor(actor)
+            if guard is not None:
+                await guard(conn)
             await conn.execute(
                 insert(extension_requests).values(
                     principal_id=actor.principal_id,
@@ -418,16 +473,20 @@ class ExtensionService:
             if row["revision"] != body.expected_revision:
                 raise ServiceError("revision_conflict", 409)
             refs = (
-                await conn.execute(
-                    select(
-                        session_extensions.c.session_id,
-                        session_extensions.c.revision,
-                        session_extensions.c.skills,
+                (
+                    await conn.execute(
+                        select(
+                            session_extensions.c.session_id,
+                            session_extensions.c.revision,
+                            session_extensions.c.skills,
+                        )
+                        .join(sessions, sessions.c.id == session_extensions.c.session_id)
+                        .where(sessions.c.owner_id == actor.principal_id)
                     )
-                    .join(sessions, sessions.c.id == session_extensions.c.session_id)
-                    .where(sessions.c.owner_id == actor.principal_id)
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             for ref_row in refs:
                 raw_skills = cast(list[dict[str, Any]], ref_row["skills"])
                 selected = [item for item in raw_skills if item.get("skill_id") != skill_id]
@@ -447,15 +506,51 @@ class ExtensionService:
 
         return await self._mutate(actor, body, "skill-delete:" + skill_id, write)
 
+    @staticmethod
+    def memory_filter(
+        owner: str, workspace_id: str | None = None, project_id: str | None = None
+    ) -> Any:
+        return and_(
+            memories.c.principal_id == owner,
+            memories.c.workspace_id == workspace_id,
+            memories.c.project_id == project_id,
+        )
+
+    async def memory_project(
+        self,
+        conn: AsyncConnection,
+        actor: PrincipalContext,
+        workspace_id: str | None,
+        project_id: str | None,
+        *,
+        write: bool = False,
+    ) -> None:
+        if workspace_id is None and project_id is None:
+            return
+        if not workspace_id or not project_id:
+            raise ServiceError("invalid_input", 422)
+        self.actor(actor).member(workspace_id, write=write)
+        found = await conn.scalar(
+            select(sandbox_projects.c.project_id).where(
+                sandbox_projects.c.project_id == project_id,
+                sandbox_projects.c.workspace_id == workspace_id,
+                sandbox_projects.c.principal_id == actor.principal_id,
+                sandbox_projects.c.status.not_in(["deleted", "deleting"]),
+            )
+        )
+        if found is None:
+            raise ServiceError("not_found", 404)
+
     async def list_memories(self, actor: PrincipalContext) -> list[dict[str, Any]]:
+        """Legacy management API: account scope only; new clients use memory_page."""
+
         async def read(conn: AsyncConnection) -> list[dict[str, Any]]:
             rows = (
                 (
                     await conn.execute(
                         select(memories)
-                        .where(memories.c.principal_id == actor.principal_id)
+                        .where(self.memory_filter(actor.principal_id))
                         .order_by(memories.c.updated_at.desc(), memories.c.id)
-                        .limit(MAX_MEMORIES)
                     )
                 )
                 .mappings()
@@ -471,30 +566,107 @@ class ExtensionService:
             raise ServiceError("facts_corrupt")
         return dict(row)
 
+    async def memory_page(
+        self,
+        actor: PrincipalContext,
+        *,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+        query: str = "",
+    ) -> dict[str, Any]:
+        if offset < 0 or not 1 <= limit <= 200:
+            raise ServiceError("invalid_input", 422)
+
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            await self.memory_project(conn, actor, workspace_id, project_id)
+            statement = select(memories).where(
+                self.memory_filter(actor.principal_id, workspace_id, project_id)
+            )
+            if query:
+                await _memory_search_function(conn)
+                statement = statement.where(
+                    func.krim_memory_casefold(memories.c.body).contains(
+                        query.casefold(), autoescape=True
+                    )
+                )
+            rows = (
+                (
+                    await conn.execute(
+                        statement.order_by(memories.c.updated_at.desc(), memories.c.id)
+                        .offset(offset)
+                        .limit(limit + 1)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return {
+                "items": [self._memory(row) for row in rows[:limit]],
+                "next_offset": offset + limit if len(rows) > limit else None,
+            }
+
+        return await self._read(actor, read)
+
+    async def read_memory(
+        self,
+        actor: PrincipalContext,
+        memory_id: str,
+        *,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            await self.memory_project(conn, actor, workspace_id, project_id)
+            row = (
+                (
+                    await conn.execute(
+                        select(memories).where(
+                            memories.c.id == memory_id,
+                            self.memory_filter(actor.principal_id, workspace_id, project_id),
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ServiceError("not_found", 404)
+            return self._memory(row)
+
+        return await self._read(actor, read)
+
     async def memory(
         self,
         actor: PrincipalContext,
         body: MemoryCreate | MemoryDelete,
         memory_id: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+        authorization_turn_id: str | None = None,
+        guard: Callable[[AsyncConnection], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
-        if isinstance(body, MemoryCreate) and (
-            not body.body.strip()
-            or "\x00" in body.body
-            or len(body.body.encode()) > MAX_MEMORY_BYTES
-        ):
+        if isinstance(body, MemoryCreate) and (not body.body.strip() or "\x00" in body.body):
             raise ServiceError("invalid_input", 422)
+        if memory_id is None and isinstance(body, (MemoryUpdate, MemoryDelete)):
+            raise ServiceError("invalid_input", 422)
+
+        async def authorize(conn: AsyncConnection) -> None:
+            await self.memory_project(conn, actor, workspace_id, project_id, write=True)
+            if guard is not None:
+                await guard(conn)
 
         async def write(conn: AsyncConnection) -> dict[str, Any]:
             now = time.time()
             selected_id, revision = memory_id or str(uuid.uuid4()), 1
+            condition = self.memory_filter(actor.principal_id, workspace_id, project_id)
             if memory_id is not None:
                 row = (
                     (
                         await conn.execute(
-                            select(memories).where(
-                                memories.c.id == memory_id,
-                                memories.c.principal_id == actor.principal_id,
-                            )
+                            select(memories).where(memories.c.id == memory_id, condition)
                         )
                     )
                     .mappings()
@@ -512,10 +684,7 @@ class ExtensionService:
                     raise ServiceError("revision_conflict", 409)
                 if isinstance(body, MemoryDelete):
                     await conn.execute(
-                        delete(memories).where(
-                            memories.c.id == memory_id,
-                            memories.c.principal_id == actor.principal_id,
-                        )
+                        delete(memories).where(memories.c.id == memory_id, condition)
                     )
                     return dict(id=memory_id, removed=True, retention_notice=RETENTION)
                 revision = row["revision"] + 1
@@ -524,33 +693,189 @@ class ExtensionService:
                 body=body.body,
                 content_hash=body_hash(body.body),
                 source_ref=body.source_ref,
+                source_kind=body.source_kind,
+                memory_kind=body.memory_kind,
+                authorization_turn_id=authorization_turn_id,
                 revision=revision,
                 updated_at=now,
             )
+            if isinstance(body, MemoryUpdate):
+                assert row is not None
+                for key in ("source_kind", "memory_kind"):
+                    if key not in body.model_fields_set:
+                        values[key] = row[key]
+                if body.source_ref is None:
+                    values["source_ref"] = row["source_ref"]
+                if (
+                    values["memory_kind"] == "preference"
+                    and values["source_kind"] != "user"
+                    or values["source_kind"] in {"web", "mcp"}
+                    and not values["source_ref"]
+                ):
+                    raise ServiceError("invalid_input", 422)
             if memory_id is None:
-                count = await conn.scalar(
-                    select(func.count())
-                    .select_from(memories)
-                    .where(memories.c.principal_id == actor.principal_id)
-                )
-                if (count or 0) >= MAX_MEMORIES:
-                    raise ServiceError("capacity", 429)
                 await conn.execute(
                     insert(memories).values(
-                        id=selected_id, principal_id=actor.principal_id, created_at=now, **values
+                        id=selected_id,
+                        principal_id=actor.principal_id,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        created_at=now,
+                        **values,
                     )
                 )
             else:
                 await conn.execute(
-                    update(memories)
-                    .where(
-                        memories.c.id == memory_id, memories.c.principal_id == actor.principal_id
-                    )
-                    .values(**values)
+                    update(memories).where(memories.c.id == memory_id, condition).values(**values)
                 )
+            if guard is not None:
+                await guard(conn)
             return dict(id=selected_id, revision=revision, content_hash=values["content_hash"])
 
-        return await self._mutate(actor, body, "memory:" + (memory_id or "create"), write)
+        action = "memory:" + (memory_id or "create")
+        if project_id is not None:
+            action += ":" + fingerprint({"workspace": workspace_id, "project": project_id})
+        if authorization_turn_id is not None:
+            action += ":turn:" + authorization_turn_id
+        return await self._mutate(actor, body, action, write, guard=authorize)
+
+    async def memory_access(
+        self,
+        conn: AsyncConnection,
+        actor: PrincipalContext,
+        workspace_id: str,
+        session_id: str,
+        *,
+        project_id: str | None = None,
+        write: bool = False,
+    ) -> dict[str, Any]:
+        """Current private-memory gates; never grants an admin another owner's memory."""
+        session = await self._session(conn, actor, workspace_id, session_id, write=write)
+        if session["owner_id"] != actor.principal_id:
+            raise ServiceError("not_found", 404)
+        config = (
+            (
+                await conn.execute(
+                    select(session_extensions).where(session_extensions.c.session_id == session_id)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        preference = (
+            (
+                await conn.execute(
+                    select(memory_preferences).where(
+                        memory_preferences.c.principal_id == actor.principal_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        bound_project = await conn.scalar(
+            select(sandbox_session_bindings.c.project_id).where(
+                sandbox_session_bindings.c.session_id == session_id,
+                sandbox_session_bindings.c.principal_id == actor.principal_id,
+            )
+        )
+        if project_id != bound_project:
+            raise ServiceError("context_binding_changed", 409)
+        if project_id is not None:
+            await self.memory_project(conn, actor, workspace_id, project_id, write=write)
+        personal = await self.personal(conn, actor.principal_id, workspace_id)
+        enabled = bool(
+            config
+            and config["memory_enabled"]
+            and preference
+            and preference["enabled"]
+            and (personal or project_id is not None)
+        )
+        return dict(
+            enabled=enabled,
+            preference_revision=preference["revision"] if preference else 0,
+            session_extension_revision=config["revision"] if config else 0,
+            account_allowed=personal,
+            project_id=project_id,
+        )
+
+    async def memory_recall(
+        self,
+        conn: AsyncConnection,
+        owner: str,
+        workspace_id: str,
+        project_id: str | None,
+        query: str,
+        *,
+        account_allowed: bool,
+        limit: int = 8,
+        max_chars: int = DEFAULT_RECALL_CHARS,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Bounded projection over the whole store, with resumable matching records."""
+        conditions = [self.memory_filter(owner)] if account_allowed else []
+        if project_id is not None:
+            conditions.append(self.memory_filter(owner, workspace_id, project_id))
+        terms = list(dict.fromkeys(re.findall(r"[\w]+", query.casefold())))
+        if not conditions or not terms:
+            return dict(items=[], next_offset=None)
+        await _memory_search_function(conn)
+        keywords = func.json_each(encoded(terms)).table_valued("value").alias("memory_terms")
+        score = (
+            select(func.count())
+            .select_from(keywords)
+            .where(func.instr(func.krim_memory_casefold(memories.c.body), keywords.c.value) > 0)
+            .correlate(memories)
+            .scalar_subquery()
+        )
+        # Fetch only excerpts; large stored bodies are read explicitly with memory_read.
+        columns = [column for column in memories.c if column.name != "body"]
+        rows = (
+            (
+                await conn.execute(
+                    select(
+                        *columns,
+                        func.substr(memories.c.body, 1, max_chars).label("body"),
+                        func.length(memories.c.body).label("total_chars"),
+                    )
+                    .where(or_(*conditions), score > 0)
+                    .order_by(score.desc(), memories.c.updated_at.desc(), memories.c.id)
+                    .offset(offset)
+                    .limit(limit + 1)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        items, used = [], 0
+        for row in rows[:limit]:
+            if used >= max_chars:
+                break
+            if len(row["body"]) == row["total_chars"]:
+                self._memory(row)
+            excerpt = row["body"][: max_chars - used]
+            items.append(
+                dict(
+                    kind="memory",
+                    id=row["id"],
+                    revision=row["revision"],
+                    content_hash=row["content_hash"],
+                    body=excerpt,
+                    excerpt_hash=body_hash(excerpt),
+                    total_chars=row["total_chars"],
+                    next_offset=len(excerpt) if len(excerpt) < row["total_chars"] else None,
+                    scope="project" if row["project_id"] else "account",
+                    workspace_id=row["workspace_id"],
+                    project_id=row["project_id"],
+                    source_ref=row["source_ref"],
+                    source_kind=row["source_kind"],
+                    memory_kind=row["memory_kind"],
+                )
+            )
+            used += len(excerpt)
+        return dict(
+            items=items, next_offset=offset + len(items) if len(rows) > len(items) else None
+        )
 
     async def preference(
         self, actor: PrincipalContext, body: Preference | None = None
@@ -637,7 +962,15 @@ class ExtensionService:
             if current["revision"] != body.expected_revision:
                 raise ServiceError("revision_conflict", 409)
             if body.memory_enabled and not await self.personal(conn, actor.principal_id, workspace):
-                raise ServiceError("private_memory_workspace", 403)
+                project_id = await conn.scalar(
+                    select(sandbox_session_bindings.c.project_id).where(
+                        sandbox_session_bindings.c.session_id == session_id,
+                        sandbox_session_bindings.c.principal_id == actor.principal_id,
+                    )
+                )
+                if project_id is None:
+                    raise ServiceError("private_memory_workspace", 403)
+                await self.memory_project(conn, actor, workspace, project_id)
             if len({s.skill_id for s in body.skills}) != len(body.skills):
                 raise ServiceError("invalid_input", 422)
             for ref in body.skills:
@@ -729,54 +1062,26 @@ class ExtensionService:
                 )
         if len(encoded(items).encode()) > MAX_SKILL_CONTEXT_BYTES:
             raise ServiceError("context_budget", 422)
-        preference = await conn.scalar(
-            select(memory_preferences.c.enabled).where(
-                memory_preferences.c.principal_id == actor.principal_id
-            )
-        )
-        if (
-            config is not None
-            and config["memory_enabled"]
-            and preference
-            and await self.personal(conn, actor.principal_id, session["workspace_id"])
-        ):
-            rows = (
-                (
-                    await conn.execute(
-                        select(memories)
-                        .where(memories.c.principal_id == actor.principal_id)
-                        .order_by(memories.c.updated_at.desc(), memories.c.id)
-                        .limit(MAX_MEMORIES)
-                    )
+        if config is not None and config["memory_enabled"]:
+            project_id = await conn.scalar(
+                select(sandbox_session_bindings.c.project_id).where(
+                    sandbox_session_bindings.c.session_id == session["id"],
+                    sandbox_session_bindings.c.principal_id == actor.principal_id,
                 )
-                .mappings()
-                .all()
             )
-            terms = set(re.findall(r"[\w]+", text.casefold()))
-            ranked = sorted(
-                rows, key=lambda row: -sum(term in row["body"].casefold() for term in terms)
+            access = await self.memory_access(
+                conn, actor, session["workspace_id"], session["id"], project_id=project_id
             )
-            used, selected = 0, 0
-            for row in ranked:
-                score = sum(term in row["body"].casefold() for term in terms)
-                if score == 0:
-                    continue
-                value = self._memory(row)
-                item = dict(
-                    kind="memory",
-                    id=value["id"],
-                    revision=value["revision"],
-                    content_hash=value["content_hash"],
-                    body=value["body"],
-                    source_ref=value["source_ref"],
+            if access["enabled"]:
+                recalled = await self.memory_recall(
+                    conn,
+                    actor.principal_id,
+                    session["workspace_id"],
+                    project_id,
+                    text,
+                    account_allowed=access["account_allowed"],
                 )
-                size = len(encoded(item).encode())
-                if used + size > MAX_RECALL_BYTES:
-                    continue
-                items.append(item)
-                used, selected = used + size, selected + 1
-                if selected >= 8:
-                    break
+                items.extend(recalled["items"])
         self.actor(actor)
         snapshot = dict(version="extensions/2", revision=revision, items=items)
         await conn.execute(

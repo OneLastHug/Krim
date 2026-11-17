@@ -17,6 +17,7 @@ from krim_agent.contracts import (
     fingerprint,
     parse_json,
 )
+from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import ExecutionBudget, settled
 
 from .core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
@@ -24,6 +25,7 @@ from .mcp_schema import MCPContract
 from .output import OutputContract
 from .pipeline import CURRENT, Middleware, Scope, Wrap, _calling
 from .registry import ToolRegistry
+from .session import SESSION_RISKS
 
 type Emit = Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]]
 type Approve = Callable[[Invocation, float], Awaitable[bool]]
@@ -33,7 +35,7 @@ type Approve = Callable[[Invocation, float], Awaitable[bool]]
 class ToolContext:
     emit: Emit
     approve: Approve
-    timeout: float
+    timeout: float | None
     assert_target_current: Callable[[], None] = lambda: None
     scope: Scope | None = None
     approval_timeout: float = 300
@@ -76,14 +78,24 @@ class ToolExecutor:
         decisions = [await self.policy(invocation)]
         if spec.binding_target is not None:
             target = spec.binding_target
-            decisions.append(await self.policy(replace(
-                invocation, name=target.name, tool_hash=target.fingerprint)))
+            projected = replace(invocation, name=target.name, tool_hash=target.fingerprint)
+            # A binding target is a host-validated second policy check. Give it
+            # its own matching call scope rather than weakening session resolve
+            # to accept arbitrary model-supplied names on an existing call.
+            with _calling(projected):
+                current = CURRENT.get()
+                token = CURRENT.set(replace(current, invocation=projected)
+                                    if current is not None else None)
+                try:
+                    decisions.append(await self.policy(projected))
+                finally:
+                    CURRENT.reset(token)
         if any(value not in {"allow", "ask"} for value in decisions):
             return "deny"
         return "ask" if "ask" in decisions else "allow"
 
     async def admit(
-        self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float
+        self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float | None
     ) -> Admission:
         """入场判定（ADR-0015）：指纹核对、严格入参校验、pre 钩子、middleware、策略判定。
 
@@ -152,7 +164,8 @@ class ToolExecutor:
             fields["arguments"] = parse_json(invocation.arguments_json)
             outcome = ToolObservation.model_validate(fields)
             clock = asyncio.get_running_loop().time
-            deadline = clock() + context.timeout if context.scope is not None else None
+            deadline = (clock() + context.timeout
+                        if context.scope is not None and context.timeout is not None else None)
             tool_budget: ExecutionBudget | None = None
             decision = "deny"
             entering = returned = available = cancelled = False
@@ -182,9 +195,8 @@ class ToolExecutor:
                 if not admission.start_emitted and context.scope is None:
                     # legacy的tool_start仍在原工具timeout之外。
                     await context.emit("tool_start", outcome.model_dump(mode="json"))
-                if context.scope is None:
+                if context.scope is None and context.timeout is not None:
                     deadline = clock() + context.timeout
-                assert deadline is not None
                 tool_budget = ExecutionBudget(deadline)
                 tool_timeout = asyncio.timeout_at(deadline)
                 tool_budget.bind(tool_timeout)
@@ -217,7 +229,7 @@ class ToolExecutor:
                             raw = await spec.external_executor(invocation, parsed)
                         elif spec.scoped_executor is None:
                             raw = await spec.executor(parsed)
-                        elif context.scope is None:
+                        elif context.scope is None and spec.capability not in SESSION_RISKS:
                             entering = False
                             raise ServiceError("workspace_contract_required")
                         else:
@@ -254,7 +266,7 @@ class ToolExecutor:
                             before = asdict(snapshot)
                             try:
                                 response = await self.wrap(snapshot, next_once)
-                            except ServiceError:
+                            except (ServiceError, RequestPending):
                                 raise
                             except Exception:
                                 raise ServiceError("middleware_error") from None
@@ -288,6 +300,10 @@ class ToolExecutor:
                         except Exception:
                             raise ServiceError("post_hook_error") from None
                         check()
+            except RequestPending:
+                # Durable user input yields without recording a failed tool result.
+                CURRENT.reset(token)
+                raise
             except asyncio.CancelledError:
                 cancelled, code = True, "cancelled"
             except TimeoutError:

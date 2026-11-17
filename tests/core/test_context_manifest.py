@@ -161,6 +161,11 @@ def test_compactor_metadata_marks_summary_and_retained_history_from_state_only()
         Message(role="user", content="current request"),
     ]
 
+    compactor.extension_snapshot = {"version": "extensions/2", "revision": 0, "items": []}
+    compactor.live_memory = False
+    compactor.projections = []
+    compactor.projection_metadata = []
+    compactor.conversation = [messages[-1]]
     metadata = Compactor.manifest_metadata(compactor, messages)
     manifest = build_context_manifest(messages, [], message_metadata=metadata)
     summary_item = next(item for item in manifest["items"] if item.get("message_index") == 1)

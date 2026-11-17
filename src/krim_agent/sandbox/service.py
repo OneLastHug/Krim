@@ -489,16 +489,6 @@ class SandboxService:
                 .mappings()
                 .first()
             )
-            project_count = await conn.scalar(
-                select(func.count())
-                .select_from(projects)
-                .where(projects.c.principal_id == actor.principal_id)
-            )
-            if (
-                project_count is None
-                or project_count >= self.configuration.max_projects_per_account
-            ):
-                raise ServiceError("sandbox_limit")
             now = time.time()
             if row is None:
                 environment_id = str(uuid.uuid4())
@@ -555,7 +545,7 @@ class SandboxService:
     ) -> dict[str, Any]:
         if (
             type(offset) is not int
-            or not 0 <= offset <= 100000
+            or offset < 0
             or type(limit) is not int
             or not 1 <= limit <= 100
         ):
@@ -1052,8 +1042,17 @@ class SandboxService:
         return await settled(self.store._write(finish))
 
     async def download_file(
-        self, actor: PrincipalContext, project_id: str, *, path: str
+        self, actor: PrincipalContext, project_id: str, *, path: str,
+        allow_running: bool = False,
     ) -> tuple[bytes, str]:
+        """Read authorized bytes; active reads require a stable stat-bound snapshot.
+
+        The explicit host-only flag does not grant access or a writing lease.
+        HTTP export callers retain the default idle-only contract.
+        """
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
         project = await self._project_state(actor, project_id)
         if self.broker is None or project["status"] not in {
             "ready",
@@ -1062,17 +1061,29 @@ class SandboxService:
             "restoring",
         }:
             raise ServiceError("sandbox_backend_unavailable", 503)
-        if project["status"] != "ready" or project["lease_id"] is not None:
-            raise ServiceError("workspace_busy")
-        if len(path.encode("utf-8")) > 512:
+        if type(allow_running) is not bool:
             raise ServiceError("invalid_input", 422)
+        active = project["status"] != "ready" or project["lease_id"] is not None
+        if (not allow_running and active
+                or allow_running and project["status"] not in {"ready", "running"}):
+            raise ServiceError("workspace_busy")
+        binding = (project["generation"], project["status"], project["lease_id"])
+
+        async def unchanged() -> None:
+            current = await self._project_state(actor, project_id)
+            if (current["generation"], current["status"], current["lease_id"]) != binding:
+                raise ServiceError("artifact_conflict")
+
         self._live(actor)
         chunks = bytearray()
         offset = 0
         expected_hash: str | None = None
         expected_stat: list[int] | None = None
         generation: int | None = None
+        expected_size: int | None = None
         while True:
+            if allow_running:
+                await unchanged()
             result = await self.read_file(
                 actor,
                 project_id,
@@ -1083,19 +1094,27 @@ class SandboxService:
                 expected_stat=expected_stat,
                 _include_stat_token=True,
             )
-            if result["may_change"]:
+            if allow_running:
+                await unchanged()
+            elif result["may_change"]:
                 raise ServiceError("input_revision_conflict")
+            if result["offset"] != offset:
+                raise ServiceError("artifact_conflict")
             if expected_hash is None:
                 expected_hash = result["sha256"]
                 stat_token = result.get("stat_token")
                 if stat_token is not None:
                     expected_stat = stat_token
+                elif allow_running and active:
+                    # A legacy broker cannot pin an actively writable inode.
+                    raise ServiceError("artifact_conflict")
                 generation = result["generation"]
-            elif result["sha256"] != expected_hash or result["generation"] != generation:
+                expected_size = result["size"]
+            elif (result["sha256"] != expected_hash or result["generation"] != generation
+                    or result["size"] != expected_size
+                    or expected_stat is not None and result.get("stat_token") != expected_stat):
                 raise ServiceError("artifact_conflict")
             block = base64.b64decode(result["data"], validate=True)
-            if len(chunks) + len(block) > 4 * 1024**2:
-                raise ServiceError("sandbox_limit")
             chunks.extend(block)
             offset += len(block)
             if result["eof"]:
@@ -1106,8 +1125,11 @@ class SandboxService:
         current_project = await self._project_state(actor, project_id)
         if (
             current_project["generation"] != generation
-            or current_project["status"] != "ready"
-            or current_project["lease_id"] is not None
+            or (current_project["generation"], current_project["status"],
+                current_project["lease_id"]) != binding
+            or not allow_running and (current_project["status"] != "ready"
+                                      or current_project["lease_id"] is not None)
+            or len(chunks) != expected_size
         ):
             raise ServiceError("artifact_conflict")
         if hashlib.sha256(chunks).hexdigest() != expected_hash:
@@ -1201,10 +1223,8 @@ class SandboxService:
             raise ServiceError("input_revision_conflict")
         if (
             not find
-            or len(find.encode("utf-8")) > 4096
-            or len(replacement.encode("utf-8")) > 16384
             or len(expected_sha256) != 64
-            or occurrence > 4096
+            or type(occurrence) is not int or occurrence < 1
         ):
             raise ServiceError("invalid_input", 422)
         try:
@@ -1222,8 +1242,6 @@ class SandboxService:
             raise
         if current["may_change"] or current["generation"] != expected_generation:
             raise ServiceError("input_revision_conflict")
-        if current["size"] > 4 * 1024**2:
-            raise ServiceError("sandbox_limit")
         if current["sha256"] != expected_sha256:
             raise ServiceError("source_changed")
         raw_parts = [base64.b64decode(current["data"], validate=True)]
@@ -1264,27 +1282,23 @@ class SandboxService:
             source = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise ServiceError("invalid_input", 422) from None
-        positions = []
+        count = 0
+        selected = None
         cursor = 0
         while True:
             found = source.find(find, cursor)
             if found < 0:
                 break
-            positions.append(found)
+            count += 1
+            if count == occurrence:
+                selected = found
             cursor = found + len(find)
-            if len(positions) >= 4096:
-                break
-        count = len(positions)
-        if count == 0 or occurrence > count:
+        if selected is None:
             raise ServiceError("not_found", 404)
-        if count == 4096 and source.find(find, cursor) >= 0:
-            raise ServiceError("artifact_limit")
-        char_offset = positions[occurrence - 1]
+        char_offset = selected
         byte_offset = len(source[:char_offset].encode("utf-8"))
         delete_length = len(find.encode("utf-8"))
         updated = source[:char_offset] + replacement + source[char_offset + len(find):]
-        if len(updated.encode("utf-8")) > 4 * 1024**2:
-            raise ServiceError("sandbox_limit")
         if updated == source:
             raise ServiceError("key_conflict")
         def context_window(text: str, start_position: int, end_position: int) -> tuple[str, bool]:
@@ -1398,7 +1412,7 @@ class SandboxService:
         if mode == "regex":
             response.update(
                 regex_limit_bytes=64,
-                max_regex_scan_bytes=512 * 1024,
-                max_regex_line_chars=1024,
+                max_regex_scan_bytes=None,
+                max_regex_line_chars=None,
             )
         return response

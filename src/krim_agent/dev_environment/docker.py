@@ -97,6 +97,13 @@ class DockerCLI:
 
 
 def tmpfs(record: RuntimeSpec) -> dict[str, str]:
+    if not record.legacy_profile:
+        # Linux defines size=0 and nr_inodes=0 as unbounded. Docker's default
+        # /dev/shm is omitted with --ipc=none, then explicitly mounted here.
+        options = "rw,nosuid,nodev,size=0,nr_inodes=0"
+        return {"/tmp": options + ",mode=1777",
+                HOME: options + ",uid=65532,gid=65532,mode=700",
+                "/dev/shm": options + ",mode=1777"}
     return {"/tmp": f"rw,nosuid,nodev,size={record.limits.tmp_bytes},mode=1777",
             HOME: (f"rw,nosuid,nodev,size={record.limits.home_bytes},"
                    "uid=65532,gid=65532,mode=700")}
@@ -153,15 +160,28 @@ def create_args(record: RuntimeSpec) -> tuple[str, ...]:
     args = ["create", "--name", record.name, "--pull=never", "--runtime=runsc",
             "--user=" + USER, "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--read-only", "--restart=no", "--init=false", "--log-driver=none",
-            f"--memory={limits.memory_bytes}", f"--memory-swap={limits.memory_bytes}",
-            f"--cpus={limits.nano_cpus / 1_000_000_000:.9f}", f"--pids-limit={limits.pids}",
-            f"--shm-size={limits.shm_bytes}", "--ulimit=nofile=1024:4096",
             "--network=none",
             "--mount", (f"type=bind,source={record.mount.path},target=/workspace,"
                         "bind-propagation=rprivate,bind-recursive=disabled"),
             "--env=HOME=" + HOME, "--env=npm_config_cache=/workspace/.cache/npm",
             "--env=PIP_CACHE_DIR=/workspace/.cache/pip", "--workdir=/workspace",
             "--entrypoint=" + entrypoint, "--no-healthcheck"]
+    if record.legacy_profile:
+        assert limits.nano_cpus is not None
+        args += [f"--memory={limits.memory_bytes}",
+                 f"--memory-swap={limits.memory_bytes}",
+                 f"--cpus={limits.nano_cpus / 1_000_000_000:.9f}",
+                 f"--pids-limit={limits.pids}", f"--shm-size={limits.shm_bytes}",
+                 "--ipc=private", "--ulimit=nofile=1024:4096"]
+    else:
+        # --ipc=none keeps Docker from adding its fixed-size default /dev/shm;
+        # tmpfs() adds an isolated, explicitly unbounded /dev/shm mount.
+        args += [f"--pids-limit={limits.pids}", "--ipc=none"]
+        if limits.memory_bytes is not None:
+            args += [f"--memory={limits.memory_bytes}",
+                     f"--memory-swap={limits.memory_bytes}"]
+        if limits.nano_cpus is not None:
+            args += [f"--cpus={limits.nano_cpus / 1_000_000_000:.9f}"]
     for key, value in network_env(record).items():
         args += ["--env=" + key + "=" + value]
     if record.request is not None:
@@ -250,6 +270,26 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
     try:
         config, host = value["Config"], value["HostConfig"]
         entrypoint, cmd = command(record)
+        legacy = record.legacy_profile
+        limits = record.limits
+        if legacy:
+            if (host.get("Memory") != limits.memory_bytes
+                    or host.get("MemorySwap") != limits.memory_bytes
+                    or host.get("NanoCpus") != limits.nano_cpus
+                    or host.get("PidsLimit") != limits.pids
+                    or host.get("ShmSize") != limits.shm_bytes
+                    or host.get("Ulimits") != [{"Name": "nofile", "Soft": 1024, "Hard": 4096}]
+                    or host.get("IpcMode") not in {"private", ""}):
+                raise ValueError
+        elif (host.get("Memory") != (limits.memory_bytes or 0)
+              or host.get("MemorySwap") != (limits.memory_bytes or 0)
+              or host.get("NanoCpus") != (limits.nano_cpus or 0)
+              # Docker 29 serializes an explicitly unlimited PID limit as null.
+              or (host["PidsLimit"] not in (None, -1) if limits.pids == -1
+                  else host["PidsLimit"] != limits.pids)
+              or host.get("Ulimits") not in (None, [])
+              or host.get("IpcMode") != "none"):
+            raise ValueError
         cid = value["Id"]
         if (not isinstance(cid, str) or not re.fullmatch(r"[0-9a-f]{64}", cid)
                 or (record.container_id is not None and record.container_id != cid)
@@ -267,8 +307,7 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
                 or host.get("Privileged") or host.get("CapAdd")
                 or set(host.get("CapDrop") or ()) != {"ALL"}
                 or set(host.get("SecurityOpt") or ()) != {"no-new-privileges"}
-                or host.get("PidMode") or host.get("IpcMode") not in {"private", ""}
-                or host.get("UTSMode") or host.get("UsernsMode")
+                or host.get("PidMode") or host.get("UTSMode") or host.get("UsernsMode")
                 or host.get("CgroupnsMode") == "host"
                 or host.get("Devices") or host.get("DeviceRequests")
                 or host.get("DeviceCgroupRules")
@@ -279,12 +318,6 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
                 or host.get("RestartPolicy", {}).get("Name") != "no"
                 or host.get("LogConfig", {}).get("Type") != "none"
                 or host.get("NetworkMode") != "none"
-                or host.get("Memory") != record.limits.memory_bytes
-                or host.get("MemorySwap") != record.limits.memory_bytes
-                or host.get("NanoCpus") != record.limits.nano_cpus
-                or host.get("PidsLimit") != record.limits.pids
-                or host.get("ShmSize") != record.limits.shm_bytes
-                or host.get("Ulimits") != [{"Name": "nofile", "Soft": 1024, "Hard": 4096}]
                 or host.get("OomKillDisable") or host.get("Init")
                 or host.get("Tmpfs") != tmpfs(record)):
             raise ValueError
@@ -296,12 +329,28 @@ def verify(record: RuntimeSpec, value: dict[str, Any]) -> str:
             raise ValueError
         # No image volumes, second project, host socket, recursive submount or port publish.
         mounts = value["Mounts"]
-        if len(mounts) != 1:
+        expected_tmpfs = tmpfs(record)
+        expected_destinations = {"/workspace": "bind", **{
+            destination: "tmpfs" for destination in expected_tmpfs
+        }}
+        # Daemon versions may list --tmpfs mounts only in HostConfig.Tmpfs.
+        # Its complete options were checked above; never accept a partial list.
+        if not isinstance(mounts, list):
             raise ValueError
-        mount = mounts[0]
-        if (mount["Type"] != "bind" or mount["Source"] != str(record.mount.path)
-                or mount["Destination"] != "/workspace" or mount["RW"] is not True
-                or mount["Propagation"] != "rprivate"):
+        seen_mounts: set[str] = set()
+        for mount in mounts:
+            destination = mount["Destination"]
+            if (destination in seen_mounts
+                    or expected_destinations.get(destination) != mount["Type"]):
+                raise ValueError
+            seen_mounts.add(destination)
+            if destination == "/workspace":
+                if (mount["Source"] != str(record.mount.path) or mount["RW"] is not True
+                        or mount["Propagation"] != "rprivate"):
+                    raise ValueError
+            elif mount["RW"] is not True:
+                raise ValueError
+        if seen_mounts not in ({"/workspace"}, set(expected_destinations)):
             raise ValueError
         spec, = host["Mounts"]
         if (spec["Type"] != "bind" or spec["Source"] != str(record.mount.path)

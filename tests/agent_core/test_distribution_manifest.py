@@ -41,6 +41,7 @@ def test_sdist_whitelist_matches_wheel_sources_and_preserves_notices() -> None:
         "README.md",
         ".gitignore",
         "src/krim_agent",
+        "deployment/browser",
         "frontend/src",
         "frontend/scripts",
         "frontend/package.json",
