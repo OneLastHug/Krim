@@ -2,7 +2,15 @@
 
 本文件是当前接续入口。旧过程笔记已归档到本地 `.cache/recovery/archived-notes-qa-20261117/`；旧 RUN-STATUS、handoff-A..H 和会话树不再代表当前后台任务或文件所有权。
 
-## 当前结论
+## 外部实测入口接续
+
+qa已于2026-11-17推送提交 `b7d9328d1`。之后按用户“准备实测入口”新增 `tests/coding_agent/verify_external_services_real.py`，操作说明和无密钥样板位于 [deployment/acceptance](../deployment/acceptance/README.md)。默认必须显式选择模式：`--check-config`不联网，`--preflight`调用真实服务，`--run-real`另创建隔离容器；本次尚未发起真实外部请求。
+
+新增离线测试文件已纳入默认CI（清单由225增至227文件）；下文2858项、前端和分发包结果是qa发布前验证快照，不包含此次入口。正式HTTP回归发现并修复个人MCP严格tuple字段拒绝JSON数组的问题，仅对创建/更新/会话选择字段接受数组并转tuple，保留元素类型、重复项和权限校验。新改动尚未提交推送，旧分发包不包含此修复。
+
+入口验证：无外部请求的CLI配置模式exit0，缺少模式exit2；新入口/图片标准答案/账号MCP最终组合149项通过，之前含通用流程与发行清单的组合166项通过（集合重叠，不累加）。7个变动Python文件Ruff通过，账号MCP服务mypy通过；最后清理用例2项复测通过。真实runsc独立评分6/6行通过，容器和临时目录已清理。证据见 `.cache/recovery/external-entry-final-r3.xml`、`external-entry-cli-result.json`、`external-grader-runsc-result.json`。本轮未运行完整227文件CI，也未重建分发包。
+
+## qa发布前验证快照
 
 本地代码已接入计划、结构化提问、计划模式、工具发现、MCP 资源、私有/项目记忆、图片输入、Goal 顺序续跑与统一上下文压缩；默认取消开发运行和内容的累计应用配额。恢复后的修复、前端生产构建、正式页面交互、wheel/sdist 构建均已执行。
 

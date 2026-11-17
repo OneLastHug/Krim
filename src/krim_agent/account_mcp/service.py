@@ -47,6 +47,12 @@ if TYPE_CHECKING:
 _CREDENTIAL_PURPOSE = "mcp-credential"
 
 
+def _json_array(value: Any) -> Any:
+    # FastAPI validates the parsed JSON body, not model_validate_json. Preserve
+    # strict element checks while accepting JSON's only sequence representation.
+    return tuple(value) if type(value) is list else value
+
+
 class ConnectionCreate(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[!-~]+$")
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
@@ -56,6 +62,11 @@ class ConnectionCreate(StrictModel):
     readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] = Field(default_factory=dict, max_length=32)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
+    @field_validator("allowed_hosts", "selected_tools", "readonly_tools", mode="before")
+    @classmethod
+    def json_arrays(cls, value: Any) -> Any:
+        return _json_array(value)
 
     @field_validator("allowed_hosts", "selected_tools", "readonly_tools")
     @classmethod
@@ -88,6 +99,11 @@ class ConnectionUpdate(StrictModel):
     readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] | None = Field(default=None, max_length=32)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
+    @field_validator("allowed_hosts", "selected_tools", "readonly_tools", mode="before")
+    @classmethod
+    def json_arrays(cls, value: Any) -> Any:
+        return _json_array(value)
 
     @field_validator("allowed_hosts", "selected_tools", "readonly_tools")
     @classmethod
@@ -125,6 +141,11 @@ class SessionMCPSelection(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[!-~]+$")
     expected_revision: int = Field(ge=0)
     connections: tuple[SessionConnection, ...] = ()
+
+    @field_validator("connections", mode="before")
+    @classmethod
+    def json_array(cls, value: Any) -> Any:
+        return _json_array(value)
 
     @model_validator(mode="after")
     def unique_connections(self) -> SessionMCPSelection:
