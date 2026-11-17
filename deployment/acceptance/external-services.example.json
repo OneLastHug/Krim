@@ -1,0 +1,16 @@
+{
+  "tool_config_file": "tools.example.json",
+  "mcp_server": "reference",
+  "mcp_tool": "read_reference",
+  "mcp_arguments": {
+    "topic": "Python csv parsing, quoted fields and validation"
+  },
+  "mcp_resource_uri": null,
+  "mcp_task": "Consult the remote CSV reference and use its advice in the implementation or tests.",
+  "mcp_scope": "host",
+  "web_query": "Python csv module official documentation quoting newline",
+  "web_url": "https://docs.python.org/3/library/csv.html",
+  "timeout_seconds": 900,
+  "max_steps": 60,
+  "max_tool_calls": 120
+}

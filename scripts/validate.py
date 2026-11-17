@@ -16,6 +16,8 @@ FRONTEND = ROOT / "frontend"
 CI_TESTS = (
     "tests/core/test_contracts.py",
     "tests/core/test_storage.py",
+    "tests/coding_agent/test_external_acceptance.py",
+    "tests/coding_agent/test_external_challenge.py",
     "tests/coding_agent/test_development_contracts.py",
     "tests/coding_agent/test_preview_route_contracts.py",
     "tests/coding_agent/test_sdk_process_recovery.py",

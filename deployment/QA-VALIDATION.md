@@ -88,6 +88,12 @@ PYTHONPATH=src:. python -m tests.coding_agent.verify_general_tools_real --run-re
 
 脚本创建独立账号、数据库、项目和容器，测试问题停靠重开、计划确认、逐工具审批、大文件、命令输出、MCP、图片请求、记忆、Goal 续跑与压缩。`result.json` 保存逐工具结果、配额读回和清理状态；容器只按已记录 ID、镜像和项目挂载核验后清理。回环模型收到图像不等于外部视觉模型完成识图。
 
+### 外部服务与真实视觉模型入口
+
+外部服务验收使用 `tests/coding_agent/verify_external_services_real.py`，配置样板、凭据环境变量、预检/完整模式和判定标准见 [联合实测说明](acceptance/README.md)。`--check-config` 不联网；真实外部调用必须显式选择 `--preflight` 或 `--run-real`。模型自主编写CSV校验器，宿主用随机图片标准答案及重排CSV在独立runsc容器判定，不以模型自报完成作为通过依据。账号模式另检查隔离和删除后不能重选；未请求MCP资源时报告明确标为未请求。
+
+本次准备入口不调用外部模型/Web/MCP，后端未接入新凭据。离线回归与独立评分容器检查不替代真实服务验收。
+
 ## 历史 Shell 与通用工具验证
 
 - 正式网页聊天使用真实模型分轮完成 Hot 100 三题，自行写入实现、测试和 README；真实沙箱执行29项 unittest 全部通过、退出码0，并由模型读取日志。
