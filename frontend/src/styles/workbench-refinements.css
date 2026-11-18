@@ -99,3 +99,6 @@
 .control-info-content { padding:8px 10px; max-width:280px; font-size:12px; overflow-wrap:anywhere; }
 .control-model-name { min-width:0; max-width:min(200px,45vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .empty-project-picker, .empty-project-picker select { min-width:0; max-width:100%; }
+.sidebar-code-action[aria-label="新建对话"]::after { content:"Ctrl ⇧ N"; margin-left:auto; color:var(--muted-foreground); font-size:10px; }
+.sidebar-code-action[aria-label="查找对话"]::after { content:"Ctrl K"; margin-left:auto; color:var(--muted-foreground); font-size:10px; }
+.session-tree-menu-layer .menu-item:not(:disabled):focus-visible::after { content:"↵"; margin-left:auto; color:var(--muted-foreground); font-family:var(--krim-font-mono); font-size:11px; }
