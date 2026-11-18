@@ -16,8 +16,8 @@ from pydantic import JsonValue
 from sqlalchemy import select
 
 from krim_agent.accounts.service import IdentityService
-from krim_agent.config import Settings
-from krim_agent.context.types import ContextPolicy
+from krim_agent.config import Settings, minimum_limit
+from krim_agent.context.types import ContextPolicy, upgrade_to_token_window
 from krim_agent.contracts import (
     ApprovalReply,
     RunStatus,
@@ -265,12 +265,29 @@ class SessionService:
         if session.workspace_id != workspace:
             raise ServiceError("not_found", 404)
         principal.owns(workspace, session.owner_id, write=write, approve=approve)
+        if self.store.schema_version >= 19:
+            from krim_agent.project_access.policy import resolve_project_access
+            from krim_agent.storage.sandbox_models import sandbox_session_bindings
+
+            if session.owner_id != principal.principal_id:
+                raise ServiceError("not_found", 404)
+
+            async def project_access(conn: Any) -> None:
+                project_id = await conn.scalar(select(sandbox_session_bindings.c.project_id).where(
+                    sandbox_session_bindings.c.session_id == session_id,
+                ))
+                if project_id is not None:
+                    access = await resolve_project_access(conn, principal, project_id)
+                    access.require()  # saving chat is not writing project files
+
+            await self.store.work_read(project_access)
         return session
 
     async def by_key(self, principal: PrincipalContext, workspace: str, key: str) -> SessionView:
         principal = self._live_principal(principal)
         principal.member(workspace)
-        return await sql.by_key(self.store, workspace, principal.principal_id, key)
+        session = await sql.by_key(self.store, workspace, principal.principal_id, key)
+        return await self.get(principal, workspace, session.id)
 
     async def list(
         self,
@@ -344,6 +361,7 @@ class SessionService:
                 {},
                 ContextPolicy(),
                 self.settings,
+                principal=principal,
             )
         binding = self.runs.bindings.get(body.target_key)
         if binding is None:
@@ -356,14 +374,24 @@ class SessionService:
         )
         capacity = binding.settings.request_capacity(binding.loop.provider)
         configured_bytes = self.settings.context_max_bytes
+        default_policy = ContextPolicy()
+        output_headroom = default_policy.max_tokens - default_policy.compaction_trigger_tokens
         inherited = ContextPolicy(
-            max_bytes=capacity if configured_bytes is None else min(capacity, configured_bytes),
+            max_bytes=minimum_limit(capacity, configured_bytes),
             max_messages=self.settings.context_max_messages,
-            reserved_output_tokens=max(self.settings.context_reserved_output_tokens or 0, output),
+            reserved_output_tokens=max(
+                self.settings.context_reserved_output_tokens or 0,
+                min(output or default_policy.reserved_output_tokens, output_headroom),
+            ),
         )
-        policy = body.context_policy or inherited
+        policy = upgrade_to_token_window(body.context_policy) if body.context_policy else inherited
+        if policy.max_bytes is None and inherited.max_bytes is not None:
+            policy = policy.model_copy(update={"max_bytes": inherited.max_bytes})
         if (
-            policy.max_bytes > inherited.max_bytes
+            inherited.max_bytes is not None and policy.max_bytes is not None
+            and policy.max_bytes > inherited.max_bytes
+            or policy.max_tokens != inherited.max_tokens
+            or policy.compaction_trigger_tokens != inherited.compaction_trigger_tokens
             or (inherited.max_messages is not None and (
                 policy.max_messages is None or policy.max_messages > inherited.max_messages
             ))
@@ -378,6 +406,7 @@ class SessionService:
             cast(dict[str, JsonValue], parse_json(binding.descriptor_json)),
             policy,
             self.settings,
+            principal=principal,
         )
 
     async def submit(

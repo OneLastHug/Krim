@@ -92,12 +92,12 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             assert "".join(e.text for e in second if isinstance(e, ModelText)) == "5"
             assert len(fixture.requests) == 2
             body = fixture.requests[1]["body"]
+            # 默认不带输出上限：max_tokens交由供应商真实能力，不再注入512演示值。
             assert set(body) == {
                 "model",
                 "messages",
                 "stream",
                 "n",
-                "max_tokens",
                 "stream_options",
                 "tools",
                 "parallel_tool_calls",
@@ -114,6 +114,15 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             assert all(r["accept_encoding"] == "identity" for r in fixture.requests)
         finally:
             await provider.close()
+
+
+async def test_explicit_output_budget_reaches_chat_wire():
+    async with HTTPFixture() as fixture:
+        config = OpenAICompatibleConfig(
+            base_url=fixture.url, model="fixture", max_output_tokens=640
+        )
+        await collect(fixture, config=config)
+        assert fixture.requests[0]["body"]["max_tokens"] == 640
 
 
 async def test_deepseek_disabled_thinking_preserves_real_tcp_tool_history():

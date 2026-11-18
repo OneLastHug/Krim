@@ -11,15 +11,8 @@ from krim_agent.contracts import ServiceError
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
-from krim_agent.storage.account_models import ACCOUNT_TABLES
-from krim_agent.storage.development_models import DEVELOPMENT_TABLES
-from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.models import runs, turns
-from krim_agent.storage.preview_models import PREVIEW_TABLES
-from krim_agent.storage.sandbox_models import SANDBOX_TABLES
-from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
-from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
-from krim_agent.storage.sqlite import MCP_TABLE_NAMES, SCHEMA_VERSION, SQLiteStore
+from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
 async def test_eval_consumers_use_actual_validated_schema(tmp_path):
@@ -33,40 +26,11 @@ async def test_eval_consumers_use_actual_validated_schema(tmp_path):
 
 
 def downgrade(path, version):
-    conn = sqlite3.connect(path)
-    try:
-        for name in sorted(MCP_TABLE_NAMES):
-            conn.execute(f'DROP TABLE "{name}"')
-        for table in [
-            *reversed(SIDEBAR_TABLES),
-            *reversed((*DEVELOPMENT_TABLES, *PREVIEW_TABLES)),
-            *reversed(SESSION_LIFECYCLE_TABLES),
-            *reversed(EXTENSION_TABLES),
-            *reversed(SANDBOX_TABLES),
-            *reversed(ACCOUNT_TABLES),
-        ]:
-            conn.execute('DROP TABLE "' + table.name + '"')
-        for name in [
-            "park_checkpoints",
-            "observation_outbox",
-            "capture_policies",
-            "capture_meta",
-            "tool_effects",
-            "compactions",
-            "work_turns",
-            "artifact_revisions",
-            "work_sessions",
-        ]:
-            conn.execute('DROP TABLE "' + name + '"')
-        for name in ["session_controls", "turns", "sessions"] if version < 3 else []:
-            conn.execute('DROP TABLE "' + name + '"')
-        if version == 1:
-            for name in ["eval_items", "evaluations", "dataset_revisions"]:
-                conn.execute('DROP TABLE "' + name + '"')
-        conn.execute(f"PRAGMA user_version={version}")
-        conn.commit()
-    finally:
-        conn.close()
+    # One explicit historical schema map, including all later feature tables.
+    # Partial DROP lists silently leave newer tables in a supposed v1/v2 DB.
+    from tests.agent_core.test_extension_migration import downgrade_to_version
+
+    downgrade_to_version(path, version)
 
 
 def table_rows(path, names):
@@ -509,4 +473,7 @@ async def test_trusted_session_source_damage_still_fails_closed(tmp_path, wire, 
         with pytest.raises(ServiceError, match="facts_corrupt"):
             await app.evaluations.candidate(turn.run_id)
         assert len(wire.requests) == 2 and len(wire.executions) == 1
-        assert not probe.pending and probe.unsafe == 0
+        # The live dispatcher may own an unrelated bounded read. Inspect after
+        # that read settles, without permitting another checkout to race here.
+        async with asyncio.timeout(5), app.store.lock:
+            assert not probe.pending and probe.unsafe == 0

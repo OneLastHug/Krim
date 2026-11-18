@@ -9,6 +9,7 @@ from typing import Literal, cast
 
 from pydantic import JsonValue
 
+from krim_agent.context.counter import TokenCounter
 from krim_agent.contracts import Message, encoded
 
 Category = Literal[
@@ -104,15 +105,21 @@ def _component_item(
     tool_index: int | None = None,
     call_id: str | None = None,
     source_refs: Sequence[Mapping[str, JsonValue]] = (),
+    counter: TokenCounter | None = None,
 ) -> dict[str, JsonValue]:
     raw = encoded(value).encode("utf-8")
+    estimated = (
+        counter.count_text(encoded(value))
+        if counter is not None
+        else (len(raw) + 3) // 4
+    )
     item: dict[str, JsonValue] = {
         "key": key,
         "category": category if category in _CATEGORIES else "unknown",
         "label": _bounded_label(label),
         "content_hash": hashlib.sha256(raw).hexdigest(),
         "input_bytes": len(raw),
-        "estimated_tokens": (len(raw) + 3) // 4,
+        "estimated_tokens": estimated,
     }
     if message_index is not None:
         item["message_index"] = message_index
@@ -142,16 +149,26 @@ def build_context_manifest(
     model_context_window: int | None = None,
     reserved_output_tokens: int | None = None,
     input_budget_bytes: int | None = None,
+    counter: TokenCounter | None = None,
 ) -> dict[str, JsonValue]:
     """Describe canonical request bytes without retaining request bodies.
 
     The provider may translate this application representation to its wire protocol;
-    approx-utf8/1 is not a provider tokenizer or a measured native token window.
+    without a ``counter`` the parts are the legacy approx-utf8/1 byte share, which is
+    not a provider tokenizer or a measured native token window. Passing a
+    ``context.counter`` TokenCounter switches every ``estimated_tokens`` value to the
+    same real counting source that gates the 1M/900k window; BPE boundary drift
+    between per-item and whole-request counts is reconciled into the envelope item.
     """
     message_values = [message.model_dump(mode="json") for message in messages]
     tool_values = list(tools)
     request_value = {"messages": message_values, "tools": tool_values}
     total_bytes = len(encoded(request_value).encode("utf-8"))
+    total_tokens = (
+        counter.count_request(message_values, tool_values)
+        if counter is not None
+        else (total_bytes + 3) // 4
+    )
     tool_calls_by_id: dict[str, str] = {}
     for message in messages:
         if message.role != "assistant":
@@ -235,7 +252,15 @@ def build_context_manifest(
             "label": "Canonical JSON wrappers",
             "content_hash": hashlib.sha256(wrapper_raw).hexdigest(),
             "input_bytes": wrapper_bytes,
-            "estimated_tokens": (wrapper_bytes + 3) // 4,
+            "estimated_tokens": (
+                max(
+                    0,
+                    total_tokens
+                    - sum(cast(int, item["estimated_tokens"]) for item in candidates),
+                )
+                if counter is not None
+                else (wrapper_bytes + 3) // 4
+            ),
         }
     )
 
@@ -257,6 +282,11 @@ def build_context_manifest(
                 for item in omitted
             ]
             aggregate_raw = encoded(aggregate_input).encode()
+            omitted_tokens = (
+                sum(cast(int, item["estimated_tokens"]) for item in omitted)
+                if counter is not None
+                else (omitted_bytes + 3) // 4
+            )
             visible_items = [
                 *visible_items,
                 {
@@ -265,34 +295,56 @@ def build_context_manifest(
                     "label": "Omitted context items (truncated)",
                     "content_hash": hashlib.sha256(aggregate_raw).hexdigest(),
                     "input_bytes": omitted_bytes,
-                    "estimated_tokens": (omitted_bytes + 3) // 4,
+                    "estimated_tokens": omitted_tokens,
                 },
             ]
-        # Partition the same byte-based estimate, rather than independently rounding
-        # every fragment up and making the displayed parts exceed the request total.
-        estimated_total = (total_bytes + 3) // 4
+        # Reconcile the displayed parts to the authoritative whole-request count.
+        # Legacy mode partitions the byte share; counter mode assigns BPE boundary
+        # drift between per-item and whole-request counts to the largest items so
+        # the displayed parts never exceed the request total.
         for item in visible_items:
-            item["estimated_tokens"] = cast(int, item["input_bytes"]) // 4
-        remainder = estimated_total - sum(
+            if counter is None:
+                item["estimated_tokens"] = cast(int, item["input_bytes"]) // 4
+        remainder = total_tokens - sum(
             cast(int, item["estimated_tokens"]) for item in visible_items
         )
-        ranked = sorted(
-            range(len(visible_items)),
-            key=lambda index: (-(cast(int, visible_items[index]["input_bytes"]) % 4), index),
-        )
-        for index in ranked[:remainder]:
-            visible_items[index]["estimated_tokens"] = (
-                cast(int, visible_items[index]["estimated_tokens"]) + 1
+        if remainder > 0:
+            ranked = sorted(
+                range(len(visible_items)),
+                key=lambda index: (-(cast(int, visible_items[index]["input_bytes"])), index),
             )
+            cursor = 0
+            while remainder > 0 and visible_items:
+                visible_items[ranked[cursor % len(ranked)]]["estimated_tokens"] = (
+                    cast(int, visible_items[ranked[cursor % len(ranked)]]["estimated_tokens"]) + 1
+                )
+                remainder -= 1
+                cursor += 1
+        elif remainder < 0:
+            shrink = sorted(
+                range(len(visible_items)),
+                key=lambda index: (cast(int, visible_items[index]["input_bytes"]), index),
+            )
+            cursor = 0
+            while remainder < 0 and any(
+                cast(int, item["estimated_tokens"]) > 0 for item in visible_items
+            ):
+                target = visible_items[shrink[cursor % len(shrink)]]
+                if cast(int, target["estimated_tokens"]) > 0:
+                    target["estimated_tokens"] = cast(int, target["estimated_tokens"]) - 1
+                    remainder += 1
+                cursor += 1
         items_truncated = bool(omitted)
         visible_source_refs_truncated = source_refs_truncated or any(
             bool(item.get("source_refs")) for item in omitted
         )
         result: dict[str, JsonValue] = {
             "version": 1,
-            "counter_version": "approx-utf8/1",
+            "counter_version": (
+                counter.version if counter is not None else "approx-utf8/1"
+            ),
             "input_bytes": total_bytes,
-            "estimated_tokens": (total_bytes + 3) // 4,
+            "estimated_tokens": total_tokens,
             "items": cast(JsonValue, visible_items),
             "model_context_window": (
                 model_context_window

@@ -16,7 +16,7 @@ from pydantic import JsonValue
 from krim_agent.account_mcp.secrets import AuthenticatedSecretVault, MasterKeyring
 from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
-from krim_agent.config import SESSION_FIELDS, Settings
+from krim_agent.config import SESSION_FIELDS, Settings, minimum_limit
 from krim_agent.context.service import ContextService
 from krim_agent.context.tools import compact_context_bundle
 from krim_agent.contracts import ServiceError, fingerprint
@@ -57,7 +57,7 @@ from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
 from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.bundles import compose_executor, policy_spec
-from krim_agent.tools.core import Decision, Invocation, Policy, PostHook, PreHook
+from krim_agent.tools.core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.memory import MemoryToolService
 from krim_agent.tools.pipeline import Middleware, Wrap
@@ -258,8 +258,7 @@ async def open_application(
             workspace.profile.max_tools_per_step
             if workspace is not None
             else (
-                min(config.max_tools_per_step,
-                    provider.config.max_tool_calls or config.max_tools_per_step)
+                minimum_limit(config.max_tools_per_step, provider.config.max_tool_calls)
                 if agent_http else 1
             )
         )
@@ -277,7 +276,7 @@ async def open_application(
         )
         if "max_tool_calls" in raw_http_fields and http_config.max_tool_calls is not None:
             if agent_http and workspace is None:
-                if http_config.max_tool_calls > cap:
+                if cap is not None and http_config.max_tool_calls > cap:
                     raise ProviderError("provider_config", 422)
                 cap = http_config.max_tool_calls
             elif http_config.max_tool_calls != cap:
@@ -325,12 +324,12 @@ async def open_application(
                 "target_version": config.target_version
                 if "target_version" in specified
                 else ("agent-http/1"),
-                "max_tools_per_step": min(
-                    config.max_tools_per_step,
-                    http_config.max_tool_calls or config.max_tools_per_step,
+                "max_tools_per_step": minimum_limit(
+                    config.max_tools_per_step, http_config.max_tool_calls,
                 ),
-                "max_request_bytes": min(config.max_request_bytes or http_config.max_request_bytes,
-                                         http_config.max_request_bytes),
+                "max_request_bytes": minimum_limit(
+                    config.max_request_bytes, http_config.max_request_bytes,
+                ),
             }
         )
     elif live:
@@ -341,6 +340,7 @@ async def open_application(
             http_config.model != "gpt-6.1-sol"
             or http_config.reasoning_effort != "xhigh"
             or not http_config.api_key.get_secret_value()
+            or http_config.read_timeout_seconds is None
             or not 60 <= http_config.read_timeout_seconds <= 90
             or config.run_timeout is None or not 180 <= config.run_timeout <= 240
             or config.max_active_runs != 1
@@ -370,8 +370,10 @@ async def open_application(
             raise ProviderError("provider_config", 422) from None
     elif (
         http_config is not None
+        and http_config.read_timeout_seconds is not None
         and http_config.read_timeout_seconds > 5
         or isinstance(provider, OpenAICompatibleProvider)
+        and provider.config.read_timeout_seconds is not None
         and provider.config.read_timeout_seconds > 5
     ):
         raise ProviderError("provider_config", 422)
@@ -450,7 +452,7 @@ async def open_application(
                     isinstance(body, dict) and body.get("target") == "target-workspace"
                     for body in pending
                 )
-                if 3 <= store.schema_version <= 18:
+                if 3 <= store.schema_version <= 19:
                     queued = await conn.scalar(
                         select(turns.c.id)
                         .join(sessions, turns.c.session_id == sessions.c.id)
@@ -470,7 +472,7 @@ async def open_application(
                         .limit(1)
                     )
                     needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
+                if store.schema_version in range(4, 20):
                     active_effect = await conn.scalar(
                         select(tool_effects.c.call_id)
                         .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
@@ -719,10 +721,17 @@ async def open_application(
             async def guard(invocation: Invocation) -> Decision:
                 current_scope = await session_tools.resolve(invocation)
                 spec = policy_spec(state["runtime"].executor.registry, invocation)
-                return "allow" if await interactions.permits(
+                from krim_agent.project_access.execution import session_decision
+
+                if not await interactions.permits(
                     current_scope, spec,
                     trusted_readonly_names=state["runtime"].trusted_readonly_names,
-                ) else "deny"
+                ):
+                    return "deny"
+                return await session_decision(
+                    store, current_scope, spec, invocation,
+                    trusted_readonly_names=state["runtime"].trusted_readonly_names,
+                )
 
             runtime = await open_run_tools(
                 base, scope=scope, resolve=session_tools.resolve,
@@ -733,6 +742,24 @@ async def open_application(
             return runtime
 
         service.run_tool_factory = open_tools
+
+        async def recheck_execution_policy(
+            session_id: str, invocation: Invocation, spec: ToolSpec,
+        ) -> Decision:
+            from krim_agent.project_access.execution import session_decision
+
+            scope = await session_tools.policy_scope(invocation.run_id)
+            if scope.session_id != session_id:
+                return "deny"
+            if scope.project_id is None:
+                return "ask"  # Legacy confirmations are not silently policy-approved.
+            # Pending requests are not active producers. Reconstruct only their
+            # persisted identity, never a callable tool scope or user approval.
+            if not await interactions.permits(scope, spec):
+                return "deny"
+            return await session_decision(store, scope, spec, invocation)
+
+        service.execution_policy_recheck = recheck_execution_policy
         application = Application(
             store,
             service,
@@ -833,6 +860,8 @@ async def open_application(
                         await service.cancel(run_id)
 
         identities.on_change = identity_changed
+        if store.schema_version >= 19 and not store.readonly:
+            await service.reconcile_execution_policies()
         return application
     except BaseException:
         if application is not None:
@@ -883,9 +912,8 @@ def _make_http_binding(
             "system_prompt": "使用受控工具回答任务；保持数值精度。",
             "target_version": "target-http/1",
             "max_request_bytes": settings.request_capacity(provider),
-            "max_tools_per_step": min(
-                settings.max_tools_per_step,
-                provider.config.max_tool_calls or settings.max_tools_per_step,
+            "max_tools_per_step": minimum_limit(
+                settings.max_tools_per_step, provider.config.max_tool_calls,
             ),
         }
     )

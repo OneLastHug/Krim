@@ -138,6 +138,7 @@ async def test_responses_sdk_tool_result_round_trip_is_stateless(tmp_path):
                 base_url=fixture.url,
                 model="responses-fixture",
                 wire_api="responses",
+                max_output_tokens=512,
             )
         )
         try:

@@ -20,6 +20,7 @@ class SessionCreate(StrictModel):
     title: str = Field(default="新对话", min_length=1, max_length=128)
     target_key: TargetKey = "demo"
     context_policy: ContextPolicy | None = None
+    project_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class TurnRequest(StrictModel):

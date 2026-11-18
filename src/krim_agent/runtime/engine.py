@@ -36,7 +36,7 @@ from .recovery import SDKResume
 ApprovalRequest = Callable[[Invocation, float | None], Awaitable[dict[str, JsonValue]]]
 
 
-async def _no_inprocess_wait(invocation: Invocation, timeout_seconds: float) -> bool:
+async def _no_inprocess_wait(invocation: Invocation, timeout_seconds: float | None) -> bool:
     """Approvals park the run and resume through the persisted SDK checkpoint."""
     raise ServiceError("approval_unavailable")
 
@@ -85,6 +85,7 @@ class AgentLoop:
         executor: ToolExecutor | None = None,
         run_tools: Any | None = None,
         session_scope: SessionToolScope | None = None,
+        startup_gate: Callable[[], asyncio.Lock | None] | None = None,
     ) -> None:
         active_executor = executor or self.executor
 
@@ -298,6 +299,7 @@ class AgentLoop:
             read_result=reject_read_result,
             approval_request=cast(ApprovalRequest, approval_request),
             host=host,
+            startup_gate=startup_gate,
         )
         if ordinary_source is not None:
             await cast(SQLiteStore, self.store).work_read(

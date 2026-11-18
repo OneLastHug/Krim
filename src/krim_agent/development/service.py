@@ -95,6 +95,28 @@ from krim_agent.tools.registry import ToolRegistry
 _HOST_CLEANUP: ContextVar[bool] = ContextVar("development_host_cleanup", default=False)
 
 
+def _approved_request(snapshot: Any, call_id: str) -> str | None:
+    """Only an actual affirmative user reply supplies an approval reference.
+
+    Mode-change decisions are recorded separately. Merely having waited for a
+    request must not make the lower capability fence demand a fabricated reply.
+    """
+    replies = {
+        event.data.get("request_id"): event.data.get("reply")
+        for event in snapshot.events if event.kind == "approval_reply"
+    }
+    for event in snapshot.events:
+        if event.kind != "approval_request" or event.data.get("call_id") != call_id:
+            continue
+        request_id = event.data.get("request_id")
+        if not isinstance(request_id, str):
+            continue
+        reply = replies.get(request_id)
+        if isinstance(reply, dict) and reply.get("allow") is True:
+            return request_id
+    return None
+
+
 @contextmanager
 def _preview_errors() -> Iterator[None]:
     try:
@@ -513,7 +535,7 @@ class DevelopmentService:
     ) -> NetworkGrant:
         project = await self.sandbox.project(actor, project_id, write=True)
         actor.owns(project["workspace_id"], project["principal_id"], write=True, approve=True)
-        if not time.time() < expires_at <= time.time() + 86400:
+        if not time.time() < expires_at:
             raise ServiceError("invalid_input", 422)
         value = NetworkGrant(
             owner_id=project["principal_id"], project_id=project_id, policy_id=policy_id,
@@ -600,7 +622,7 @@ class DevelopmentService:
             raise ServiceError("invalid_input", 422)
         project = await self.sandbox.project(actor, project_id, write=True)
         actor.owns(project["workspace_id"], project["principal_id"], write=True, approve=True)
-        if not time.time() < expires_at <= time.time() + 86400:
+        if not time.time() < expires_at:
             raise ServiceError("invalid_input", 422)
         try:
             grant = GitGrant(
@@ -631,7 +653,7 @@ class DevelopmentService:
             raise ServiceError("invalid_input", 422)
         project = await self.sandbox.project(actor, project_id, write=True)
         actor.owns(project["workspace_id"], project["principal_id"], write=True, approve=True)
-        if not time.time() < expires_at <= time.time() + 86400:
+        if not time.time() < expires_at:
             raise ServiceError("invalid_input", 422)
         try:
             record = SecretRecord(
@@ -658,7 +680,7 @@ class DevelopmentService:
             raise ServiceError("storage_unavailable", 503)
         if (type(expected_revision) is not int or not 0 <= expected_revision < 2**31 - 1
                 or type(value) is not str or not 1 <= len(value.encode("utf-8")) <= 8192
-                or not time.time() < expires_at <= time.time() + 86400):
+                or not time.time() < expires_at):
             raise ServiceError("invalid_input", 422)
         project = await self.sandbox.project(actor, project_id, write=True)
         actor.owns(project["workspace_id"], project["principal_id"], write=True, approve=True)
@@ -854,9 +876,11 @@ class DevelopmentService:
         requires_approval: bool,
         actions: tuple[Action, ...] = ("shell.execute",),
     ) -> ProjectGrant:
+        if self.store.schema_version >= 19:
+            raise ServiceError("session_execution_policy_required", 410)
         project = await self.sandbox.project(actor, project_id, write=True)
         actor.owns(project["workspace_id"], project["principal_id"], write=True, approve=True)
-        if not time.time() < expires_at <= time.time() + 86400:
+        if not time.time() < expires_at:
             raise ServiceError("invalid_input", 422)
         grant = ProjectGrant(
             owner_id=project["principal_id"],
@@ -931,6 +955,23 @@ class DevelopmentService:
     async def _grant(
         self, scope: DevelopmentScope, action: Action = "shell.execute",
     ) -> ProjectGrant:
+        if self.store.schema_version >= 19:
+            from krim_agent.project_access.policy import resolve_project_access
+
+            async with self.store.lock, self.store.engine.connect() as conn:
+                access = await resolve_project_access(
+                    conn, scope.actor, scope.environment.project_id,
+                )
+            access.require(write=action != "git.diff")
+            return ProjectGrant(
+                owner_id=access.owner_id, workspace_id=access.workspace_id,
+                project_id=access.project_id, actor_id=scope.actor.principal_id,
+                actor_generation=scope.actor.generation, revision=access.revision,
+                actions=(("git.diff",) if access.access == "read" else (
+                    "shell.execute", "secret.deliver", "network.connect", "git.clone",
+                    "git.diff", "git.commit", "git.push",
+                )), requires_approval=False, expires_at=None,
+            )
         async with self.store.lock, self.store.engine.connect() as conn:
             row = (
                 await conn.execute(
@@ -947,7 +988,7 @@ class DevelopmentService:
         grant = ProjectGrant.model_validate_json(encoded(row))
         if (
             grant.revoked
-            or grant.expires_at <= time.time()
+            or grant.expires_at is not None and grant.expires_at <= time.time()
             or grant.actor_generation != scope.actor.generation
             or action not in grant.actions
         ):
@@ -956,6 +997,16 @@ class DevelopmentService:
 
     async def policy(self, invocation: Invocation) -> Decision:
         scope = self.current(invocation)
+        if self.store.schema_version >= 19:
+            from krim_agent.tools.project_names import LEGACY_PROJECT_NAMES, PROJECT_CAPABILITIES
+
+            name = LEGACY_PROJECT_NAMES.get(invocation.name, invocation.name)
+            await self.sandbox.project(
+                scope.actor, scope.environment.project_id,
+                write=PROJECT_CAPABILITIES.get(name) != "read",
+            )
+            # Confirmation is decided once, by the composed session policy.
+            return "allow"
         if invocation.name in {
             "read", "list", "find", "search", "process_status", "read_output", "stop_process",
             "preview_status", "preview_stop", "browser_close",
@@ -1075,15 +1126,13 @@ class DevelopmentService:
             if identity is None or identity.call_id != invocation.call_id:
                 raise ServiceError("facts_corrupt")
             snapshot = await self.store.snapshot(invocation.run_id)
-            approval = next((event.data["request_id"] for event in snapshot.events
-                             if event.kind == "approval_request"
-                             and event.data.get("call_id") == invocation.call_id), None)
+            approval = _approved_request(snapshot, invocation.call_id)
             result_git: GitTreeResult | GitExecutionResult
             if isinstance(parameters, GitTreeRequest):
                 if invocation.name != "git_tree":
                     raise ServiceError("invalid_input", 422)
                 result_git = await self.git.tree(scope.actor, identity, parameters,
-                                                 approval_id=cast(str | None, approval))
+                                                 approval_id=approval)
             else:
                 expected = parameters.git.action.replace(".", "_")
                 if invocation.name != expected:
@@ -1091,7 +1140,7 @@ class DevelopmentService:
                 execute = {"git.clone": self.git.clone, "git.diff": self.git.diff,
                            "git.commit": self.git.commit, "git.push": self.git.push}
                 result_git = await execute[parameters.git.action](
-                    scope.actor, identity, parameters, approval_id=cast(str | None, approval),
+                    scope.actor, identity, parameters, approval_id=approval,
                 )
             scope.check()
             return cast(JsonValue, result_git.model_dump(mode="json"))
@@ -1100,18 +1149,10 @@ class DevelopmentService:
             if identity is None or identity.call_id != invocation.call_id:
                 raise ServiceError("facts_corrupt")
             snapshot = await self.store.snapshot(invocation.run_id)
-            approval = next(
-                (
-                    event.data["request_id"]
-                    for event in snapshot.events
-                    if event.kind == "approval_request"
-                    and event.data.get("call_id") == invocation.call_id
-                ),
-                None,
-            )
+            approval = _approved_request(snapshot, invocation.call_id)
             values = (self._file_shell(parameters)
                       if isinstance(parameters, (WriteInput, EditInput)) else parameters)
-            request = await self._command(scope, values, identity, cast(str | None, approval))
+            request = await self._command(scope, values, identity, approval)
             await self.repositories.operations.bind_command(identity, request)
             if isinstance(parameters, ShellInput):
                 command_handle = await self.terminal.submit(request)
@@ -1411,13 +1452,16 @@ class DevelopmentService:
                 development_environments.c.owner_id == actor.principal_id,
                 development_environments.c.project_id == project_id,
             ))
-            grant = await self.access_repository._record(
+            grant = (await self.access_repository._record(
                 conn, actor.principal_id, project_id, "grant", actor.principal_id,
-            )
-        if (owner != actor.principal_id or project["principal_id"] != owner or raw is None
-                or not isinstance(grant, ProjectGrant) or grant.revoked
-                or grant.expires_at <= time.time() or grant.actor_generation != actor.generation
-                or "shell.execute" not in grant.actions):
+            ) if self.store.schema_version < 19 else None)
+        if owner != actor.principal_id or project["principal_id"] != owner or raw is None:
+            raise ServiceError("permission_denied", 403)
+        if self.store.schema_version < 19 and (
+            not isinstance(grant, ProjectGrant) or grant.revoked
+            or grant.expires_at is not None and grant.expires_at <= time.time()
+            or grant.actor_generation != actor.generation or "shell.execute" not in grant.actions
+        ):
             raise ServiceError("permission_denied", 403)
         environment = EnvironmentHandle.model_validate(raw["environment"])
         ownership = RunOwnership(owner_id=actor.principal_id,
@@ -1428,10 +1472,13 @@ class DevelopmentService:
         self.identities.validate(actor)
         await self.sandbox.project(actor, project_id)
         async with self.store.lock, self.store.engine.connect() as conn:
-            current_grant = await self.access_repository._record(
+            current_grant = (await self.access_repository._record(
                 conn, actor.principal_id, project_id, "grant", actor.principal_id,
-            )
-        if current_grant != grant or grant.expires_at <= time.time():
+            ) if self.store.schema_version < 19 else None)
+        if self.store.schema_version < 19 and (
+            current_grant != grant or not isinstance(grant, ProjectGrant)
+            or grant.expires_at is not None and grant.expires_at <= time.time()
+        ):
             raise ServiceError("permission_denied", 403)
         await self.repositories.environments.resolve(environment)
         return data, metadata

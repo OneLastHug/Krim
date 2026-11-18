@@ -4,16 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from krim_agent.skills import (
-    SKILL_BODY_MAX_BYTES,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_METADATA_KEY_MAX_CHARS,
     SKILL_METADATA_MAX_ENTRIES,
     SKILL_METADATA_VALUE_MAX_CHARS,
     SKILL_NAME_MAX_CHARS,
-    SKILL_RESOURCE_MAX_BYTES,
-    SKILL_RESOURCE_MAX_COUNT,
-    SKILL_RESOURCES_TOTAL_MAX_BYTES,
-    SKILL_TOTAL_MAX_BYTES,
     SkillDocument,
     SkillParseError,
     SkillSummary,
@@ -191,13 +186,9 @@ def test_frontmatter_structure_rejected() -> None:
             parse_skill(text)
 
 
-def test_body_required_and_bounded() -> None:
-    maxed = "x" * SKILL_BODY_MAX_BYTES
-    assert parse_skill(_frontmatter_text(body=maxed, name="x", description="y")).body == maxed
-    with pytest.raises(SkillParseError):
-        parse_skill(
-            _frontmatter_text(body="x" * (SKILL_BODY_MAX_BYTES + 1), name="x", description="y")
-        )
+def test_body_required_and_not_capped() -> None:
+    body = "x" * (32 * 1024 + 1)
+    assert parse_skill(_frontmatter_text(body=body, name="x", description="y")).body == body
     assert parse_skill("---\nname: x\ndescription: y\n---\n   \n").body == "   \n"
     assert parse_skill("---\nname: x\ndescription: y\n---").body == ""
 
@@ -208,15 +199,10 @@ def test_body_may_contain_delimiter_lines() -> None:
     assert doc.body.startswith("段落\n---\n")
 
 
-def test_total_bytes_limit() -> None:
-    base = _frontmatter_text(body="x" * SKILL_BODY_MAX_BYTES, name="x", description="y")
-    room = SKILL_TOTAL_MAX_BYTES - len(base.encode())
-    assert room <= SKILL_RESOURCES_TOTAL_MAX_BYTES
-    half = room // 2
-    doc = parse_skill(base, {"a.md": "y" * half, "b.md": "y" * (room - half)})
-    assert len(doc.resources) == 2
-    with pytest.raises(SkillParseError):
-        parse_skill(base, {"a.md": "y" * half, "b.md": "y" * (room - half + 1)})
+def test_document_and_resources_beyond_legacy_total_accepted() -> None:
+    base = _frontmatter_text(body="x" * (32 * 1024), name="x", description="y")
+    doc = parse_skill(base, {"a.md": "y" * (32 * 1024), "b.md": "y" * 2048})
+    assert doc.resources == {"a.md": "y" * (32 * 1024), "b.md": "y" * 2048}
 
 
 @pytest.mark.parametrize(
@@ -269,22 +255,18 @@ def test_resource_nfc_collision_rejected() -> None:
         parse_skill(_normative_text(), {"cafe\u0301.md": "1\n", "caf\u00e9.md": "2\n"})
 
 
-def test_resource_count_limit() -> None:
-    resources = {f"r{i}.md": "x" for i in range(SKILL_RESOURCE_MAX_COUNT)}
-    assert len(parse_skill(_normative_text(), resources).resources) == SKILL_RESOURCE_MAX_COUNT
-    with pytest.raises(SkillParseError):
-        parse_skill(_normative_text(), {**resources, "extra.md": "x"})
+def test_resource_count_beyond_legacy_cap_accepted() -> None:
+    resources = {f"r{i}.md": "x" for i in range(40)}
+    doc = parse_skill(_normative_text(), resources)
+    assert len(doc.resources) == 40
 
 
-def test_resource_bytes_limits() -> None:
+def test_resource_bytes_beyond_legacy_caps_accepted() -> None:
     text = _normative_text()
-    big = {"big.md": "x" * SKILL_RESOURCE_MAX_BYTES}
+    big = {"big.md": "x" * (32 * 1024 + 1)}
     assert parse_skill(text, big).resources == big
-    with pytest.raises(SkillParseError):
-        parse_skill(text, {"big.md": "x" * (SKILL_RESOURCE_MAX_BYTES + 1)})
-    with pytest.raises(SkillParseError):
-        parse_skill(text, {"a.md": "x" * 16385, "b.md": "x" * 16384})
-    assert len(parse_skill(text, {"a.md": "x" * 16384, "b.md": "x" * 16384}).resources) == 2
+    doc = parse_skill(text, {"a.md": "x" * 16385, "b.md": "x" * 16384})
+    assert len(doc.resources) == 2
 
 
 def test_resource_content_validation() -> None:

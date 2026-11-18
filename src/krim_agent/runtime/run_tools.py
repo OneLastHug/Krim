@@ -254,7 +254,10 @@ async def open_run_tools(
         # separately so it can never be hidden by its own selection state.
         ordinary_specs = tuple(spec for spec, _ in ordinary.registry._frozen)
         catalog = ToolCatalogService(ordinary_specs, owner_scope=scope)
-        executor = compose_executor(ordinary, (catalog.bundle(resolve),), guard=guard)
+        executor = compose_executor(
+            ordinary, (catalog.bundle(resolve),), guard=guard,
+            guard_confirms=guard is not None and scope.project_id is not None,
+        )
         return RunTools(
             executor, scope, catalog, resources, account=account,
             connections=(binding.connection for binding in bindings),

@@ -51,15 +51,20 @@ class OpenAICompatibleConfig(StrictModel):
     model: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
     wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
-    # Per-request generation budget, not a cumulative agent output quota.
-    max_output_tokens: int = Field(default=512, ge=1)
+    # None = 请求不带max_tokens/max_output_tokens，输出上限交给供应商真实
+    # 能力；显式数值仍是"单次请求的生成预算"，不是累计输出配额。
+    max_output_tokens: int | None = Field(default=None, ge=1)
     reasoning_effort: Literal["xhigh"] | None = None
     thinking: Literal["disabled"] | None = None
-    connect_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
-    read_timeout_seconds: float = Field(default=5.0, gt=0, le=90)
-    write_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
-    pool_timeout_seconds: float = Field(default=2.0, gt=0, le=2)
-    max_request_bytes: int = Field(default=32768, ge=256)
+    # None = 该传输阶段不设应用层硬超时；长连接的最终期限由运行层的
+    # model_timeout/运行deadline执行。默认值不再压住大窗口请求的首字节等待。
+    connect_timeout_seconds: float | None = Field(default=10.0, gt=0)
+    read_timeout_seconds: float | None = Field(default=None, gt=0)
+    write_timeout_seconds: float | None = Field(default=30.0, gt=0)
+    pool_timeout_seconds: float | None = Field(default=30.0, gt=0)
+    # None = 不设应用层请求字节上限；输入规模由token窗口判定（context策略），
+    # 供应商真实限制按其响应原样暴露。
+    max_request_bytes: int | None = Field(default=None, ge=256)
     allow_images: bool = Field(default=False, strict=True)
     max_response_bytes: int | None = Field(default=None, ge=1)
     max_event_bytes: int | None = Field(default=None, ge=1)
@@ -136,6 +141,8 @@ class OpenAICompatibleConfig(StrictModel):
             "THINKING",
             "CONNECT_TIMEOUT_SECONDS",
             "READ_TIMEOUT_SECONDS",
+            "WRITE_TIMEOUT_SECONDS",
+            "POOL_TIMEOUT_SECONDS",
             "MAX_REQUEST_BYTES",
             "MAX_RESPONSE_BYTES",
             "MAX_EVENT_BYTES",
@@ -163,8 +170,7 @@ class OpenAICompatibleConfig(StrictModel):
                 "max_tool_calls",
             ):
                 if name in values:
-                    if (name not in {"max_output_tokens", "max_request_bytes"}
-                            and values[name].lower() in {"none", "unlimited"}):
+                    if values[name].lower() in {"none", "unlimited"}:
                         arguments[name] = None
                         continue
                     if re.fullmatch(r"[0-9]+", values[name]) is None:
@@ -174,8 +180,16 @@ class OpenAICompatibleConfig(StrictModel):
                 if values["allow_images"] not in {"true", "false"}:
                     raise ValueError
                 arguments["allow_images"] = values["allow_images"] == "true"
-            for name in ("connect_timeout_seconds", "read_timeout_seconds"):
+            for name in (
+                "connect_timeout_seconds",
+                "read_timeout_seconds",
+                "write_timeout_seconds",
+                "pool_timeout_seconds",
+            ):
                 if name in values:
+                    if values[name].lower() in {"none", "unlimited"}:
+                        arguments[name] = None
+                        continue
                     if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values[name]) is None:
                         raise ValueError
                     arguments[name] = float(values[name])
@@ -778,6 +792,7 @@ class OpenAICompatibleProvider:
             base_url=self.config.base_url + "/",
             trust_env=False,
             follow_redirects=False,
+            # None分量表示该阶段不设应用层硬超时；整体期限由运行层deadline执行。
             timeout=httpx.Timeout(
                 connect=self.config.connect_timeout_seconds,
                 read=self.config.read_timeout_seconds,
@@ -846,7 +861,9 @@ class OpenAICompatibleProvider:
             request._content = wire
             request.stream = httpx.ByteStream(wire)
             request.headers["Content-Length"] = str(len(wire))
-        if len(request.content) > self.config.max_request_bytes:
+        if self.config.max_request_bytes is not None and len(
+            request.content
+        ) > self.config.max_request_bytes:
             boundary.error = ProviderError("provider_request_limit")
             raise boundary.error
 
@@ -937,8 +954,11 @@ class OpenAICompatibleProvider:
         )
         # Explicit None binds the absence of provider aggregate quotas on resume.
         result.update({name: getattr(self.config, name) for name in (
+            "max_output_tokens", "max_request_bytes",
             "max_response_bytes", "max_event_bytes", "max_events",
             "max_arguments_bytes", "max_tool_calls",
+            "connect_timeout_seconds", "read_timeout_seconds",
+            "write_timeout_seconds", "pool_timeout_seconds",
         )})
         if not self.config.allow_images:
             result.pop("allow_images", None)
@@ -950,7 +970,8 @@ class OpenAICompatibleProvider:
             "write_timeout_seconds",
             "pool_timeout_seconds",
         ):
-            result[key] = float(cast(float, result[key]))
+            value = result[key]
+            result[key] = None if value is None else float(cast(float, value))
         return result | {
             "schema_version": 1,
             "max_connections": self._connections,
@@ -984,8 +1005,13 @@ class OpenAICompatibleProvider:
             raise ServiceError("target_binding_changed")
         max_tool_calls = self.config.max_tool_calls
         if budget is not None:
-            max_tool_calls = (budget.max_tool_calls_this_step if max_tool_calls is None
-                              else min(max_tool_calls, budget.max_tool_calls_this_step))
+            step_cap = budget.max_tool_calls_this_step
+            if step_cap is None:
+                pass  # 步内批次不限：保留配置上限（或None=完全不裁）。
+            elif max_tool_calls is None:
+                max_tool_calls = step_cap
+            else:
+                max_tool_calls = min(max_tool_calls, step_cap)
         responses = self.config.wire_api == "responses"
         boundary = (
             _ResponsesBoundary(self.config, max_tool_calls)
@@ -993,11 +1019,18 @@ class OpenAICompatibleProvider:
             else _StreamBoundary(self.config, max_tool_calls)
         )
         # Keep each protocol's native token field; Responses requests are stateless.
+        # None leaves the output cap to the provider's real capability: no invented
+        # default presses it down, and a provider-side reject surfaces as-is.
         extra: dict[str, Any] = (
-            {"max_output_tokens": self.config.max_output_tokens, "store": False}
+            {"store": False}
             if responses
-            else {"max_tokens": self.config.max_output_tokens, "n": 1}
+            else {"n": 1}
         )
+        if self.config.max_output_tokens is not None:
+            if responses:
+                extra["max_output_tokens"] = self.config.max_output_tokens
+            else:
+                extra["max_tokens"] = self.config.max_output_tokens
         if self.config.reasoning_effort is not None:
             if responses:
                 extra["reasoning"] = {"effort": self.config.reasoning_effort}

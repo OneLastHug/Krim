@@ -211,7 +211,7 @@ class CompactorHistory:
         conversation: list[Message],
         tools: list[dict[str, JsonValue]],
         *,
-        max_group: int,
+        max_group: int | None,
         remaining_tools: int | None,
     ) -> list[Message]:
         # Validate before touching the queue/snapshot port. A caller with a

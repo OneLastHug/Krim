@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import type { ApprovalScope } from "../lib/execution-policy";
 import { ChevronRight, LoaderCircle, Shield, Wrench } from "lucide-react";
 import { runReason } from "../lib/copy";
 import { displayToolName } from "../lib/tool-names";
@@ -37,23 +38,33 @@ function missingResult(tool: ToolPresentation) {
   return "结果未确认";
 }
 
-export function ToolCallCard({ tool, canApprove, busy, pending, onDecision, onInspect }: {
+export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, pending, onDecision, onInspect }: {
   tool: ToolPresentation;
   canApprove: boolean;
+  canAllowSession?: boolean;
   busy: boolean;
   pending: boolean;
-  onDecision: (allow: boolean) => void;
+  onDecision: (allow: boolean, scope?: ApprovalScope) => void;
   onInspect: () => void;
 }) {
   // 显示用名称：旧 dev_* 名映射为新名；事件与审批记录中的原始 name 不变。
   const toolName = displayToolName(tool.name);
+  const scopeId = useId();
+  const approvalIdentity = tool.approval ? JSON.stringify([tool.approval.run_id, tool.approval.request_id, tool.approval.call_id, tool.approval.tool_hash, tool.approval.arguments_hash]) : "";
+  const [choice, setChoice] = useState<{ identity: string; scope: ApprovalScope }>({ identity: "", scope: "once" });
+  const selectedScope = canAllowSession && choice.identity === approvalIdentity ? choice.scope : "once";
   if (tool.approval) return <section className="approval chat-approval" data-request-id={tool.approval.request_id} data-risk={tool.risk === "write" ? "write" : tool.risk === "read" ? "read" : "unknown"} aria-label="等待审批">
     <div className="approval-title"><Shield aria-hidden="true" /><strong data-ui-data>{toolName}</strong><span>等待审批</span></div>
     <ToolProvenance value={{ source: tool.source, risk: tool.risk ?? "unknown" }} />
-    <ApprovalTime expiresAt={tool.approval.expires_at} />
+    {tool.approval.expires_at !== null && <ApprovalTime expiresAt={tool.approval.expires_at} />}
     <pre data-ui-data className="approval-arguments" tabIndex={0} aria-label={`${toolName} 的调用参数`}>{valueText(tool.approval.arguments)}</pre>
+    {canAllowSession && <div className="approval-scope"><label htmlFor={scopeId}>允许范围</label>
+      <select id={scopeId} value={selectedScope} disabled={!canApprove || busy || pending}
+        onChange={event => setChoice({ identity: approvalIdentity, scope: event.target.value === "session" ? "session" : "once" })}>
+        <option value="once">仅本次调用</option><option value="session">本会话的相同调用</option>
+      </select></div>}
     <div className="approval-actions">
-      <Button disabled={!canApprove || busy || pending} onClick={() => onDecision(true)} aria-label={`允许 ${toolName} 本次调用`}>允许本次调用</Button>
+      <Button disabled={!canApprove || busy || pending} onClick={() => selectedScope === "session" ? onDecision(true, "session") : onDecision(true)} aria-label={selectedScope === "session" ? `允许 ${toolName} 本会话相同调用` : `允许 ${toolName} 本次调用`}>{selectedScope === "session" ? "允许本会话相同调用" : "允许本次调用"}</Button>
       <Button variant="outline" disabled={!canApprove || busy || pending} onClick={() => onDecision(false)} aria-label={`拒绝 ${toolName} 本次调用`}>拒绝</Button>
       {pending && <span role="status">正在确认决定</span>}
       {!canApprove && <span>当前身份没有审批权限</span>}

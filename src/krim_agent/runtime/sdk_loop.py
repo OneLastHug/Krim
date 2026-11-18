@@ -83,6 +83,7 @@ class DevelopmentSDKLoop(AgentLoop):
         executor: ToolExecutor | None = None,
         run_tools: Any | None = None,
         session_scope: SessionToolScope | None = None,
+        startup_gate: Callable[[], asyncio.Lock | None] | None = None,
     ) -> None:
         if execution_budget is None:
             raise ServiceError("execution_error")
@@ -257,6 +258,7 @@ class DevelopmentSDKLoop(AgentLoop):
             read_result=unused_result,
             approval_request=cast(ApprovalRequest, approval_request),
             host=host,
+            startup_gate=startup_gate,
         )
         if resume is not None and not isinstance(resume, SDKResume):
             raise ServiceError("facts_corrupt")

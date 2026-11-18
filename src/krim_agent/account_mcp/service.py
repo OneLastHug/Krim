@@ -61,7 +61,7 @@ class ConnectionCreate(StrictModel):
     selected_tools: tuple[str, ...] = ()
     readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] = Field(default_factory=dict, max_length=32)
-    timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    timeout_seconds: float = Field(default=10.0, gt=0)
 
     @field_validator("allowed_hosts", "selected_tools", "readonly_tools", mode="before")
     @classmethod
@@ -98,7 +98,7 @@ class ConnectionUpdate(StrictModel):
     selected_tools: tuple[str, ...] = ()
     readonly_tools: tuple[str, ...] = ()
     credentials: dict[str, SecretStr] | None = Field(default=None, max_length=32)
-    timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    timeout_seconds: float = Field(default=10.0, gt=0)
 
     @field_validator("allowed_hosts", "selected_tools", "readonly_tools", mode="before")
     @classmethod

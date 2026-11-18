@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from krim_agent.context.compaction import Compactor
 from krim_agent.context.compaction_source import WorkspaceCompactionSource
+from krim_agent.context.counter import DEFAULT_COUNTER
 from krim_agent.context.types import CompactionPolicy, ContextPolicy
 from krim_agent.contracts import Message, encoded, fingerprint
 from krim_agent.providers.types import ModelText
@@ -41,6 +42,8 @@ class MeasuredCompactor(Compactor):
         self.system = "system"
         self.policy = ContextPolicy(max_bytes=8192, reserved_output_tokens=32)
         self.compaction = CompactionPolicy()
+        self.counts_tokens = self.policy.counts_tokens()
+        self._counter = DEFAULT_COUNTER
         self.request_limit = 262144
         self.step = ModelStep(Provider(), self.emit, self.check, max_steps=8, max_output=4096,
                               deadline=None, workspace=True)
@@ -85,14 +88,14 @@ async def test_compaction_changes_measure_business_context_before_and_after():
     original = [Message(role="system", content=compactor.system),
                 *[message for turn in compactor.history for message in turn["messages"]],
                 *conversation]
-    expected_before, _ = compactor.measure(original, [], 2, 10)
+    expected_before = compactor.measure(original, [], 2, 10).size_bytes
     prepared = await compactor.prepare("run", conversation, [], max_group=2, remaining_tools=10)
     assert len(compactor.compaction_changes) == 1
     change = compactor.compaction_changes[0]
     assert change["before_input_bytes"] == expected_before
     assert change["pass_index"] == 0 and change["summary_step_index"] == 0
     assert 0 < change["after_input_bytes"] < expected_before
-    assert change["after_input_bytes"] == compactor.measure(prepared, [], 2, 10)[0]
+    assert change["after_input_bytes"] == compactor.measure(prepared, [], 2, 10).size_bytes
     summary_request_bytes = len(encoded({
         "messages": [m.model_dump(mode="json") for m in compactor.summary_requests[0]],
         "tools": [],

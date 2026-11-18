@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
 RETENTION = "已从未来记忆中移除；历史运行记录、上下文快照、对话和备份仍按其保留策略保存。"
 DEFAULT_RECALL_CHARS = 8192
-MAX_SKILL_CONTEXT_BYTES = 65536
 BUILTIN_ID = "builtin-task-checklist"
 BUILTIN = """---
 name: task-checklist
@@ -52,8 +51,8 @@ class Mutation(StrictModel):
 
 
 class SkillImport(Mutation):
-    document: str = Field(max_length=65536)
-    resources: dict[str, str] = Field(default_factory=dict, max_length=16)
+    document: str
+    resources: dict[str, str] = Field(default_factory=dict)
 
 
 class SkillUpdate(SkillImport):
@@ -99,12 +98,12 @@ class SkillSelection(StrictModel):
     skill_id: str = Field(min_length=1, max_length=64)
     revision: int = Field(ge=1)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    resources: tuple[str, ...] = Field(default=(), max_length=16)
+    resources: tuple[str, ...] = Field(default=())
 
 
 class SessionExtensions(Mutation):
     expected_revision: int = Field(ge=0)
-    skills: tuple[SkillSelection, ...] = Field(default=(), max_length=4)
+    skills: tuple[SkillSelection, ...] = Field(default=())
     memory_enabled: bool = False
 
     @model_validator(mode="after")
@@ -422,15 +421,8 @@ class ExtensionService:
                         skills.c.principal_id == actor.principal_id, skills.c.name == document.name
                     )
                 )
-                count = await conn.scalar(
-                    select(func.count())
-                    .select_from(skills)
-                    .where(skills.c.principal_id == actor.principal_id)
-                )
                 if duplicate is not None or document.name == "task-checklist":
                     raise ServiceError("skill_name_conflict", 409)
-                if (count or 0) >= 100:
-                    raise ServiceError("capacity", 429)
                 await conn.execute(
                     insert(skills).values(
                         id=selected_id,
@@ -1060,8 +1052,6 @@ class ExtensionService:
                         resources={path: skill["resources"][path] for path in ref.resources},
                     )
                 )
-        if len(encoded(items).encode()) > MAX_SKILL_CONTEXT_BYTES:
-            raise ServiceError("context_budget", 422)
         if config is not None and config["memory_enabled"]:
             project_id = await conn.scalar(
                 select(sandbox_session_bindings.c.project_id).where(

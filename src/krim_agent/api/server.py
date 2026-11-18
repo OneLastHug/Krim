@@ -322,6 +322,7 @@ def create_app(
     mount_accounts(app)
 
     from .context import mount_context
+    from .execution_policy import mount_execution_policy
     from .extensions import mount_extensions
     from .goals import mount_goals
     from .interaction import mount_interaction
@@ -336,6 +337,7 @@ def create_app(
     mount_goals(app)
     mount_session_lifecycle(app)
     mount_session_sidebar(app)
+    mount_execution_policy(app)
 
     from .account_mcp import mount_account_mcp
 

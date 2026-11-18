@@ -40,7 +40,7 @@ from krim_agent.development.contracts import (
 from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import RunStore
 from krim_agent.tools.core import Invocation
-from krim_agent.tools.executor import Admission, ToolContext, ToolExecutor
+from krim_agent.tools.executor import Admission, StartupHandoff, ToolContext, ToolExecutor
 
 from .host import CURRENT_OPERATION, HostExecution, sdk_lifetime
 from .media import DEFAULT_MEDIA_LIMITS, MediaLimits, authorize_history
@@ -68,6 +68,9 @@ class _Entry:
     gate: asyncio.Event
     predecessors: tuple[asyncio.Event, ...] = ()
     input_request: dict[str, Any] | None = None
+    startup_gate: asyncio.Lock | None = None
+    # 会话启动闸门：ordered() 在最新判定前获取；execute() 移交 StartupHandoff
+    # 后置 None，executor 在 entered 边界释放。停靠/异常路径由 ordered() 兜底。
 
 
 class _OrderedAgent(ai.Agent):
@@ -98,57 +101,82 @@ class _OrderedAgent(ai.Agent):
                         tool_call_id=part.tool_call_id,
                         tool_name=part.tool_name,
                     )
-                # BoundToolCall catches ordinary tool exceptions. The wrapper is
-                # outside it so HookDeferredException can become SDK's own
-                # deferred result rather than a generic error result.
-                if entry.admission.decision == "ask" and part.cached_result is None:
-                    try:
-                        approval = await ai.hook(
-                            f"approve_{entry.invocation.call_id}",
-                            payload=ToolApproval,
-                            metadata={"tool": part.tool_name, "call_id": entry.invocation.call_id},
-                            tool_call_id=part.tool_call_id,
-                        )
-                    except HookDeferredException as error:
-                        owner.deferred = error.hook
-                        return deferred_tool_result(
-                            error.hook,
-                            tool_call_id=part.tool_call_id,
-                            tool_name=part.tool_name,
-                        )
-                    await owner.check_stop()
-                    entry.admission = replace(
-                        entry.admission,
-                        approved=approval.granted,
-                        decision="ask" if approval.granted else "deny",
-                        code=None if approval.granted else "approval_denied",
-                    )
-                if entry.invocation.name in INPUT_TOOLS and part.cached_result is None:
-                    try:
-                        result = await owner.execute(entry)
-                    except RequestPending as pending:
-                        entry.input_request = dict(pending.request)
+                startup_gate = owner.dispatch_gate()
+                if startup_gate is not None and part.cached_result is None:
+                    # 会话启动闸门：与模式CAS提交同锁排序，覆盖最新判定重读、
+                    # 确认决议与started标记交接；entered 后即释放，不持有整段执行。
+                    await startup_gate.acquire()
+                    entry.startup_gate = startup_gate
+                try:
+                    if part.cached_result is None and entry.admission.decision != "deny":
+                        # 模式热切换可能落在准入与派发之间：队列→实际执行边界按
+                        # 最新持久策略重验，不信任冻结 Admission。
+                        entry.admission = await owner.revalidate(entry)
+                    # BoundToolCall catches ordinary tool exceptions. The wrapper is
+                    # outside it so HookDeferredException can become SDK's own
+                    # deferred result rather than a generic error result.
+                    if entry.admission.decision == "ask" and part.cached_result is None:
                         try:
-                            await ai.hook(
-                                "input_" + str(pending.request["id"]), payload=ToolApproval,
+                            approval = await ai.hook(
+                                f"approve_{entry.invocation.call_id}",
+                                payload=ToolApproval,
                                 metadata={
-                                    "interaction_request_id": pending.request["id"],
+                                    "tool": part.tool_name,
                                     "call_id": entry.invocation.call_id,
-                                    "tool": entry.invocation.name,
-                                }, tool_call_id=part.tool_call_id,
+                                },
+                                tool_call_id=part.tool_call_id,
                             )
                         except HookDeferredException as error:
                             owner.deferred = error.hook
-                            return deferred_tool_result(error.hook,
-                                tool_call_id=part.tool_call_id, tool_name=part.tool_name)
-                        raise ServiceError("interaction_pending") from None
-                    result_part = messages.ToolResultPart(
-                        tool_call_id=part.tool_call_id, tool_name=part.tool_name,
-                        result=result, result_kind="json",
-                    )
-                    message = messages.Message(role="tool", parts=[result_part])
-                    return events.ToolCallResult(message=message, results=message.tool_results)
-                return cast(events.ToolCallResult, await native())
+                            return deferred_tool_result(
+                                error.hook,
+                                tool_call_id=part.tool_call_id,
+                                tool_name=part.tool_name,
+                            )
+                        await owner.check_stop()
+                        entry.admission = replace(
+                            entry.admission,
+                            approved=approval.granted,
+                            decision="ask" if approval.granted else "deny",
+                            code=None if approval.granted else "approval_denied",
+                        )
+                        if approval.granted:
+                            # 批准回程不覆盖新权限：放行前按当前项目访问重验，
+                            # 停靠期间撤权时该调用以 deny 落账，不重放副作用。
+                            entry.admission = await owner.revalidate(
+                                entry, after_approval=True,
+                            )
+                    if entry.invocation.name in INPUT_TOOLS and part.cached_result is None:
+                        try:
+                            result = await owner.execute(entry)
+                        except RequestPending as pending:
+                            entry.input_request = dict(pending.request)
+                            try:
+                                await ai.hook(
+                                    "input_" + str(pending.request["id"]), payload=ToolApproval,
+                                    metadata={
+                                        "interaction_request_id": pending.request["id"],
+                                        "call_id": entry.invocation.call_id,
+                                        "tool": entry.invocation.name,
+                                    }, tool_call_id=part.tool_call_id,
+                                )
+                            except HookDeferredException as error:
+                                owner.deferred = error.hook
+                                return deferred_tool_result(error.hook,
+                                    tool_call_id=part.tool_call_id, tool_name=part.tool_name)
+                            raise ServiceError("interaction_pending") from None
+                        result_part = messages.ToolResultPart(
+                            tool_call_id=part.tool_call_id, tool_name=part.tool_name,
+                            result=result, result_kind="json",
+                        )
+                        message = messages.Message(role="tool", parts=[result_part])
+                        return events.ToolCallResult(message=message, results=message.tool_results)
+                    return cast(events.ToolCallResult, await native())
+                finally:
+                    startup_lock, entry.startup_gate = entry.startup_gate, None
+                    if startup_lock is not None:
+                        # execute() 已移交交接单元时为 None；停靠/异常在此兜底释放。
+                        startup_lock.release()
             finally:
                 entry.gate.set()
 
@@ -186,6 +214,7 @@ class SDKAdapter:
         host: HostExecution | None = None,
         authorize_media: Callable[[messages.FilePart], Awaitable[None]] | None = None,
         media_limits: MediaLimits = DEFAULT_MEDIA_LIMITS,
+        startup_gate: Callable[[], asyncio.Lock | None] | None = None,
     ) -> None:
         if operations is not None:
             if (environment is None or ownership is None
@@ -208,8 +237,10 @@ class SDKAdapter:
         self.read_result = read_result
         self.approval_request = approval_request
         self.host = host
+        self.startup_gate = startup_gate
         self.authorize_media, self.media_limits = authorize_media, media_limits
         self.entries: dict[str, _Entry] = {}
+        self.replies: dict[str, bool] = {}
         self.deferred: messages.HookPart[Any] | None = None
         self.step = 0
         self.failure: Exception | None = None
@@ -255,6 +286,10 @@ class SDKAdapter:
     def run_id(self) -> str:
         return self._run_id
 
+    def dispatch_gate(self) -> asyncio.Lock | None:
+        """当前调用的会话启动闸门；非会话运行无执行模式，不设闸门。"""
+        return self.startup_gate() if self.startup_gate is not None else None
+
     async def check_stop(self) -> None:
         if self.host is not None:
             self.host.context.assert_target_current()
@@ -276,7 +311,9 @@ class SDKAdapter:
                 await self.check_stop()
             return event
 
-        async def unexpected_approval(invocation: Invocation, timeout_seconds: float) -> bool:
+        async def unexpected_approval(
+            invocation: Invocation, timeout_seconds: float | None,
+        ) -> bool:
             raise RuntimeError("approval must pass through SDK hook before execution")
 
         if self.host is not None:
@@ -311,6 +348,51 @@ class SDKAdapter:
                 entry.predecessors = previous
             previous = tuple(entry.gate for entry in group)
             index += len(group)
+
+    async def revalidate(self, entry: _Entry, *, after_approval: bool = False) -> Admission:
+        """队列→实际执行边界（及批准回程后）的会话策略重验（ADR-0015 热切换）。
+
+        冻结 Admission 只保留参数与工具绑定事实；确认语义每次从权威存储
+        重读。规则：
+        - 冻结 deny（用户拒绝/取消、项目拒绝）永不因模式切换复活；
+        - 最新判定 deny：停靠期间的撤权/规则变化硬否决未启动调用，
+          也覆盖刚获得的批准；
+        - 最新判定 ask：未获批的调用改走确认停靠，已批准的按批准放行；
+        - 最新判定 allow 且原为待批：模式热切换放行，先记录独立的
+          execution_policy_allow 事件（不伪记用户 approval_reply）再执行，
+          已有用户批复的调用仍走原批复决议，不重复记录。
+        """
+        admission = entry.admission
+        if admission.decision == "deny":
+            return admission
+        scope = self.host.context.scope if self.host is not None else None
+        fresh = await self.executor.redecide(entry.invocation, admission.spec, scope)
+        if fresh == "deny":
+            return replace(admission, decision="deny", code="permission_denied")
+        if after_approval:
+            return admission
+        if fresh == "ask":
+            if admission.approved:
+                return admission
+            return replace(admission, decision="ask", code=None)
+        if (admission.decision == "ask" and not admission.approved
+                and entry.invocation.call_id not in self.replies):
+            await self.store.append(
+                self.run_id,
+                "execution_policy_allow",
+                {
+                    "call_id": entry.invocation.call_id,
+                    "span_id": entry.invocation.span_id,
+                    "step_index": entry.invocation.step_index,
+                    "name": entry.invocation.name,
+                    "tool_hash": entry.invocation.tool_hash,
+                    "arguments_hash": fingerprint(parse_json(entry.invocation.arguments_json)),
+                    "reason": "session_mode",
+                },
+                event_id="execution-policy-allow:" + entry.invocation.call_id,
+            )
+            return replace(admission, decision="allow", code=None)
+        return admission
 
     async def prepare(self, calls: Sequence[messages.ToolCallPart]) -> None:
         await self.check_stop()
@@ -386,6 +468,8 @@ class SDKAdapter:
 
     async def execute(self, entry: _Entry) -> JsonValue:
         await self.check_stop()
+        handoff_gate, entry.startup_gate = entry.startup_gate, None
+        handoff = StartupHandoff(handoff_gate) if handoff_gate is not None else None
         identity = entry.identity
         if identity is not None and entry.admission.decision != "deny":
             assert self.operations is not None
@@ -449,11 +533,18 @@ class SDKAdapter:
             return observation.model_dump(mode="json")
         token = CURRENT_OPERATION.set(identity)
         try:
+            dispatch_context = self.context()
+            if handoff is not None:
+                dispatch_context = replace(dispatch_context, startup_gate=handoff)
             observation = await self.executor.execute(
-                entry.invocation, self.context(), entry.admission,
+                entry.invocation, dispatch_context, entry.admission,
             )
         finally:
             CURRENT_OPERATION.reset(token)
+            if handoff is not None and handoff.gate is not None:
+                # executor 未到达 entered 边界（lookup 短路/前置异常）：兜底释放。
+                unreleased, handoff.gate = handoff.gate, None
+                unreleased.release()
         # Existing RunStore tool_end is the result record; the C0 receipt stores
         # only its reference. A crash before this receipt leaves accepted/unknown,
         # which lookup will not dispatch again.
@@ -632,10 +723,16 @@ class SDKAdapter:
         remaining = self.host.budget.remaining if self.host is not None else None
         data = await self.approval_request(invocation, remaining)
         expires_at = data.get("expires_at") if isinstance(data, dict) else None
+        batch_window = self.context().approval_timeout
         if self.batch_approvals and isinstance(expires_at, (float, int)):
             if self.batch_expires is None:
-                self.batch_expires = min(
-                    expires_at, time.time() + self.context().approval_timeout
+                # 无产品倒计时（approval_timeout=None）时只收敛同一批准回程内
+                # 的既有expires；两者皆无则保持None，批复/取消是唯一定稿路径。
+                self.batch_expires = (
+                    min(expires_at, time.time() + batch_window)
+                    if isinstance(batch_window, (int, float))
+                    and not isinstance(batch_window, bool)
+                    else expires_at
                 )
             data["expires_at"] = min(expires_at, self.batch_expires)
         expected = {
@@ -653,12 +750,16 @@ class SDKAdapter:
         if fingerprint(data.get("arguments")) != expected["arguments_hash"]:
             raise ValueError("approval request arguments changed")
         expires = data.get("expires_at")
+        # expires_at=None 表示该请求不带产品倒计时，只按用户批复与取消定稿。
+        expiry_valid = expires is None or (
+            isinstance(expires, (int, float))
+            and not isinstance(expires, bool)
+            and math.isfinite(expires)
+        )
         if (
             not isinstance(data.get("request_id"), str)
             or not data["request_id"]
-            or isinstance(expires, bool)
-            or not isinstance(expires, (int, float))
-            or not math.isfinite(expires)
+            or not expiry_valid
             or "budget_remaining" not in data
         ):
             raise ValueError("incomplete host approval request")
@@ -702,6 +803,8 @@ class SDKAdapter:
         # as well as at each real model request. No checkpoint implies permission.
         history = await self.prepare_input(history)
         self.deferred = None
+        # 用户批复是派发重验的边界：已有批复的调用不因模式切换被重判放行。
+        self.replies = {str(call_id): bool(granted) for call_id, granted in (replies or {}).items()}
         registry = HookRegistry()
         for call_id, granted in (replies or {}).items():
             ai.resolve_hook(f"approve_{call_id}", {"granted": granted}, registry=registry)

@@ -4,7 +4,8 @@ SKILL.md 采用通行 Agent Skills 格式：YAML frontmatter 必需 ``name`` 与
 ``description``，可选 ``license``、``compatibility`` 与字符串 ``metadata``；
 未知扩展字段一律忽略，不影响 content_hash。frontmatter 由收紧的 PyYAML
 SafeLoader 解析：禁止别名、显式标签、合并键、非字符串键与重复键，歧义
-输入明确报错。资源路径必须是安全的 POSIX 相对文件名，所有内容字节受限。
+输入明确报错。资源路径必须是安全的 POSIX 相对文件名；正文与资源不设
+人为字节或数量封顶，进入上下文的占用由显式选择与真实 token 预算约束。
 本模块产出的是不可信文本：上层注入上下文时须按不可信内容标注，且不得
 借此改变工具权限。依赖 ``pyyaml``（需加入 pyproject 依赖）。
 """
@@ -22,15 +23,12 @@ from yaml.events import AliasEvent
 
 from krim_agent.contracts import StrictModel, fingerprint
 
-# 导入契约限额；调整任何常量都会改变校验边界与 content_hash 语义，须同步目录版本。
+# 格式与路径校验限额。正文与资源不设人为字节或数量封顶：内容经显式
+# 选择按需进入上下文，占用由真实 token 预算收敛；content_hash 只绑定
+# 内容本身，与这些常量无关。
 SKILL_NAME_MAX_CHARS = 64
 SKILL_DESCRIPTION_MAX_CHARS = 1024
-SKILL_BODY_MAX_BYTES = 32 * 1024
-SKILL_TOTAL_MAX_BYTES = 64 * 1024
 SKILL_RESOURCE_PATH_MAX_CHARS = 256
-SKILL_RESOURCE_MAX_BYTES = 32 * 1024
-SKILL_RESOURCES_TOTAL_MAX_BYTES = 32 * 1024
-SKILL_RESOURCE_MAX_COUNT = 32
 SKILL_METADATA_MAX_ENTRIES = 16
 SKILL_METADATA_KEY_MAX_CHARS = 64
 SKILL_METADATA_VALUE_MAX_CHARS = 1024
@@ -74,34 +72,26 @@ def _validate_resource_path(path: str) -> None:
             raise SkillParseError("资源路径包含空段或相对跳转段")
 
 
-def _validate_resource_content(content: str) -> int:
-    """资源内容必须为有界文本；返回 UTF-8 字节数。"""
+def _validate_resource_content(content: str) -> None:
+    """资源内容必须为可编码文本；字节总量不设人为封顶。"""
     if not isinstance(content, str):
         raise SkillParseError("资源内容必须为文本")
     if "\x00" in content:
         raise SkillParseError("资源内容包含 NUL 字符")
-    size = _utf8_size(content)
-    if size > SKILL_RESOURCE_MAX_BYTES:
-        raise SkillParseError(f"单个资源字节超过 {SKILL_RESOURCE_MAX_BYTES}")
-    return size
+    _utf8_size(content)
 
 
 def _validate_resources(resources: dict[str, str]) -> None:
     if not isinstance(resources, dict) or any(not isinstance(key, str) for key in resources):
         raise SkillParseError("resources 必须为字符串映射")
-    if len(resources) > SKILL_RESOURCE_MAX_COUNT:
-        raise SkillParseError(f"资源数量超过 {SKILL_RESOURCE_MAX_COUNT}")
     seen: set[str] = set()
-    total = 0
     for path, content in resources.items():
         _validate_resource_path(path)
-        total += _validate_resource_content(content)
+        _validate_resource_content(content)
         key = unicodedata.normalize("NFC", path).casefold()
         if key in seen:
             raise SkillParseError("资源路径存在大小写或 Unicode 规范化歧义")
         seen.add(key)
-    if total > SKILL_RESOURCES_TOTAL_MAX_BYTES:
-        raise SkillParseError(f"资源总字节超过 {SKILL_RESOURCES_TOTAL_MAX_BYTES}")
 
 
 def _validate_metadata(metadata: dict[str, str]) -> None:
@@ -207,9 +197,9 @@ class SkillDocument(StrictModel):
 
     @field_validator("body")
     @classmethod
-    def _bounded_body(cls, value: str) -> str:
-        if _utf8_size(value) > SKILL_BODY_MAX_BYTES:
-            raise ValueError(f"Skill 正文字节超过 {SKILL_BODY_MAX_BYTES}")
+    def _clean_body(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("文本字段包含 NUL 字符")
         return value
 
     @field_validator("resources")
@@ -335,9 +325,6 @@ def parse_skill(document: str, resources: dict[str, str] | None = None) -> Skill
     if "\x00" in document:
         raise SkillParseError("文档包含 NUL 字符")
     _validate_resources(resource_map)
-    total = _utf8_size(document) + sum(_utf8_size(item) for item in resource_map.values())
-    if total > SKILL_TOTAL_MAX_BYTES:
-        raise SkillParseError(f"文档与资源总字节超过 {SKILL_TOTAL_MAX_BYTES}")
     frontmatter_text, body = _split_frontmatter(document)
     frontmatter = _parse_frontmatter(frontmatter_text)
     name = _required_str(frontmatter, "name")

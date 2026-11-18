@@ -28,7 +28,19 @@ from .registry import ToolRegistry
 from .session import SESSION_RISKS
 
 type Emit = Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]]
-type Approve = Callable[[Invocation, float], Awaitable[bool]]
+type Approve = Callable[[Invocation, float | None], Awaitable[bool]]
+
+
+@dataclass
+class StartupHandoff:
+    """会话启动闸门的交接单元（ADR-0015 热切换）。
+
+    派发方在闸门内完成最新策略判定后把锁放进此单元；executor 在 entered
+    边界（started 标记落定、真实执行即将派发）把 ``gate`` 置 None 并释放
+    锁。置 None 即"已交接"，保证 acquire 与 release 恰好各一次。
+    """
+
+    gate: asyncio.Lock | None
 
 
 @dataclass(frozen=True)
@@ -38,7 +50,8 @@ class ToolContext:
     timeout: float | None
     assert_target_current: Callable[[], None] = lambda: None
     scope: Scope | None = None
-    approval_timeout: float = 300
+    approval_timeout: float | None = None
+    startup_gate: StartupHandoff | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,24 @@ class ToolExecutor:
         if any(value not in {"allow", "ask"} for value in decisions):
             return "deny"
         return "ask" if "ask" in decisions else "allow"
+
+    async def redecide(
+        self, invocation: Invocation, spec: ToolSpec, scope: Scope | None = None,
+    ) -> Decision:
+        """队列→实际执行边界的最新策略重读（ADR-0015 热切换）。
+
+        不信任冻结 Admission：会话执行模式、项目访问与本会话允许规则每次
+        都从权威存储重读。deny/参数/registry 校验仍由 execute 内的 check()
+        与冻结 Admission 负责，这里只重跑策略链（含 binding target 的
+        独立二次判定）。
+        """
+        with _calling(invocation):
+            token = CURRENT.set(
+                replace(scope, invocation=invocation) if scope is not None else None)
+            try:
+                return await self._decision(invocation, spec)
+            finally:
+                CURRENT.reset(token)
 
     async def admit(
         self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float | None
@@ -173,6 +204,16 @@ class ToolExecutor:
             code: str | None = None
             first: asyncio.Task[JsonValue] | None = None
             repeated = False
+            handoff = context.startup_gate if admission is not None else None
+
+            def release_handoff() -> None:
+                # entered 边界（started 标记落定）后模式切换不再约束本次执行；
+                # 未交接（deny/确认停靠/异常）路径由 finally 兜底释放。
+                nonlocal handoff
+                if handoff is not None and handoff.gate is not None:
+                    lock, handoff.gate = handoff.gate, None
+                    lock.release()
+
             token = CURRENT.set(replace(context.scope,
                 invocation=invocation) if context.scope is not None else None)
 
@@ -225,6 +266,9 @@ class ToolExecutor:
                         })
                         check()
                         entering = True
+                        # 交接完成：started 标记与 intent 已落库，真实执行在
+                        # 闸门外进行，模式切换只能约束之后排队的调用。
+                        release_handoff()
                         if spec.external_executor is not None:
                             raw = await spec.external_executor(invocation, parsed)
                         elif spec.scoped_executor is None:
@@ -302,6 +346,7 @@ class ToolExecutor:
                         check()
             except RequestPending:
                 # Durable user input yields without recording a failed tool result.
+                release_handoff()
                 CURRENT.reset(token)
                 raise
             except asyncio.CancelledError:
@@ -340,4 +385,5 @@ class ToolExecutor:
                     raise asyncio.CancelledError
                 return outcome
             finally:
+                release_handoff()
                 CURRENT.reset(token)

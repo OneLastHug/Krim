@@ -66,6 +66,12 @@ async def read_binding(
         binding = await binding_row(conn, session_id)
         if binding is not None and binding["principal_id"] != actor.principal_id:
             raise ServiceError("facts_corrupt")
+        if (binding is not None and binding["project_id"] is not None
+                and service.store.schema_version >= 19):
+            from krim_agent.project_access.policy import resolve_project_access
+
+            access = await resolve_project_access(conn, actor, binding["project_id"])
+            access.require()
         return view(session, binding)
 
     return await service._read(actor, read)
@@ -82,6 +88,8 @@ async def bind_project(
     if service.store.schema_version < 9:
         raise ServiceError("schema_upgrade_required")
     values = service._parse(BindProjectBody, body)
+    if service.store.schema_version >= 19 and values.project_id is None:
+        raise ServiceError("project_required", 422)
 
     async def perform(conn: AsyncConnection) -> dict[str, Any]:
         session = await session_row(conn, actor, session_id)
@@ -117,7 +125,6 @@ async def bind_project(
                     await conn.execute(
                         select(projects).where(
                             projects.c.project_id == selected,
-                            projects.c.principal_id == actor.principal_id,
                         )
                     )
                 )
@@ -125,6 +132,13 @@ async def bind_project(
                 .first()
             )
             if project is None or project["workspace_id"] != session["workspace_id"]:
+                raise ServiceError("not_found", 404)
+            if service.store.schema_version >= 19:
+                from krim_agent.project_access.policy import resolve_project_access
+
+                access = await resolve_project_access(conn, actor, str(selected))
+                access.require()
+            elif project["principal_id"] != actor.principal_id:
                 raise ServiceError("not_found", 404)
             if project["lease_id"] is not None or project["status"] not in {
                 "ready",
@@ -148,6 +162,10 @@ async def bind_project(
             await conn.execute(
                 update(bindings).where(bindings.c.session_id == session_id).values(**saved)
             )
+        if service.store.schema_version >= 19:
+            from krim_agent.storage.execution_policy import clear_allow_rules
+
+            await clear_allow_rules(conn, session_id)
         # sql.submit核对同一session revision，不能用改绑前的页面状态入队。
         await conn.execute(
             update(sessions)

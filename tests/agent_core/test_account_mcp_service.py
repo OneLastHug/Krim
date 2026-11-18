@@ -220,3 +220,26 @@ async def test_session_selection_is_owner_only_and_turn_snapshot_is_immutable(tm
                     select(session_mcp).where(session_mcp.c.session_id == session.id)
                 )
             ).mappings().one()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_connection_timeout_configurable_without_product_cap(tmp_path):
+    async with managed(tmp_path / "timeout.sqlite") as (store, identities, admin):
+        owner = await create_owner(identities, admin, "mcp-timeout")
+        vault = AuthenticatedSecretVault(MasterKeyring.create(bytes(range(32))))
+        service = AccountMCPService(store, identities, vault)
+
+        created = await service.create_connection(
+            owner,
+            ConnectionCreate(
+                request_key="long-run",
+                name="docs",
+                url="https://docs.example/mcp",
+                allowed_hosts=("docs.example",),
+                selected_tools=("search",),
+                timeout_seconds=3600.0,
+            ),
+        )
+        listed = await service.list_connections(owner)
+        assert created["id"] == listed[0]["id"]
+        assert listed[0]["timeout_seconds"] == 3600.0

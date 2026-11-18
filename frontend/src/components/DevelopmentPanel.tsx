@@ -3,7 +3,7 @@ import {
   Archive, ChevronRight, ChevronUp, CodeXml, Columns2, Download, FileText, Folder, FolderOpen,
   Image, KeyRound, PanelRight, Plus, Shield, Terminal, X,
 } from "lucide-react";
-import { parseTurn, sessionPath, type Turn } from "../lib/session-contracts.ts";
+import { parseTurn, sessionPath, type Turn, type SessionContextPolicy } from "../lib/session-contracts.ts";
 import {
   devReason, environmentLabels, environmentRowLabel, fmtBytes, fmtCount, parseProject,
   projectStatusLabels, shortHost, type DirectoryPage, type EnvironmentState, type McpConnection,
@@ -57,6 +57,8 @@ function useMediaQuery(query: string, fallbackWidth: number) {
 }
 
 const riskLabel = (risk: string | null) => (risk === "read" ? "只读" : risk === "write" ? "写操作" : risk ? risk : "未标注");
+const contextWindowLabel = (policy: SessionContextPolicy) => policy.counter_version !== "approx-utf8/1" && policy.max_tokens !== undefined
+  ? `${fmtCount(policy.max_tokens)} tokens` : policy.max_bytes === null ? "未提供" : fmtBytes(policy.max_bytes);
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"];
 const isImagePath = (path: string) => IMAGE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(ext));
 const lastSegment = (path: string) => path.split("/").at(-1) ?? path;
@@ -195,7 +197,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
           <EnvRow icon={KeyRound} label="Secret" value={projectId ? "引用管理" : "未绑定"}
             onClick={() => setDialog(projectId ? { kind: "secrets" } : { kind: "project" })} />
           <EnvRow icon={CodeXml} label="终端" value="暂未开放" onClick={() => comingSoon("终端")} />
-          <EnvRow icon={Shield} label="项目授权" value={projectId ? "管理" : "未绑定"} onClick={() => comingSoon("项目授权管理")} />
+          <EnvRow icon={Shield} label="项目权限" value={chat.execution?.policy?.project_access === "read" ? "只读" : chat.execution?.policy?.project_access === "write" ? "写入" : chat.execution?.loading ? "读取中" : chat.execution?.error ? "无法读取" : "未绑定"} onClick={() => void chat.execution?.openProject()} />
         </div>
       </section>
       <section className="g-info-section context">
@@ -206,11 +208,11 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
         <div className="g-section-body g-context-scroll">
           <div className="g-context-overview">
             <span>{policy ? "会话上下文策略" : "会话载入后显示上下文容量"}</span>
-            {policy && <span>{fmtBytes(policy.max_bytes)} · {policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条消息`}</span>}
+            {policy && <span>{contextWindowLabel(policy)} · {policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条消息`}</span>}
           </div>
           {policy && <table className="g-context-table" aria-label="上下文策略容量">
             <tbody>
-              <tr><td>总容量</td><td>{fmtBytes(policy.max_bytes)}</td><td>—</td></tr>
+              <tr><td>总容量</td><td>{contextWindowLabel(policy)}</td><td>—</td></tr>
               <tr><td>消息上限</td><td>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</td><td>—</td></tr>
               <tr><td>输出预留</td><td>{fmtCount(policy.reserved_output_tokens)} tokens</td><td>—</td></tr>
             </tbody>
@@ -790,7 +792,7 @@ function ContextDialogBody({ chat }: { chat: SessionState }) {
   return <>
     <DialogHeader><DialogTitle>Context</DialogTitle><DialogDescription>当前会话的策略容量</DialogDescription></DialogHeader>
     {policy ? <dl className="g-description-list">
-      <dt>总容量</dt><dd>{fmtBytes(policy.max_bytes)}</dd>
+      <dt>总容量</dt><dd>{contextWindowLabel(policy)}</dd>
       <dt>消息上限</dt><dd>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</dd>
       <dt>输出预留</dt><dd>{fmtCount(policy.reserved_output_tokens)} tokens</dd>
       <dt>计数口径</dt><dd className="g-mono">{policy.counter_version}</dd>

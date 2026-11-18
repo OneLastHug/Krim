@@ -10,7 +10,7 @@ export interface ApprovalRecord extends Record<string, unknown> {
   arguments: Record<string, unknown>;
   arguments_hash: string;
   tool_hash: string;
-  expires_at: number;
+  expires_at: number | null;
 }
 
 export interface AssistantPresentation {
@@ -125,7 +125,7 @@ function toolStatus(value: unknown): ToolState | null {
 function approvalRecord(raw: unknown, runId: string): ApprovalRecord | null {
   if (!isRecord(raw) || raw.run_id !== runId || !nonempty(raw.request_id) || !nonempty(raw.call_id) ||
     !nonempty(raw.name) || !isRecord(raw.arguments) || !/^[a-f0-9]{64}$/.test(String(raw.arguments_hash)) ||
-    !/^[a-f0-9]{64}$/.test(String(raw.tool_hash)) || typeof raw.expires_at !== "number" || !Number.isFinite(raw.expires_at)) return null;
+    !/^[a-f0-9]{64}$/.test(String(raw.tool_hash)) || raw.expires_at !== null && (typeof raw.expires_at !== "number" || !Number.isFinite(raw.expires_at))) return null;
   return raw as ApprovalRecord;
 }
 function sameOptional(left: unknown, right: unknown): boolean {
@@ -312,7 +312,8 @@ export function projectTurn(
   }
 
   const validTools = tools.filter(item => !item.conflict);
-  if (turn.status === "completed" && Array.isArray(turn.transcript)) {
+  if (turn.status === "completed" && Array.isArray(turn.transcript)
+    && turn.transcript.some(message => message.role === "assistant")) {
     const resultByProvider = new Map<string, unknown>();
     for (const message of turn.transcript) {
       if (message.role === "tool" && nonempty(message.call_id)) resultByProvider.set(message.call_id, parseJson(message.content));
@@ -357,7 +358,7 @@ export function projectTurn(
 
   const result: { order: number; orderIndex: number; item: TurnPresentation }[] = [];
   for (const [stepIndex, segment] of textByStep) {
-    result.push({ order: segment.firstSeq, orderIndex: -1, item: { type: "assistant", key: `assistant:step:${stepIndex}`, text: segment.text, partial: true } });
+    result.push({ order: segment.firstSeq, orderIndex: -1, item: { type: "assistant", key: `assistant:step:${stepIndex}`, text: segment.text, partial: turn.status !== "completed" } });
   }
   for (const item of validTools) {
     result.push({ order: item.order, orderIndex: item.orderIndex, item: {
