@@ -196,7 +196,7 @@ test("其他对话框打开时快捷查找不抢焦点", async () => {
   // 新建直达画布；真实项目 Dialog 打开时 Ctrl+K 仍不得抢焦点。
   await until(() => expect((host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement)?.disabled).toBe(false));
   await act(async () => (host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement).click());
-  await act(async () => host.querySelector<HTMLButtonElement>(".empty-project-picker button")!.click());
+  await act(async () => host.querySelector<HTMLButtonElement>('.empty-setup-card[data-kind="project"]')!.click());
   await until(() => expect(document.querySelector('[aria-label="选择新会话项目"]')).toBeTruthy());
   await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
   expect(document.querySelector('[aria-label="选择新会话项目"]')).toBeTruthy();

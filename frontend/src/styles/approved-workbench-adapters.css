@@ -1,0 +1,108 @@
+/* Native React/Base UI adapters for the approved visual contract.
+   These reset legacy declarations that the plain-HTML reference never had. */
+:is(.workbench-shell,.mobile-drawer-content,.session-tree-menu-layer) .icon-button { min-width:32px!important; min-height:32px!important; translate:none; }
+:is(.workbench-shell,.mobile-drawer-content,.session-tree-menu-layer) .icon-button.small { min-width:28px!important; min-height:28px!important; }
+:is(.workbench-shell,.mobile-drawer-content) .session-tree .session-select[data-slot="button"] { height:auto; min-height:28px!important; padding:3px 6px!important; border:0!important; font-size:12px; font-weight:400; translate:none; }
+:is(.workbench-shell,.mobile-drawer-content) .session-tree .session-select[aria-current="page"] { font-weight:500; }
+:is(.workbench-shell,.mobile-drawer-content) .session-tree-children .session-select[data-slot="button"] { font-size:11.5px; min-height:26px!important; }
+:is(.workbench-shell,.mobile-drawer-content) .session-tree .chat-session-label { display:block; }
+:is(.workbench-shell,.mobile-drawer-content) .account-button { min-height:36px!important; height:auto; padding:4px 7px!important; }
+:is(.workbench-shell,.mobile-drawer-content) .sidebar-code-action::after { content:none; }
+:is(.workbench-shell,.mobile-drawer-content) .sidebar-code-action kbd { margin-left:auto; font:10px var(--krim-font-sans); opacity:.75; }
+:is(.workbench-shell,.mobile-drawer-content) .g-info { margin:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-info-section { flex:0 0 auto; max-height:none; }
+:is(.workbench-shell,.mobile-drawer-content) .g-info-section.environment { max-height:none; }
+:is(.workbench-shell,.mobile-drawer-content) .g-info-link { height:auto; min-height:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-context-table td:first-child svg { margin:0; }
+:is(.workbench-shell,.mobile-drawer-content) .context-composition.dev-context-bar { margin:0 0 8px; }
+:is(.workbench-shell,.mobile-drawer-content) .g-detail > summary { padding:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-output-group-label:not(:first-child) { margin-top:8px; }
+:is(.workbench-shell,.mobile-drawer-content) .g-info-head + .g-output-group-label { margin-top:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-context-end [data-slot="button"] { min-height:28px; height:auto; padding:0 10px; font-size:12px; }
+:is(.workbench-shell,.mobile-drawer-content) .g-work.is-maximized { position:relative; inset:auto; width:100%!important; flex:1 1 auto!important; max-width:none; }
+:is(.workbench-shell,.mobile-drawer-content) .g-work:not(.is-maximized) { max-width:62vw; }
+:is(.workbench-shell,.mobile-drawer-content) .g-work-tab.is-active { background:var(--muted); color:var(--foreground); font-weight:500; }
+:is(.workbench-shell,.mobile-drawer-content) .g-work-tab > button:first-child svg { width:12.5px; height:12.5px; flex-shrink:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-work-slot .g-work-content { flex:1; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-user-message { width:auto; margin:0; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-user-actions { position:static; inset:auto; transform:none; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-answer-actions { height:auto; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-message-action[data-slot="button"] { width:auto; min-width:28px; min-height:28px; height:28px; padding:0 6px; translate:none; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-composer #chat-prompt { field-sizing:fixed; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-controls-left,
+:is(.workbench-shell,.mobile-drawer-content) .chat-controls-right { flex-wrap:nowrap; }
+:is(.workbench-shell,.mobile-drawer-content) .control-chip.is-strong { min-width:0; }
+:is(.workbench-shell,.mobile-drawer-content) .control-model-name { max-width:min(200px,40vw); }
+:is(.workbench-shell,.mobile-drawer-content) .chat-thread { display:flex; flex-direction:column; }
+:is(.workbench-shell,.mobile-drawer-content) .session-features { display:contents; }
+:is(.workbench-shell,.mobile-drawer-content) .session-features > .task-plan { order:-1; }
+:is(.workbench-shell,.mobile-drawer-content,.session-tree-menu-layer) .popover-menu { z-index:40; }
+:is(.workbench-shell,.mobile-drawer-content,.session-tree-menu-layer) .menu-identity > div { display:grid; gap:2px; min-width:0; }
+:is(.workbench-shell,.mobile-drawer-content,.session-tree-menu-layer) .menu-item::after { content:none; }
+.session-tree-menu-layer .session-rename-action::after { content:"F2"; margin-left:auto; color:var(--muted-foreground); font:11px var(--krim-font-sans); }
+.session-tree-menu-layer .session-trash-action::after { content:"Del"; margin-left:auto; color:var(--muted-foreground); font:11px var(--krim-font-sans); }
+:is(.workbench-shell,.mobile-drawer-content) .settings-popover .pop-grid > button[data-slot="button"] { height:auto; min-height:48px!important; padding:6px 4px!important; gap:5px!important; }
+:is(.workbench-shell,.mobile-drawer-content) .settings-popover .pop-grid.sizes > button[data-slot="button"] { min-height:32px!important; }
+:is(.workbench-shell,.mobile-drawer-content) .settings-popover .theme-swatch { width:100%; height:18px; box-shadow:none; }
+:is(.workbench-shell,.mobile-drawer-content) .appearance-card[data-slot="button"] { height:auto; min-height:0; }
+:is(.workbench-shell,.mobile-drawer-content) .theme-swatch { box-shadow:none; }
+:is(.workbench-shell,.mobile-drawer-content) .dev-context-note { margin:4px 0 0; font-size:11.5px; line-height:1.6; color:var(--muted-foreground); }
+:is(.workbench-shell,.mobile-drawer-content) .g-mcp-connection { display:flex; align-items:center; gap:8px; width:100%; padding:8px; border:1px solid var(--border); border-radius:7px; background:var(--input-surface); font-size:12px; text-align:left; }
+.g-mcp-connections { display:grid; gap:8px; }
+.g-mcp-connection { display:flex; align-items:center; gap:8px; width:100%; padding:8px; border:1px solid var(--border); border-radius:7px; background:var(--input-surface); font-size:12px; text-align:left; }
+.g-mcp-connection > svg { width:14px; height:14px; }
+.g-mcp-connection > span { flex:1; min-width:0; }
+.g-mcp-connection > small { color:var(--muted-foreground); }
+:is(.dev-dialog,.new-session-project-dialog,.session-sidebar-dialog,.session-search-dialog,.session-project-permission-dialog)[data-slot="dialog-content"] { width:min(480px,calc(100vw - 24px)); max-width:none; max-height:calc(100dvh - 24px); padding:20px 22px; border:1px solid var(--border); border-radius:12px; background:var(--background); color:var(--foreground); box-shadow:0 16px 44px rgb(0 0 0 / 20%); gap:14px; font-size:12px; }
+:is(.dev-dialog.is-wide,.new-session-project-dialog)[data-slot="dialog-content"] { width:min(540px,calc(100vw - 24px)); }
+:is(.dev-dialog,.new-session-project-dialog,.session-sidebar-dialog,.session-search-dialog,.session-project-permission-dialog) [data-slot="dialog-title"] { margin:0; font-size:15px; font-weight:600; line-height:1.4; }
+:is(.dev-dialog,.new-session-project-dialog,.session-sidebar-dialog,.session-search-dialog,.session-project-permission-dialog) [data-slot="dialog-description"] { margin:4px 0 0; font-size:12px; line-height:1.6; }
+.mobile-drawer-content[data-slot="dialog-content"] { width:min(92vw,336px)!important; max-width:336px!important; padding:10px 8px!important; gap:4px; border-radius:0 12px 12px 0!important; }
+.mobile-drawer-content .drawer-heading { display:flex; flex-direction:row; align-items:center; min-height:36px; padding:0 34px 0 6px; }
+.mobile-drawer-content .drawer-heading [data-slot="dialog-title"] { margin:0; font-size:14px; font-weight:600; }
+.mobile-drawer-content .drawer-sidebar.app-sidebar { --sidebar-padding-inline:8px; flex:1 1 auto; min-height:0; height:auto; padding:2px 8px 10px; background:transparent; }
+.mobile-drawer-content > [data-slot="dialog-close"] { top:14px; right:14px; width:28px; height:28px; }
+.mobile-drawer-content > [data-slot="dialog-close"] svg { width:14px; height:14px; }
+/* The reference uses one compact plan list and one formatted tool output. */
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-body { display:contents; }
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-summary-meta { font-size:11.5px; }
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-step { flex-direction:row; align-items:center; gap:8px; padding:6px 0; }
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-step-state { width:auto; min-width:0; }
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-step-text { line-height:1.5; }
+:is(.workbench-shell,.mobile-drawer-content) .task-plan-card .task-plan-step svg { width:13.5px; height:13.5px; flex-shrink:0; }
+:is(.workbench-shell,.mobile-drawer-content) .interaction-head h3 { margin:0; font-size:13px; font-weight:600; }
+:is(.workbench-shell,.mobile-drawer-content) .interaction-fieldset { margin:0; padding:0; border:0; min-width:0; }
+:is(.workbench-shell,.mobile-drawer-content) .interaction-fieldset legend { margin-bottom:8px; padding:0; font-size:12.5px; }
+:is(.workbench-shell,.mobile-drawer-content) .g-file-address { position:sticky; top:0; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--background); z-index:1; }
+:is(.workbench-shell,.mobile-drawer-content) .g-file-address .g-file-crumb { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+:is(.workbench-shell,.mobile-drawer-content) .g-file-address .g-file-actions { display:flex; align-items:center; flex-shrink:0; }
+:is(.workbench-shell,.mobile-drawer-content) .g-file-view > .code-block:first-child { margin-top:0; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-tool-target { margin-left:0; min-width:0; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-tool-name { min-width:0; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-tool-bar [data-slot="button"] { height:auto; min-height:0; }
+@media(max-width:700px) {
+  :is(.workbench-shell,.mobile-drawer-content) .icon-button:not(.small) { min-width:40px!important; min-height:40px!important; }
+  :is(.workbench-shell,.mobile-drawer-content) .icon-button.small { min-width:28px!important; min-height:28px!important; }
+  :is(.workbench-shell,.mobile-drawer-content) .g-work.is-maximized { position:fixed; inset:48px 0 0!important; width:100vw!important; }
+  :is(.workbench-shell,.mobile-drawer-content) .g-work:not(.is-maximized) { max-width:none; }
+  :is(.workbench-shell,.mobile-drawer-content) .chat-user-message { padding:8px 13px; }
+}
+/* Portal dialogs retain the approved field, row and footer rhythm. */
+:is(.dev-dialog,.new-session-project-dialog) .g-description-list { grid-template-columns:96px minmax(0,1fr); gap:10px 14px; }
+:is(.dev-dialog,.new-session-project-dialog) .g-field { gap:6px; margin:0; }
+:is(.dev-dialog,.new-session-project-dialog) .dev-dialog-footer { padding-top:4px; gap:8px; }
+:is(.dev-dialog,.new-session-project-dialog) .g-inline-actions { gap:8px; }
+:is(.dev-dialog,.new-session-project-dialog) .g-row { gap:10px; padding:9px 0; }
+:is(.dev-dialog,.new-session-project-dialog) .g-row-main small { margin-top:2px; font-size:11px; }
+:is(.dev-dialog,.new-session-project-dialog) .dev-create-form { display:grid; gap:10px; }
+.dev-dialog .dev-secret-form { display:grid; gap:10px; padding-top:6px; margin:0; }
+.dev-dialog .dev-secret-heading { font-size:12.5px; font-weight:600; }
+.dev-dialog .dev-secret-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; }
+.dev-dialog .dev-secret-fields > .g-field:last-child { grid-column:1 / -1; }
+:is(.dev-dialog,.new-session-project-dialog) [data-slot="input"] { min-height:36px; height:36px; padding:6px 10px; border-radius:7px; font-size:13px; line-height:1.45; }
+@media(max-width:480px) {
+  .dev-dialog .dev-secret-fields { grid-template-columns:minmax(0,1fr); }
+}
+:is(.workbench-shell,.mobile-drawer-content) .message-code-head { min-width:0; gap:8px; }
+:is(.workbench-shell,.mobile-drawer-content) .message-code-head > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+:is(.workbench-shell,.mobile-drawer-content) .message-code-head .message-copy-code { position:static; opacity:1; margin:0; flex-shrink:0; }

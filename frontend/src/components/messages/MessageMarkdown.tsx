@@ -8,7 +8,7 @@ import { Button } from "../ui/button";
 
 import "./messages.css";
 
-type CodeData = NonNullable<Element["data"]> & { krimCodeText?: string };
+type CodeData = NonNullable<Element["data"]> & { krimCodeText?: string; krimCodeLabel?: string };
 
 function collectText(node: ElementContent): string {
   if (node.type === "text") return node.value;
@@ -21,7 +21,11 @@ function rehypePreserveCodeText() {
     function visit(node: Root | Element) {
       if (node.type === "element" && node.tagName === "pre") {
         const code = node.children.find((child): child is Element => child.type === "element" && child.tagName === "code");
-        if (code) node.data = { ...node.data, krimCodeText: code.children.map(collectText).join("") } as CodeData;
+        if (code) {
+          const language = Array.isArray(code.properties.className) ? code.properties.className.find(value => typeof value === "string" && value.startsWith("language-"))?.toString().slice(9) : undefined;
+          const meta = typeof code.data?.meta === "string" ? code.data.meta.trim() : "";
+          node.data = { ...node.data, krimCodeText: code.children.map(collectText).join(""), krimCodeLabel: meta || language || "代码" } as CodeData;
+        }
       }
       for (const child of node.children) if (child.type === "element") visit(child);
     }
@@ -54,10 +58,12 @@ function CodeBlock({ children, node, onCopy }: {
   }
 
   return <div className="message-code-block">
-    <Button variant="ghost" size="icon-xs" className="message-copy-code" aria-label="复制代码" title={copied ? "已复制" : failed ? "复制失败" : "复制代码"} onClick={() => void copy()}>
-      {copied ? <Check /> : <Copy />}
-      <span className="sr-only">{copied ? "已复制" : failed ? "复制失败" : "复制代码"}</span>
-    </Button>
+    <div className="message-code-head"><span>{(node?.data as CodeData | undefined)?.krimCodeLabel ?? "代码"}</span>
+      <Button variant="ghost" size="icon-xs" className="message-copy-code chat-message-action" aria-label="复制代码" title={copied ? "已复制" : failed ? "复制失败" : "复制代码"} onClick={() => void copy()}>
+        {copied ? <Check /> : <Copy />}
+        <span className="sr-only">{copied ? "已复制" : failed ? "复制失败" : "复制代码"}</span>
+      </Button>
+    </div>
     <pre tabIndex={0} aria-label="代码片段">{children}</pre>
   </div>;
 }

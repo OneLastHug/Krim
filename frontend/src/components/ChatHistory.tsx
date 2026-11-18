@@ -108,9 +108,9 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
           const moreOpen = expanded[turn.id] === true;
           const canReuse = chat.canWrite && chat.session?.status === "open" && !chat.turnPending;
           return <article className="chat-turn" key={turn.id} data-turn-id={turn.id}>
-            <div className="chat-user-message">
+            <div className="chat-user-wrap"><div className="chat-user-message">
               <div className="chat-user-text" data-ui-data>{turn.text}</div>
-              <div className="chat-user-actions">
+              </div><div className="chat-user-actions">
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制用户消息" title="复制用户消息" onClick={() => void feedback.copy(turn.text)}><Copy aria-hidden="true" /></Button>
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复用提问" title="复用提问" disabled={!canReuse} onClick={() => reuse(turn.text)}><Pencil aria-hidden="true" /></Button>
               </div>

@@ -47,7 +47,7 @@ function button(label: string): HTMLButtonElement | undefined {
   return [...host.querySelectorAll("button")].find(item => item.textContent?.trim() === label);
 }
 
-test("task_plan_renders_global_counts_and_loaded_steps_read_only_and_collapsed", async () => {
+test("task_plan_renders_global_counts_and_loaded_steps_read_only_and_expanded", async () => {
   const longText = "很长的计划步骤".repeat(80) + "\n第二行保留换行";
   const snapshot = page({
     steps: [
@@ -60,10 +60,10 @@ test("task_plan_renders_global_counts_and_loaded_steps_read_only_and_collapsed",
   await renderTaskPlan({ snapshot });
   const details = host.querySelector("details.task-plan");
   expect(details).toBeTruthy();
-  expect((details as HTMLDetailsElement).open).toBe(false);
+  expect((details as HTMLDetailsElement).open).toBe(true);
   expect(details!.getAttribute("aria-label")).toBe("会话计划");
   expect(details!.textContent).toContain("计划");
-  expect(details!.textContent).toContain("已完成 1 / 4 步");
+  expect(details!.textContent).toContain("已完成 1 / 4");
 
   const summaryCounts = [...host.querySelectorAll(".task-plan-counts li")].map(item => item.textContent?.replace(/\s+/g, ""));
   expect(summaryCounts).toEqual(["待开始1", "进行中1", "已完成1", "受阻1"]);

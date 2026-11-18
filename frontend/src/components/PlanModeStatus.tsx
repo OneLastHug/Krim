@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { RequestError } from "../api";
+import { ListChecks } from "lucide-react";
 import { Button } from "./ui/button";
 import type {
   InteractionAnswerBody,
@@ -101,25 +102,24 @@ export function PlanModeStatus({ state, request, onConfirm, onReject, onCancel, 
     }
   }
 
-  return <section className="workbench-interaction space-y-3 rounded-lg border border-border bg-card p-4 text-card-foreground" data-pending-interaction={request?.status === "pending"} aria-label="计划模式状态" data-mode={state.mode}>
-    <div>
-      <h3 className="text-sm font-medium">{state.mode === "plan" ? "计划模式" : "执行模式"}</h3>
-      <p className="text-sm text-muted-foreground">
-        {state.mode === "plan" ? "当前仅进行规划与只读操作。" : "当前可按权限执行操作。"}
-      </p>
+  return <section className="workbench-interaction interaction-card" data-pending-interaction={request?.status === "pending"} aria-label="计划模式状态" data-mode={state.mode}>
+    <div className="interaction-head"><ListChecks aria-hidden="true"/>
+      <h3>{request?.status === "pending" ? "计划模式确认" : state.mode === "plan" ? "计划模式" : "执行模式"}</h3>
+      {request?.status === "pending" && <span className="obs-pill obs-pill-warn">需要确认</span>}
     </div>
+    {!request && <p className="interaction-description">{state.mode === "plan" ? "当前仅进行规划与只读操作。" : "当前可按权限执行操作。"}</p>}
     {stale && !terminal ? <p role="status" className="text-sm text-muted-foreground">计划已更新，请等待新的确认请求。</p> : null}
     {request && terminal ? <p role="status" className="text-sm text-muted-foreground">
       {terminalLabels[request.status] ?? "计划请求已结束"}
     </p> : null}
-    {request && request.status === "pending" ? <div className="space-y-3">
-      <div className="whitespace-pre-wrap rounded-md border border-border p-3 text-sm">{request.payload.plan}</div>
+    {request && request.status === "pending" ? <>
+      <div className="interaction-body whitespace-pre-wrap">{request.payload.plan}</div>
       {active.error && <p role="alert" className="text-sm text-destructive">{active.error}</p>}
-      <div className="flex flex-wrap gap-2">
+      <div className="interaction-actions">
         <Button type="button" disabled={confirmLocked} onClick={() => void perform("confirm")}>{active.action === "confirm" ? "确认中…" : "按计划执行"}</Button>
         <Button type="button" variant="outline" disabled={confirmLocked} onClick={() => void perform("reject")}>{active.action === "reject" ? "处理中…" : "继续修改计划"}</Button>
         <Button type="button" variant="outline" disabled={blocked} onClick={() => void perform("cancel")}>{active.action === "cancel" ? "取消中…" : "取消请求"}</Button>
       </div>
-    </div> : null}
+    </> : null}
   </section>;
 }

@@ -148,7 +148,7 @@ test("Compact session点击现有按钮仅排队，不将接纳称为压缩完�
   readApi.mockImplementation((path, _key, body) => path === compactPath()
     ? Promise.resolve(compactReceipt(body)) : Promise.reject(new Error("not provided")));
   await render();
-  const compact = findButton(host, "Compact session");
+  const compact = findButtonByLabel(host, "Compact session");
   expect(compact.className).toContain("outline");
   await act(async () => { compact.click(); compact.click(); });
   const posts = readApi.mock.calls.filter(([path]) => path === compactPath());
@@ -167,18 +167,18 @@ test("Compact session断网后重挂载仍以原键重试，确认后下次生�
     return fail ? Promise.reject(new TypeError("offline")) : Promise.resolve(compactReceipt(body));
   });
   await render();
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   expect(host.textContent).toContain("重试原请求");
   const original = readApi.mock.calls.find(([path]) => path === compactPath())![2];
   await act(async () => root.unmount());
   root = createRoot(host);
   await render();
   fail = false;
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   const retried = readApi.mock.calls.filter(([path]) => path === compactPath());
   expect(retried).toHaveLength(2);
   expect(retried[1]![2]).toEqual(original);
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   const fresh = readApi.mock.calls.filter(([path]) => path === compactPath());
   expect(fresh).toHaveLength(3);
   expect(fresh[2]![2]).not.toEqual(original);
@@ -192,14 +192,14 @@ test("Compact session丢弃旧scope响应，新的会话不串提示和请求键
     return Promise.reject(new Error("not provided"));
   });
   await render();
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   const original = readApi.mock.calls.find(([path]) => path === compactPath())![2];
   const next = { ...baseProps, chat: fakeChat({ id: "session-B" }, { id: "session-B" }) };
   await render(next);
-  expect(findButton(host, "Compact session").disabled).toBe(false);
+  expect(findButtonByLabel(host, "Compact session").disabled).toBe(false);
   await act(async () => { release(compactReceipt(original)); await Promise.resolve(); });
   expect(host.textContent).not.toContain("整理请求已排队");
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   const fresh = readApi.mock.calls.find(([path]) => path === compactPath("session-B"))![2];
   expect(fresh).not.toEqual(original);
   expect(host.textContent).toContain("整理请求已排队");
@@ -209,9 +209,9 @@ test("Compact session拒绝错会话回执并保留原键", async () => {
   readApi.mockImplementation((path, _key, body) => path === compactPath()
     ? Promise.resolve(compactReceipt(body, "another-session")) : Promise.reject(new Error("not provided")));
   await render();
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   expect(host.textContent).toContain("重试原请求");
-  await act(async () => findButton(host, "Compact session").click());
+  await act(async () => findButtonByLabel(host, "Compact session").click());
   const posts = readApi.mock.calls.filter(([path]) => path === compactPath());
   expect(posts[1]![2]).toEqual(posts[0]![2]);
   expect(host.textContent).not.toContain("整理请求已排队");
@@ -230,12 +230,13 @@ test("绑定项目后环境行、工具目录与账号连接显示真实数据�
 
   expect(host.textContent).toContain("图片服务项目");
   expect(host.textContent).toContain("已就绪");
-  expect(host.textContent).toContain("引用管理");
+  expect(host.textContent).toContain("Secrets 密钥");
   expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("docs.search_pages");
   expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).not.toContain("dev_read");
   expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("read");
-  expect(host.querySelector('[aria-label="账号 MCP 连接"]')?.textContent).toContain("docs");
-  expect(host.querySelector('[aria-label="账号 MCP 连接"]')?.textContent).toContain("凭据已配置");
+  await act(async () => (host.querySelector('[title="MCP 连接"]') as HTMLButtonElement).click());
+  expect(dialogElement().textContent).toContain("docs");
+  expect(dialogElement().textContent).toContain("凭据已配置");
   // 上下文不编造构成百分比；容量来自会话策略，用量缺失如实标注。
   expect(host.textContent).not.toContain("%");
   expect(host.textContent).toContain("878.9 KB");
@@ -394,11 +395,11 @@ test("未支持的操作显示敬请期待", async () => {
   }));
 
   await render();
-  const terminalRow = [...host.querySelectorAll(".g-env-row")].find(row => row.textContent?.includes("终端"));
+  const terminalRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("下载项目文件归档"));
   await act(async () => (terminalRow as HTMLButtonElement).click());
 
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain("敬请期待");
-  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("终端暂未开放");
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("项目打包下载暂未开放");
 });
 
 test("浏览器预览页签不使用 iframe，并说明真实原因", async () => {
@@ -411,7 +412,7 @@ test("浏览器预览页签不使用 iframe，并说明真实原因", async () =
   }));
 
   await render();
-  const outputRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("浏览器预览"));
+  const outputRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("打开浏览器实时预览"));
   await act(async () => (outputRow as HTMLButtonElement).click());
 
   expect(host.querySelector('[aria-label="开发工作区"]')).toBeTruthy();
@@ -526,7 +527,8 @@ test("sandbox 绑定链路失败时工具目录仍独立加载", async () => {
   await render();
 
   expect(host.querySelector('[aria-label="会话工具目录"]')?.textContent).toContain("docs.search_pages");
-  expect(host.querySelector('[aria-label="账号 MCP 连接"]')?.textContent).toContain("docs");
+  await act(async () => (host.querySelector('[title="MCP 连接"]') as HTMLButtonElement).click());
+  expect(dialogElement().textContent).toContain("docs");
   expect(host.textContent).toContain("开发管理服务未启用");
 });
 
@@ -593,7 +595,7 @@ test("prepare 恢复以 development 环境记录为准：已存在则采纳，�
   });
 
   await render();
-  const environmentRow = [...host.querySelectorAll(".g-env-row")].find(row => row.textContent?.includes("Linux 项目环境"));
+  const environmentRow = [...host.querySelectorAll(".g-env-row")].find(row => row.textContent?.includes("Linux 容器"));
   await act(async () => (environmentRow as HTMLButtonElement).click());
   await act(async () => findButton(dialogElement(), "准备环境").click());
   await flush();
@@ -612,7 +614,7 @@ test("停止中的环境记录不能被当作准备完成并清掉未确认账�
     if (path.endsWith("/environment")) return ++reads === 1 ? Promise.reject(new RequestError(404, "not_found")) : Promise.resolve({ ...environment, state: "stopped" });
     return route(path, { "/v2/me/sandbox/sessions/session-A/project": bindingBound, "/v2/me/sandbox/projects/proj-9": project, "/v2/targets/target-development/tools": tools, "/v2/me/mcp-connections": connections });
   });
-  await render(); await act(async () => ([...host.querySelectorAll<HTMLButtonElement>(".g-env-row")].find(row => row.textContent?.includes("Linux 项目环境"))!).click());
+  await render(); await act(async () => ([...host.querySelectorAll<HTMLButtonElement>(".g-env-row")].find(row => row.textContent?.includes("Linux 容器"))!).click());
   await act(async () => findButton(dialogElement(), "准备环境").click());
   expect(JSON.parse(localStorage.getItem("krim.development.writes/1")!)).toHaveLength(1);
   expect(host.textContent).toContain("环境尚未就绪");
@@ -638,7 +640,7 @@ test("环境记录确无时按原键重投 prepare", async () => {
   });
 
   await render();
-  const environmentRow = [...host.querySelectorAll(".g-env-row")].find(row => row.textContent?.includes("Linux 项目环境"));
+  const environmentRow = [...host.querySelectorAll(".g-env-row")].find(row => row.textContent?.includes("Linux 容器"));
   await act(async () => (environmentRow as HTMLButtonElement).click());
   await act(async () => findButton(dialogElement(), "准备环境").click());
   await flush();
@@ -710,7 +712,7 @@ test("关闭唯一标签后激活项清空，不留已关闭的 id", async () =>
   }));
 
   await render();
-  const outputRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("浏览器预览"));
+  const outputRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("打开浏览器实时预览"));
   await act(async () => (outputRow as HTMLButtonElement).click());
   expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1);
   const closeButton = host.querySelector('[aria-label="关闭 浏览器预览"]') as HTMLButtonElement;
@@ -836,4 +838,33 @@ test("分段读取发现文件变化时报错而非拼接坏数据", async () =>
   await flush();
 
   expect(host.textContent).toContain("文件在读取期间发生变化");
+});
+
+test("信息栏保留样板图标顺序，Outputs 只列文件调用并按路径去重", async () => {
+  readApi.mockImplementation((path: string) => route(path, {
+    "/v2/me/sandbox/sessions/session-A/project": bindingBound,
+    "/v2/me/sandbox/projects/proj-9": project,
+    "/v2/me/development/projects/proj-9/environment": environment,
+    "/v2/targets/target-development/tools": tools,
+    "/v2/me/mcp-connections": connections,
+  }));
+  const calls = [
+    ["read_file", "src/long-file-name.tsx"], ["edit", "src/long-file-name.tsx"],
+    ["dev_read", "README.md"], ["write_file", "docs/plan.md"],
+    ["grep_content", "src"], ["write", "../outside.txt"],
+  ];
+  const transcript = calls.flatMap(([name, path], index) => [
+    { role: "assistant", content: "", call_id: null, tool_calls: [{ kind: "tool_call", id: `call-${index}`, name, arguments: { path } }] },
+    { role: "tool", content: "ok", call_id: `call-${index}`, tool_calls: [] },
+  ]);
+  await render({ ...baseProps, chat: fakeChat({ history: [{ id: "turn-a", run_id: "run-a", status: "completed", transcript }], turnEvents: {}, details: {}, turnFacts: {} }) });
+  expect([...host.querySelectorAll(".g-env-row > svg")].map(icon => icon.getAttribute("class"))).toEqual([
+    "lucide lucide-terminal", "lucide lucide-folder", "lucide lucide-shield", "lucide lucide-key-round", "lucide lucide-cpu",
+  ]);
+  expect([...host.querySelectorAll(".g-output-row[title]")].map(row => row.getAttribute("title"))).toEqual([
+    "src/long-file-name.tsx", "README.md", "docs/plan.md",
+  ]);
+  expect(host.querySelector('.g-output-row[title="src/long-file-name.tsx"] svg')?.classList.contains("lucide-file-code")).toBe(true);
+  expect(host.querySelector('.g-output-row[title="README.md"] svg')?.classList.contains("lucide-file-text")).toBe(true);
+  expect(host.querySelector(".g-context-end button")?.textContent).toBe("Compact");
 });

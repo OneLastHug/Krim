@@ -24,7 +24,8 @@
     "types": [
       "node"
     ],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true
   },
   "include": [
     "contracts/memory*.test.ts*",
@@ -37,6 +38,8 @@
     "vite.config.ts",
     "vite.session-features.config.ts",
     "vite.integration.config.ts",
+    "vite.visual.config.ts",
+    "visual/**/*.tsx",
     "contracts/session-sidebar*.test.ts*",
     "contracts/development-*.test.ts*",
     "vitest.config.ts",

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { RequestError } from "../api";
+import { CircleHelp } from "lucide-react";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import {
@@ -57,7 +58,7 @@ function QuestionOption({
   disabled: boolean;
   onChange: (checked: boolean) => void;
 }) {
-  return <label className="flex items-start gap-2 text-sm">
+  return <label className="question-option">
     <input
       type={question.mode === "single" ? "radio" : "checkbox"}
       name={question.mode === "single" ? `interaction-${requestId}-${question.id}` : undefined}
@@ -67,8 +68,8 @@ function QuestionOption({
       onChange={event => onChange(event.currentTarget.checked)}
     />
     <span className="min-w-0">
-      <span className="block">{option.label}</span>
-      {option.description && <span className="block text-muted-foreground">{option.description}</span>}
+      <strong>{option.label}</strong>
+      {option.description && <small>{option.description}</small>}
     </span>
   </label>;
 }
@@ -203,22 +204,19 @@ export function UserQuestion({ request, onAnswer, onCancel, disabled = false }: 
     </section>;
   }
 
-  return <section className="workbench-interaction space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground" data-pending-interaction="true" aria-label="用户问题" data-request-id={request.id}>
-    <div>
-      <h3 className="text-sm font-medium">需要你的回答</h3>
-      <p className="text-sm text-muted-foreground">请回答以下问题后继续。</p>
-    </div>
+  return <section className="workbench-interaction interaction-card" data-pending-interaction="true" aria-label="用户问题" data-request-id={request.id}>
+    <div className="interaction-head"><CircleHelp aria-hidden="true"/><h3>需要你的回答</h3><span className="obs-pill obs-pill-warn">待回答</span></div>
     {request.payload.questions.map((question, index) => {
       const draft = current.answers[question.id] ?? { optionIds: [], text: "" };
-      return <fieldset key={question.id} className="space-y-2" disabled={locked}>
-        <legend className="mb-2 text-sm font-medium">{index + 1}. {question.prompt}</legend>
+      return <fieldset key={question.id} className="interaction-fieldset" disabled={locked}>
+        <legend>{request.payload.questions.length > 1 ? `${index + 1}. ` : ""}{question.prompt}</legend>
         {question.mode === "text" ? <Textarea
           aria-label={question.prompt}
           value={draft.text}
           disabled={locked}
           rows={2}
           onChange={event => changeDraft(question.id, value => ({ ...value, text: event.target.value }))}
-        /> : <div className="space-y-2">
+        /> : <div className="question-options">
           {question.options.map(option => <QuestionOption
             key={option.id}
             question={question}
@@ -249,7 +247,7 @@ export function UserQuestion({ request, onAnswer, onCancel, disabled = false }: 
       </fieldset>;
     })}
     {current.error && <p role="alert" className="text-sm text-destructive">{current.error}</p>}
-    <div className="flex flex-wrap gap-2">
+    <div className="interaction-actions">
       <Button type="button" disabled={locked} onClick={() => void submit()}>{current.busy ? "提交中…" : "提交回答"}</Button>
       <Button type="button" variant="outline" disabled={locked} onClick={() => void cancel()}>取消问题</Button>
     </div>
