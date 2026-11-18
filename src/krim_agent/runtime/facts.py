@@ -32,6 +32,15 @@ def project_facts(snapshot: RunSnapshot) -> RunFacts:
         elif event.kind in {"tool_start", "tool_end"}:
             item = ToolObservation.model_validate(data)
             observations[item.call_id] = item
+        elif event.kind == "tool_intent":
+            old = observations.get(str(data.get("call_id")))
+            if old is not None and old.status == "unknown":
+                # A durable intent precedes the external handoff. Without an
+                # end/receipt, a crash cannot prove whether execution started.
+                observations[old.call_id] = old.model_copy(update={
+                    "executor_started": None, "result_available": None,
+                    "decision": data.get("decision", old.decision),
+                })
     if snapshot.work is not None:
         # 只合并同事务持久receipt；没有end仍不补span或假成功。
         for event in snapshot.events:

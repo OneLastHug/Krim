@@ -30,14 +30,31 @@ def test_absent_provider_environment_stays_disabled():
     assert OpenAICompatibleConfig.from_env() is None
 
 
-def test_development_environment_preserves_small_text_defaults(monkeypatch):
+def test_development_environment_no_longer_applies_demo_caps(monkeypatch):
+    """512输出/32KiB请求/短超时演示默认已移除：None交给真实模型能力与运行层期限。"""
     config = configure(monkeypatch)
     assert config is not None
     assert config.allow_images is False
-    assert config.max_request_bytes == 32768
+    assert config.max_request_bytes is None
     assert config.max_tool_calls is None
-    assert config.max_output_tokens == 512
-    assert config.read_timeout_seconds == 5
+    assert config.max_output_tokens is None
+    assert config.read_timeout_seconds is None
+    assert config.connect_timeout_seconds == 10.0
+
+
+def test_explicit_unlimited_and_timeout_environment(monkeypatch):
+    config = configure(
+        monkeypatch,
+        max_output_tokens="unlimited",
+        max_request_bytes="none",
+        read_timeout_seconds="unlimited",
+        write_timeout_seconds="none",
+    )
+    assert config is not None
+    assert config.max_output_tokens is None
+    assert config.max_request_bytes is None
+    assert config.read_timeout_seconds is None
+    assert config.write_timeout_seconds is None
 
 
 def test_explicit_development_image_and_tool_budget(monkeypatch):

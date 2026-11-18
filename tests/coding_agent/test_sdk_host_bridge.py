@@ -39,7 +39,7 @@ class HostScript:
         pass
 
 
-def connected(harness, script, *, max_steps=3, max_calls=4):
+def connected(harness, script, *, max_steps=3, max_calls=4, max_group=2):
     adapter = harness.adapter()
     from dataclasses import replace
 
@@ -49,7 +49,7 @@ def connected(harness, script, *, max_steps=3, max_calls=4):
     context = replace(adapter.context(), emit=emit)
     stepper = ModelStep(script, context.emit, lambda: None, max_steps=max_steps,
                         max_output=65536, deadline=None, workspace=False)
-    model = HostModelProvider(stepper, adapter.executor.registry, max_group=2,
+    model = HostModelProvider(stepper, adapter.executor.registry, max_group=max_group,
                              max_calls=max_calls, request_bytes=65536)
     budget = ExecutionBudget(asyncio.get_running_loop().time() + 30)
 
@@ -80,6 +80,32 @@ async def test_sdk_continues_using_host_model_events_and_tool_results() -> None:
     assert len(model_events) == 2 and len(starts) == 1
     assert starts[0].data['step_index'] == model_events[0].data['step_index'] == 0
     assert starts[0].data['provider_call_id'] == 'wire-1'
+
+
+async def test_unlimited_group_keeps_the_full_returned_batch_in_one_step() -> None:
+    class GroupScript(HostScript):
+        async def stream(self, messages, tools):
+            self.calls += 1
+            self.histories.append(messages)
+            try:
+                if self.calls == 1:
+                    yield ModelToolCall(id='wire-a', name='write', arguments={'value': 1})
+                    yield ModelToolCall(id='wire-b', name='write', arguments={'value': 2})
+                else:
+                    yield ModelText(text='done')
+            finally:
+                self.closed += 1
+
+    harness = setup(approval=False)
+    script = GroupScript()
+    adapter, model, stepper = connected(harness, script, max_group=None, max_calls=None)
+    assert model.provider._max_group is None  # None is never folded into a one-call group
+    result = await adapter.run(model, sdk_messages([Message(role='user', content='go')]))
+    assert result.status == 'completed'
+    assert harness.counts['write'] == 2
+    assert script.calls == 2 and stepper.index == 2
+    starts = [e for e in harness.store.events if e.kind == 'tool_start']
+    assert [e.data['step_index'] for e in starts] == [0, 0]
 
 
 async def test_host_claims_resume_and_parking_once_with_preserved_budget() -> None:

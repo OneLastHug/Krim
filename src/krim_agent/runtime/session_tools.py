@@ -65,7 +65,17 @@ class SessionToolHost:
 
         return await self._scope(run_id, fence)
 
-    async def _scope(self, run_id: str, fence: Callable[[], None]) -> SessionToolScope:
+    async def policy_scope(self, run_id: str) -> SessionToolScope:
+        """Host-only reevaluation of persisted parked requests, never execution.
+
+        This deliberately grants no producer/call ownership. The executor still
+        resolves its ordinary live scope when the parked run actually resumes.
+        """
+        return await self._scope(run_id, lambda: None, allow_awaiting=True)
+
+    async def _scope(
+        self, run_id: str, fence: Callable[[], None], *, allow_awaiting: bool = False,
+    ) -> SessionToolScope:
         fence()
 
         async def read(conn: Any) -> dict[str, Any]:
@@ -97,7 +107,8 @@ class SessionToolHost:
 
         record = await self.store.work_read(read)
         fence()
-        if record["stop_requested"] or record["run_status"] != "running":
+        allowed_statuses = {"running", "awaiting"} if allow_awaiting else {"running"}
+        if record["stop_requested"] or record["run_status"] not in allowed_statuses:
             raise ServiceError("cancelled")
         if record["session_status"] != "open":
             raise ServiceError("session_closed", 409)
@@ -126,6 +137,15 @@ class SessionToolHost:
         actor.member(record["workspace_id"])
         if self.identities is not None:
             self.identities.validate(actor)
+        if record["project_id"] is not None and self.store.schema_version >= 19:
+            from krim_agent.project_access.policy import resolve_project_access
+
+            async def project_access(conn: Any) -> None:
+                access = await resolve_project_access(conn, actor, record["project_id"])
+                access.require()
+
+            await self.store.work_read(project_access)
+            fence()
         environment = getattr(current, "environment", None)
         if environment is not None and environment.project_id != record["project_id"]:
             raise ServiceError("target_binding_changed")

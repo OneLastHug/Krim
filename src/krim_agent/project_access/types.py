@@ -65,7 +65,8 @@ class ProjectGrant(StrictModel):
     revision: int = Field(ge=1)
     actions: tuple[Action, ...]
     requires_approval: bool = True
-    expires_at: float
+    # None is used only by the read-only projection of the project ACL.
+    expires_at: float | None = None
     revoked: bool = False
 
 
@@ -81,7 +82,7 @@ class ApprovalBinding(StrictModel):
     operation_id: Identifier
     action: Action
     arguments_digest: Digest
-    expires_at: float
+    expires_at: float | None
     approved: bool
 
 

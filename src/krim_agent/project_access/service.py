@@ -91,7 +91,7 @@ class ProjectAccessService:
             actor is None
             or grant is None
             or grant.revoked
-            or grant.expires_at <= now
+            or grant.expires_at is not None and grant.expires_at <= now
             or (actor.principal_id, actor.generation) != (ref.actor_id, ref.actor_generation)
             or (grant.actor_id, grant.actor_generation) != (ref.actor_id, ref.actor_generation)
             or (grant.owner_id, grant.workspace_id, grant.project_id)
@@ -110,7 +110,7 @@ class ProjectAccessService:
             if (
                 approval is None
                 or not approval.approved
-                or approval.expires_at <= now
+                or approval.expires_at is not None and approval.expires_at <= now
                 or (
                     approval.approval_id,
                     approval.actor_id,
@@ -336,9 +336,10 @@ class ProjectAccessService:
         ):
             _deny()
         assert snapshot.grant is not None
-        expiries = [self._clock(), snapshot.grant.expires_at,
-                    *(r.expires_at for r in snapshot.secrets)]
-        if snapshot.approval is not None:
+        expiries = [self._clock(), *(r.expires_at for r in snapshot.secrets)]
+        if snapshot.grant.expires_at is not None:
+            expiries.append(snapshot.grant.expires_at)
+        if snapshot.approval is not None and snapshot.approval.expires_at is not None:
             expiries.append(snapshot.approval.expires_at)
         if snapshot.network is not None:
             expiries.append(snapshot.network.expires_at)
@@ -390,8 +391,10 @@ class ProjectAccessService:
                 self._validate(request.authorization, intent, snapshot)
                 self._command_records(binding, snapshot, starting=True)
                 assert snapshot.grant is not None
-                expiries = [snapshot.grant.expires_at, *(r.expires_at for r in records)]
-                if snapshot.approval is not None:
+                expiries = [r.expires_at for r in records]
+                if snapshot.grant.expires_at is not None:
+                    expiries.append(snapshot.grant.expires_at)
+                if snapshot.approval is not None and snapshot.approval.expires_at is not None:
                     expiries.append(snapshot.approval.expires_at)
                 if snapshot.network is not None:
                     expiries.append(snapshot.network.expires_at)

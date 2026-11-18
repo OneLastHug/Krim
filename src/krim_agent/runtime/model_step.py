@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import JsonValue, ValidationError
 
+from krim_agent.context.counter import UsageCalibratedCounter, counter_for_model
 from krim_agent.context.manifest import ItemMetadata, build_context_manifest
 from krim_agent.contracts import Message, RunEvent, ServiceError
 from krim_agent.providers.types import (
@@ -50,10 +51,13 @@ class ModelStep:
         self.execution_budget = execution_budget
         self.index = self.output_bytes = 0
         self.seen: set[str] = set()
+        model = getattr(getattr(provider, "config", None), "model", None)
+        self._raw_counter = counter_for_model(model if isinstance(model, str) else None)
+        self.token_counter = UsageCalibratedCounter(self._raw_counter)
 
     def request_budget(
         self,
-        max_group: int,
+        max_group: int | None,
         remaining_tools: int | None,
         *,
         purpose: str = "task",
@@ -62,12 +66,12 @@ class ModelStep:
         if remaining_steps is not None and remaining_steps <= 0:
             raise ServiceError("step_limit")
         provider_cap = getattr(getattr(self.provider, "config", None), "max_tool_calls", None)
-        limits = [max_group]
-        if remaining_tools is not None:
-            limits.append(remaining_tools)
+        limits = [value for value in (max_group, remaining_tools) if value is not None]
         if type(provider_cap) is int:
             limits.append(provider_cap)
-        max_this_step = 0 if purpose == "summary" else min(limits)
+        # None means this request admits the full returned batch; only configured
+        # limits narrow it, and none are folded into a default ceiling.
+        max_this_step = 0 if purpose == "summary" else min(limits) if limits else None
         return ModelRequestBudget(
             remaining_steps=remaining_steps,
             remaining_tool_calls=remaining_tools,
@@ -83,7 +87,8 @@ class ModelStep:
             steps=(budget.remaining_steps if budget.remaining_steps is not None else "unlimited"),
             tools=(budget.remaining_tool_calls
                    if budget.remaining_tool_calls is not None else "unlimited"),
-            step_tools=budget.max_tool_calls_this_step,
+            step_tools=(budget.max_tool_calls_this_step
+                        if budget.max_tool_calls_this_step is not None else "unlimited"),
         )
         if result and result[0].role == "system":
             system = result[0]
@@ -95,8 +100,8 @@ class ModelStep:
         return result
 
     async def call(self, messages: list[Message], tools: list[dict[str, JsonValue]], *,
-                   purpose: str = "task", max_group: int = 1,
-                   remaining_tools: int | None = 1, summary_bytes: int = 2048,
+                   purpose: str = "task", max_group: int | None = 1,
+                   remaining_tools: int | None = 1, summary_bytes: int | None = None,
                    request_budget: ModelRequestBudget | None = None,
                    request_prepared: bool = False,
                    request_metadata: Sequence[ItemMetadata | None] = (),
@@ -125,9 +130,13 @@ class ModelStep:
         request_messages = (
             messages if request_prepared else self.with_budget_prompt(messages, budget)
         )
-        request_tools = tools if budget.max_tool_calls_this_step > 0 else []
+        request_tools = (
+            tools if budget.max_tool_calls_this_step is None
+            or budget.max_tool_calls_this_step > 0 else []
+        )
         if not request_prepared and (not messages or messages[0].role != "system"):
             request_metadata = (None, *request_metadata)
+        raw_input_tokens = self._raw_counter.count_request(request_messages, request_tools)
         context_manifest = build_context_manifest(
             request_messages,
             request_tools,
@@ -135,6 +144,7 @@ class ModelStep:
             model_context_window=model_context_window,
             reserved_output_tokens=reserved_output_tokens,
             input_budget_bytes=input_budget_bytes,
+            counter=self.token_counter,
         )
         if compaction_changes:
             context_manifest["compaction_changes"] = list(compaction_changes)
@@ -168,7 +178,8 @@ class ModelStep:
                             if self.max_output is not None and self.output_bytes > self.max_output:
                                 raise ServiceError("output_limit")
                             text += item.text
-                            if purpose == "summary" and len(text.encode()) > summary_bytes:
+                            if (purpose == "summary" and summary_bytes is not None
+                                    and len(text.encode()) > summary_bytes):
                                 raise ServiceError("summary_failed")
                             await self.emit("summary_text" if purpose == "summary" else "text",
                                 {"text": item.text, "step_index": index, **extra})
@@ -180,7 +191,8 @@ class ModelStep:
                                 raise ServiceError("duplicate_tool_call")
                             self.seen.add(call.id)
                             calls.append(call)
-                            if len(calls) > budget.max_tool_calls_this_step:
+                            if (budget.max_tool_calls_this_step is not None
+                                    and len(calls) > budget.max_tool_calls_this_step):
                                 raise ServiceError("tool_limit")
                             if first_content_at is None:
                                 first_content_at = clock()
@@ -206,6 +218,8 @@ class ModelStep:
             self.check()
             if purpose == "summary" and not text.strip():
                 raise ServiceError("summary_failed")
+            if final_usage and usage is not None and usage.input_tokens is not None:
+                self.token_counter.observe(raw_input_tokens, usage.input_tokens)
             await self.emit("model_end", {"span_id": span, "step_index": index,
                 "tool_calls": [call.model_dump(mode="json") for call in calls],
                 "timing_origin": "provider_event",

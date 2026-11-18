@@ -6,6 +6,7 @@ import { useSession } from "../hooks/use-session";
 import { ChatHistory } from "./ChatHistory";
 import { SessionFeatures } from "./SessionFeatures";
 import { DevelopmentPanel } from "./DevelopmentPanel";
+import { SessionExecutionControl } from "./SessionExecutionControl";
 import { ChatComposer } from "./ChatComposer";
 import { Button } from "./ui/button";
 import { chatCopy as c } from "../lib/copy";
@@ -43,7 +44,7 @@ export function ChatWorkbench({ apiKey, active, fence, onLegacy, onConnect, onId
       </details> : <ChatComposer chat={chat} />}
       {futureNotice && <p className="chat-future-notice" role="status">{futureNotice}</p>}
       {chat.session && <footer className="chat-controls">
-        <button type="button" className="control-chip" onClick={() => setFutureNotice("敬请期待")}>权限<ChevronDown aria-hidden="true" /></button>
+        <SessionExecutionControl execution={chat.execution} canChange={chat.canWrite && chat.session.status === "open" && !chat.session.archived_at && !chat.session.deleted_at} />
         <div className="chat-controls-right">
           <button type="button" className="control-chip is-strong" onClick={() => setFutureNotice("敬请期待")}>模型</button>
           <button type="button" className="control-chip" onClick={() => setFutureNotice("敬请期待")}>Extra<ChevronDown aria-hidden="true" /></button>

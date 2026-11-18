@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 
 import ai
 from ai import events
@@ -83,8 +83,7 @@ def host_messages(history: Sequence[sdk.Message]) -> list[Message]:
         if text or calls or not message.parts:
             if message.role not in {"system", "user", "assistant"}:
                 raise ServiceError("provider_event")
-            result.append(Message(role=cast(Literal["system", "user", "assistant"], message.role),
-                                  content="".join(text), tool_calls=calls))
+            result.append(Message(role=message.role, content="".join(text), tool_calls=calls))
         result.extend(output for _, output in sorted(outputs, key=lambda item: item[0]))
     return result
 
@@ -177,7 +176,7 @@ class HostModelProvider(ai.Provider):
     default_base_url: str = "http://unused.invalid"
     _stepper: ModelStep = PrivateAttr()
     _registry: ToolRegistry = PrivateAttr()
-    _max_group: int = PrivateAttr()
+    _max_group: int | None = PrivateAttr()
     _max_calls: int | None = PrivateAttr()
     _request_bytes: int | None = PrivateAttr()
     _context_policy: ContextPolicy | None = PrivateAttr(default=None)
@@ -218,10 +217,10 @@ class HostModelProvider(ai.Provider):
                 raise ValueError("compaction context policy differs from the host")
             context_policy = history.compactor.policy
         self._stepper, self._registry = stepper, registry
-        # ModelStep.request_budget still requires a concrete group; an unlimited
-        # host falls back to the sequential single-call group instead of
-        # inventing a product-level call ceiling.
-        self._max_group = 1 if max_group is None else max_group
+        # None keeps the full returned batch: ModelStep.request_budget then only
+        # applies remaining_tools/provider caps that are actually configured, and
+        # never invents a product-level call ceiling in their place.
+        self._max_group = max_group
         self._max_calls, self._request_bytes = max_calls, request_bytes
         self._context_policy = context_policy
         self._session_sources = tuple(session_sources) if session_sources is not None else None
@@ -391,7 +390,10 @@ class HostModelProvider(ai.Provider):
         prepared = self._stepper.with_budget_prompt(history, budget)
         if self._history is None and self._session_sources is not None:
             metadata = tuple(session_message_metadata(prepared, self._session_sources))
-        tools = schemas if budget.max_tool_calls_this_step else []
+        tools = (
+            schemas if budget.max_tool_calls_this_step is None
+            or budget.max_tool_calls_this_step > 0 else []
+        )
         if self._request_bytes is not None and len(encoded(
                 {"messages": [item.model_dump(mode="json") for item in prepared],
                  "tools": tools}).encode()) > self._request_bytes:
@@ -401,18 +403,31 @@ class HostModelProvider(ai.Provider):
             policy = self._context_policy
             # check_budget keeps the policy's own window and reserved output; a
             # host without a transport byte limit still checks the policy window.
-            check_budget(prepared, tools, policy,
-                         self._request_bytes if self._request_bytes is not None
-                         else policy.max_bytes)
-            input_bytes = max(0, policy.max_bytes - 1024 - policy.reserved_output_tokens * 4)
-            if self._request_bytes is not None:
-                input_bytes = min(input_bytes, self._request_bytes - 1024)
+            check_budget(
+                prepared, tools, policy, self._request_bytes,
+                counter=getattr(self._stepper, "token_counter", None),
+            )
+            if policy.counts_tokens():
+                # Transport bytes and model tokens are different units. Never
+                # reserve output by multiplying token counts by four here.
+                from krim_agent.config import minimum_limit
+
+                input_bytes = minimum_limit(policy.max_bytes, self._request_bytes)
+            elif policy.max_bytes is not None:
+                input_bytes = max(0, policy.max_bytes - 1024 - policy.reserved_output_tokens * 4)
+                if self._request_bytes is not None:
+                    input_bytes = min(input_bytes, self._request_bytes - 1024)
         response = await self._stepper.call(
             prepared, tools, max_group=self._max_group, remaining_tools=remaining,
             request_budget=budget, request_prepared=True, input_budget_bytes=input_bytes,
             request_metadata=metadata, compaction_changes=changes,
             reserved_output_tokens=(
                 self._context_policy.reserved_output_tokens if self._context_policy else None
+            ),
+            model_context_window=(
+                self._context_policy.max_tokens
+                if self._context_policy is not None and self._context_policy.counts_tokens()
+                else None
             ),
         )
         self._tool_count += len(response.calls)

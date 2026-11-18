@@ -7,6 +7,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+def minimum_limit(*values: int | None) -> int | None:
+    """Intersect explicit limits without inventing a fallback product quota."""
+    declared = [value for value in values if value is not None]
+    return min(declared) if declared else None
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, allow_inf_nan=False, hide_input_in_errors=True
@@ -18,7 +24,7 @@ class Settings(BaseModel):
     system_prompt: str = "你是 Krim Agent 离线演示。"
     target_version: str = "demo-v1"
     max_steps: int | None = Field(default=None, ge=1)
-    max_tools_per_step: int = Field(default=4, ge=1)
+    max_tools_per_step: int | None = Field(default=None, ge=1)
     read_parallelism: int = Field(default=4, ge=1)  # 执行调度宽度，不限制任务总量
     max_tool_calls: int | None = Field(default=None, ge=1)
     max_active_runs: int | None = Field(default=None, ge=1)
@@ -29,8 +35,9 @@ class Settings(BaseModel):
     run_timeout: float | None = Field(default=None, gt=0)
     model_timeout: float | None = Field(default=None, gt=0)
     tool_timeout: float | None = Field(default=None, gt=0)
-    # 上限 86400：无状态停靠的人类尺度批复窗口（ADR-0015 §5）；默认 300 兼容 ADR-0014
-    approval_timeout: float = Field(default=300, gt=0, le=86400)
+    # Parked confirmations have no product countdown. Explicit transport/test
+    # windows remain supported without a 24-hour application ceiling.
+    approval_timeout: float | None = Field(default=None, gt=0)
 
     access_policy_file: Path | None = None
     identity_mode: Literal["auto", "managed", "legacy"] = "auto"
@@ -67,18 +74,12 @@ class Settings(BaseModel):
             raise ValueError("网关显示名无效")
         return normalized
 
-    def request_capacity(self, provider: object | None = None) -> int:
-        """Resolve request capacity from a host override and provider declaration.
-
-        Scripted/local fixtures use the default ContextPolicy. HTTP providers
-        declare their accepted request size in their trusted configuration.
-        """
-        from krim_agent.context.types import ContextPolicy
-
+    def request_capacity(self, provider: object | None = None) -> int | None:
+        """Intersect explicit transport limits; no default application byte cap."""
         declared = getattr(getattr(provider, "config", None), "max_request_bytes", None)
         candidates = [value for value in (self.max_request_bytes, declared)
                       if isinstance(value, int) and not isinstance(value, bool)]
-        return min(candidates) if candidates else ContextPolicy().max_bytes
+        return min(candidates) if candidates else None
 
     @classmethod
     def from_env(cls) -> "Settings":

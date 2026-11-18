@@ -482,9 +482,30 @@ class SQLiteAccessRepository:
                 ):
                     raise ServiceError("permission_denied")
                 actor = await self._actor(conn, ref.actor_id)
-                grant = await self._record(
-                    conn, intent.owner_id, intent.project_id, "grant", ref.actor_id
-                )
+                grant: AccessRecord | None
+                if self.store.schema_version >= 19:
+                    from krim_agent.project_access.policy import resolve_project_access
+
+                    if actor is None:
+                        raise ServiceError("permission_denied")
+                    access = await resolve_project_access(conn, actor, intent.project_id)
+                    access.require(write=intent.action != "git.diff")
+                    # Compatibility DTO only. The project ACL is the sole source
+                    # of capabilities; session confirmation is enforced by the
+                    # live execution chain, not a second expiring license.
+                    grant = ProjectGrant(
+                        owner_id=access.owner_id, workspace_id=access.workspace_id,
+                        project_id=access.project_id, actor_id=actor.principal_id,
+                        actor_generation=actor.generation, revision=access.revision,
+                        actions=(("git.diff",) if access.access == "read" else (
+                            "shell.execute", "secret.deliver", "network.connect",
+                            "git.clone", "git.diff", "git.commit", "git.push",
+                        )), requires_approval=False, expires_at=None,
+                    )
+                else:
+                    grant = await self._record(
+                        conn, intent.owner_id, intent.project_id, "grant", ref.actor_id
+                    )
                 secrets = []
                 for key in ref.secret_refs:
                     value = await self._record(

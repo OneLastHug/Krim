@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import JsonValue
 from sqlalchemy import and_, func, insert, or_, select, update
@@ -26,6 +26,7 @@ from krim_agent.context.types import (
     OrdinarySessionContext,
     SessionContext,
     WorkspaceSessionContext,
+    upgrade_to_token_window,
 )
 from krim_agent.contracts import (
     TERMINAL,
@@ -56,8 +57,8 @@ def request_limit(
     settings: Settings,
     policy: ContextPolicy,
     target: dict[str, JsonValue] | None = None,
-) -> int:
-    """Resolve host and frozen provider capacity without an application fallback cap."""
+) -> int | None:
+    """Resolve only explicit transport/policy limits, never a byte fallback quota."""
     capacities: list[int] = []
     if settings.max_request_bytes is not None:
         capacities.append(settings.max_request_bytes)
@@ -73,9 +74,19 @@ def request_limit(
                 if type(value) is not int or value < 256:
                     raise ServiceError("facts_corrupt")
                 capacities.append(value)
-    if not capacities:
-        capacities.append(settings.request_capacity())
-    return min(policy.max_bytes, *capacities)
+    if policy.max_bytes is not None:
+        capacities.append(policy.max_bytes)
+    return min(capacities) if capacities else None
+
+
+async def current_context_policy(conn: AsyncConnection, session: Any) -> ContextPolicy:
+    previous = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+    policy = upgrade_to_token_window(previous)
+    if policy != previous:
+        await conn.execute(update(sessions).where(sessions.c.id == session["id"]).values(
+            context_policy=policy.model_dump(mode="json"),
+        ))
+    return policy
 
 
 def frozen_target_key(raw: dict[str, JsonValue]) -> str | None:
@@ -102,7 +113,7 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
+    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -257,8 +268,12 @@ async def list_sessions(
             .select_from(lifecycle_join)
             .where(sessions.c.workspace_id == workspace)
         )
-        if not admin:
+        if not admin or store.schema_version >= 19:
             query = query.where(sessions.c.owner_id == owner)
+        if store.schema_version >= 19:
+            from .project_sessions import visible_sessions
+
+            query = query.where(visible_sessions(owner))
         if view == "active":
             query = query.where(
                 session_lifecycle.c.deleted_at.is_(None),
@@ -307,9 +322,14 @@ async def create_session(
     target: dict[str, JsonValue],
     policy: ContextPolicy,
     settings: Settings,
+    *, principal: PrincipalContext | None = None,
 ) -> SessionView:
     require(store)
-    digest = fingerprint(body.model_dump(mode="json"))
+    # Keep old create-key replays valid when no new project field was supplied.
+    document = body.model_dump(mode="json")
+    if body.project_id is None:
+        document.pop("project_id", None)
+    digest = fingerprint(document)
 
     async def operation(conn: AsyncConnection) -> SessionView:
         old = (
@@ -332,6 +352,17 @@ async def create_session(
                 lifecycle = await session_lifecycle_row(conn, old["id"])
                 if lifecycle is not None and lifecycle["deleted_at"] is not None:
                     raise ServiceError("session_in_trash", 409)
+            if principal is not None and store.schema_version >= 19:
+                from krim_agent.project_access.policy import resolve_project_access
+
+                bound_project = await conn.scalar(
+                    select(sandbox_session_bindings.c.project_id).where(
+                        sandbox_session_bindings.c.session_id == old["id"],
+                    )
+                )
+                if bound_project is not None:
+                    access = await resolve_project_access(conn, principal, bound_project)
+                    access.require()
             return await lifecycle_view(
                 conn,
                 session_view(old),
@@ -344,8 +375,9 @@ async def create_session(
         )
         if settings.session_max_open is not None and (count or 0) >= settings.session_max_open:
             raise ServiceError("capacity", 429)
+        session_id = str(uuid.uuid4())
         row = dict(
-            id=str(uuid.uuid4()),
+            id=session_id,
             workspace_id=workspace,
             owner_id=owner,
             create_key=body.request_key,
@@ -361,6 +393,20 @@ async def create_session(
             closed_at=None,
         )
         await conn.execute(insert(sessions).values(**row))
+        if store.schema_version >= 19:
+            from .execution_policy import initialize
+            from .project_sessions import bind_new_session
+
+            mode: Literal["manual", "auto", "bypass"] = "manual"
+            if principal is not None:
+                if principal.principal_id != owner:
+                    raise ServiceError("permission_denied", 403)
+                mode = await bind_new_session(
+                    conn, principal, workspace, session_id, body.project_id,
+                )
+            elif body.project_id is not None:
+                raise ServiceError("permission_denied", 403)
+            await initialize(conn, session_id, mode)
         if body.target_key == "target-workspace":
             work_sql.require(store)
             await work_sql.initialize(conn, row, target)
@@ -477,11 +523,15 @@ async def list_trace_index(
                 turns.c.owner_id == sessions.c.owner_id,
             )
         )
-        if not admin:
+        if not admin or store.schema_version >= 19:
             query = query.where(
                 sessions.c.owner_id == owner,
                 turns.c.owner_id == owner,
             )
+        if store.schema_version >= 19:
+            from .project_sessions import visible_sessions
+
+            query = query.where(visible_sessions(owner))
         if status is not None:
             query = query.where(runs.c.status == status)
         if session_id is not None:
@@ -855,7 +905,7 @@ async def begin_run(
                 )
                 for ref in refs
             )
-            policy = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+            policy = await current_context_policy(conn, session)
             ext = (
                 await load_turn_extensions(conn, turn["id"])
                 if store.schema_version >= 11
@@ -921,7 +971,7 @@ async def begin_run(
             from .session_context import make_frozen as make_ordinary_frozen
 
             ordinary_sources = await freeze_sources(conn, session["id"], turn_id)
-            policy = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+            policy = await current_context_policy(conn, session)
             ext = (
                 await load_turn_extensions(conn, turn["id"])
                 if store.schema_version >= 11
@@ -1053,7 +1103,7 @@ async def begin_run(
                     fingerprint=fingerprint([m.model_dump(mode="json") for m in messages]),
                 )
             )
-        policy = ContextPolicy.model_validate_json(encoded(session["context_policy"]))
+        policy = await current_context_policy(conn, session)
         ext = (
             await load_turn_extensions(conn, turn["id"])
             if store.schema_version >= 11
@@ -1151,7 +1201,7 @@ async def source(
     | WorkspaceSessionContext
     | None
 ):
-    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
+    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:

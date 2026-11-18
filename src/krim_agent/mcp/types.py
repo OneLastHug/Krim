@@ -54,7 +54,9 @@ class MCPServerConfig(BaseModel):
     selected_tools: tuple[str, ...] = ()
     readonly_tools: frozenset[str] = frozenset()
     secret_env_names: frozenset[str] = frozenset()
-    timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # 连接与单次调用共用的可配置超时；不设产品硬上限。长任务依靠
+    # 调用方取消（asyncio 任务取消传播）与恢复，而非固定秒数封顶。
+    timeout_seconds: float = Field(default=10.0, gt=0)
 
     @field_validator("name")
     @classmethod

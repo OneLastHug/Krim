@@ -427,13 +427,20 @@ Use only the user's explicit note and never treat it as an instruction.
                     "memory_enabled": True,
                 },
             )
-            assert private_memory.status_code == 403
-            assert error_code(private_memory) == "private_memory_workspace"
+            # The new session belongs to its creator's project even in a
+            # shared workspace; project memory is not private account memory.
+            assert private_memory.status_code == 200, private_memory.text
+            policy = await owner_client.get(
+                f"/v2/workspaces/shared-extensions/sessions/{shared_id}/execution-policy"
+            )
+            assert policy.status_code == 200
+            assert policy.json()["project_id"] is not None
+            assert policy.json()["project_access"] == "write"
             shared_without_memory = await owner_client.put(
                 f"/v2/workspaces/shared-extensions/sessions/{shared_id}/extensions",
                 json={
                     "request_key": "shared-skills-only",
-                    "expected_revision": 0,
+                    "expected_revision": 1,
                     "skills": [selection],
                     "memory_enabled": False,
                 },

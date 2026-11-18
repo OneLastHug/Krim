@@ -952,13 +952,13 @@ async def test_freeze_and_reads_reject_tampered_references(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_skill_context_budget_fails_before_turn(tmp_path):
+async def test_selected_skills_freeze_beyond_legacy_caps(tmp_path):
     async with managed_extensions(tmp_path / "budget.sqlite") as (store, identities, admin):
         owner = await account_of(identities, admin, "owner")
         service = ExtensionService(store, identities)
         personal = await personal_workspace(identities, owner)
         selections = []
-        for index in range(4):
+        for index in range(5):
             imported = await service.import_skill(
                 owner,
                 SkillImport(
@@ -980,7 +980,7 @@ async def test_skill_context_budget_fails_before_turn(tmp_path):
             session.id,
             SessionExtensions(request_key="select", expected_revision=0, skills=tuple(selections)),
         )
-        with pytest.raises(ServiceError, match="context_budget"):
-            await submit_turn(store, owner, service, session, "one", "正文", 0)
-        with pytest.raises(ServiceError, match="not_found"):
-            await session_sql.turn_by_key(store, session.id, "one")
+        turn = await submit_turn(store, owner, service, session, "one", "正文", 0)
+        snapshot = await snapshot_of(store, turn.id)
+        assert [item["kind"] for item in snapshot["items"]] == ["skill"] * 5
+        assert turn.id in await stored_turn_ids(store)

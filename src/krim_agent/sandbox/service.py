@@ -523,6 +523,10 @@ class SandboxService:
                     updated_at=now,
                 )
             )
+            if self.store.schema_version >= 19:
+                from krim_agent.project_access.policy import initialize_project_access
+
+                await initialize_project_access(conn, project_id, actor.principal_id)
             saved = (
                 (await conn.execute(select(projects).where(projects.c.project_id == project_id)))
                 .mappings()
@@ -555,10 +559,17 @@ class SandboxService:
             visible = select(account_workspaces.c.workspace_id).where(
                 account_workspaces.c.principal_id == actor.principal_id
             )
-            conditions = (
-                projects.c.principal_id == actor.principal_id,
-                projects.c.workspace_id.in_(visible),
-            )
+            permitted = projects.c.principal_id == actor.principal_id
+            if self.store.schema_version >= 19:
+                from krim_agent.storage.project_membership_models import project_memberships
+
+                permitted = projects.c.project_id.in_(
+                    select(project_memberships.c.project_id).where(
+                        project_memberships.c.principal_id == actor.principal_id,
+                        project_memberships.c.access.in_(["read", "write"]),
+                    )
+                )
+            conditions = (permitted, projects.c.workspace_id.in_(visible))
             total = await conn.scalar(select(func.count()).select_from(projects).where(*conditions))
             rows = (
                 await conn.execute(
@@ -588,6 +599,15 @@ class SandboxService:
     ) -> dict[str, Any]:
         """已授权的内部状态；公开project响应仍隐藏租约字段。"""
         async def read(conn: AsyncConnection) -> dict[str, Any]:
+            if self.store.schema_version >= 19:
+                from krim_agent.project_access.policy import resolve_project_access
+
+                access = await resolve_project_access(conn, actor, project_id)
+                access.require(write=write)
+                authorized_row = (await conn.execute(select(projects).where(
+                    projects.c.project_id == project_id,
+                ))).mappings().one()
+                return dict(authorized_row)
             row = (
                 (
                     await conn.execute(

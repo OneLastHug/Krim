@@ -105,7 +105,7 @@ export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; o
               const approval = item.approval;
               const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";
               const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
-              return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={allow => { if (approval) void chat.control(turn, "approval", approval, allow); }} />;
+              return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
             })}
             {turn.status === "running" && !items.length && <p className="chat-waiting" role="status">正在处理</p>}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}

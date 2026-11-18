@@ -111,6 +111,16 @@ def _stdio_config(**changes):
     return MCPServerConfig(**values)
 
 
+def test_timeout_is_configurable_without_product_cap():
+    assert _stdio_config().timeout_seconds == 10.0
+    assert _stdio_config(timeout_seconds=3600).timeout_seconds == 3600
+    assert _stdio_config(timeout_seconds=0.05).timeout_seconds == 0.05
+    with pytest.raises(ValidationError):
+        _stdio_config(timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        _stdio_config(timeout_seconds=-1)
+
+
 def test_config_validates_transport_security_and_digest_redacts_secret_values():
     with pytest.raises(ValidationError):
         MCPServerConfig(

@@ -4,6 +4,8 @@ import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
 import { DEFAULT_GROUP, includeSessions, parseSidebar } from "../lib/session-sidebar";
+import { useExecutionPolicy } from "./use-execution-policy";
+import type { ApprovalScope } from "../lib/execution-policy";
 
 interface Detail { facts: Record<string, unknown> | null; trace: Record<string, unknown>; events: Record<string, unknown>[]; loadedForStatus?: Turn["status"]; traceLoaded?: boolean }
 interface ControlIntent extends Scope { target: string; turn_id: string; body: Record<string, unknown>; rejected: boolean }
@@ -96,6 +98,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
       let activeRun: { turn: Turn; cursor: number; events: Record<string, unknown>[] } | null = null;
       let turns: Turn[] = [], historyLoaded = false, recoveredPartial = false;
+      const hydratedFinished = new Set<string>();
       async function readEvents(turn: Turn, start: number, target: Record<string, unknown>[]) {
         let next = start, raw: unknown;
         do {
@@ -128,6 +131,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
           const facts = await readFacts(turn);
           if (facts === null) return false;
           keepRunData(turn, runEvents, facts);
+          hydratedFinished.add(turn.id);
         } catch (error) {
           if (!current()) return false;
           if (error instanceof RequestError && (error.status === 401 || error.status === 403)) throw error;
@@ -183,6 +187,12 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
               if (!await hydrateFinished(finished, activeRun.events, activeRun.cursor)) return;
               setEvents([...activeRun.events]); setApprovals([]); activeRun = null; recoveredPartial = true;
             }
+          }
+          const recentCompleted = [...turns].reverse().find(item => item.status === "completed" && !!item.run_id
+            && !!item.transcript?.length && !item.transcript.some(message => message.role === "assistant"));
+          if (recentCompleted && !hydratedFinished.has(recentCompleted.id)) {
+            const finishedEvents: Record<string, unknown>[] = [];
+            if (!await hydrateFinished(recentCompleted, finishedEvents, 0)) return;
           }
           if (running?.run_id) {
             if (!activeRun || activeRun.turn.id !== running.id || activeRun.turn.run_id !== running.run_id) {
@@ -352,7 +362,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); refreshPending(); }
   }
-  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string, target?: Session) {
+  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string, target?: Session, approvalScope: ApprovalScope = "once") {
     const who = actorRef.current, member = who?.value.workspaces.find(w => w.workspace_id === workspace);
     const controlled = target ?? session;
     if (!activeRef.current || !who || who.key !== keyRef.current || !controlled || controlled.workspace_id !== workspace || !target && controlled.id !== id || selected.current.id !== id || selected.current.workspace !== workspace) return;
@@ -381,7 +391,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       let saved = previous?.[1] ?? values[cacheKey], first = saved === undefined;
       if (!saved) {
         const path = expectedTarget;
-        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: controlled.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
+        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow, ...(allow && approvalScope === "session" ? { scope: "session" } : {}) } : { request_key: crypto.randomUUID(), expected_revision: controlled.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
         saved = { ...targetScope, target: path, turn_id: turn?.id ?? "", body, rejected: false }; values[cacheKey] = saved; saveControls(values);
       }
       first = first || saved.rejected;
@@ -399,7 +409,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
         throw error;
       }
       const value = object(raw); if (value.session_id !== saved.session_id || value.request_key !== saved.body.request_key) throw new Error("控制身份不匹配");
-      if (current() && value.status === "completed") { const latest = controls(); delete latest[cacheKey]; saveControls(latest); setVersion(v => v + 1); setNotice(null); }
+      if (current() && value.status === "completed") { const latest = controls(); delete latest[cacheKey]; saveControls(latest); setVersion(v => v + 1); setNotice(null); if (action === "approval") execution.reload(); }
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); }
   }
@@ -476,6 +486,12 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   let pendingControls: ControlIntent[] = []; try { pendingControls = ready ? Object.values(controls()).filter(i => i.principal_id === actor.value.principal_id && i.workspace_id === workspace) : []; } catch { /* 控制事件会明确报告损坏，不能重新POST。 */ }
   const controlling = flights.current.has("close:" + id) || flights.current.has("resume:" + id) || flights.current.has("rename:" + id) || flights.current.has("lifecycle:" + id) || history.some(t => flights.current.has("cancel:" + t.id)) || approvals.some(a => flights.current.has("approval:" + String(a.request_id)));
   const posting = (i: Intent) => flights.current.has("post:" + JSON.stringify({ principal_id: i.principal_id, generation: i.generation, workspace_id: i.workspace_id, session_id: i.session_id }));
-  return { actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], listView, setSessionListView, lifecycle, session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
+  const execution = useExecutionPolicy({ apiKey, principalId: ready ? actor.value.principal_id : "",
+    generation: ready ? actor.value.generation : 0, workspaceId: workspace, sessionId: id,
+    sessionRevision: session?.revision ?? 0,
+    enabled: active && ready && session?.id === id && session.workspace_id === workspace && !session.deleted_at,
+    running: history.some(turn => turn.status === "queued" || turn.status === "running"), fence,
+  }, () => setVersion(value => value + 1));
+  return { execution, actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], listView, setSessionListView, lifecycle, session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
 }
 export type SessionState = ReturnType<typeof useSession>;

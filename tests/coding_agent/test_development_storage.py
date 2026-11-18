@@ -376,7 +376,7 @@ async def test_schema14_readonly_and_upgrade_preserve_original_rows(tmp_path: Pa
     assert path.read_bytes() == original
     writer = await SQLiteStore.open(path)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 18
+        assert writer.schema_version == SCHEMA_VERSION == 19
         assert (await writer.snapshot(run.id)).request.text == 'legacy'
     finally:
         await writer.close()

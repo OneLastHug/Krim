@@ -8,7 +8,7 @@ import math
 import time
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 RunStatus = Literal[
     "queued", "running", "awaiting", "completed", "failed", "aborted", "interrupted"
@@ -316,6 +316,14 @@ class ApprovalReply(StrictModel):
     arguments_hash: str
     tool_hash: str
     allow: bool
+    scope: Literal["once", "session"] = "once"
+
+    @model_validator(mode="after")
+    def _denial_stays_once(self) -> ApprovalReply:
+        # 只有批准可以携带会话范围；拒绝永远是单次，不接受降格写法。
+        if not self.allow and self.scope != "once":
+            raise ValueError("denial cannot carry session scope")
+        return self
 
 
 class Message(StrictModel):

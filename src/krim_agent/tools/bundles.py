@@ -29,6 +29,7 @@ def policy_spec(registry: ToolRegistry, invocation: Invocation) -> ToolSpec:
 
 def compose_executor(
     base: ToolExecutor, bundles: Iterable[ToolBundle], *, guard: ModeGuard | None = None,
+    guard_confirms: bool = False,
 ) -> ToolExecutor:
     base.registry.assert_current()
     specs = [spec for spec, _ in base.registry._frozen]
@@ -74,8 +75,11 @@ def compose_executor(
             guarded = await guard(invocation)
             if guarded not in {"allow", "ask"}:
                 return "deny"
-            if guarded == "ask":
-                return "ask"
+            # The execution guard is the single confirmation authority. Owner
+            # policies still veto capabilities; their legacy asks cannot keep a
+            # second project/global confirmation mode alive alongside sessions.
+            if guarded == "ask" or guard_confirms:
+                return guarded
         return verdict
 
     return ToolExecutor(
