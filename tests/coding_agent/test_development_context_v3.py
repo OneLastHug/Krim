@@ -28,6 +28,7 @@ from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.account_models import account_workspaces, accounts
 from krim_agent.storage.development_context import DevelopmentCompactionSource, state_from_raw
 from krim_agent.storage.models import turns
+from krim_agent.storage.project_membership_models import project_memberships
 from krim_agent.storage.sandbox_models import sandbox_session_bindings
 from krim_agent.storage.sqlite import SQLiteStore
 
@@ -78,10 +79,6 @@ async def development_session(tmp_path: Path):
         ),
         request_key="bind-project",
     )
-    import time
-
-    from krim_agent.project_access.types import ProjectGrant
-    from krim_agent.storage.project_access import SQLiteAccessRepository
     from krim_agent.storage.sandbox_models import sandbox_projects
 
     async with store.engine.begin() as conn:
@@ -92,20 +89,6 @@ async def development_session(tmp_path: Path):
             )
             .values(status="ready")
         )
-    await SQLiteAccessRepository(store).put(
-        ProjectGrant(
-            owner_id=actor.principal_id,
-            workspace_id=workspace,
-            project_id=project["project_id"],
-            actor_id=actor.principal_id,
-            actor_generation=actor.generation,
-            revision=1,
-            actions=("shell.execute",),
-            requires_approval=False,
-            expires_at=time.time() + 600,
-        ),
-        expected_revision=0,
-    )
     yield store, identities, sandbox, actor, project, session, settings, policy, target
     await sandbox.close()
     await identities.close()
@@ -136,6 +119,115 @@ async def _store_transcript(store: SQLiteStore, turn_id: str, content: str) -> N
                 transcript=[{"role": "user", "content": content, "call_id": None, "tool_calls": []}]
             )
         )
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto", "bypass"])
+@pytest.mark.parametrize("access", ["read", "write"])
+async def test_v3_context_uses_project_acl_in_every_session_mode(development_session, mode, access):
+    from krim_agent.storage.execution_policy_models import session_execution_policies
+
+    fixture, store = development_session, development_session[0]
+    actor, project, session = fixture[3:6]
+    async with store.engine.begin() as conn:
+        await conn.execute(
+            update(project_memberships)
+            .where(
+                project_memberships.c.project_id == project["project_id"],
+                project_memberships.c.principal_id == actor.principal_id,
+            )
+            .values(access=access)
+        )
+        await conn.execute(
+            update(session_execution_policies)
+            .where(session_execution_policies.c.session_id == session.id)
+            .values(mode=mode)
+        )
+    _, run = await _start_turn(fixture, "你有什么权限", "acl-question", 1)
+    snapshot = await store.snapshot(run.id)
+    source = DevelopmentCompactionSource(snapshot.session_context.frozen)
+    await store.work_read(lambda conn: source.verify(conn, run.id))
+    assert await store.work_read(lambda conn: source.page(conn, run.id, 0, 16)) == []
+
+
+async def _put_legacy_grant(fixture, variant):
+    import time
+
+    from krim_agent.project_access.types import ProjectGrant
+    from krim_agent.storage.project_access import SQLiteAccessRepository
+
+    if variant == "missing":
+        return
+    store, actor, project = fixture[0], fixture[3], fixture[4]
+    await SQLiteAccessRepository(store).put(
+        ProjectGrant(
+            owner_id=actor.principal_id,
+            workspace_id=actor.memberships[0].workspace_id,
+            project_id=project["project_id"],
+            actor_id=actor.principal_id,
+            actor_generation=actor.generation,
+            revision=1,
+            actions=("git.diff",) if variant == "no_shell" else ("shell.execute",),
+            requires_approval=False,
+            revoked=variant == "revoked",
+            expires_at=(
+                None
+                if variant == "no_expiry"
+                else time.time() + (-60 if variant == "expired" else 600)
+            ),
+        ),
+        expected_revision=0,
+    )
+
+
+@pytest.mark.parametrize("variant", ["expired", "revoked", "no_expiry", "no_shell"])
+async def test_v3_current_acl_is_not_limited_by_legacy_grants(development_session, variant):
+    fixture, store = development_session, development_session[0]
+    await _put_legacy_grant(fixture, variant)
+    _, run = await _start_turn(fixture, "current", "old-grant-ignored", 1)
+    source = DevelopmentCompactionSource((await store.snapshot(run.id)).session_context.frozen)
+    await store.work_read(lambda conn: source.verify(conn, run.id))
+
+
+async def test_v3_live_acl_downgrade_and_revocation_ignore_old_grant(development_session):
+    fixture, store = development_session, development_session[0]
+    actor, project = fixture[3:5]
+    await _put_legacy_grant(fixture, "valid")
+    _, run = await _start_turn(fixture, "current", "acl-drift", 1)
+    source = DevelopmentCompactionSource((await store.snapshot(run.id)).session_context.frozen)
+    await store.work_read(lambda conn: source.verify(conn, run.id))
+    for access in ("read", "none"):
+        async with store.engine.begin() as conn:
+            await conn.execute(
+                update(project_memberships)
+                .where(
+                    project_memberships.c.project_id == project["project_id"],
+                    project_memberships.c.principal_id == actor.principal_id,
+                )
+                .values(access=access, revision=project_memberships.c.revision + 1)
+            )
+        if access == "read":
+            await store.work_read(lambda conn: source.verify(conn, run.id))
+        else:
+            with pytest.raises(ServiceError, match="permission_denied"):
+                await store.work_read(lambda conn: source.verify(conn, run.id))
+
+
+@pytest.mark.parametrize(
+    "variant", ["missing", "valid", "no_expiry", "expired", "revoked", "no_shell"]
+)
+async def test_v3_legacy_schema_keeps_grant_checks(development_session, variant):
+    fixture, store = development_session, development_session[0]
+    await _put_legacy_grant(fixture, variant)
+    _, run = await _start_turn(fixture, "current", "legacy-grant", 1)
+    source = DevelopmentCompactionSource((await store.snapshot(run.id)).session_context.frozen)
+    # Select the pre-ACL compatibility branch using the database's stored version.
+    async with store.engine.begin() as conn:
+        await conn.exec_driver_sql("PRAGMA user_version=18")
+    if variant == "valid":
+        await store.work_read(lambda conn: source.verify(conn, run.id))
+    else:
+        with pytest.raises(ServiceError, match="permission_denied"):
+            await store.work_read(lambda conn: source.verify(conn, run.id))
 
 
 async def test_v3_disabled_preserves_legacy_v1_snapshot(development_session) -> None:
@@ -282,7 +374,7 @@ async def test_v3_non_object_context_is_facts_corrupt(development_session, raw):
         await store.snapshot(run.id)
 
 
-@pytest.mark.parametrize("drift", ["owner", "project", "membership", "key", "grant"])
+@pytest.mark.parametrize("drift", ["owner", "project", "membership", "key", "project_access"])
 async def test_v3_source_rechecks_authorization_and_project_binding(
     development_session, drift: str
 ) -> None:
@@ -313,13 +405,11 @@ async def test_v3_source_rechecks_authorization_and_project_binding(
                 .where(access_keys.c.principal_id == actor.principal_id)
                 .values(status="revoked")
             )
-        elif drift == "grant":
-            from krim_agent.storage.development_models import project_access_records
-
+        elif drift == "project_access":
             await conn.execute(
-                project_access_records.delete().where(
-                    project_access_records.c.project_id == project["project_id"],
-                    project_access_records.c.kind == "grant",
+                project_memberships.delete().where(
+                    project_memberships.c.project_id == project["project_id"],
+                    project_memberships.c.principal_id == actor.principal_id,
                 )
             )
         else:
@@ -351,7 +441,7 @@ async def test_v3_paging_rejects_changed_transcript(development_session):
         await store.work_read(lambda conn: source.page(conn, current.id, 0, 16))
 
 
-async def _history_service(fixture, tmp_path, *, approval=False):
+async def _history_service(fixture, tmp_path, *, approval=False, history_turns=8, write=True):
     """Real RunService/SDK/SQLite; only model responses and tools are fixtures."""
     from krim_agent.contracts import parse_json
     from krim_agent.development.contracts import EnvironmentHandle, RunOwnership
@@ -364,7 +454,7 @@ async def _history_service(fixture, tmp_path, *, approval=False):
     from tests.coding_agent.test_sdk_context_compaction import Script
 
     store, _, _, actor, project, session, settings, _, _ = fixture
-    for index in range(8):
+    for index in range(history_turns):
         turn, prior = await _start_turn(fixture, f"prior {index}", f"prior-{index}", index + 1)
         await store.finish(prior.id, "completed")
         async with store.lock, store.engine.begin() as conn:
@@ -394,7 +484,7 @@ async def _history_service(fixture, tmp_path, *, approval=False):
     await repositories.environments.register(
         EnvironmentRecord(environment, "sha256:" + "a" * 64, content, info.st_dev, info.st_ino)
     )
-    harness, provider, cleanup = setup(approval=approval), Script(write=True), []
+    harness, provider, cleanup = setup(approval=approval), Script(write=write), []
     executor = harness.adapter().executor
 
     async def scope(run_id, check, budget):
@@ -428,10 +518,43 @@ async def _history_service(fixture, tmp_path, *, approval=False):
     turn = await session_sql.submit(
         store,
         session.id,
-        TurnRequest(text="current task", request_key="sdk-current", expected_revision=9),
+        TurnRequest(
+            text="你有什么权限", request_key="sdk-current", expected_revision=history_turns + 1
+        ),
         settings,
     )
     return service, harness, provider, turn, cleanup
+
+
+async def test_v3_new_question_reaches_model_without_legacy_grant(development_session, tmp_path):
+    from krim_agent.storage.development_models import project_access_records
+
+    fixture, store = development_session, development_session[0]
+    service, harness, provider, turn, cleanup = await _history_service(
+        fixture, tmp_path, history_turns=0, write=False
+    )
+    grant = await store.work_read(
+        lambda conn: conn.scalar(
+            select(project_access_records.c.resource_id).where(
+                project_access_records.c.project_id == fixture[4]["project_id"],
+                project_access_records.c.kind == "grant",
+            )
+        )
+    )
+    assert grant is None
+    try:
+        run = await service.start_turn(turn.id)
+        result = await service.wait(run.id)
+        assert result.status == "completed", result.code
+        assert len(provider.requests) == 1
+        assert provider.requests[0][0][-1].content == "你有什么权限"
+        assert harness.counts["write"] == 0
+        snapshot = await store.snapshot(run.id)
+        assert isinstance(snapshot.session_context, DevelopmentSessionContext)
+        assert not snapshot.session_context.frozen.sources
+        assert cleanup == [run.id]
+    finally:
+        await service.close()
 
 
 async def test_v3_real_service_compacts_and_reuses_summary_on_next_turn(
@@ -495,7 +618,6 @@ async def test_v3_real_approval_resume_never_recharges_or_dispatches_after_revoc
     tmp_path,
 ):
     from krim_agent.contracts import ApprovalReply
-    from krim_agent.storage.development_models import project_access_records
 
     fixture, store = development_session, development_session[0]
     service, harness, provider, turn, cleanup = await _history_service(
@@ -510,9 +632,9 @@ async def test_v3_real_approval_resume_never_recharges_or_dispatches_after_revoc
         if revoke:
             async with store.lock, store.engine.begin() as conn:
                 await conn.execute(
-                    project_access_records.delete().where(
-                        project_access_records.c.project_id == fixture[4]["project_id"],
-                        project_access_records.c.kind == "grant",
+                    project_memberships.delete().where(
+                        project_memberships.c.project_id == fixture[4]["project_id"],
+                        project_memberships.c.principal_id == fixture[3].principal_id,
                     )
                 )
         await service.reply_approval(
@@ -549,7 +671,6 @@ async def test_v3_revocation_at_model_start_prevents_provider_call(
     tmp_path,
     monkeypatch,
 ):
-    from krim_agent.storage.development_models import project_access_records
     from krim_agent.storage.models import compactions
 
     fixture, store = development_session, development_session[0]
@@ -561,9 +682,9 @@ async def test_v3_revocation_at_model_start_prevents_provider_call(
         if self is store and kind == "model_start":
             async with store.lock, store.engine.begin() as conn:
                 await conn.execute(
-                    project_access_records.delete().where(
-                        project_access_records.c.project_id == fixture[4]["project_id"],
-                        project_access_records.c.kind == "grant",
+                    project_memberships.delete().where(
+                        project_memberships.c.project_id == fixture[4]["project_id"],
+                        project_memberships.c.principal_id == fixture[3].principal_id,
                     )
                 )
         return event
