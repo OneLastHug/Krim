@@ -75,12 +75,12 @@ test("hot-switches with CAS without displaying the desired mode before the serve
   handle = (path, method) => path.endsWith("/allow-rules") ? json({ session_id: "session-a", rule_count: 0 })
     : method === "PUT" ? new Promise(resolve => { finish = resolve; }) : json(current);
   await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu();
-  await click("免确认"); expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("手动确认");
+  await click("跳过确认"); expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("手动确认");
   expect(document.body.textContent).toContain("正在保存");
   const sent = calls.find(c => c.method === "PUT")!;
   expect(sent.body).toMatchObject({ mode: "bypass", expected_revision: 1 }); expect(sent.body!.request_key).toEqual(expect.any(String));
   current = policy("session-a", "bypass", 2); await act(async () => finish(json(current)));
-  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("免确认"));
+  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("跳过确认"));
 });
 
 test("a lost write response recovers server state rather than blindly reposting", async () => {
@@ -90,8 +90,8 @@ test("a lost write response recovers server state rather than blindly reposting"
     if (method === "PUT") { current = policy("session-a", "bypass", 2); throw new TypeError("synthetic network failure"); }
     return json(current);
   };
-  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("免确认");
-  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("免确认"));
+  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("跳过确认");
+  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("跳过确认"));
   expect(calls.filter(c => c.method === "PUT")).toHaveLength(1);
   expect(document.body.textContent).toContain("已从服务端恢复当前执行模式");
 });
@@ -103,15 +103,15 @@ test("a revision conflict displays the actual newer mode", async () => {
     if (method === "PUT") { current = policy("session-a", "auto", 3); return json({ error: { code: "revision_conflict" } }, 409); }
     return json(current);
   };
-  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("免确认");
-  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("自动判断"));
+  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("跳过确认");
+  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("自动执行"));
   expect(document.body.textContent).toContain("模式已在其他位置更改");
 });
 
 test("read-only stays explicit even when the session selects bypass", async () => {
   router({ ...policy(), project_access: "read" }); await render();
-  await until(() => expect(host.textContent).toContain("只读")); await openMenu(); await click("免确认");
-  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("只读 · 免确认"));
+  await until(() => expect(host.textContent).toContain("只读")); await openMenu(); await click("跳过确认");
+  await until(() => expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("只读 · 跳过确认"));
   await openMenu(); expect(document.body.textContent).toContain("不能修改文件或运行 Shell");
 });
 
@@ -123,10 +123,10 @@ test("a late receipt from another session never changes the current session", as
     if (method === "PUT") return new Promise(resolve => { finish = resolve; });
     return json(policy(sid, sid === "session-b" ? "auto" : "manual"));
   };
-  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("免确认");
-  await render("session-b"); await until(() => expect(host.textContent).toContain("自动判断"));
+  await render(); await until(() => expect(host.textContent).toContain("手动确认")); await openMenu(); await click("跳过确认");
+  await render("session-b"); await until(() => expect(host.textContent).toContain("自动执行"));
   await act(async () => finish(json(policy("session-a", "bypass", 2))));
-  expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("自动判断");
+  expect(host.querySelector('[aria-haspopup="menu"]')?.textContent).toContain("自动执行");
 });
 
 test("clearing retries the same key and GET prevents an old response from hiding newly saved rules", async () => {

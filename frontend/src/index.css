@@ -2,6 +2,8 @@
 @import "tailwindcss" ;
 @import "tw-animate-css" ;
 @import "shadcn/tailwind.css" ;
+@source "./";
+@source not "../visual";
 @source not "./prototype";
 @source not "../e2e/prototype.spec.ts";
 @source not "../e2e/prototype-native-zoom.spec.ts";

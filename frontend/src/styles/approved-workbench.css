@@ -1,0 +1,706 @@
+/* Approved HTML visual values, scoped to the workbench.
+ * Reference SHA-256: b038d8d7aecfcbb176056b112e5e41b8ec697c18ef084095e7d105bb323bf4a2
+ * Behavior and real API data remain in native React components.
+ */
+
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button {
+      display: grid; width: 32px; min-width: 32px; height: 32px; min-height: 32px;
+      place-items: center; padding: 0; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted-foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button svg { width: 16px; height: 16px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button[aria-pressed="true"], :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button[aria-current="page"] { background: var(--session-selected, var(--muted)); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button:disabled { opacity: .4; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button.small { width: 28px; min-width: 28px; height: 28px; min-height: 28px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button.small svg { width: 14px; height: 14px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .app-sidebar {
+      --sidebar-padding-inline: 8px;
+      display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0;
+      overflow: hidden; padding: 10px var(--sidebar-padding-inline); background: var(--sidebar-surface);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-navigation { display: block; flex: 0 0 auto; padding: 0 2px 6px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-mode-tabs {
+      display: flex; gap: 2px; padding: 3px; margin-bottom: 8px;
+      background: var(--muted); border-radius: 8px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-mode-tabs button {
+      flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+      min-height: 25px; padding: 2px 6px; border: 0; border-radius: 6px;
+      color: var(--muted-foreground); background: transparent; font-size: 11px; font-weight: 500;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-mode-tabs button[aria-current="page"] {
+      background: var(--input-surface); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-mode-tabs svg { width: 13px; height: 13px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-action {
+      display: flex; align-items: center; justify-content: flex-start; gap: 8px;
+      width: 100%; min-height: 29px; height: 29px; padding: 4px 7px; border: 0; border-radius: 6px;
+      background: transparent; font-size: 12px; color: var(--muted-foreground); text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-action:hover:not(:disabled) { background: var(--message-hover, var(--muted)); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-action[aria-current="page"] { background: var(--session-selected, var(--muted)); color: var(--foreground); font-weight: 500; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-action svg { width: 14px; height: 14px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-code-action kbd {
+      margin-left: auto; color: var(--muted-foreground); font-family: var(--krim-font-sans);
+      font-size: 11px; opacity: .75;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-back-chat {
+      color: var(--foreground); font-weight: 500; margin-bottom: 2px;
+      background: color-mix(in srgb, var(--muted) 65%, transparent);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-more-navigation { display: grid; gap: 1px; padding: 2px 0 4px 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      min-height: 26px; padding: 0 4px 4px; color: var(--muted-foreground); font-size: 11px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-toolbar > button {
+      display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 3px 4px;
+      border-radius: 5px; background: transparent; color: inherit;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-toolbar > button:hover { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-toolbar svg { width: 12px; height: 12px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-list.session-tree {
+      flex: 1 1 auto; min-height: 0; margin: 0 calc(-1 * var(--sidebar-padding-inline)) 0 0;
+      padding: 0 calc(2px + var(--sidebar-padding-inline) - var(--scrollbar-size)) 8px 2px;
+      overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-list, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-children { list-style: none; padding: 0; margin: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-group { position: relative; margin-bottom: 10px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading {
+      display: flex; align-items: center; min-height: 28px; padding: 0 2px 0 4px; gap: 2px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading > button:first-child {
+      display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; padding: 3px 4px; text-align: left;
+      border: 0; border-radius: 6px; background: transparent;
+      color: var(--foreground); font-size: 13px; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading.is-pinned > button:first-child {
+      font-size: 12px; font-weight: 600; color: var(--muted-foreground); letter-spacing: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading > button:first-child:hover {
+      background: color-mix(in srgb, var(--muted) 70%, transparent); color: var(--foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading .group-title {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading .group-chevron {
+      display: inline-grid; place-items: center; color: var(--muted-foreground); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading svg { width: 12px; height: 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-heading .group-badge {
+      font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px;
+      background: var(--muted); color: var(--muted-foreground); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-group-new {
+      display: grid; place-items: center; width: 24px; height: 24px; padding: 0; flex-shrink: 0;
+      border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-group-new:hover { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-group-new svg { width: 13px; height: 13px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-group > .session-tree-list {
+      padding-left: 14px; margin-top: 1px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-group-empty {
+      margin: 2px 0 4px; padding: 2px 6px 2px 20px;
+      color: var(--muted-foreground); font-size: 11.5px;
+    }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row {
+      --session-row-background: transparent;
+      position: relative; display: flex; align-items: center; gap: 0; min-width: 0;
+      border-radius: 6px; background: var(--session-row-background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row:is(:hover, :focus-within) { --session-row-background: var(--message-hover, var(--muted)); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row.is-selected { --session-row-background: var(--session-selected, var(--message-hover)); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-select {
+      display: flex; flex: 1 1 auto; align-items: center; gap: 6px; width: 100%; min-width: 0;
+      min-height: 28px; padding: 3px 6px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted-foreground); font-size: 12px; font-weight: 400; line-height: 1.4; text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row:hover .session-select { color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row.is-selected .session-select { color: var(--foreground); font-weight: 500; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-select > svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-disclosure {
+      display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px;
+      background: transparent; color: var(--muted-foreground); width: 20px; height: 26px; flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-disclosure:hover { color: var(--foreground); background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-disclosure svg { width: 12px; height: 12px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-status { width: 6px; height: 6px; border-radius: 50%; margin: 0 5px; flex: 0 0 6px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-status.waiting { background: #c39632; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-status.running { background: #2a78d6; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-more {
+      display: grid; place-items: center; width: 22px; min-width: 22px; height: 26px; padding: 0; margin-right: 2px;
+      border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground); opacity: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-more svg { width: 14px; height: 14px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-session-row:is(:hover, :focus-within) .session-more, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-more[aria-expanded="true"] { opacity: 1; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-more:hover { background: color-mix(in srgb, var(--foreground) 8%, var(--session-row-background)); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-children {
+      margin: 1px 0 2px 9px; padding-left: 7px; border-left: 1px solid var(--border);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree-children .session-select {
+      min-height: 26px; font-size: 11.5px;
+    }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree .is-drag-source { opacity: .45; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree .drop-before::before, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree .drop-after::after {
+      content: ""; position: absolute; left: 4px; right: 4px; height: 2px; border-radius: 1px; background: var(--ring); z-index: 2; pointer-events: none;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree .drop-before::before { top: -1px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-tree .drop-after::after { bottom: -1px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-current-section {
+      display: grid; flex: 1 1 auto; align-content: start; gap: 2px;
+      margin-right: calc(-1 * var(--sidebar-padding-inline));
+      padding: 10px calc(2px + var(--sidebar-padding-inline) - var(--scrollbar-size)) 10px 2px;
+      border-top: 1px solid var(--border); overflow-y: auto; scrollbar-gutter: stable;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-observe-link {
+      display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 30px;
+      padding: 4px 8px; border: 0; border-radius: 6px; background: transparent;
+      color: var(--muted-foreground); font-size: 12px; text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-observe-link:hover { background: var(--message-hover, var(--muted)); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-observe-link[aria-current="page"] { background: var(--session-selected, var(--muted)); color: var(--foreground); font-weight: 500; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .sidebar-account {
+      display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-top: auto;
+      margin-inline: calc(-1 * var(--sidebar-padding-inline));
+      padding: 8px var(--sidebar-padding-inline) 0; border-top: 1px solid var(--border);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-button {
+      display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; min-height: 36px;
+      padding: 4px 7px; border: 0; border-radius: 7px; background: transparent; color: var(--foreground); text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-button:hover { background: var(--message-hover, var(--muted)); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-avatar {
+      display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border-radius: 50%;
+      background: color-mix(in srgb, var(--brand-accent) 20%, var(--background)); color: var(--brand-accent);
+      font-size: 11px; font-weight: 600;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-identity-line {
+      display: flex; align-items: center; gap: 5px; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-identity-line strong { font-size: 12px; font-weight: 600; flex-shrink: 0; max-width: 62%; overflow: hidden; text-overflow: ellipsis; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .identity-dot { color: var(--muted-foreground); flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-gateway { color: var(--muted-foreground); font-size: 11px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-button > svg { width: 13px; height: 13px; color: var(--muted-foreground); flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-toolbar {
+      z-index: 2; display: flex; align-items: center; gap: 6px; min-height: 44px;
+      padding: 0 12px; border-bottom: 1px solid transparent; background: var(--background); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-toolbar.is-bordered { border-bottom-color: var(--border); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .actions-divider { width: 1px; height: 16px; margin: 0 3px; background: var(--border); flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-title { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; gap: 8px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-title h1 {
+      margin: 0; min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600;
+      letter-spacing: -.2px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-project-pill {
+      display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 5px;
+      background: var(--muted); color: var(--muted-foreground); font-size: 11px; white-space: nowrap; border: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-project-pill:hover { color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-project-pill svg { width: 12px; height: 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-workbench { display: flex; flex: 1 1 0%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-main {
+      --chat-padding-inline: 28px;
+      display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0;
+      padding: 0 var(--chat-padding-inline) 10px; position: relative;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-main.is-hidden-by-max { display: none; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-main > .chat-history-shell {
+      position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0;
+      margin-inline: calc(-1 * var(--chat-padding-inline));
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-transcript {
+      flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden;
+      padding-inline: var(--chat-padding-inline);
+      overscroll-behavior: contain; scrollbar-gutter: stable both-edges;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-thread { width: min(960px, 100%); min-width: 0; margin: 0 auto; padding: 24px 0 18px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-empty-guide {
+      width: min(680px, 100%); margin: clamp(28px, 10dvh, 96px) auto 24px;
+      display: grid; gap: 18px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-empty-guide h2 { margin: 0; font-size: 22px; font-weight: 550; letter-spacing: -.3px; color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-empty-guide p { margin: 5px 0 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.6; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-card {
+      display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--input-surface);
+      text-align: left; transition: border-color 120ms, background-color 120ms;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-card:hover { border-color: var(--input); background: color-mix(in srgb, var(--muted) 45%, var(--input-surface)); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-icon {
+      display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px;
+      background: var(--muted); color: var(--foreground); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-icon svg { width: 15px; height: 15px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-body { min-width: 0; flex: 1; display: grid; gap: 2px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-body span { font-size: 11px; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-body strong { font-size: 13px; font-weight: 550; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-setup-body small { font-size: 11px; color: var(--muted-foreground); line-height: 1.5; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-quick-prompts { display: flex; flex-wrap: wrap; gap: 6px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-prompt-pill {
+      padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px;
+      background: transparent; color: var(--muted-foreground); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .empty-prompt-pill:hover { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-turn {
+      min-width: 0; padding: 8px 0; margin-bottom: 22px; border-radius: 8px;
+      transition: background-color 400ms, outline-color 400ms;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-turn:last-child { margin-bottom: 4px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-turn.is-highlighted {
+      background: color-mix(in srgb, var(--ring) 9%, transparent);
+      outline: 1px solid color-mix(in srgb, var(--ring) 45%, transparent);
+      padding-inline: 10px; margin-inline: -10px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-wrap { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 16px; gap: 4px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-message {
+      position: relative; max-width: min(720px, 100%); padding: 8px 13px;
+      border-radius: 10px; background: var(--muted);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-text {
+      margin: 0; color: var(--foreground); font-family: var(--krim-font-sans);
+      font-size: var(--reading-size, 14px); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-actions {
+      display: flex; align-items: center; gap: 2px; height: 24px; opacity: 0; pointer-events: none; transition: opacity 120ms;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-wrap:is(:hover, :focus-within) .chat-user-actions { opacity: 1; pointer-events: auto; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-answer-actions {
+      display: flex; align-items: center; gap: 2px; min-height: 28px; margin: 8px 0 0 -5px;
+      opacity: 0; transition: opacity 120ms;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-turn:is(:hover, :focus-within, :last-child) .chat-answer-actions { opacity: 1; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-message-action {
+      display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted-foreground); font-size: 11px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-message-action:hover { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-message-action svg { width: 13.5px; height: 13.5px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown {
+      min-width: 0; color: var(--message-foreground); font-size: var(--reading-size, 14px);
+      line-height: 1.48; overflow-wrap: anywhere;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown > :first-child { margin-top: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown > :last-child { margin-bottom: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown p { margin: 10px 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h1, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h2, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h3 {
+      margin: 20px 0 8px; color: var(--message-heading); font-weight: 600; line-height: 1.4;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h1 { font-size: 1.4em; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h2 { font-size: 1.2em; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown h3 { font-size: 1.08em; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown ul, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown ol { margin: 10px 0; padding-left: 1.6em; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown li { margin: 4px 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown :not(pre) > code {
+      padding: .1em .35em; border: 1px solid var(--message-border); border-radius: 4px;
+      font: .92em/1.5 var(--krim-font-mono); background: var(--message-cell-background); color: var(--message-inline-color);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-code-block {
+      position: relative; display: block; width: 100%; max-width: 100%; margin: 12px 0;
+      overflow: hidden; border: 1px solid var(--message-border); border-radius: 8px; background: var(--message-code-background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-code-head {
+      display: flex; align-items: center; justify-content: space-between; min-height: 30px;
+      padding: 0 8px 0 12px; border-bottom: 1px solid var(--message-border);
+      background: color-mix(in srgb, var(--muted) 45%, var(--message-code-background));
+      color: var(--message-muted); font-size: 11px; font-family: var(--krim-font-mono);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-code-block pre {
+      margin: 0; padding: 10px 14px; overflow-x: auto; white-space: pre;
+      font: calc(var(--reading-size, 14px) - 1px)/1.55 var(--krim-font-mono); tab-size: 2; color: var(--message-code-color);
+    }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-table-scroll { width: 100%; margin: 11px 0; overflow-x: auto; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown table { width: 100%; border-collapse: separate; border-spacing: 2px; text-align: left; font-size: calc(var(--reading-size, 14px) - 1px); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown th, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown td { padding: 6px 9px; border-radius: 3px; background: var(--message-cell-background); line-height: 1.43; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .message-markdown th { background: var(--message-header-background); color: var(--message-foreground); font-weight: 550; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool { margin: 6px 0 10px; color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool > summary {
+      display: flex; align-items: center; gap: 7px; min-height: 29px; padding: 3px 6px; margin-inline: -6px;
+      border-radius: 6px; list-style: none; cursor: pointer; font-size: 12.5px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool > summary::-webkit-details-marker { display: none; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool > summary:hover { background: color-mix(in srgb, var(--muted) 65%, transparent); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool summary svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool .chat-tool-chevron { width: 12px; height: 12px; transition: transform 120ms; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool[open] .chat-tool-chevron { transform: rotate(90deg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-name { font-weight: 550; white-space: nowrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-target {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--muted-foreground); font-family: var(--krim-font-mono); font-size: 11.5px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-meta { margin-left: auto; flex-shrink: 0; color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-spinner { animation: krim-spin 1.1s linear infinite; color: #2a78d6 !important; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-body {
+      display: grid; gap: 9px; margin: 5px 0 4px; padding: 11px 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--input-surface); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 11px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-tool-output {
+      max-height: 220px; margin: 0; padding: 9px 11px; border-radius: 6px;
+      background: var(--muted); overflow: auto; font: 12px/1.55 var(--krim-font-mono); white-space: pre;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-card {
+      width: min(960px, 100%); margin: 0 auto 12px; border: 1px solid var(--border);
+      border-radius: 9px; background: var(--input-surface); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-card > summary {
+      display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 11px;
+      list-style: none; cursor: pointer;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-card > summary::-webkit-details-marker { display: none; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-card > summary svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-card > summary strong { font-weight: 550; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-counts { margin-left: auto; display: flex; align-items: center; gap: 10px; color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-steps { list-style: none; margin: 0; padding: 0 12px 8px; display: grid; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step {
+      display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step svg { width: 13.5px; height: 13.5px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step[data-status="completed"] svg { color: var(--status-ok-fg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step[data-status="in_progress"] svg { color: var(--status-info-fg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step[data-status="pending"] { color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .task-plan-step[data-status="pending"] svg { color: var(--muted-foreground); }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-approval, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-card {
+      display: grid; gap: 10px; margin: 12px 0 16px; padding: 13px 14px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--input-surface); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-approval[data-risk="write"], :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-card[data-pending="true"] {
+      border-color: color-mix(in srgb, var(--ring) 70%, var(--border));
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-title, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-head {
+      display: flex; align-items: center; gap: 8px; font-size: 13px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-title svg, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-head svg { width: 15px; height: 15px; color: var(--muted-foreground); flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-title strong, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-head strong { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-badge {
+      margin-left: auto; padding: 2px 7px; border-radius: 5px; font-size: 11px; font-weight: 500;
+      background: var(--status-warn-bg); color: var(--status-warn-fg); white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-badge.is-done { background: var(--status-ok-bg); color: var(--status-ok-fg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-arguments, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-plan-box {
+      margin: 0; padding: 9px 11px; border-radius: 6px; background: var(--muted);
+      font: 12px/1.55 var(--krim-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .interaction-plan-box { font-family: var(--krim-font-sans); font-size: 12.5px; line-height: 1.6; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-scope select {
+      height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--background); color: var(--foreground); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-options { display: grid; gap: 6px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-option {
+      display: flex; align-items: flex-start; gap: 9px; padding: 9px 11px;
+      border: 1px solid var(--border); border-radius: 7px; cursor: pointer; background: var(--background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-option:has(input:checked) {
+      border-color: var(--ring); background: color-mix(in srgb, var(--ring) 7%, var(--background));
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-option input { margin: 3px 0 0; accent-color: var(--primary); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-option strong { display: block; font-size: 12.5px; font-weight: 550; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .question-option small { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 11.5px; line-height: 1.5; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer {
+      position: relative; display: flex; flex: 0 0 auto; align-items: center;
+      width: min(960px, 100%); min-height: 46px; margin: 0 auto;
+      padding: 12px 50px 12px 46px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--input-surface);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer:focus-within {
+      border-color: var(--ring);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--ring) 14%, transparent);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer #chat-prompt {
+      display: block; flex: 1; width: 100%; min-width: 0; min-height: 20px;
+      max-height: min(220px, 34dvh); margin: 0; padding: 0; border: 0; border-radius: 0;
+      box-shadow: none; outline: 0; resize: none;
+      background: transparent; color: var(--foreground);
+      font-family: var(--krim-font-sans); font-size: 14px; line-height: 20px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer #chat-prompt::placeholder { color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer .composer-add {
+      position: absolute; left: 9px; bottom: 8px; display: grid; place-items: center;
+      width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted-foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer .composer-add:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer .composer-add svg { width: 16px; height: 16px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-compose-actions { position: absolute; right: 8px; bottom: 8px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-send {
+      display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+      border: 0; border-radius: 6px; background: transparent; color: var(--foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-send:hover:not(:disabled) { background: var(--muted); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-send:disabled { opacity: .35; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-send svg { width: 16px; height: 16px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-controls {
+      display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between;
+      gap: 8px; width: min(960px, 100%); min-height: 30px; margin: 5px auto 0; flex-wrap: wrap;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-controls-left, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-controls-right { display: flex; align-items: center; gap: 2px; min-width: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-controls-right { margin-left: auto; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip {
+      display: inline-flex; align-items: center; gap: 4px; min-height: 27px; padding: 0 8px;
+      border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground);
+      font-size: 12px; white-space: nowrap;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip:hover:not(:disabled), :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip[aria-expanded="true"] {
+      background: var(--muted); color: var(--foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip.is-strong { color: var(--foreground); font-weight: 500; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip svg { width: 12.5px; height: 12.5px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip .chip-dot { width: 6px; height: 6px; border-radius: 50%; background: #318052; }
+    :root[data-theme="dark"] :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip .chip-dot { background: #65c58b; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .context-meter {
+      display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+      min-height: 27px; padding: 0 7px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .context-meter:hover, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .context-meter[aria-expanded="true"] { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-panel-root {
+      --info-width: 300px;
+      --work-width: 460px;
+      display: flex; align-items: stretch; flex: 0 0 auto; min-width: 0; min-height: 0; height: 100%;
+      font-size: 12px; background: var(--background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-panel-root.is-work-maximized { flex: 1 1 auto; width: 100%; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-rail {
+      display: flex; flex-direction: column; gap: 4px; padding: 8px 5px;
+      border-left: 1px solid var(--border); background: var(--background); flex-shrink: 0;
+    }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info {
+      display: flex; flex-direction: column; flex: 0 0 var(--info-width); width: var(--info-width);
+      min-height: 0; min-width: 0; padding: 12px 12px 14px 14px;
+      border-left: 1px solid var(--border); overflow-y: auto; overflow-x: hidden;
+      overscroll-behavior: contain; background: var(--background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 26px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info h2, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info h3 { margin: 0; font-size: 13px; line-height: 1.45; font-weight: 550; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-link {
+      display: inline-flex; align-items: center; gap: 3px; border: 0; padding: 2px 5px;
+      border-radius: 5px; background: transparent; color: var(--muted-foreground); font-size: 11px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-link:hover { background: var(--muted); color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-link svg { width: 11.5px; height: 11.5px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-section {
+      display: flex; flex-direction: column; flex-shrink: 0;
+      padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-info-section:last-child { margin-bottom: 0; border-bottom: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-environment-body { padding-top: 5px; display: grid; gap: 1px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-env-row {
+      display: flex; align-items: center; width: 100%; min-height: 29px; gap: 8px;
+      padding: 4px 6px; margin-inline: -4px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--foreground); text-align: left; font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-env-row:hover { background: var(--muted); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-env-row svg { width: 14.5px; height: 14.5px; flex-shrink: 0; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-env-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-env-value { max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-state-mini { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-state-mini.ready { background: #318052; }
+    :root[data-theme="dark"] :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-state-mini.ready { background: #65c58b; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-state-mini.stopped { background: #a1a19b; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-overview { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 8px 0 6px; font-size: 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-overview strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-overview span { color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-context-bar {
+      display: flex; width: 100%; height: 7px; gap: 1px; border-radius: 4px;
+      overflow: hidden; background: var(--muted); margin-bottom: 8px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-context-bar > i { display: block; height: 100%; min-width: 2px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-table td { height: 24px; padding: 1px 0; vertical-align: middle; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-table td:first-child { display: flex; align-items: center; gap: 6px; height: 24px; white-space: nowrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-table td:nth-child(2), :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-table td:nth-child(3) {
+      padding-left: 6px; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 11.5px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .obs-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-context-end {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between;
+      margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--border); color: var(--muted-foreground); font-size: 11px;
+    }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail { margin-top: 6px; min-width: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail > summary {
+      display: flex; align-items: center; gap: 5px; min-height: 28px; list-style: none;
+      cursor: pointer; color: var(--muted-foreground); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail > summary::-webkit-details-marker { display: none; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail > summary:hover { color: var(--foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail > summary svg { width: 12px; height: 12px; transition: transform 100ms; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail[open] > summary svg { transform: rotate(90deg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail-count { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-detail-list {
+      max-height: 148px; overflow-y: auto; overscroll-behavior: contain;
+      margin-left: 5px; padding: 2px 3px 2px 14px; border-left: 1px solid var(--border);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-list { max-height: 172px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-tool-row, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+      min-height: 27px; padding: 2px 5px; border: 0; border-radius: 5px; background: transparent;
+      color: var(--foreground); text-align: left; font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-tool-row:hover, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-row:hover { background: var(--muted); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-tool-row span:first-child, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-row span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-tool-row small, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-row small { color: var(--muted-foreground); font-size: 10.5px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-memory-source { margin: 6px 0 3px; color: var(--muted-foreground); font-size: 10.5px; font-weight: 600; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-group-label { margin: 6px 0 3px; color: var(--muted-foreground); font-size: 11px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-row {
+      display: flex; align-items: center; gap: 7px; width: 100%; min-height: 28px;
+      padding: 3px 6px; margin-inline: -4px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--foreground); text-align: left; font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-row:hover { background: var(--muted); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-row svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--muted-foreground); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-output-row > small { flex-shrink: 0; font-family: var(--krim-font-mono); font-size: 10.5px; color: var(--status-ok-fg); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work {
+      position: relative; display: flex; flex-direction: column;
+      width: var(--work-width); flex: 0 0 var(--work-width); min-width: 0; min-height: 0;
+      overflow: hidden; border-left: 1px solid var(--border); background: var(--background);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work.is-maximized { width: 100% !important; flex: 1 1 auto !important; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-resizer {
+      position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; z-index: 5;
+      cursor: col-resize; background: transparent; transition: background-color 120ms;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-resizer:hover, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-resizer.is-dragging { background: var(--ring); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-topbar {
+      display: flex; align-items: center; gap: 2px; height: 42px; padding: 0 8px;
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-topbar > strong { margin: 0 auto 0 4px; font-size: 12px; font-weight: 550; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-stack { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-stack.split { display: grid; grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-slot { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-stack.split > .g-work-slot + .g-work-slot { border-top: 1px solid var(--border); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tabbar {
+      display: flex; align-items: center; gap: 3px; min-height: 36px; padding: 4px 7px;
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tabs { display: flex; flex: 1; gap: 3px; min-width: 0; overflow-x: auto; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab {
+      display: flex; align-items: center; flex: 0 0 auto; max-width: 190px; height: 27px;
+      border-radius: 6px; color: var(--muted-foreground);
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab[aria-selected="true"] { background: var(--muted); color: var(--foreground); font-weight: 500; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab > button:first-child {
+      display: inline-flex; align-items: center; gap: 5px; min-width: 0; height: 27px; padding: 0 8px;
+      border: 0; background: transparent; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab > button:first-child svg { width: 12.5px; height: 12.5px; flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab > button:last-child {
+      display: grid; place-items: center; width: 22px; height: 24px; padding: 0;
+      border: 0; border-radius: 5px; background: transparent;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab > button:last-child svg { width: 11.5px; height: 11.5px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-tab > button:last-child:hover { background: color-mix(in srgb, var(--foreground) 10%, transparent); }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-address {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 34px;
+      padding: 4px 10px; border-bottom: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px; flex-shrink: 0;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-crumbs { display: flex; align-items: center; gap: 3px; min-width: 0; flex-wrap: wrap; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-content { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-document { padding: 14px 16px; min-width: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .appearance-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .appearance-card {
+      display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 9px;
+      background: var(--input-surface); text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .appearance-card[aria-pressed="true"] { border-color: var(--ring); outline: 1px solid var(--ring); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .theme-swatch { display: block; width: 100%; height: 32px; border-radius: 6px; border: 1px solid var(--border); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .theme-swatch-warm { background: linear-gradient(90deg, #f0ebdf 34%, #faf7ee 34% 78%, #b35d3d 78%); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .theme-swatch-bright { background: linear-gradient(90deg, #fdfdfc 34%, #f1f1f0 34% 78%, #292927 78%); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .theme-swatch-dark { background: linear-gradient(90deg, #191c1e 34%, #111315 34% 78%, #d98468 78%); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .popover-menu {
+      position: fixed; z-index: 62; display: grid; gap: 2px; min-width: 224px; max-width: min(340px, calc(100vw - 16px));
+      max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground);
+      box-shadow: 0 8px 28px rgb(0 0 0 / 16%); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item {
+      display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 9px;
+      border: 0; border-radius: 6px; background: transparent; color: var(--foreground); font-size: 12px; text-align: left;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item svg { width: 14.5px; height: 14.5px; color: var(--muted-foreground); flex-shrink: 0; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item:hover:not(:disabled) { background: var(--muted); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item:disabled { opacity: .5; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item.danger, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item.danger svg { color: var(--destructive); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-item kbd { margin-left: auto; color: var(--muted-foreground); font-family: var(--krim-font-sans); font-size: 11px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-separator { width: calc(100% - 4px); height: 1px; margin: 4px 2px; border: 0; background: var(--border); }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-hint { margin: 5px 9px; color: var(--muted-foreground); font-size: 11.5px; line-height: 1.55; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-identity { padding: 7px 9px 9px; border-bottom: 1px solid var(--border); margin-bottom: 3px; display: grid; gap: 2px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-identity strong { font-size: 12px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .menu-identity span { color: var(--muted-foreground); font-size: 11px; }
+
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover { gap: 10px; min-width: 252px; padding: 10px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover h3 { margin: 0; font-size: 13px; font-weight: 600; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover h4 { margin: 0 0 6px; color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover .pop-grid { display: flex; gap: 6px; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover .pop-grid > button {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+      min-height: 48px; padding: 6px 4px; border: 1px solid var(--border); border-radius: 7px; background: var(--input-surface); font-size: 12px;
+    }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover .pop-grid.sizes > button { min-height: 32px; flex-direction: row; }
+    :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .settings-popover .pop-grid > button.is-selected { border-color: var(--ring); outline: 1px solid var(--ring); }
+    @media (max-width: 1520px) {
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work:not(.is-maximized) {
+        position: fixed; z-index: 45; inset: 44px 0 0 auto;
+        width: min(var(--work-width), calc(100vw - 24px));
+        box-shadow: -12px 0 32px rgb(0 0 0 / 10%);
+      }
+    }
+    @media (max-width: 1200px) {
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-panel-root:not([data-info="drawer"]) .g-info { display: none; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-panel-root[data-info="drawer"] .g-info {
+        position: fixed; z-index: 48; inset: 48px 8px 8px auto;
+        width: 304px; max-width: calc(100vw - 16px); border: 1px solid var(--border);
+        border-radius: 10px; box-shadow: -6px 8px 28px rgb(0 0 0 / 14%);
+      }
+    }
+    @media (max-width: 700px) {
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .dev-rail { display: none; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .icon-button { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-toolbar { min-height: 48px; padding: 4px 8px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .toolbar-project-pill { display: none; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-main { --chat-padding-inline: 12px; padding: 0 var(--chat-padding-inline) max(8px, env(safe-area-inset-bottom)); }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer { min-height: 52px; padding: 14px 56px 14px 46px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-composer .composer-add { bottom: 12px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-compose-actions { right: 5px; bottom: 5px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-compose-actions .chat-send { width: 40px; height: 40px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .control-chip, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .context-meter { min-height: 36px; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-user-actions, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-answer-actions, :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .session-more { opacity: 1; pointer-events: auto; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work { position: fixed; z-index: 46; inset: 48px 0 0 0 !important; width: 100vw !important; border-left: 0; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .g-work-resizer { display: none; }
+      :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .appearance-cards { grid-template-columns: minmax(0, 1fr); }
+      .mobile-drawer-content {
+        width: min(92vw, 336px); height: 100dvh; max-height: 100dvh; padding: 10px 8px; gap: 4px;
+        border-radius: 0 12px 12px 0; border-left: 0; display: flex; flex-direction: column;
+      }
+      .mobile-drawer-content .app-sidebar { padding-top: 2px; background: transparent; }
+    }

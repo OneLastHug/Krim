@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import {
-  Archive, Maximize2, Minimize2, ChevronRight, ChevronUp, CodeXml, Columns2, Download, FileText, Folder, FolderOpen,
+  Cpu, Globe, Copy, FileCode, GitFork, ArrowUpRight, Maximize2, Minimize2, ChevronRight, ChevronUp, Columns2, Download, FileText, Folder, FolderOpen,
   Image, KeyRound, PanelRight, Plus, Shield, Terminal, X,
 } from "lucide-react";
 import { parseTurn, sessionPath, type Turn, type SessionContextPolicy } from "../lib/session-contracts.ts";
@@ -15,12 +15,16 @@ import { useSessionCompaction } from "../hooks/use-session-compaction";
 import { request } from "../api.ts";
 import { parsePreviewBootstrap, registeredPreviews } from "../lib/development-previews";
 import { displayToolName } from "../lib/tool-names";
+import { modeLabels } from "../lib/execution-policy";
+import { contextCount } from "./ContextSummary";
 import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
 import { PopoverMenu } from "./popover-menu.tsx";
 import "./development-panel.css";
 import { MessageMarkdown } from "./messages/MessageMarkdown";
+import { useCopyFeedback } from "../hooks/use-copy-feedback";
+import { CopyFeedback } from "./messages/CopyFeedback";
 import { ContextSummary } from "./ContextSummary";
 import type { SessionContextState } from "../hooks/use-session-context";
 import type { DevelopmentActionDetail } from "../lib/workbench-events";
@@ -40,7 +44,7 @@ function workWidthLimit(element: HTMLElement | null): number {
 
 type WorkTab =
   | { id: string; type: "browser"; title: string }
-  | { id: string; type: "document"; title: string; path: string | null }
+  | { id: string; type: "document"; title: string; path: string | null; rawMarkdown?: boolean }
   | { id: string; type: "aux"; title: string; sessionId: string };
 
 type PanelDialog =
@@ -49,23 +53,18 @@ type PanelDialog =
   | { kind: "project" }
   | { kind: "secrets" }
   | { kind: "context" }
+  | { kind: "connections" }
   | { kind: "tool"; tool: ToolEntry }
   | { kind: "connection"; connection: McpConnection };
 
 function useMediaQuery(query: string, fallbackWidth: number) {
-  const [matches, setMatches] = useState(() =>
-    (typeof window !== "undefined" && window.matchMedia?.(query).matches) ?? window.innerWidth <= fallbackWidth);
+  const fallback = () => query.includes("min-width") ? window.innerWidth > fallbackWidth : window.innerWidth <= fallbackWidth;
+  const [matches, setMatches] = useState(() => typeof window !== "undefined" ? window.matchMedia?.(query).matches ?? fallback() : false);
   useEffect(() => {
     const media = window.matchMedia?.(query);
-    if (!media) {
-      const update = () => setMatches(window.innerWidth <= fallbackWidth);
-      window.addEventListener("resize", update);
-      return () => window.removeEventListener("resize", update);
-    }
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
+    const update = () => setMatches(window.matchMedia?.(query).matches ?? fallback());
+    update(); window.addEventListener("resize", update); media?.addEventListener?.("change", update);
+    return () => { window.removeEventListener("resize", update); media?.removeEventListener?.("change", update); };
   }, [query, fallbackWidth]);
   return matches;
 }
@@ -79,19 +78,24 @@ const lastSegment = (path: string) => path.split("/").at(-1) ?? path;
 
 const EMPTY_TABS: WorkTab[] = [];
 
-export function DevelopmentPanel({ chat, apiKey, active, fence, development, dark, context, onContextTrace }: {
+export function DevelopmentPanel({ chat, apiKey, active, fence, development, dark, context, onContextTrace, onMaximizedChange }: {
   chat: SessionState; apiKey: string; active: boolean; fence: { current: number };
-  development?: DevelopmentState; dark?: boolean; context?: SessionContextState; onContextTrace?: () => void;
+  development?: DevelopmentState; dark?: boolean; context?: SessionContextState; onContextTrace?: () => void; onMaximizedChange?: (maximized: boolean) => void;
 }) {
   const fallbackDev = useDevelopment(chat, apiKey, active && !development, fence);
   const dev = development ?? fallbackDev;
   const compaction = useSessionCompaction(chat, apiKey, active, fence);
   const narrow = useMediaQuery("(max-width: 1200px)", 1200);
   const workInline = useMediaQuery("(min-width: 1521px)", 1520);
-  const [infoOpen, setInfoOpen] = useState(() => window.innerWidth > 1200);
+  const [desktopInfoOpen, setDesktopInfoOpen] = useState(true);
+  const [drawerInfoOpen, setDrawerInfoOpen] = useState(false);
+  const infoOpen = narrow ? drawerInfoOpen : desktopInfoOpen;
+  const setInfoOpen = useCallback((value: boolean | ((previous: boolean) => boolean)) => {
+    if (narrow) setDrawerInfoOpen(value); else setDesktopInfoOpen(value);
+  }, [narrow]);
   const [workOpen, setWorkOpen] = useState(false);
   const [split, setSplit] = useState(false);
-  const [maximized, setMaximized] = useState(false), [workWidth, setWorkWidth] = useState(440), [showAllFiles, setShowAllFiles] = useState(false);
+  const [maximized, setMaximized] = useState(false), [workWidth, setWorkWidth] = useState(460), [showAllFiles, setShowAllFiles] = useState(false);
   const [workLimit, setWorkLimit] = useState(() => workWidthLimit(null));
   const workElement = useRef<HTMLElement>(null);
   const resizeStart = useRef<{ x: number; width: number; pointer: number } | null>(null);
@@ -119,7 +123,6 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
   const [activeTabs, setActiveTabs] = useState<(string | null)[]>([null, null]);
   const [dialog, setDialog] = useState<PanelDialog | null>(null);
   const [addMenuSlot, setAddMenuSlot] = useState<{ slot: number; anchor: HTMLButtonElement } | null>(null);
-  const outputsButton = useRef<HTMLButtonElement | null>(null);
   const identity = `${chat.actor?.principal_id ?? ""}:${chat.actor?.generation ?? ""}:${chat.workspace}:${chat.id}`;
   const previousIdentity = useRef(identity);
   const comingSoon = useCallback((label: string) => setDialog({ kind: "coming", label }), []);
@@ -169,21 +172,26 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
       setSplit(false);
     }
   }
-  function toggleWork() {
-    if (workOpen) { setWorkOpen(false); return; }
-    if (!(slots[0] ?? EMPTY_TABS).length) addTab(filesTab(), 0);
-    else setWorkOpen(true);
+  function toggleFiles() {
+    const selected = slots[activeSlot]?.find(tab => tab.id === activeTabs[activeSlot]);
+    if (workOpen && selected?.type === "document" && !maximized) setWorkOpen(false);
+    else addTab(filesTab(), 0);
+  }
+  function toggleBrowser() {
+    const selected = slots[activeSlot]?.find(tab => tab.id === activeTabs[activeSlot]);
+    if (workOpen && selected?.type === "browser" && !maximized) setWorkOpen(false);
+    else addTab({ id: "browser", type: "browser", title: "浏览器预览" }, 0);
   }
   // Esc 关闭覆盖态；对话框自身处理 Esc，这里跳过。
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key !== "Escape" || document.querySelector('[role="dialog"]')) return;
-      if (workOpen && !workInline) { event.stopPropagation(); setWorkOpen(false); }
-      else if (infoOpen && narrow) { event.stopPropagation(); setInfoOpen(false); }
+      if (infoOpen && narrow && !(workOpen && maximized)) { event.stopPropagation(); setInfoOpen(false); }
+      else if (workOpen && !workInline) { event.stopPropagation(); setWorkOpen(false); }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [workOpen, workInline, infoOpen, narrow]);
+  }, [workOpen, workInline, infoOpen, narrow, maximized, setInfoOpen]);
   // 侧栏"在辅助会话打开"接线：仅在当前身份、代次、工作区一致且会话在列表内时打开只读 AuxView。
   useEffect(() => {
     function onOpenAux(event: Event) {
@@ -204,39 +212,61 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
     const onAction = (event: Event) => {
       const source = (event as CustomEvent<DevelopmentActionDetail>).detail;
       if (!active || !chat.ready || !source || source.principal !== chat.actor?.principal_id || source.generation !== chat.actor?.generation || source.workspace !== chat.workspace || source.sessionId !== chat.id) return;
-      if (source.action === "files") addTab(filesTab(), 0);
-      else if (source.action === "browser") addTab({ id: "browser", type: "browser", title: "浏览器预览" }, 0);
-      else if (source.action === "info") setInfoOpen(value => !value);
-      else if (source.action === "context") setInfoOpen(true);
+      if (source.action === "files") toggleFiles();
+      else if (source.action === "browser") toggleBrowser();
+      else if (source.action === "info") { if (workOpen && maximized) { setMaximized(false); setInfoOpen(true); } else setInfoOpen(value => !value); }
+      else if (source.action === "context") { setMaximized(false); setInfoOpen(true); }
       else if (source.action === "project") setDialog({ kind: "project" });
       else if (source.action === "environment") setDialog({ kind: "environment" });
     };
     window.addEventListener("krim:development-action", onAction);
     return () => window.removeEventListener("krim:development-action", onAction);
-  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, activeSlot]);
-  const outputPaths = new Set<string>();
-  for (const turn of chat.history ?? []) {
-    for (const item of projectTurn(turn, chat.turnEvents?.[turn.id] ?? [], [], { events: chat.details[turn.id]?.events, facts: chat.turnFacts?.[turn.id] ?? chat.details[turn.id]?.facts })) {
-      if (item.type !== "tool" || !item.arguments || typeof item.arguments !== "object") continue;
-      const args = item.arguments as Record<string, unknown>;
-      const path = args.path ?? args.file_path;
-      if (typeof path === "string" && path.length <= 4096 && !path.split(/[\\/]/).includes("..")) outputPaths.add(path);
+  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, activeSlot, workOpen, maximized, slots, activeTabs, setInfoOpen]);
+  useEffect(() => {
+    onMaximizedChange?.(workOpen && maximized);
+    return () => onMaximizedChange?.(false);
+  }, [workOpen, maximized, onMaximizedChange]);
+  useEffect(() => {
+    const emit = () => {
+      if (!active || !chat.ready || !chat.actor) return;
+      const selected = slots[activeSlot]?.find(tab => tab.id === activeTabs[activeSlot]);
+      window.dispatchEvent(new CustomEvent("krim:development-state", { detail: {
+        principal: chat.actor.principal_id, generation: chat.actor.generation, workspace: chat.workspace, sessionId: chat.id,
+        projectTitle: dev.binding && dev.project && dev.binding.session_id === chat.id && dev.binding.project_id === dev.project.project_id ? dev.project.title : null, infoOpen: infoOpen && !(workOpen && maximized),
+        filesOpen: workOpen && selected?.type === "document", browserOpen: workOpen && selected?.type === "browser",
+      } }));
+    };
+    const requested = (event: Event) => {
+      const value = (event as CustomEvent).detail;
+      if (value?.principal === chat.actor?.principal_id && value?.generation === chat.actor?.generation && value?.workspace === chat.workspace && value?.sessionId === chat.id) emit();
+    };
+    window.addEventListener("krim:development-state-request", requested); emit();
+    return () => window.removeEventListener("krim:development-state-request", requested);
+  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, dev.project?.title, infoOpen, maximized, workOpen, slots, activeSlot, activeTabs]);
+  const outputFiles = useMemo(() => {
+    const outputPaths = new Set<string>();
+    for (const turn of chat.history ?? []) {
+      const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : []) ?? [];
+      for (const item of projectTurn(turn, events, [], { events: chat.details[turn.id]?.events, facts: chat.turnFacts?.[turn.id] ?? chat.details[turn.id]?.facts })) {
+        if (item.type !== "tool" || !["read", "edit", "write", "read_file", "edit_file", "write_file"].includes(displayToolName(item.name)) || !item.arguments || typeof item.arguments !== "object") continue;
+        const args = item.arguments as Record<string, unknown>;
+        const path = args.path ?? args.file_path;
+        if (typeof path === "string" && path.length > 0 && path.length <= 4096 && !path.includes("\0") && !path.split(/[\\/]/).includes("..")) outputPaths.add(path);
+      }
     }
-  }
-  const outputFiles = [...outputPaths];
+    return [...outputPaths];
+  }, [chat.history, chat.currentTurn?.id, chat.events, chat.turnEvents, chat.details, chat.turnFacts]);
   const environmentState = dev.environment?.state ?? null;
   const policy = chat.session?.context_policy ?? null;
-  const overlayWork = workOpen && (!workInline || maximized);
   const drawerInfo = infoOpen && narrow;
 
-  return <div className="dev-panel-root" data-info={infoOpen ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline ? "inline" : "overlay") : "false"}>
-    {drawerInfo && <button type="button" className="g-info-backdrop" aria-label="关闭信息栏背景" onClick={() => setInfoOpen(false)}></button>}
-    {overlayWork && <button type="button" className="g-work-backdrop" aria-label="关闭工作区背景" onClick={() => setWorkOpen(false)}></button>}
-    {!infoOpen && <div className="dev-rail" role="toolbar" aria-label="开发面板开关" aria-orientation="vertical">
-      <Button variant="ghost" className="dev-rail-button" aria-label="显示信息栏" aria-pressed={infoOpen} onClick={() => setInfoOpen(true)}><PanelRight aria-hidden="true" /></Button>
-      <Button variant="ghost" className="dev-rail-button" aria-label={workOpen ? "关闭工作区" : "打开工作区"} aria-pressed={workOpen} onClick={toggleWork}><Columns2 aria-hidden="true" /></Button>
+  return <div className={`dev-panel-root${workOpen && maximized ? " is-work-maximized" : ""}`} data-info={infoOpen && !(workOpen && maximized) ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline || maximized ? "inline" : "overlay") : "false"}>
+    {!infoOpen && !(workOpen && maximized) && <div className="dev-rail" role="toolbar" aria-label="开发面板开关" aria-orientation="vertical">
+      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label="显示信息栏" title="展开开发信息栏" onClick={() => setInfoOpen(true)}><PanelRight aria-hidden="true" /></Button>
+      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label={workOpen ? "关闭工作区" : "打开工作区"} title="打开项目文件" onClick={toggleFiles}><Folder aria-hidden="true" /></Button>
+      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label="打开浏览器预览" title="打开浏览器预览" onClick={toggleBrowser}><Globe aria-hidden="true" /></Button>
     </div>}
-    {infoOpen && <section className="g-info" aria-label="开发信息栏">
+    {infoOpen && !(workOpen && maximized) && <section className="g-info" aria-label="开发信息栏">
       {(dev.notice || compaction.notice || dev.writes.length > 0) && <div className="dev-panel-status">
         {compaction.notice && <div className="dev-panel-notice" role="status"><p>{compaction.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭整理提示" onClick={compaction.dismiss}><X aria-hidden="true" /></Button></div>}
         {dev.notice && <div className="dev-panel-notice" role="status"><p>{dev.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭提示" onClick={dev.dismissNotice}><X aria-hidden="true" /></Button></div>}
@@ -249,27 +279,24 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
       <section className="g-info-section environment">
         <div className="g-info-head">
           <h2>Environment</h2>
-          <Button variant="ghost" size="icon-sm" aria-label={workOpen ? "关闭工作区" : "打开工作区"} aria-pressed={workOpen} onClick={toggleWork}><Columns2 aria-hidden="true" /></Button>
-          <Button variant="ghost" size="icon-sm" aria-label="关闭信息栏" onClick={() => setInfoOpen(false)}><X aria-hidden="true" /></Button>
+          <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label="关闭信息栏" title="收起信息栏" onClick={() => setInfoOpen(false)}><PanelRight aria-hidden="true" /></Button>
         </div>
-        <div className="g-section-body g-environment-body">
-          <EnvRow icon={Terminal} label="Linux 项目环境" value={projectId ? environmentRowLabel(environmentState) : "未准备"}
+        <div className="g-environment-body">
+          <EnvRow icon={Terminal} label="Linux 容器" value={projectId ? environmentRowLabel(environmentState) : "未准备"}
             state={projectId ? environmentState : null} onClick={() => setDialog({ kind: "environment" })} />
-          <EnvRow icon={Folder} label={dev.project?.title ?? "选择项目"} value={projectId ? "切换" : "绑定"}
-            title={dev.project?.title} onClick={() => setDialog({ kind: "project" })} />
-          <EnvRow icon={KeyRound} label="Secret" value={projectId ? "引用管理" : "未绑定"}
-            onClick={() => setDialog(projectId ? { kind: "secrets" } : { kind: "project" })} />
-          <EnvRow icon={CodeXml} label="终端" value="暂未开放" onClick={() => comingSoon("终端")} />
-          <EnvRow icon={Shield} label="项目权限" value={chat.execution?.policy?.project_access === "read" ? "只读" : chat.execution?.policy?.project_access === "write" ? "写入" : chat.execution?.loading ? "读取中" : chat.execution?.error ? "无法读取" : "未绑定"} onClick={() => void chat.execution?.openProject()} />
+          <EnvRow icon={Folder} label="项目" value={dev.project?.title ?? "选择项目"} title={dev.project?.title} onClick={() => setDialog({ kind: "project" })} />
+          <EnvRow icon={Shield} label="执行策略" value={chat.execution?.policy ? `${chat.execution.policy.project_access === "read" ? "只读 · " : ""}${modeLabels[chat.execution.policy.mode]}` : chat.execution?.loading ? "读取中" : "未提供"} onClick={() => void chat.execution?.openProject()} />
+          <EnvRow icon={KeyRound} label="Secrets 密钥" value={!projectId ? "未绑定" : Array.isArray(dev.secretRefs) ? `${dev.secretRefs.length} 项已配置` : "读取中"} onClick={() => setDialog(projectId ? { kind: "secrets" } : { kind: "project" })} />
+          <EnvRow icon={Cpu} label="MCP 连接" value={dev.connections === null ? "未提供" : `${dev.connections.length} 个连接`} onClick={() => setDialog({ kind: "connections" })} />
         </div>
       </section>
       <section className="g-info-section context">
         <div className="g-info-head">
           <h2>Context</h2>
-          <Button variant="ghost" size="icon-sm" aria-label="上下文用量说明" onClick={() => setDialog({ kind: "context" })}><EllipsisIcon /></Button>
+          {context ? <button type="button" className="g-info-link" onClick={onContextTrace} disabled={!context.turnId || !onContextTrace} title="在 Trace 页查看来源与请求差分">观测详情<ArrowUpRight aria-hidden="true"/></button> : <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label="上下文用量说明" onClick={() => setDialog({ kind: "context" })}><EllipsisIcon /></Button>}
         </div>
-        <div className="g-section-body g-context-scroll">
-          {context ? <ContextSummary context={context} dark={dark} onTrace={onContextTrace}/> : <>
+        <div className="g-context-body">
+          {context ? <ContextSummary context={context} dark={dark} compactView/> : <>
           <div className="g-context-overview">
             <span>{policy ? "会话上下文策略" : "会话载入后显示上下文容量"}</span>
             {policy && <span>{contextWindowLabel(policy)} · {policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条消息`}</span>}
@@ -282,8 +309,12 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
             </tbody>
           </table>}
           <p className="dev-context-note">上下文用量未提供。</p></>}
+          <div className="g-context-end">
+            <span>{context?.used !== null && context?.used !== undefined && context.limit !== null ? `距自动压缩余 ${contextCount(Math.max(0, context.limit - context.used))}` : "整理在运行时内自动进行"}</span>
+            <Button variant="outline" size="sm" disabled={compaction.disabled} aria-label="Compact session" onClick={() => void compaction.compact()}>{compaction.busy ? "提交中…" : "Compact"}</Button>
+          </div>
           <details className="g-detail">
-            <summary><ChevronRight aria-hidden="true" />MCP tools<span className="g-detail-count">{dev.tools.length}</span></summary>
+            <summary><ChevronRight aria-hidden="true" />MCP 与内置工具<span className="g-detail-count">{dev.tools.length}</span></summary>
             <div className="g-detail-list" tabIndex={0} aria-label="会话工具目录">
               {dev.tools.length === 0 && <p className="dev-detail-empty">当前目标没有可用工具</p>}
               {dev.tools.map((tool, index) => <button type="button" className="g-tool-row" key={`${tool.name}:${index}`} title={displayToolName(tool.name)}
@@ -293,59 +324,30 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
             </div>
           </details>
           <details className="g-detail">
-            <summary><ChevronRight aria-hidden="true" />账号 MCP 连接<span className="g-detail-count">{dev.connections === null ? "—" : dev.connections.length}</span></summary>
-            <div className="g-detail-list" tabIndex={0} aria-label="账号 MCP 连接">
-              {dev.connections === null && <p className="dev-detail-empty">账号 MCP 服务暂不可用</p>}
-              {dev.connections?.length === 0 && <p className="dev-detail-empty">还没有账号 MCP 连接</p>}
-              {dev.connections?.map(connection => <button type="button" className="g-tool-row" key={connection.id} title={connection.name}
-                onClick={() => setDialog({ kind: "connection", connection })}>
-                <span>{connection.name}</span><span>{connection.credential_configured ? "凭据已配置" : "未配置凭据"}</span>
-              </button>)}
-            </div>
-          </details>
-          <details className="g-detail">
             <summary><ChevronRight aria-hidden="true" />Memory files<span className="g-detail-count">—</span></summary>
             <div className="g-detail-list g-memory-list" tabIndex={0} aria-label="记忆来源列表">
               <p className="dev-detail-empty">记忆来源未提供</p>
             </div>
           </details>
-          <div className="g-context-end">
-            <span>整理在运行时内自动进行</span>
-            <Button variant="outline" size="sm" disabled={compaction.disabled} onClick={() => void compaction.compact()}>Compact session</Button>
-          </div>
         </div>
       </section>
       <section className="g-info-section outputs">
-        <div className="g-info-head">
-          <h2>Outputs</h2>
-          <Button variant="ghost" size="icon-sm" aria-label="在分区中打开内容" aria-haspopup="menu"
-            ref={outputsButton as RefObject<HTMLButtonElement>} onClick={() => {
-              if (outputsButton.current) setAddMenuSlot({ slot: 0, anchor: outputsButton.current });
-            }}><Plus aria-hidden="true" /></Button>
-        </div>
-        <div className="g-section-body g-output-scroll">
-          {(showAllFiles ? outputFiles : outputFiles.slice(0, 6)).map(path => <button type="button" className="g-output-row" key={path} title={path} onClick={() => addTab({ id: "file:" + path, type: "document", title: lastSegment(path), path }, 0)}><FileText aria-hidden="true"/><span>{path}</span></button>)}
-          {outputFiles.length > 6 && <Button variant="ghost" size="sm" onClick={() => setShowAllFiles(value => !value)}>{showAllFiles ? "收起" : `显示全部 ${outputFiles.length} 个文件`}</Button>}
-          <button type="button" className="g-output-row" onClick={() => addTab(filesTab(), 0)}>
-            <FolderOpen aria-hidden="true" /><span>项目文件</span>
-          </button>
-          <button type="button" className="g-output-row" onClick={() => addTab({ id: "browser", type: "browser", title: "浏览器预览" }, 0)}>
-            <PanelRight aria-hidden="true" /><span>浏览器预览</span>
-          </button>
-          <button type="button" className="g-output-row" onClick={() => comingSoon("项目打包下载")}>
-            <Archive aria-hidden="true" /><span>下载项目文件</span>
-          </button>
-        </div>
+        <div className="g-info-head"><h2>Outputs</h2>{outputFiles.length > 3 && <button type="button" className="g-info-link" onClick={() => setShowAllFiles(value => !value)}>{showAllFiles ? "收起" : `展开全部 (${outputFiles.length})`}</button>}</div>
+        {outputFiles.length > 0 && <div className="g-output-group-label">本会话涉及文件</div>}
+        {(showAllFiles ? outputFiles : outputFiles.slice(0, 3)).map(path => <button type="button" className="g-output-row" key={path} title={path} onClick={() => addTab({ id: "file:" + path, type: "document", title: lastSegment(path), path }, 0)}>{/\.(md|markdown)$/i.test(path) ? <FileText aria-hidden="true"/> : <FileCode aria-hidden="true"/>}<span>{path.split("/").slice(-2).join("/")}</span></button>)}
+        <div className="g-output-group-label">工作区面板</div>
+        <button type="button" className="g-output-row" onClick={() => addTab(filesTab(), 0)}><FolderOpen aria-hidden="true"/><span>浏览全部项目文件</span></button>
+        <button type="button" className="g-output-row" onClick={() => addTab({ id: "browser", type: "browser", title: "浏览器预览" }, 0)}><Globe aria-hidden="true"/><span>打开浏览器实时预览</span></button>
+        <button type="button" className="g-output-row" onClick={() => comingSoon("项目打包下载")}><Download aria-hidden="true"/><span>下载项目文件归档 (.tar.gz)</span></button>
       </section>
     </section>}
-    {workOpen && <section ref={workElement} className={`g-work${workInline ? "" : " is-overlay"}${maximized ? " is-maximized" : ""}`} aria-label="开发工作区">
+    {workOpen && <section ref={workElement} className={`g-work${workInline || maximized ? "" : " is-overlay"}${maximized ? " is-maximized" : ""}`} aria-label="开发工作区">
       {!maximized && <div className="g-work-resizer" role="separator" aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuenow={Math.round(workWidth)} aria-valuemin={340} aria-valuemax={Math.round(workLimit)} tabIndex={0} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* Synthetic pointers have no native capture. */ } resizeStart.current = { x: event.clientX, width: workWidth, pointer: event.pointerId }; }} onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setWorkWidth(value => Math.max(340, Math.min(workWidthLimit(workElement.current), value + (event.key === "ArrowLeft" ? 24 : -24)))); } }}/>}
       <div className="g-work-topbar">
         <strong>工作区</strong>
-        <Button variant="ghost" size="icon-sm" aria-label={maximized ? "还原工作区" : "最大化工作区"} onClick={() => setMaximized(value => !value)}>{maximized ? <Minimize2 aria-hidden="true"/> : <Maximize2 aria-hidden="true"/>}</Button>
-        <Button variant="ghost" size="icon-sm" aria-label={split ? "合并分区" : "上下分区"} aria-pressed={split}
-          title={split ? "合并分区" : "上下分区"} onClick={toggleSplit}><Columns2 aria-hidden="true" /></Button>
-        <Button variant="ghost" size="icon-sm" aria-label="关闭工作区" onClick={() => setWorkOpen(false)}><X aria-hidden="true" /></Button>
+        <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label={split ? "合并分区" : "上下分区"} aria-pressed={split} title={split ? "合并单栏" : "上下双栏分屏"} onClick={toggleSplit}><Columns2 aria-hidden="true"/></Button>
+        <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label={maximized ? "还原工作区" : "最大化工作区"} onClick={() => setMaximized(value => !value)}>{maximized ? <Minimize2 aria-hidden="true"/> : <Maximize2 aria-hidden="true"/>}</Button>
+        <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label="关闭工作区" onClick={() => setWorkOpen(false)}><X aria-hidden="true" /></Button>
       </div>
       <div className={`g-work-stack${split ? " split" : ""}`}>
         {(split ? [0, 1] : [0]).map(slot => <WorkSlot key={slot} slot={slot} label={split ? (slot ? "下方工作区" : "上方工作区") : "工作区内容"}
@@ -357,6 +359,8 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
           onComing={comingSoon}
           chat={chat} apiKey={apiKey} projectId={projectId} environmentState={environmentState}
           onOpenEnvironment={() => setDialog({ kind: "environment" })}
+          onBrowseFiles={() => addTab(filesTab(), slot)}
+          onSetDocumentMode={(id, rawMarkdown) => setSlots(previous => previous.map((items, index) => index === slot ? items.map(tab => tab.id === id && tab.type === "document" ? { ...tab, rawMarkdown } : tab) : items))}
           onOpenFile={(path, title) => addTab({ id: "file:" + path, type: "document", title, path }, slot)} />)}
       </div>
     </section>}
@@ -369,7 +373,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
       }}>辅助会话</button>
     </PopoverMenu>
     <DevelopmentDialogs dialog={dialog} onClose={() => setDialog(null)} dev={dev} chat={chat} apiKey={apiKey}
-      projectId={projectId} project={dev.project} environmentState={environmentState} />
+      projectId={projectId} project={dev.project} environmentState={environmentState} onInspectConnection={connection => setDialog({ kind: "connection", connection })} />
   </div>;
 }
 
@@ -383,20 +387,20 @@ function EnvRow({ icon: Icon, label, value, state, onClick, title }: {
   return <button type="button" className="g-env-row" onClick={onClick} title={title ?? label}>
     <Icon aria-hidden="true" />
     <span className="g-env-label">{label}</span>
+    <span className="g-env-value">{value}</span>
     {state && <span className={`g-state-mini${state === "ready" ? " ready" : state === "failed" ? " failed" : ""}`} role="img"
       aria-label={environmentLabels[state]}></span>}
-    <span className="g-env-value">{value}</span>
-    <ChevronRight aria-hidden="true" />
   </button>;
 }
 
-function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAdd, onCloseSplit, onComing, chat, apiKey, projectId, environmentState, onOpenEnvironment, onOpenFile }: {
+function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAdd, onCloseSplit, onComing, chat, apiKey, projectId, environmentState, onOpenEnvironment, onOpenFile, onBrowseFiles, onSetDocumentMode }: {
   slot: number; label: string; tabs: WorkTab[]; activeTab: string | null; split: boolean;
   onSelect: (id: string) => void; onClose: (id: string) => void; onAdd: (anchor: HTMLButtonElement) => void;
   onCloseSplit: () => void; onComing: (label: string) => void;
   chat: SessionState; apiKey: string; projectId: string | null; environmentState: EnvironmentState | null;
   onOpenEnvironment: () => void;
   onOpenFile: (path: string, title: string) => void;
+  onBrowseFiles: () => void; onSetDocumentMode: (id: string, rawMarkdown: boolean) => void;
 }) {
   const current = tabs.find(item => item.id === activeTab) ?? tabs[0] ?? null;
   const addButton = useRef<HTMLButtonElement | null>(null);
@@ -415,24 +419,24 @@ function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAd
   return <section className="g-work-slot" data-slot-index={slot} aria-label={label}>
     <div className="g-work-tabbar">
       <div className="g-work-tabs" role="tablist" aria-label={`${label}标签`} onKeyDown={onTabKeyDown}>
-        {tabs.map(tab => <div className="g-work-tab" role="presentation" key={tab.id}>
+        {tabs.map(tab => <div className={`g-work-tab${current?.id === tab.id ? " is-active" : ""}`} role="presentation" key={tab.id}>
           <button type="button" role="tab" id={`dev-tab-${slot}-${tab.id.replace(/[^a-zA-Z0-9-]/g, "-")}`}
             aria-selected={current?.id === tab.id} aria-controls={`dev-work-content-${slot}`}
             tabIndex={current?.id === tab.id ? 0 : -1} data-tab={tab.id} title={tab.title}
-            onClick={() => onSelect(tab.id)}>{tab.title}</button>
+            onClick={() => onSelect(tab.id)}>{tab.type === "browser" ? <Globe aria-hidden="true"/> : tab.type === "aux" ? <GitFork aria-hidden="true"/> : tab.path ? <FileCode aria-hidden="true"/> : <Folder aria-hidden="true"/>}<span>{tab.title}</span></button>
           <button type="button" aria-label={`关闭 ${tab.title}`} onClick={() => onClose(tab.id)}><X aria-hidden="true" /></button>
         </div>)}
       </div>
-      <Button variant="ghost" size="icon-sm" aria-label={`在${slot ? "下方" : "上方"}分区打开内容`} aria-haspopup="menu"
+      <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label={`在${slot ? "下方" : "上方"}分区打开内容`} aria-haspopup="menu"
         ref={addButton as RefObject<HTMLButtonElement>} onClick={() => { if (addButton.current) onAdd(addButton.current); }}><Plus aria-hidden="true" /></Button>
-      {split && slot === 1 && <Button variant="ghost" size="icon-sm" aria-label="关闭下方分区" onClick={onCloseSplit}><X aria-hidden="true" /></Button>}
+      {split && slot === 1 && <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label="关闭下方分区" onClick={onCloseSplit}><X aria-hidden="true" /></Button>}
     </div>
     <div className="g-work-content" id={`dev-work-content-${slot}`} role="tabpanel" aria-label={current?.title ?? "空工作区"} tabIndex={0}>
       {!current && <div className="g-work-empty"><strong>打开内容</strong><span>使用上方 + 选择浏览器预览、项目文件或辅助会话。</span></div>}
       {current?.type === "browser" && <BrowserView chat={chat} apiKey={apiKey} projectId={projectId} environmentState={environmentState} onOpenEnvironment={onOpenEnvironment} />}
       {current?.type === "document" && (current.path === null
         ? <FileBrowser apiKey={apiKey} projectId={projectId} onOpenFile={onOpenFile} />
-        : <FileView apiKey={apiKey} projectId={projectId} path={current.path} />)}
+        : <FileView apiKey={apiKey} projectId={projectId} path={current.path} rawMarkdown={current.rawMarkdown ?? false} onToggleMarkdown={() => onSetDocumentMode(current.id, !current.rawMarkdown)} onBrowseFiles={onBrowseFiles} />)}
       {current?.type === "aux" && <AuxView chat={chat} apiKey={apiKey} sessionId={current.sessionId} onComing={onComing} />}
     </div>
   </section>;
@@ -516,7 +520,7 @@ function FileBrowser({ apiKey, projectId, onOpenFile }: {
         </button>
         : <button type="button" className="g-tool-row dev-file-row" disabled={entry.type === "blocked"} role="listitem" key={entry.name} title={entry.type === "blocked" ? "受限文件" : entry.name}
           onClick={() => onOpenFile(path === "." ? entry.name : `${path}/${entry.name}`, entry.name)}>
-          {isImagePath(entry.name) ? <Image aria-hidden="true" /> : <FileText aria-hidden="true" />}
+          {isImagePath(entry.name) ? <Image aria-hidden="true" /> : /\.(md|markdown)$/i.test(entry.name) ? <FileText aria-hidden="true"/> : <FileCode aria-hidden="true"/>}
           <span>{entry.name}</span><span>{fmtBytes(entry.size)}</span>
         </button>)}
       {(offset > 0 || page.next_offset !== null) && <div className="g-inline-actions"><Button variant="ghost" size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>上一页</Button><span>{offset + 1}–{Math.min(offset + page.entries.length, page.total)} / {page.total}</span><Button variant="ghost" size="sm" disabled={page.next_offset === null} onClick={() => { if (page.next_offset !== null) setOffset(page.next_offset); }}>下一页</Button></div>}
@@ -545,50 +549,43 @@ async function downloadProjectFile(apiKey: string, projectId: string, path: stri
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-function FileView({ apiKey, projectId, path }: {
-  apiKey: string; projectId: string | null; path: string;
+function FileView({ apiKey, projectId, path, rawMarkdown, onToggleMarkdown, onBrowseFiles }: {
+  apiKey: string; projectId: string | null; path: string; rawMarkdown: boolean;
+  onToggleMarkdown: () => void; onBrowseFiles: () => void;
 }) {
   const [state, setState] = useState<{ url?: string; text?: string; truncated?: boolean; error?: string; loading: boolean }>({ loading: true });
-  const objectUrl = useRef<string | null>(null);
+  const objectUrl = useRef<string | null>(null), feedback = useCopyFeedback();
   const image = isImagePath(path);
   useEffect(() => {
     if (!projectId) return;
-    const controller = new AbortController();
-    setState({ loading: true });
+    const controller = new AbortController(); setState({ loading: true });
     void fetchFileBytes(apiKey, projectId, path, controller.signal).then(value => {
       if (controller.signal.aborted) return;
       const truncated = !value.eof;
       if (image) {
         const blob = new Blob([value.bytes], { type: blobType(path) });
         if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
-        objectUrl.current = URL.createObjectURL(blob);
-        setState({ url: objectUrl.current, truncated, loading: false });
-      } else {
-        setState({ text: new TextDecoder("utf-8", { fatal: false }).decode(value.bytes), truncated, loading: false });
-      }
-    }).catch(value => {
-      if (!controller.signal.aborted) setState({ error: devReason(value), loading: false });
-    });
-    return () => { controller.abort(); };
+        objectUrl.current = URL.createObjectURL(blob); setState({ url: objectUrl.current, truncated, loading: false });
+      } else setState({ text: new TextDecoder("utf-8", { fatal: false }).decode(value.bytes), truncated, loading: false });
+    }).catch(value => { if (!controller.signal.aborted) setState({ error: devReason(value), loading: false }); });
+    return () => controller.abort();
   }, [apiKey, projectId, path, image]);
   useEffect(() => () => { if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); }, []);
   if (!projectId) return <div className="g-work-empty"><strong>未绑定项目</strong><span>绑定项目后可以查看项目文件。</span></div>;
   if (state.loading) return <p className="dev-detail-empty" role="status">读取中…</p>;
   if (state.error) return <div className="g-work-empty"><strong>读取未完成</strong><span>{state.error}</span></div>;
   const name = lastSegment(path);
-  return image
-    ? <figure className="g-picture"><img src={state.url} alt={name} /><figcaption>{name} · {state.truncated ? "仅预览前段" : "完整内容"}</figcaption></figure>
-    : <article className="g-document">
-      <div className="g-source-line">项目文件 · {path}</div>
-      <h1>{name}</h1>
-      {path.toLowerCase().endsWith(".md") || path.toLowerCase().endsWith(".markdown") ? <MessageMarkdown text={state.text ?? ""} onCopy={async text => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } }}/> : <MessageMarkdown text={`\`\`\`${({ ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", py: "python", json: "json", css: "css", html: "html", sh: "bash", yml: "yaml", yaml: "yaml", toml: "toml" } as Record<string, string>)[path.split(".").at(-1) ?? ""] ?? "text"}\n${state.text ?? ""}\n\`\`\``} onCopy={async text => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } }}/>}
-      {state.truncated && <div className="dev-file-truncated">
-        <span>文件较大，仅显示前段。</span>
-        <Button variant="outline" size="sm" onClick={() => void downloadProjectFile(apiKey, projectId, path).catch(() => undefined)}>
-          <Download aria-hidden="true" />下载完整文件
-        </Button>
-      </div>}
-    </article>;
+  if (image) return <figure className="g-picture"><img src={state.url} alt={name}/><figcaption>{name} · {state.truncated ? "仅预览前段" : "完整内容"}</figcaption></figure>;
+  const markdown = /\.(md|markdown)$/i.test(path), text = state.text ?? "";
+  const language = markdown ? "markdown" : ({ ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", py: "python", json: "json", css: "css", html: "html", sh: "bash", yml: "yaml", yaml: "yaml", toml: "toml" } as Record<string, string>)[path.split(".").at(-1) ?? ""] ?? "text";
+  const fenceLength = (text.match(/`+/g) ?? []).reduce((maximum, run) => Math.max(maximum, run.length + 1), 3);
+  const fence = "`".repeat(fenceLength);
+  const renderedText = markdown && !rawMarkdown ? text : `${fence}${language}\n${text}\n${fence}`;
+  return <>
+    <div className="g-work-address g-file-address"><div className="g-work-crumbs"><button type="button" className="dev-crumb" onClick={onBrowseFiles}><FolderOpen aria-hidden="true"/>全部文件</button><span>/</span><span className="dev-crumb is-current" title={path}>{name}</span></div><div className="g-file-actions">{markdown && <button type="button" className="g-info-link" aria-pressed={rawMarkdown} onClick={onToggleMarkdown}>{rawMarkdown ? "渲染视图" : "Markdown 源码"}</button>}<button type="button" className="g-info-link" onClick={() => void feedback.copy(text)}><Copy aria-hidden="true"/>复制</button></div></div>
+    <article className="g-document"><MessageMarkdown text={renderedText} onCopy={feedback.copy}/>{state.truncated && <div className="dev-file-truncated"><span>文件较大，仅显示前段。</span><Button variant="outline" size="sm" onClick={() => void downloadProjectFile(apiKey, projectId, path).catch(() => undefined)}><Download aria-hidden="true"/>下载完整文件</Button></div>}</article>
+    <CopyFeedback {...feedback}/>
+  </>;
 }
 
 function AuxView({ chat, apiKey, sessionId, onComing }: {
@@ -634,13 +631,13 @@ function AuxView({ chat, apiKey, sessionId, onComing }: {
   </article>;
 }
 
-function DevelopmentDialogs({ dialog, onClose, dev, chat, apiKey, projectId, project, environmentState }: {
+function DevelopmentDialogs({ dialog, onClose, dev, chat, apiKey, projectId, project, environmentState, onInspectConnection }: {
   dialog: PanelDialog | null; onClose: () => void; dev: DevelopmentState;
   chat: SessionState; apiKey: string; projectId: string | null; project: SandboxProject | null;
-  environmentState: EnvironmentState | null;
+  environmentState: EnvironmentState | null; onInspectConnection: (connection: McpConnection) => void;
 }) {
   return <Dialog open={dialog !== null} onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent className="dev-dialog" aria-describedby={undefined}>
+    <DialogContent className={`dev-dialog${dialog?.kind === "project" || dialog?.kind === "secrets" ? " is-wide" : ""}`} aria-describedby={undefined}>
       {dialog?.kind === "coming" && <>
         <DialogHeader><DialogTitle>敬请期待</DialogTitle></DialogHeader>
         <p className="g-answer">{dialog.label}暂未开放。</p>
@@ -651,6 +648,7 @@ function DevelopmentDialogs({ dialog, onClose, dev, chat, apiKey, projectId, pro
       {dialog?.kind === "secrets" && <SecretsDialogBody dev={dev} projectId={projectId} />}
       {dialog?.kind === "context" && <ContextDialogBody chat={chat} />}
       {dialog?.kind === "tool" && <ToolDialogBody tool={dialog.tool} />}
+      {dialog?.kind === "connections" && <><DialogHeader><DialogTitle>MCP 连接</DialogTitle><DialogDescription>当前账号配置的服务连接</DialogDescription></DialogHeader><div className="g-mcp-connections">{dev.connections === null ? <p role="status">账号 MCP 服务暂不可用</p> : dev.connections.length === 0 ? <p>还没有账号 MCP 连接</p> : dev.connections.map(connection => <button type="button" className="g-mcp-connection" key={connection.id} onClick={() => onInspectConnection(connection)}><Cpu aria-hidden="true"/><span>{connection.name}</span><small>{connection.credential_configured ? "凭据已配置" : "未配置凭据"}</small><ChevronRight aria-hidden="true"/></button>)}</div></>}
       {dialog?.kind === "connection" && <ConnectionDialogBody connection={dialog.connection} />}
     </DialogContent>
   </Dialog>;
@@ -753,8 +751,8 @@ export function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose, 
       <DialogDescription>{onChoose ? "选择新会话使用的开发项目。" : "为这段会话绑定开发项目。"}</DialogDescription>
     </DialogHeader>
     {error && <p className="g-error" role="status">{error}</p>}
-    <div className="g-project-options" role="radiogroup" aria-label="选择项目">
-      {(page ?? []).map(item => <label className="g-project-option" key={item.project_id}>
+    <div className="g-project-options question-options" role="radiogroup" aria-label="选择项目">
+      {(page ?? []).map(item => <label className="g-project-option question-option" key={item.project_id}>
         <input type="radio" name="dev-project" value={item.project_id} checked={selected === item.project_id}
           onChange={() => setSelected(item.project_id)} />
         <span><strong>{item.title}</strong><small>{projectStatusLabels[item.status] ?? item.status} · 更新于 {new Date(item.updated_at * 1000).toLocaleString()}</small></span>
@@ -817,7 +815,19 @@ function SecretsDialogBody({ dev, projectId }: {
     {projectId && <>
       {result && <p className="dev-secret-result" role="status">{result}</p>}
       {error && <p className="g-error" role="status">{error}</p>}
+      {dev.secretRefs.map(ref => <div className="g-row" key={ref.name}>
+        <div className="g-row-main">
+          <strong>{ref.name}</strong>
+          <small className="g-mono">版本 {ref.revision} · 本会话写入</small>
+        </div>
+        <div className="g-row-actions">
+          <Button variant="outline" size="sm" disabled={busy || !dev.canApprove} onClick={() => { setRotateTarget(ref.name); setName(ref.name); setValue(""); setResult(""); setError(""); }}>轮换</Button>
+          <Button variant="destructive" size="sm" disabled={busy || !dev.canApprove} onClick={() => setRevokeTarget(ref.name)}>撤销</Button>
+        </div>
+      </div>)}
       <form className="dev-secret-form" onSubmit={event => { event.preventDefault(); if (dev.canApprove) void submit(rotateTarget ? "rotate" : "add", rotateTarget ?? name); }}>
+        <strong className="dev-secret-heading">新增或轮换环境变量</strong>
+        <div className="dev-secret-fields">
         <div className="g-field">
           <label htmlFor="dev-secret-name">引用名称</label>
           <Input id="dev-secret-name" disabled={!!rotateTarget || busy || !dev.canApprove} value={name} onChange={event => setName(event.target.value)} maxLength={64} autoComplete="off" placeholder="例如 API_TOKEN" />
@@ -830,22 +840,12 @@ function SecretsDialogBody({ dev, projectId }: {
           <label htmlFor="dev-secret-hours">有效期（小时，1-24）</label>
           <Input id="dev-secret-hours" type="number" min={1} max={24} value={hours} onChange={event => setHours(event.target.value)} />
         </div>
+        </div>
         <div className="g-inline-actions">
           {rotateTarget && <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => { setRotateTarget(null); setName(""); setValue(""); }}>取消轮换</Button>}
           <Button type="submit" size="sm" disabled={busy || !dev.canApprove || !name.trim() || !value}>{rotateTarget ? "确认轮换" : "添加引用"}</Button>
         </div>
       </form>
-      {dev.secretRefs.length > 0 && <div className="g-divider"></div>}
-      {dev.secretRefs.map(ref => <div className="g-row" key={ref.name}>
-        <div className="g-row-main">
-          <strong>{ref.name}</strong>
-          <small className="g-mono">版本 {ref.revision} · 本会话写入</small>
-        </div>
-        <div className="g-row-actions">
-          <Button variant="outline" size="sm" disabled={busy || !dev.canApprove} onClick={() => { setRotateTarget(ref.name); setName(ref.name); setValue(""); setResult(""); setError(""); }}>轮换</Button>
-          <Button variant="destructive" size="sm" disabled={busy || !dev.canApprove} onClick={() => setRevokeTarget(ref.name)}>撤销</Button>
-        </div>
-      </div>)}
       {revokeTarget && <div className="g-inline-confirm" role="alertdialog" aria-label={`撤销 ${revokeTarget}`}>
         <p>撤销后，正在使用旧版本的进程会停止。确认撤销 {revokeTarget}？</p>
         <div className="g-inline-actions">

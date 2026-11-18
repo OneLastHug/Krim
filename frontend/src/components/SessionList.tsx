@@ -101,7 +101,7 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
   function row(entry: SidebarEntry, depth: number) {
     const session = byId.get(entry.session_id); if (!session) return null;
     const children = entry.pinned && chat.listView === "active" ? [] : childrenByParent.get(session.id) ?? [], closed = nodes.has(session.id), [state, label] = status(session);
-    return <li key={session.id} className="session-tree-node"><div className={`chat-session-row session-depth-${depth}${sortClass("session", session.id)}`} data-session-row={session.id}>
+    return <li key={session.id} className="session-tree-node"><div className={`chat-session-row session-depth-${depth}${chat.id === session.id ? " is-selected" : ""}${sortClass("session", session.id)}`} data-session-row={session.id}>
       <Button variant="ghost" className="session-select" aria-label={session.title} aria-current={chat.id === session.id ? "page" : undefined} onPointerDown={event => startDrag(event, "session", session.id)} onClick={() => select(session.id)}>{entry.pinned && <CodeXml aria-hidden="true"/>}<span className="chat-session-label"><span>{session.title}</span></span></Button>
       {!!children.length && <button type="button" data-no-drag className="session-tree-disclosure" aria-label={`${closed ? "展开" : "收起"} ${session.title} 的子会话`} aria-expanded={!closed} onClick={() => setNodes(old => { const next = new Set(old); next.has(session.id) ? next.delete(session.id) : next.add(session.id); return next; })}>{closed ? <ChevronRight/> : <ChevronDown/>}</button>}
       {state !== "idle" && <span className={`session-status ${state}`} title={label} role="img" aria-label={label}/> }

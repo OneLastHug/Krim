@@ -7,7 +7,7 @@ import { workbenchTitles, type WorkbenchView } from "../lib/workbench-route";
 import type { DisplayTheme } from "../lib/use-display-theme";
 import type { ReadingSize } from "../hooks/use-reading-size";
 import type { ObsPage } from "../observability/obs-route";
-import { openDevelopmentPanel } from "../lib/workbench-events";
+import { openDevelopmentPanel, type DevelopmentPanelSnapshot } from "../lib/workbench-events";
 import { request } from "../api";
 import { parseSidebar } from "../lib/session-sidebar";
 import { AppSidebar } from "./AppSidebar";
@@ -26,9 +26,9 @@ function useMediaQuery(query: string) {
       window.addEventListener("resize", update);
       return () => window.removeEventListener("resize", update);
     }
-    const update = () => setMatches(media.matches);
-    update(); media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
+    const update = () => setMatches(window.matchMedia?.(query).matches ?? window.innerWidth <= fallbackWidth);
+    update(); media.addEventListener?.("change", update); window.addEventListener("resize", update);
+    return () => { media.removeEventListener?.("change", update); window.removeEventListener("resize", update); };
   }, [query, fallbackWidth]);
   return matches;
 }
@@ -71,6 +71,21 @@ export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, 
   const canCloseSession = canRefresh && chatSession.session?.status === "open" && chatSession.canWrite && !chatSession.controlling;
   const paused = chatSession?.session?.dispatch_paused === true;
   const results = chat?.ready ? chat.list.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())) : [];
+  const snapshotScope = JSON.stringify([apiKey, chat?.actor?.principal_id, chat?.actor?.generation, chat?.workspace, chat?.id]);
+  const [snapshot, setSnapshot] = useState<{ scope: string; value: DevelopmentPanelSnapshot } | null>(null);
+  const panel = snapshot?.scope === snapshotScope && chat?.ready ? snapshot.value : null;
+  useEffect(() => {
+    if (!chat?.ready || !chat.actor) return;
+    const current = { principal: chat.actor.principal_id, generation: chat.actor.generation, workspace: chat.workspace, sessionId: chat.id };
+    const receive = (event: Event) => {
+      const value = (event as CustomEvent<DevelopmentPanelSnapshot>).detail;
+      if (!value || value.principal !== current.principal || value.generation !== current.generation || value.workspace !== current.workspace || value.sessionId !== current.sessionId) return;
+      setSnapshot({ scope: snapshotScope, value });
+    };
+    window.addEventListener("krim:development-state", receive);
+    window.dispatchEvent(new CustomEvent("krim:development-state-request", { detail: current }));
+    return () => window.removeEventListener("krim:development-state", receive);
+  }, [snapshotScope, chat?.ready]);
   function openCreate(groupId?: string) {
     if (!chat?.ready || !chat.canWrite || chat.creating || chat.newPending) return;
     beforeSessionSelect?.(chat.workspace, "");
@@ -126,16 +141,16 @@ export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, 
         onCreate={() => openCreate()} />
     </div>}
     <div className="workbench-main">
-      <header className="chat-toolbar" aria-label="会话标题栏">
+      <header className={`chat-toolbar${view !== "chat" ? " is-bordered" : ""}`} aria-label="会话标题栏">
         <Button variant="ghost" className="icon-button" aria-label={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} title={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={mobile ? navOpen : !collapsed} onClick={() => mobile ? setNavOpen(true) : setCollapsed(value => !value)}><PanelLeft aria-hidden="true" /></Button>
         <span className="actions-divider" aria-hidden="true"></span>
-        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1></div>
+        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1>{view === "chat" && panel?.projectTitle && <button type="button" className="toolbar-project-pill" title="查看项目权限详情" onClick={() => chat && openDevelopmentPanel(chat, "project")}><Folder aria-hidden="true"/>{panel.projectTitle}</button>}</div>
         <div className="toolbar-actions">
           {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => openCreate()}><SquarePlus aria-hidden="true" /></Button>}
           {view === "chat" && <>
-            <Button variant="ghost" className="icon-button" aria-label="项目文件工作区" disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "files")}><Folder aria-hidden="true"/></Button>
-            <Button variant="ghost" className="icon-button" aria-label="浏览器预览" disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "browser")}><Globe aria-hidden="true"/></Button>
-            <Button variant="ghost" className="icon-button" aria-label="开发信息栏" disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "info")}><PanelRight aria-hidden="true"/></Button>
+            <Button variant="ghost" className="icon-button" aria-label="项目文件工作区" title="项目文件工作区" aria-pressed={panel?.filesOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "files")}><Folder aria-hidden="true"/></Button>
+            <Button variant="ghost" className="icon-button" aria-label="浏览器预览" title="浏览器实时预览" aria-pressed={panel?.browserOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "browser")}><Globe aria-hidden="true"/></Button>
+            <Button variant="ghost" className="icon-button" aria-label="开发信息栏" title="开发信息栏" aria-pressed={panel?.infoOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "info")}><PanelRight aria-hidden="true"/></Button>
           </>}
           <Button variant="ghost" className="icon-button" ref={moreRef} aria-label="更多操作" title="更多操作" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}><MoreVertical aria-hidden="true" /></Button>
         </div>
@@ -163,7 +178,7 @@ export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, 
         {inspectorOpen && view !== "chat" && !narrow && <div className="inspector-desktop">{inspector}</div>}
       </div>
     </div>
-    <Dialog open={navOpen && mobile} onOpenChange={setNavOpen}><DialogContent className="mobile-drawer-content" aria-label="主导航与对话" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>主导航与对话</DialogTitle></DialogHeader><AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
+    <Dialog open={navOpen && mobile} onOpenChange={setNavOpen}><DialogContent className="mobile-drawer-content" aria-label="主导航与对话" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>导航与会话</DialogTitle></DialogHeader><AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
       theme={theme} onThemeSelect={onThemeSelect} readingSize={readingSize} onReadingSizeSelect={onReadingSizeSelect}
       onCreate={() => openCreate()} className="drawer-sidebar" /></DialogContent></Dialog>
     <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="session-search-dialog" aria-label="查找对话" aria-describedby={undefined}>
@@ -174,7 +189,7 @@ export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, 
         if (event.key === "ArrowUp") { event.preventDefault(); setSearchIndex(value => Math.max(0, value - 1)); }
         if (event.key === "Enter" && results[searchIndex]) { event.preventDefault(); selectSearch(results[searchIndex]!.id); }
       }} />
-      <div className="session-search-results">{results.map((item, index) => <Button key={item.id} variant="ghost" className={index === searchIndex ? "is-highlighted" : ""} onMouseEnter={() => setSearchIndex(index)} onClick={() => selectSearch(item.id)}><span>{item.title}<small className="session-search-group">{searchGroups[item.id] ?? workspaceNames[chat?.workspace ?? ""] ?? "当前工作区"}</small></span>{item.status === "closed" && <span>已关闭</span>}</Button>)}{!results.length && <p>{chat?.ready ? "当前列表中没有匹配的对话" : "正在读取对话列表"}</p>}</div>
+      <div className="session-search-results search-results">{results.map((item, index) => <Button key={item.id} variant="ghost" className={`search-result-btn${index === searchIndex ? " is-highlighted" : ""}`} onMouseEnter={() => setSearchIndex(index)} onClick={() => selectSearch(item.id)}><span className="search-result-main"><strong>{item.title}</strong><small className="session-search-group">{searchGroups[item.id] ?? workspaceNames[chat?.workspace ?? ""] ?? "当前工作区"}</small></span>{item.status === "closed" && <span>已关闭</span>}</Button>)}{!results.length && <p>{chat?.ready ? "当前列表中没有匹配的对话" : "正在读取对话列表"}</p>}</div>
       <p className="session-search-scope">仅查找当前工作区已加载的对话</p>
     </DialogContent></Dialog>
     <Dialog open={inspectorOpen && view !== "chat" && narrow} onOpenChange={setInspectorOpen}><DialogContent className="mobile-inspector-content" aria-label="对象详情" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>对象详情</DialogTitle></DialogHeader>{inspector}</DialogContent></Dialog>

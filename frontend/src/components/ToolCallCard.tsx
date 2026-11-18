@@ -76,12 +76,10 @@ export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, 
   </section>;
 
   return <details className="chat-tool" data-state={tool.state} data-call-id={tool.callId ?? tool.providerCallId}>
-    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Icon aria-hidden="true" />}<strong data-ui-data>{toolName}</strong>{summary && <span className="tool-summary" title={summary}>{summary}</span>}<span>{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
+    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Icon aria-hidden="true" />}<span className="chat-tool-name" data-ui-data>{toolName}</span>{summary && <span className="chat-tool-target" title={summary}>{summary}</span>}<span className="chat-tool-meta">{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
     <div className="chat-tool-body">
-      <ToolProvenance value={{ source: tool.source, risk: tool.risk }} />
-      <Button variant="ghost" size="sm" aria-pressed={raw} onClick={() => setRaw(value => !value)}>{raw ? "格式化内容" : "原始 JSON"}</Button>
-      <div className="chat-tool-section"><span>参数</span><pre data-ui-data tabIndex={0}>{raw ? valueText(tool.arguments) : formatToolValue(tool.arguments)}</pre></div>
-      {tool.resultAvailable ? <div className="chat-tool-section"><span>结果</span><pre data-ui-data tabIndex={0}>{raw ? valueText(tool.result) : formatToolValue(tool.result)}</pre></div> : <p className="detail-empty">{missingResult(tool)}</p>}
+      <div className="chat-tool-bar"><span>{tool.source || tool.risk ? <ToolProvenance value={{ source: tool.source, risk: tool.risk }} /> : "来源未提供"}</span><Button variant="ghost" size="sm" className="g-info-link" aria-pressed={raw} onClick={() => setRaw(value => !value)}>{raw ? "查看格式化摘要" : "查看原始 JSON"}</Button></div>
+      {raw ? <pre className="chat-tool-output" data-ui-data tabIndex={0}>{valueText({ name: tool.name, arguments: tool.arguments, output: tool.resultAvailable ? tool.result : undefined })}</pre> : tool.resultAvailable ? <pre className="chat-tool-output" data-ui-data tabIndex={0}>{formatToolValue(tool.result)}</pre> : <p className="detail-empty">{missingResult(tool)}</p>}
       {tool.code && <p className="chat-tool-error" data-ui-data>{tool.code === "invalid_input" ? "工具参数无效" : runReason(tool.code)} <code>{tool.code}</code></p>}
     </div>
   </details>;

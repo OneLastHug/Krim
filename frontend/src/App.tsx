@@ -179,7 +179,7 @@ export function App() {
 
   function choose(view: WorkbenchView) {
     if (preparedKey.current) applyKey(preparedKey.current, true);
-    if (view === "chat" && mode === "trace") {
+    if (view === "chat" && mode === "trace" && readWorkbenchView(new URL(location.href)) === "trace") {
       const selection = readObsState(new URL(location.href));
       if (selection.session) { returnToTraceSession(selection.session); return; }
     }

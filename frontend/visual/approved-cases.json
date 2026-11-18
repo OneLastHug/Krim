@@ -1,0 +1,686 @@
+{
+  "scenarios": [
+    {
+      "id": "s-ui-audit",
+      "title": "前端交互走查与上下文面板接入",
+      "projectId": "krim-core",
+      "parentId": null,
+      "pinned": true,
+      "lifecycle": "active",
+      "status": "waiting",
+      "mode": "auto",
+      "ruleCount": 2,
+      "modeError": "",
+      "draft": "",
+      "compactionStatus": "idle",
+      "outputs": [
+        "frontend/src/components/ChatWorkbench.tsx",
+        "frontend/src/components/DevelopmentPanel.tsx",
+        "docs/plans/qa-ui-improvements/plan.md",
+        "frontend/src/App.tsx"
+      ],
+      "context": {
+        "usedTokens": 574100,
+        "windowTokens": 900000,
+        "modelWindow": 1000000,
+        "reservedOutput": 32000,
+        "categories": [
+          {
+            "key": "files",
+            "tokens": 196200,
+            "pct": "34.2%"
+          },
+          {
+            "key": "tool_result",
+            "tokens": 148500,
+            "pct": "25.9%"
+          },
+          {
+            "key": "history",
+            "tokens": 100000,
+            "pct": "17.4%"
+          },
+          {
+            "key": "tools",
+            "tokens": 68400,
+            "pct": "11.9%"
+          },
+          {
+            "key": "system",
+            "tokens": 42800,
+            "pct": "7.5%"
+          },
+          {
+            "key": "memory",
+            "tokens": 18200,
+            "pct": "3.2%"
+          }
+        ]
+      },
+      "plan": {
+        "open": true,
+        "steps": [
+          {
+            "text": "核对 ChatWorkbench 底栏布局与输入框四态高度契约",
+            "status": "completed"
+          },
+          {
+            "text": "打通最新完成轮次 /observations 上下文分布与进度环",
+            "status": "completed"
+          },
+          {
+            "text": "运行前端组件单测并验证深色与窄屏排版",
+            "status": "in_progress"
+          },
+          {
+            "text": "整理回归截图并同步更新本地接续记录",
+            "status": "pending"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "turn-1",
+          "runId": "run_7d31a920",
+          "prompt": "检查当前 QA 分支的对话底栏和右侧 Context 面板，看看为什么只显示“上下文用量未提供”，并对齐桌面端布局。",
+          "tools": [
+            {
+              "id": "tc-1",
+              "name": "read_file",
+              "icon": "file-text",
+              "target": "frontend/src/components/ChatWorkbench.tsx:30-62",
+              "duration": "68ms",
+              "state": "ok",
+              "source": "内置 · 文件系统",
+              "risk": "read",
+              "args": {
+                "path": "frontend/src/components/ChatWorkbench.tsx",
+                "offset": 30,
+                "limit": 33
+              },
+              "formatted": "30 | return <section className=\"chat-workbench\">\n46 |   {chat.session && <footer className=\"chat-controls\">\n47 |     <SessionExecutionControl ... />\n49 |     <button className=\"control-chip is-strong\">模型</button>\n51 |     <button className=\"context-meter\">—</button>"
+            },
+            {
+              "id": "tc-2",
+              "name": "grep_content",
+              "icon": "search",
+              "target": "/observations · frontend/src/observability/",
+              "duration": "94ms",
+              "state": "ok",
+              "source": "内置 · 检索",
+              "risk": "read",
+              "args": {
+                "pattern": "/observations",
+                "path": "frontend/src/observability"
+              },
+              "formatted": "use-observations.ts:97  /v2/workspaces/${workspace}/sessions/${session_id}/turns/${turn_id}/observations\ncontext-view.tsx:49     function buildContentEntries(manifest: ObsManifest)"
+            }
+          ],
+          "answerHtml": "<p>定位到两处断点：</p><ol><li><code>DevelopmentPanel</code> 目前只读取会话静态 <code>context_policy</code>，未请求已完成轮次的 <code>/observations</code> 清单接口，因此一直回退到“上下文用量未提供”。</li><li><code>ChatWorkbench</code> 底栏将权限芯片单独放在最左侧，且在空会话下直接卸载整个 <code>footer.chat-controls</code>。</li></ol><div class=\"message-table-scroll\"><table><thead><tr><th>控件位置</th><th>远端 QA 现状</th><th>桌面端对齐调整</th></tr></thead><tbody><tr><td>底栏右侧</td><td>写死“模型”与静态灰圈 <code>—</code></td><td>聚合 <code>GPT-6 Luna · Extra · 权限 · 进度环</code></td></tr><tr><td>右侧 Context</td><td>静态策略上限 + 未提供提示</td><td>多色来源分段条 + 各分类 token 与自动压缩余量</td></tr></tbody></table></div>"
+        },
+        {
+          "id": "turn-2",
+          "runId": "run_9f82c104",
+          "prompt": "先把底栏右侧聚合和 Context 来源分布接好，然后跑一下相关契约测试。",
+          "tools": [
+            {
+              "id": "tc-3",
+              "name": "edit_file",
+              "icon": "file-code",
+              "target": "frontend/src/components/ChatWorkbench.tsx (+34 -18)",
+              "duration": "112ms",
+              "state": "ok",
+              "source": "内置 · 文件系统",
+              "risk": "write",
+              "args": {
+                "path": "frontend/src/components/ChatWorkbench.tsx",
+                "replace_all": false
+              },
+              "formatted": "- {chat.session && <footer className=\"chat-controls\">\n-   <SessionExecutionControl ... />\n+ <footer className=\"chat-controls\">\n+   <ProjectEnvironmentChips ... />\n+   <div className=\"chat-controls-right\">...</div>"
+            }
+          ],
+          "approval": {
+            "id": "ap-1",
+            "name": "bash",
+            "source": "内置 · Linux 容器",
+            "risk": "write",
+            "remainingSec": 282,
+            "scope": "once",
+            "status": "pending",
+            "command": "npm --prefix frontend run test:components -- session-features-execution-policy-ui.test.tsx"
+          },
+          "answerHtml": "<p>已完成底栏聚合与右侧 <code>Context</code> 清单接线，请确认执行前端组件回归单测：</p><div class=\"message-code-block\"><div class=\"message-code-head\"><span>frontend/src/components/ChatWorkbench.tsx</span><button type=\"button\" class=\"chat-message-action\" data-copy-code=\"const ratio = Math.min(1, usedTokens / 900_000);\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"/><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"/></svg>复制</button></div><pre><code><span class=\"tok-kw\">const</span> ratio = Math.<span class=\"tok-fn\">min</span>(<span class=\"tok-num\">1</span>, contextUsage.usedTokens / <span class=\"tok-num\">900_000</span>);</code></pre></div>"
+        }
+      ]
+    },
+    {
+      "id": "s-sidebar-proj",
+      "title": "侧栏项目分组迁移与权限核对",
+      "projectId": "krim-core",
+      "parentId": null,
+      "pinned": false,
+      "lifecycle": "active",
+      "status": "waiting",
+      "mode": "manual",
+      "ruleCount": 0,
+      "modeError": "",
+      "draft": "",
+      "compactionStatus": "idle",
+      "outputs": [
+        "frontend/src/components/SessionList.tsx"
+      ],
+      "context": {
+        "usedTokens": 218400,
+        "windowTokens": 900000,
+        "modelWindow": 1000000,
+        "reservedOutput": 32000,
+        "categories": [
+          {
+            "key": "files",
+            "tokens": 92400,
+            "pct": "42.3%"
+          },
+          {
+            "key": "history",
+            "tokens": 54000,
+            "pct": "24.7%"
+          },
+          {
+            "key": "tools",
+            "tokens": 41000,
+            "pct": "18.8%"
+          },
+          {
+            "key": "system",
+            "tokens": 31000,
+            "pct": "14.2%"
+          }
+        ]
+      },
+      "plan": null,
+      "turns": [
+        {
+          "id": "turn-p1",
+          "runId": "run_4102b811",
+          "prompt": "梳理一下现有侧栏自定义分组切到项目一对一分组时，前端需要处理哪些边界情况？",
+          "tools": [
+            {
+              "id": "tc-p1",
+              "name": "read_file",
+              "icon": "file-text",
+              "target": "frontend/src/components/SessionList.tsx:101-135",
+              "duration": "54ms",
+              "state": "ok",
+              "source": "内置 · 文件系统",
+              "risk": "read",
+              "args": {
+                "path": "frontend/src/components/SessionList.tsx",
+                "offset": 101,
+                "limit": 35
+              },
+              "formatted": "104 | <div className=\"chat-session-row\">\n115 | const groups = [{ id: \"Pinned\", title: \"Pinned\" }, ...layout.groups];"
+            }
+          ],
+          "answerHtml": "<p>已完成 <code>SessionList</code> 与 <code>use-session-sidebar</code> 契约核对：拖拽排序、置顶区与父子会话缩进均可原样保留，仅需确认历史未绑定项目的旧会话归属策略与迁移执行计划。</p>"
+        },
+        {
+          "id": "turn-p2",
+          "runId": "run_4102b899",
+          "prompt": "请整理具体迁移步骤，并把待定项列出来让我确认。",
+          "tools": [],
+          "planConfirm": {
+            "status": "pending",
+            "text": "1. 读取工作区项目列表生成默认项目分组，保留手动拖拽排序权重；\n2. 在项目组标题右侧“+”直接创建预绑定该项目的会话；\n3. 去掉项目树下每行重复的 <CodeXml/> 图标，仅在运行中/待处理时显示状态圆点。"
+          },
+          "question": {
+            "status": "pending",
+            "title": "历史未绑定项目的旧会话应如何归组展示？",
+            "selected": "unassigned",
+            "note": "",
+            "options": [
+              {
+                "id": "unassigned",
+                "label": "归入底部“未绑定项目”分组（推荐）",
+                "desc": "保持真实项目绑定语义，支持在会话内随时绑定项目后自动迁入对应组。"
+              },
+              {
+                "id": "default_first",
+                "label": "默认归入首个可写项目分组",
+                "desc": "视觉分组更少，但需在打开会话时区分实际未绑定状态。"
+              },
+              {
+                "id": "archive_old",
+                "label": "提示一键归档旧版测试会话",
+                "desc": "适合清理早期 demo 目标遗留记录。"
+              }
+            ]
+          },
+          "answerHtml": "<p>已进入规划确认阶段，请在下方确认执行计划并选择历史未绑定会话的归组策略：</p>"
+        }
+      ]
+    },
+    {
+      "id": "s-sidebar-sub",
+      "title": "契约单测补充：session-sidebar.test.ts",
+      "projectId": "krim-core",
+      "parentId": "s-sidebar-proj",
+      "pinned": false,
+      "lifecycle": "active",
+      "status": "idle",
+      "mode": "auto",
+      "ruleCount": 1,
+      "modeError": "",
+      "draft": "",
+      "compactionStatus": "idle",
+      "outputs": [
+        "docs/plans/qa-ui-improvements/plan.md"
+      ],
+      "context": {
+        "usedTokens": 86000,
+        "windowTokens": 900000,
+        "modelWindow": 1000000,
+        "reservedOutput": 32000,
+        "categories": [
+          {
+            "key": "files",
+            "tokens": 42000,
+            "pct": "48.8%"
+          },
+          {
+            "key": "tools",
+            "tokens": 26000,
+            "pct": "30.2%"
+          },
+          {
+            "key": "system",
+            "tokens": 18000,
+            "pct": "20.9%"
+          }
+        ]
+      },
+      "plan": null,
+      "turns": [
+        {
+          "id": "turn-sub-1",
+          "runId": "run_19c4d002",
+          "prompt": "补充手动拖拽排序不因点击会话而重排的断言。",
+          "tools": [],
+          "answerHtml": "<p>已在子会话中验证 <code>moveSidebar</code> 在选中、发送与重命名操作下均保持原有索引顺序不变。</p>"
+        }
+      ]
+    },
+    {
+      "id": "s-eval-reg",
+      "title": "夜间回归基准集失败样本归因",
+      "projectId": "agent-eval",
+      "parentId": null,
+      "pinned": false,
+      "lifecycle": "active",
+      "status": "running",
+      "mode": "manual",
+      "ruleCount": 0,
+      "modeError": "",
+      "draft": "",
+      "compactionStatus": "idle",
+      "outputs": [
+        "frontend/src/App.tsx"
+      ],
+      "context": {
+        "usedTokens": 342000,
+        "windowTokens": 900000,
+        "modelWindow": 1000000,
+        "reservedOutput": 32000,
+        "categories": [
+          {
+            "key": "tool_result",
+            "tokens": 164000,
+            "pct": "48.0%"
+          },
+          {
+            "key": "files",
+            "tokens": 98000,
+            "pct": "28.7%"
+          },
+          {
+            "key": "tools",
+            "tokens": 48000,
+            "pct": "14.0%"
+          },
+          {
+            "key": "system",
+            "tokens": 32000,
+            "pct": "9.4%"
+          }
+        ]
+      },
+      "plan": null,
+      "turns": [
+        {
+          "id": "turn-eval-1",
+          "runId": "run_6620e511",
+          "prompt": "对比昨晚 regression-v4 数据集中 3 条超时样本的 span 耗时分布。",
+          "tools": [
+            {
+              "id": "tc-run-1",
+              "name": "mcp__github__list_checks",
+              "icon": "globe",
+              "target": "agent-eval · regression-v4 #184",
+              "duration": "执行中…",
+              "state": "running",
+              "source": "MCP · github-mcp",
+              "risk": "read",
+              "args": {
+                "suite": "regression-v4",
+                "run": 184
+              },
+              "formatted": "正在拉取第 3/3 条失败样本的工具调用时间线…"
+            }
+          ],
+          "answerHtml": "<p>当前项目为<strong>只读访问</strong>，正在拉取回归运行指标与 Trace 跨度数据…</p>"
+        }
+      ]
+    },
+    {
+      "id": "s-archived-1",
+      "title": "账号密钥轮换与一次性展示验收",
+      "projectId": "krim-core",
+      "parentId": null,
+      "pinned": false,
+      "lifecycle": "archived",
+      "status": "idle",
+      "mode": "manual",
+      "ruleCount": 0,
+      "modeError": "",
+      "draft": "",
+      "compactionStatus": "idle",
+      "outputs": [],
+      "context": {
+        "usedTokens": 124000,
+        "windowTokens": 900000,
+        "modelWindow": 1000000,
+        "reservedOutput": 32000,
+        "categories": []
+      },
+      "plan": null,
+      "turns": [
+        {
+          "id": "turn-arch-1",
+          "runId": "run_0081a2",
+          "prompt": "核对新签发密钥弹窗关闭后才切换内存 key 的时序。",
+          "tools": [],
+          "answerHtml": "<p>已核验通过并归档。</p>"
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "id": "krim-core",
+      "title": "krim-core"
+    },
+    {
+      "id": "agent-eval",
+      "title": "agent-eval"
+    },
+    {
+      "id": "docs-site",
+      "title": "docs-site"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "s-ui-audit",
+      "title": "前端交互走查与上下文面板接入",
+      "projectId": "krim-core",
+      "mode": "auto",
+      "status": "waiting",
+      "lifecycle": "active",
+      "pinned": true,
+      "parentId": null
+    },
+    {
+      "id": "s-sidebar-proj",
+      "title": "侧栏项目分组迁移与权限核对",
+      "projectId": "krim-core",
+      "mode": "manual",
+      "status": "waiting",
+      "lifecycle": "active",
+      "pinned": false,
+      "parentId": null
+    },
+    {
+      "id": "s-sidebar-sub",
+      "title": "契约单测补充：session-sidebar.test.ts",
+      "projectId": "krim-core",
+      "mode": "auto",
+      "status": "idle",
+      "lifecycle": "active",
+      "pinned": false,
+      "parentId": "s-sidebar-proj"
+    },
+    {
+      "id": "s-eval-reg",
+      "title": "夜间回归基准集失败样本归因",
+      "projectId": "agent-eval",
+      "mode": "manual",
+      "status": "running",
+      "lifecycle": "active",
+      "pinned": false,
+      "parentId": null
+    },
+    {
+      "id": "s-archived-1",
+      "title": "账号密钥轮换与一次性展示验收",
+      "projectId": "krim-core",
+      "mode": "manual",
+      "status": "idle",
+      "lifecycle": "archived",
+      "pinned": false,
+      "parentId": null
+    }
+  ],
+  "currentSessionId": "s-ui-audit",
+  "projects": [
+    {
+      "id": "krim-core",
+      "title": "krim-core",
+      "access": "write",
+      "creator": "当前账号",
+      "sandbox": "ready",
+      "branch": "qa",
+      "image": "krim/dev-linux:24.04",
+      "workdir": "/workspace/krim-core"
+    },
+    {
+      "id": "agent-eval",
+      "title": "agent-eval",
+      "access": "read",
+      "creator": "platform-bot",
+      "sandbox": "ready",
+      "branch": "main",
+      "image": "krim/eval-runner:24.04",
+      "workdir": "/workspace/agent-eval"
+    },
+    {
+      "id": "docs-site",
+      "title": "docs-site",
+      "access": "write",
+      "creator": "当前账号",
+      "sandbox": "stopped",
+      "branch": "main",
+      "image": "krim/dev-linux:24.04",
+      "workdir": "/workspace/docs-site"
+    }
+  ],
+  "context": {
+    "usedTokens": 574100,
+    "windowTokens": 900000,
+    "modelWindow": 1000000,
+    "reservedOutput": 32000,
+    "categories": [
+      {
+        "key": "files",
+        "tokens": 196200,
+        "pct": "34.2%"
+      },
+      {
+        "key": "tool_result",
+        "tokens": 148500,
+        "pct": "25.9%"
+      },
+      {
+        "key": "history",
+        "tokens": 100000,
+        "pct": "17.4%"
+      },
+      {
+        "key": "tools",
+        "tokens": 68400,
+        "pct": "11.9%"
+      },
+      {
+        "key": "system",
+        "tokens": 42800,
+        "pct": "7.5%"
+      },
+      {
+        "key": "memory",
+        "tokens": 18200,
+        "pct": "3.2%"
+      }
+    ]
+  },
+  "outputs": [
+    "frontend/src/components/ChatWorkbench.tsx",
+    "frontend/src/components/DevelopmentPanel.tsx",
+    "docs/plans/qa-ui-improvements/plan.md",
+    "frontend/src/App.tsx"
+  ],
+  "tools": [
+    {
+      "name": "read_file",
+      "risk": "read"
+    },
+    {
+      "name": "edit_file",
+      "risk": "write"
+    },
+    {
+      "name": "write_file",
+      "risk": "write"
+    },
+    {
+      "name": "glob_files",
+      "risk": "read"
+    },
+    {
+      "name": "grep_content",
+      "risk": "read"
+    },
+    {
+      "name": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "mcp__github__get_pull_request",
+      "risk": "read"
+    },
+    {
+      "name": "mcp__github__list_checks",
+      "risk": "read"
+    },
+    {
+      "name": "mcp__filesystem__stat",
+      "risk": "read"
+    }
+  ],
+  "plan": {
+    "open": true,
+    "steps": [
+      {
+        "text": "核对 ChatWorkbench 底栏布局与输入框四态高度契约",
+        "status": "completed"
+      },
+      {
+        "text": "打通最新完成轮次 /observations 上下文分布与进度环",
+        "status": "completed"
+      },
+      {
+        "text": "运行前端组件单测并验证深色与窄屏排版",
+        "status": "in_progress"
+      },
+      {
+        "text": "整理回归截图并同步更新本地接续记录",
+        "status": "pending"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "id": "turn-1",
+      "runId": "run_7d31a920",
+      "prompt": "检查当前 QA 分支的对话底栏和右侧 Context 面板，看看为什么只显示“上下文用量未提供”，并对齐桌面端布局。",
+      "answerHtml": "<p>定位到两处断点：</p><ol><li><code>DevelopmentPanel</code> 目前只读取会话静态 <code>context_policy</code>，未请求已完成轮次的 <code>/observations</code> 清单接口，因此一直回退到“上下文用量未提供”。</li><li><code>ChatWorkbench</code> 底栏将权限芯片单独放在最左侧，且在空会话下直接卸载整个 <code>footer.chat-controls</code>。</li></ol><div class=\"message-table-scroll\"><table><thead><tr><th>控件位置</th><th>远端 QA 现状</th><th>桌面端对齐调整</th></tr></thead><tbody><tr><td>底栏右侧</td><td>写死“模型”与静态灰圈 <code>—</code></td><td>聚合 <code>GPT-6 Luna · Extra · 权限 · 进度环</code></td></tr><tr><td>右侧 Context</td><td>静态策略上限 + 未提供提示</td><td>多色来源分段条 + 各分类 token 与自动压缩余量</td></tr></tbody></table></div>",
+      "tools": [
+        {
+          "name": "read_file",
+          "args": {
+            "path": "frontend/src/components/ChatWorkbench.tsx",
+            "offset": 30,
+            "limit": 33
+          },
+          "state": "ok",
+          "icon": "file-text",
+          "formatted": "30 | return <section className=\"chat-workbench\">\n46 |   {chat.session && <footer className=\"chat-controls\">\n47 |     <SessionExecutionControl ... />\n49 |     <button className=\"control-chip is-strong\">模型</button>\n51 |     <button className=\"context-meter\">—</button>"
+        },
+        {
+          "name": "grep_content",
+          "args": {
+            "pattern": "/observations",
+            "path": "frontend/src/observability"
+          },
+          "state": "ok",
+          "icon": "search",
+          "formatted": "use-observations.ts:97  /v2/workspaces/${workspace}/sessions/${session_id}/turns/${turn_id}/observations\ncontext-view.tsx:49     function buildContentEntries(manifest: ObsManifest)"
+        }
+      ]
+    },
+    {
+      "id": "turn-2",
+      "runId": "run_9f82c104",
+      "prompt": "先把底栏右侧聚合和 Context 来源分布接好，然后跑一下相关契约测试。",
+      "answerHtml": "<p>已完成底栏聚合与右侧 <code>Context</code> 清单接线，请确认执行前端组件回归单测：</p><div class=\"message-code-block\"><div class=\"message-code-head\"><span>frontend/src/components/ChatWorkbench.tsx</span><button type=\"button\" class=\"chat-message-action\" data-copy-code=\"const ratio = Math.min(1, usedTokens / 900_000);\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"/><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"/></svg>复制</button></div><pre><code><span class=\"tok-kw\">const</span> ratio = Math.<span class=\"tok-fn\">min</span>(<span class=\"tok-num\">1</span>, contextUsage.usedTokens / <span class=\"tok-num\">900_000</span>);</code></pre></div>",
+      "tools": [
+        {
+          "name": "edit_file",
+          "args": {
+            "path": "frontend/src/components/ChatWorkbench.tsx",
+            "replace_all": false
+          },
+          "state": "ok",
+          "icon": "file-code",
+          "formatted": "- {chat.session && <footer className=\"chat-controls\">\n-   <SessionExecutionControl ... />\n+ <footer className=\"chat-controls\">\n+   <ProjectEnvironmentChips ... />\n+   <div className=\"chat-controls-right\">...</div>"
+        }
+      ]
+    }
+  ],
+  "turnKeys": [
+    "id",
+    "runId",
+    "prompt",
+    "tools",
+    "answerHtml"
+  ],
+  "visibleTurns": [
+    {
+      "id": "turn-1",
+      "user": "检查当前 QA 分支的对话底栏和右侧 Context 面板，看看为什么只显示“上下文用量未提供”，并对齐桌面端布局。",
+      "answer": ""
+    },
+    {
+      "id": "turn-2",
+      "user": "先把底栏右侧聚合和 Context 来源分布接好，然后跑一下相关契约测试。",
+      "answer": ""
+    }
+  ]
+}

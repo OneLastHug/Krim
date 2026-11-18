@@ -12,7 +12,7 @@ export interface ProjectPermission {
   project_access: "read" | "write"; is_creator: boolean; sandbox_status: string;
 }
 export interface ModeUpdate { mode: ExecutionMode; expected_revision: number; request_key: string }
-export const modeLabels: Record<ExecutionMode, string> = { manual: "手动确认", auto: "自动判断", bypass: "免确认" };
+export const modeLabels: Record<ExecutionMode, string> = { manual: "手动确认", auto: "自动执行", bypass: "跳过确认" };
 export const modeDescriptions: Record<ExecutionMode, string> = {
   manual: "读取和搜索直接执行，修改文件、运行命令等操作需要确认。",
   auto: "常规项目修改、构建和测试自动执行；不明确或影响范围大的操作仍需确认。",

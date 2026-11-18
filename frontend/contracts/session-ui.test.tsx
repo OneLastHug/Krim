@@ -169,8 +169,11 @@ for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBi
     return undefined;
   };
   await act(async () => root.render(<StrictMode><App/></StrictMode>));
-  await until(() => expect(document.querySelector('option[value="project-one"]')).toBeTruthy());
-  await act(async () => { const select = document.getElementById("new-session-project") as HTMLSelectElement; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "project-one"); select.dispatchEvent(new Event("change", { bubbles: true })); });
+  await until(() => expect(document.querySelector('.empty-setup-card[data-kind="project"]')).toBeTruthy());
+  await act(async () => (document.querySelector('.empty-setup-card[data-kind="project"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector('input[name="dev-project"][value="project-one"]')).toBeTruthy());
+  await act(async () => (document.querySelector('input[name="dev-project"][value="project-one"]') as HTMLInputElement).click());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="选择新会话项目"] button')].find(item => item.textContent?.trim() === "使用项目")!.click());
   await type("chat-prompt", "绑定后才发送的第一条任务");
   await act(async () => button("发送").click());
   await until(() => expect(calls.some(call => call.path === bindingPath && call.method === "PUT")).toBe(true));

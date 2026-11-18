@@ -62,8 +62,8 @@ export function AppSidebar({ active, apiKey = "", onCreateInGroup, identity, ide
     {<div className="sidebar-code-navigation sidebar-buttons">
       <div className="sidebar-mode-tabs" aria-label="工作模式"><button type="button" onClick={() => setFuture("敬请期待")}>Krim Agent</button><button type="button" aria-current="page" aria-label="导航到对话" onClick={() => onNavigate("chat")}><CodeXml aria-hidden="true"/>Code</button></div>
       {!chatMode && <Button variant="ghost" className="sidebar-code-action" onClick={() => { onNavigate("chat"); onClose?.(); }}><ArrowLeft aria-hidden="true"/>返回对话</Button>}
-      <Button variant="ghost" className="sidebar-code-action" aria-label="新建对话" disabled={!canCreate} onClick={() => { onCreate(); onClose?.(); }}><SquarePen aria-hidden="true"/>新会话</Button>
-      <Button variant="ghost" className="sidebar-code-action" aria-label="查找对话" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true"/>搜索会话</Button>
+      <Button variant="ghost" className="sidebar-code-action" aria-label="新建对话" disabled={!canCreate} onClick={() => { onCreate(); onClose?.(); }}><SquarePen aria-hidden="true"/>新会话<kbd aria-hidden="true">Ctrl⇧N</kbd></Button>
+      <Button variant="ghost" className="sidebar-code-action" aria-label="查找对话" disabled={!identity} onClick={() => { onOpenSearch(); onClose?.(); }}><Search aria-hidden="true"/>搜索会话<kbd aria-hidden="true">Ctrl K</kbd></Button>
       <Button variant="ghost" className="sidebar-code-action" onClick={() => setFuture("敬请期待")}><Settings2 aria-hidden="true"/>自定义</Button>
       <Button variant="ghost" className="sidebar-code-action" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(open => !open)}><Ellipsis aria-hidden="true"/>更多</Button>
       {future && <p className="session-sidebar-notice" role="status">{future}</p>}
@@ -99,13 +99,13 @@ export function AppSidebar({ active, apiKey = "", onCreateInGroup, identity, ide
       <h3>设置</h3>
       <section>
         <h4>主题</h4>
-        <div className="theme-options" role="group" aria-label="选择显示主题">
+        <div className="theme-options pop-grid" role="group" aria-label="选择显示主题">
           {workbenchThemeOptions.map(option => <Button key={option.id} variant="ghost" className={theme === option.id ? "is-selected" : ""} aria-pressed={theme === option.id} onClick={() => { onThemeSelect(option.id); setSettingsOpen(false); }}><span className={`theme-swatch theme-swatch-${option.id}`} aria-hidden="true"></span>{option.label}</Button>)}
         </div>
       </section>
       <section>
         <h4>阅读字号</h4>
-        <div className="reading-size-options" role="group" aria-label="选择阅读字号">
+        <div className="reading-size-options pop-grid sizes" role="group" aria-label="选择阅读字号">
           {workbenchReadingSizes.map(size => <Button key={size} variant="ghost" className={readingSize === size ? "is-selected" : ""} aria-pressed={readingSize === size} onClick={() => { onReadingSizeSelect(size); setSettingsOpen(false); }}>{size}</Button>)}
         </div>
       </section>
