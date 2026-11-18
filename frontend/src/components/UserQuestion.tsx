@@ -203,7 +203,7 @@ export function UserQuestion({ request, onAnswer, onCancel, disabled = false }: 
     </section>;
   }
 
-  return <section className="space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground" aria-label="用户问题" data-request-id={request.id}>
+  return <section className="workbench-interaction space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground" data-pending-interaction="true" aria-label="用户问题" data-request-id={request.id}>
     <div>
       <h3 className="text-sm font-medium">需要你的回答</h3>
       <p className="text-sm text-muted-foreground">请回答以下问题后继续。</p>

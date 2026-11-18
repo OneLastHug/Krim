@@ -63,7 +63,7 @@ export function useObservations({ apiKey, workspace, identity, active, status, s
   const selected = turnId ? items.find(item => item.session_id === sessionId && item.turn_id === turnId) ?? null : null;
   // 深链详情独立读取：不依赖有界列表页命中，旧轮次可直接用授权 detail 端点读取。
   const detailTarget = useMemo(() => selected ?? (sessionId && turnId ? { session_id: sessionId, turn_id: turnId } : null), [selected, sessionId, turnId]);
-  const selectionQuery = detailTarget ? JSON.stringify([scope, detailTarget.session_id, detailTarget.turn_id, selected?.run_id ?? "deep-link"]) : "";
+  const selectionQuery = detailTarget ? JSON.stringify([scope, detailTarget.session_id, detailTarget.turn_id, selected?.run_id ?? "deep-link", revision]) : "";
   const selectionRef = useRef(selectionQuery);
   selectionRef.current = selectionQuery;
 

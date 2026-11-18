@@ -102,7 +102,7 @@ pre {
 summary {
   cursor: pointer;
   font-size: var(--font-size-ui);
-  color: #525252
+  color: var(--muted-foreground)
 }
 svg {
   flex-shrink: 0
@@ -154,7 +154,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 }
 .brand>span {
   font-size: var(--font-size-ui);
-  color: #525252
+  color: var(--muted-foreground)
 }
 .access-actions {
   display: flex;
@@ -182,7 +182,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   padding: 14px
 }
 .task-input:read-only {
-  background: #fafafa
+  background: var(--muted)
 }
 
 .app-nav { margin-top: 20px; }
@@ -203,22 +203,22 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 .eval-inline,.eval-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .eval-inline input { flex: 1; min-width: 0; margin-top: 0; }
 .eval-inline { margin-top: 8px; }
-.evaluation-workbench select { display: block; margin-top: 8px; min-height: 44px; width: 100%; border: 1px solid #737373; background: white; border-radius: 6px; padding: 0 10px; font: inherit; }
+.evaluation-workbench select { display: block; margin-top: 8px; min-height: 44px; width: 100%; border: 1px solid #737373; background: var(--input-surface); border-radius: 6px; padding: 0 10px; font: inherit; }
 .evaluation-workbench select:focus-visible { outline: 2px solid #171717; outline-offset: 3px; }
 .rule-options { border: 0; padding: 0; margin: 16px 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .rule-options legend { font-size: var(--font-size-ui); }
 .rule-options label { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: var(--font-size-ui); }
-.rule-options input { width: 18px; height: 18px; accent-color: #171717; }
+.rule-options input { width: 18px; height: 18px; accent-color: var(--foreground); }
 .open-evaluation { margin: 24px 0; }
 .eval-report,.eval-compare { border-top: 1px solid var(--border); padding-top: 24px; margin-top: 28px; }
-.eval-report #eval-status { color: #525252; font-size: var(--font-size-ui); }
-.evaluation-workbench .notice { color: #525252; }
+.eval-report #eval-status { color: var(--muted-foreground); font-size: var(--font-size-ui); }
+.evaluation-workbench .notice { color: var(--muted-foreground); }
 .eval-summary { display: flex; flex-wrap: wrap; gap: 12px 20px; font-size: var(--font-size-ui); margin: 24px 0; }
 .case-list { list-style: none; padding: 0; margin: 16px 0; }
 .case-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 8px 0; overflow-wrap: anywhere; }
 .case-list li>div { display: flex; }
 .source-facts { margin-top: 12px; font-size: var(--font-size-ui); }
-.source-facts p { color: #525252; }
+.source-facts p { color: var(--muted-foreground); }
 .frozen-revision,.report-identity { margin-top: 20px; overflow-wrap: anywhere; }
 .frozen-revision code { display: block; font-size: 12px; margin-top: 10px; }
 .report-table-scroll { overflow-x: auto; max-width: 100%; }
@@ -227,7 +227,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 .report-table-scroll th,.report-table-scroll td { padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: top; min-width: 100px; }
 .report-table-scroll pre { max-height: 200px; min-width: 120px; }
 .report-table-scroll p { overflow-wrap: anywhere; max-width: 160px; }
-.report-table-scroll small { display: block; color: #525252; }
+.report-table-scroll small { display: block; color: var(--muted-foreground); }
 .gate-result { padding: 20px 0; }
 .gate-result #gate-status { font-weight: 600; }
 .gate-result li { margin-top: 10px; }
@@ -268,7 +268,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 }
 .run-status {
   font-size: var(--font-size-ui);
-  color: #525252;
+  color: var(--muted-foreground);
   margin-top: 4px
 }
 .run-actions {
@@ -282,7 +282,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 }
 .empty-result {
   padding: 94px 0 70px;
-  color: #525252
+  color: var(--muted-foreground)
 }
 .empty-result p {
   font-size: 16px
@@ -317,12 +317,12 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   min-height: 44px;
   flex: none;
   padding: 0 4px;
-  color: #525252;
+  color: var(--muted-foreground);
   font-size: var(--font-size-ui);
   border-radius: 0
 }
 .detail-tabs button[data-active] {
-  color: #171717
+  color: var(--foreground)
 }
 .detail-tabs button::after {
   bottom: -1px!important
@@ -335,14 +335,14 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   font: var(--font-size-ui)/20px var(--font-sans)
 }
 .notice {
-  color: #a61b1b;
+  color: var(--status-bad-fg);
   font-size: var(--font-size-ui);
   margin-top: 16px;
   overflow-wrap: anywhere
 }
 .notice button {
   margin-top: 8px;
-  color: #171717
+  color: var(--foreground)
 }
 .approval-list {
   margin: 22px 0
@@ -362,14 +362,14 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   font-size: var(--font-size-ui)
 }
 .approval-title>span {
-  color: #525252
+  color: var(--muted-foreground)
 }
 .approval-arguments {
   font-size: var(--font-size-ui);
   line-height: 1.7;
   margin: 14px 0 18px;
   padding: 12px;
-  background: #f5f5f5;
+  background: var(--muted);
   border-radius: 4px;
   max-height: 220px
 }
@@ -390,7 +390,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   margin-bottom: 12px
 }
 .tool header>span {
-  color: #525252
+  color: var(--muted-foreground)
 }
 .tool pre {
   max-height: 320px;
@@ -398,7 +398,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
 }
 .detail-empty,.muted {
   font-size: var(--font-size-ui);
-  color: #525252
+  color: var(--muted-foreground)
 }
 .span-row {
   display: flex;
@@ -414,13 +414,13 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   gap: 5px
 }
 .span-row .mono {
-  color: #525252;
+  color: var(--muted-foreground);
   overflow-wrap: anywhere;
   font-size: var(--font-size-ui)
 }
 .span-row>span {
   flex-shrink: 0;
-  color: #525252
+  color: var(--muted-foreground)
 }
 .mono {
   font-family: ui-monospace,monospace
@@ -440,7 +440,7 @@ button[data-slot]:has(>svg):not(:has(>span)) {
   overflow-wrap: anywhere
 }
 .event-list .mono {
-  color: #525252
+  color: var(--muted-foreground)
 }
 .raw,.diagnostic {
   margin-top: 24px
@@ -906,7 +906,7 @@ input[data-slot="input"], textarea[data-slot="textarea"], .evaluation-workbench 
 }
 .session-rename-dialog form { display: grid; gap: 4px; }
 .session-rename-dialog .dialog-actions { margin-top: 16px; }
-@media (max-width: 1100px) {
+@media (max-width: 1200px) {
   .workbench-content.inspector-open { grid-template-columns: minmax(0,1fr); }
   .inspector-desktop { display: none; }
   .workbench-page { padding: 16px 18px 22px; }

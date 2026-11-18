@@ -23,6 +23,7 @@ const maxScrollPositions = 80;
 
 export interface ObservabilityModuleProps {
   apiKey: string;
+  active?: boolean;
   workspace: string;
   identity: Actor | null;
   identityLoading: boolean;
@@ -39,7 +40,7 @@ function pushUrl(next: URL, replace: boolean) {
   else window.history.pushState(null, "", next);
 }
 
-export function ObservabilityModule({ apiKey, workspace, identity, identityLoading, theme, page, onPageChange, onNavigate, onSession, onEvaluate }: ObservabilityModuleProps) {
+export function ObservabilityModule({ active = true, apiKey, workspace, identity, identityLoading, theme, page, onPageChange, onNavigate, onSession, onEvaluate }: ObservabilityModuleProps) {
   const dark = theme === "dark";
   const [state, setState] = useState<ObsState>(() => readObsState(new URL(location.href)));
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -54,12 +55,12 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
 
   // Hydrate a deep-linked page from the host route, but never clear its initial selection.
   useEffect(() => {
-    setState(previous => previous.page === page ? previous : { ...previous, page });
-  }, [page]);
+    if (active) setState({ ...readObsState(new URL(location.href)), page });
+  }, [page, active]);
 
   // Clear selections only after an established identity/workspace scope truly changes.
   useEffect(() => {
-    if (identityLoading) return;
+    if (!active || identityLoading) return;
     const nextScope = JSON.stringify([workspace, identity?.principal_id ?? "", identity?.generation ?? null]);
     const previous = previousIdentityScope.current;
     previousIdentityScope.current = nextScope;
@@ -89,7 +90,7 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
     apiKey,
     workspace,
     identity,
-    active: !!identity && !identityLoading,
+    active: active && !!identity && !identityLoading,
     status: state.status,
     sessionId: state.session,
     turnId: state.turn,
@@ -97,13 +98,13 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
 
   // Default context view chooses an actual authorized turn after the first bounded page arrives.
   useEffect(() => {
-    if (identityLoading || !identity || state.page !== "context" || state.turn || !data.items.length) return;
+    if (!active || identityLoading || !identity || state.page !== "context" || state.turn || !data.items.length) return;
     const item = state.session
       ? data.items.find(entry => entry.session_id === state.session)
       : data.items[0];
     if (!item) return;
     onState({ ...state, session: item.session_id, turn: item.turn_id, request: "", base: "", run: "", item: "" }, true);
-  }, [identityLoading, identity, state, data.items, onState]);
+  }, [active, identityLoading, identity, state, data.items, onState]);
 
   useEffect(() => {
     const moduleRoot = scrollRef.current;
@@ -164,6 +165,7 @@ export function ObservabilityModule({ apiKey, workspace, identity, identityLoadi
   const viewProps = { apiKey, workspace, identity, onNavigate, onSession, onEvaluate, state, onState, dark, data };
 
   return <div ref={scrollRef} className="observability-root" data-obs-page={state.page}>
+    {onSession && state.session && <div className="obs-return-bar"><button type="button" className="obs-button" onClick={() => onSession(state.session)}>← 返回对话原轮次</button></div>}
     <div className="obs-content">
       <div className="obs-page-body" key={state.page}>
         <Suspense fallback={<ObsEmpty title="正在加载页面…"/>}>

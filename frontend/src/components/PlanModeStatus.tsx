@@ -101,7 +101,7 @@ export function PlanModeStatus({ state, request, onConfirm, onReject, onCancel, 
     }
   }
 
-  return <section className="space-y-3 rounded-lg border border-border bg-card p-4 text-card-foreground" aria-label="计划模式状态" data-mode={state.mode}>
+  return <section className="workbench-interaction space-y-3 rounded-lg border border-border bg-card p-4 text-card-foreground" data-pending-interaction={request?.status === "pending"} aria-label="计划模式状态" data-mode={state.mode}>
     <div>
       <h3 className="text-sm font-medium">{state.mode === "plan" ? "计划模式" : "执行模式"}</h3>
       <p className="text-sm text-muted-foreground">

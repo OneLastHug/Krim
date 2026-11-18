@@ -215,33 +215,33 @@
 }
 
 .obs-pill-ok {
-  background: color-mix(in srgb, #147952 12%, var(--background));
-  color: #147952;
+  background: color-mix(in srgb, var(--status-ok-fg) 12%, var(--background));
+  color: var(--status-ok-fg);
 }
 
 .dark .obs-pill-ok {
-  background: color-mix(in srgb, #89cfaa 16%, var(--background));
-  color: #89cfaa;
+  background: color-mix(in srgb, var(--status-ok-fg) 16%, var(--background));
+  color: var(--status-ok-fg);
 }
 
 .obs-pill-bad {
-  background: color-mix(in srgb, #a61b1b 10%, var(--background));
-  color: #a61b1b;
+  background: color-mix(in srgb, var(--status-bad-fg) 10%, var(--background));
+  color: var(--status-bad-fg);
 }
 
 .dark .obs-pill-bad {
-  background: color-mix(in srgb, #ff8580 14%, var(--background));
-  color: #ff8580;
+  background: color-mix(in srgb, var(--status-bad-fg) 14%, var(--background));
+  color: var(--status-bad-fg);
 }
 
 .obs-pill-warn {
-  background: color-mix(in srgb, #8a651a 12%, var(--background));
-  color: #8a651a;
+  background: color-mix(in srgb, var(--status-warn-fg) 12%, var(--background));
+  color: var(--status-warn-fg);
 }
 
 .dark .obs-pill-warn {
-  background: color-mix(in srgb, #e9c684 14%, var(--background));
-  color: #e9c684;
+  background: color-mix(in srgb, var(--status-warn-fg) 14%, var(--background));
+  color: var(--status-warn-fg);
 }
 
 .obs-metric-strip {
@@ -334,33 +334,33 @@
 }
 
 .obs-notice-warn {
-  background: color-mix(in srgb, #8a651a 8%, var(--background));
-  border-color: color-mix(in srgb, #8a651a 25%, transparent);
-  color: #8a651a;
+  background: color-mix(in srgb, var(--status-warn-fg) 8%, var(--background));
+  border-color: color-mix(in srgb, var(--status-warn-fg) 25%, transparent);
+  color: var(--status-warn-fg);
 }
 
 .dark .obs-notice-warn {
-  color: #e9c684;
+  color: var(--status-warn-fg);
 }
 
 .obs-notice-bad {
-  background: color-mix(in srgb, #a61b1b 8%, var(--background));
-  border-color: color-mix(in srgb, #a61b1b 25%, transparent);
-  color: #a61b1b;
+  background: color-mix(in srgb, var(--status-bad-fg) 8%, var(--background));
+  border-color: color-mix(in srgb, var(--status-bad-fg) 25%, transparent);
+  color: var(--status-bad-fg);
 }
 
 .dark .obs-notice-bad {
-  color: #ff8580;
+  color: var(--status-bad-fg);
 }
 
 .obs-notice-ok {
-  background: color-mix(in srgb, #147952 8%, var(--background));
-  border-color: color-mix(in srgb, #147952 25%, transparent);
-  color: #147952;
+  background: color-mix(in srgb, var(--status-ok-fg) 8%, var(--background));
+  border-color: color-mix(in srgb, var(--status-ok-fg) 25%, transparent);
+  color: var(--status-ok-fg);
 }
 
 .dark .obs-notice-ok {
-  color: #89cfaa;
+  color: var(--status-ok-fg);
 }
 
 .obs-fact-grid {
@@ -1122,11 +1122,11 @@ rect.obs-hit:focus-visible {
 }
 
 .obs-ok {
-  color: #147952;
+  color: var(--status-ok-fg);
 }
 
 .dark .obs-ok {
-  color: #89cfaa;
+  color: var(--status-ok-fg);
 }
 
 .obs-facts {
@@ -1153,13 +1153,13 @@ rect.obs-hit:focus-visible {
 }
 
 .obs-field-errors {
-  color: #a61b1b;
+  color: var(--status-bad-fg);
   font-size: 11px;
   overflow-wrap: anywhere;
 }
 
 .dark .obs-field-errors {
-  color: #ff8580;
+  color: var(--status-bad-fg);
 }
 
 .obs-input {

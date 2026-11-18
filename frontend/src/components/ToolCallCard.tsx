@@ -1,11 +1,12 @@
 import { useEffect, useId, useState } from "react";
 import type { ApprovalScope } from "../lib/execution-policy";
-import { ChevronRight, LoaderCircle, Shield, Wrench } from "lucide-react";
+import { ChevronRight, LoaderCircle, Shield, Wrench, FileText, Terminal, Search, Plug } from "lucide-react";
 import { runReason } from "../lib/copy";
 import { displayToolName } from "../lib/tool-names";
 import type { ToolPresentation, ToolState } from "../lib/session-presentation";
 import { ToolProvenance } from "./ToolProvenance";
 import { Button } from "./ui/button";
+import { toolKind, toolSummary, formatToolValue } from "../lib/tool-display";
 
 const labels: Record<ToolState, string> = {
   preparing: "准备调用", approval: "等待审批", running: "等待结果", ok: "已完成",
@@ -49,6 +50,9 @@ export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, 
 }) {
   // 显示用名称：旧 dev_* 名映射为新名；事件与审批记录中的原始 name 不变。
   const toolName = displayToolName(tool.name);
+  const Icon = ({ file: FileText, terminal: Terminal, search: Search, mcp: Plug, other: Wrench })[toolKind(tool.name)];
+  const summary = toolSummary(tool.arguments);
+  const [raw, setRaw] = useState(false);
   const scopeId = useId();
   const approvalIdentity = tool.approval ? JSON.stringify([tool.approval.run_id, tool.approval.request_id, tool.approval.call_id, tool.approval.tool_hash, tool.approval.arguments_hash]) : "";
   const [choice, setChoice] = useState<{ identity: string; scope: ApprovalScope }>({ identity: "", scope: "once" });
@@ -72,11 +76,12 @@ export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, 
   </section>;
 
   return <details className="chat-tool" data-state={tool.state} data-call-id={tool.callId ?? tool.providerCallId}>
-    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Wrench aria-hidden="true" />}<strong data-ui-data>{toolName}</strong><span>{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
+    <summary onClick={event => { if (!(event.currentTarget.parentElement as HTMLDetailsElement).open) onInspect(); }}><ChevronRight className="chat-tool-chevron" aria-hidden="true" />{tool.state === "running" ? <LoaderCircle className="chat-tool-spinner" aria-hidden="true" /> : <Icon aria-hidden="true" />}<strong data-ui-data>{toolName}</strong>{summary && <span className="tool-summary" title={summary}>{summary}</span>}<span>{tool.code === "approval_expired" ? "审批已过期" : labels[tool.state]}</span></summary>
     <div className="chat-tool-body">
       <ToolProvenance value={{ source: tool.source, risk: tool.risk }} />
-      <div className="chat-tool-section"><span>参数</span><pre data-ui-data tabIndex={0}>{valueText(tool.arguments)}</pre></div>
-      {tool.resultAvailable ? <div className="chat-tool-section"><span>结果</span><pre data-ui-data tabIndex={0}>{valueText(tool.result)}</pre></div> : <p className="detail-empty">{missingResult(tool)}</p>}
+      <Button variant="ghost" size="sm" aria-pressed={raw} onClick={() => setRaw(value => !value)}>{raw ? "格式化内容" : "原始 JSON"}</Button>
+      <div className="chat-tool-section"><span>参数</span><pre data-ui-data tabIndex={0}>{raw ? valueText(tool.arguments) : formatToolValue(tool.arguments)}</pre></div>
+      {tool.resultAvailable ? <div className="chat-tool-section"><span>结果</span><pre data-ui-data tabIndex={0}>{raw ? valueText(tool.result) : formatToolValue(tool.result)}</pre></div> : <p className="detail-empty">{missingResult(tool)}</p>}
       {tool.code && <p className="chat-tool-error" data-ui-data>{tool.code === "invalid_input" ? "工具参数无效" : runReason(tool.code)} <code>{tool.code}</code></p>}
     </div>
   </details>;

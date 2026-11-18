@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 import "./account-settings.css";
 
-export type AccountTab = "profile" | "accounts" | "events";
+export type AccountTab = "profile" | "accounts" | "events" | "appearance";
 
 export interface AccountSettingsProps {
   apiKey: string;
@@ -58,6 +58,7 @@ export interface AccountSettingsProps {
   onLogout: () => void;
   gatewayName?: string;
   onConnect: () => void;
+  appearance?: import("react").ReactNode;
 }
 
 type ConfirmTarget = {
@@ -242,6 +243,7 @@ export function AccountSettings({
   onLogout,
   gatewayName,
   onConnect,
+  appearance,
 }: AccountSettingsProps) {
   const admin = profile?.platform_role === "platform_admin";
   const selfId = profile?.principal_id ?? identity?.principal_id ?? "";
@@ -760,8 +762,10 @@ export function AccountSettings({
         <button type="button" className="account-tab" aria-current={tab === "profile" ? "page" : undefined} onClick={() => onTabChange("profile")}>个人资料</button>
         {admin && <button type="button" className="account-tab" aria-current={tab === "accounts" ? "page" : undefined} onClick={() => onTabChange("accounts")}>账号管理</button>}
         {admin && <button type="button" className="account-tab" aria-current={tab === "events" ? "page" : undefined} onClick={() => onTabChange("events")}>管理记录</button>}
+        {appearance && <button type="button" className="account-tab" aria-current={tab === "appearance" ? "page" : undefined} onClick={() => onTabChange("appearance")}>外观与偏好</button>}
       </nav>
 
+      {tab === "appearance" && appearance}
       {tab === "profile" && (profile ? (
         <>
           <div className="account-heading">

@@ -57,8 +57,10 @@ export function RunsView({ state, onState, dark, data, workspace, onSession, onE
         <button type="button" className="obs-button" onClick={() => downloadObservationCsv(workspace, data.items)}>导出当前页 CSV</button>
       </>}
     />
-    {!items.length && <ObsEmpty title="没有符合筛选条件的运行记录">调整状态筛选或刷新。</ObsEmpty>}
-    {items.length > 0 && <div className={selected ? "obs-run-layout has-selection" : "obs-run-layout"}>
+    {state.turn && !selected && data.detailLoading && <p className="obs-caption" role="status">正在读取运行观测详情…</p>}
+    {data.detailError && <div role="alert">{data.detailError}<button className="obs-button" onClick={data.refresh}>重试详情</button></div>}
+    {!items.length && !selected && !data.detailLoading && <ObsEmpty title="没有符合筛选条件的运行记录">调整状态筛选或刷新。</ObsEmpty>}
+    {(items.length > 0 || selected) && <div className={selected ? "obs-run-layout has-selection" : "obs-run-layout"}>
       <section className="obs-panel obs-run-list" aria-label="运行列表">
         {items.map(item => <button key={item.run_id} type="button"
           className={item.run_id === state.run ? "obs-run-row active" : "obs-run-row"}
@@ -77,7 +79,6 @@ export function RunsView({ state, onState, dark, data, workspace, onSession, onE
       </section>
       {selected && <section className="obs-panel obs-panel-pad obs-run-detail">
         {!detail && data.detailLoading && <p className="obs-caption" role="status">正在读取运行观测详情…</p>}
-        {!detail && !!data.detailError && <p className="obs-caption" role="alert">{data.detailError}</p>}
         {detail && <>
           <header className="obs-detail-head">
             <div>
