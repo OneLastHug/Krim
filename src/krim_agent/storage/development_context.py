@@ -416,6 +416,16 @@ class DevelopmentCompactionSource:
             or run["stop_requested"]
         ):
             raise ServiceError("permission_denied", 403)
+        schema_version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar_one()
+        if schema_version >= 19:
+            from krim_agent.project_access.policy import resolve_project_access
+
+            access = await resolve_project_access(conn, actor, frozen.project_id)
+            # History needs project read access, not a separate shell license.
+            # Each tool's guard still enforces the write ceiling and session mode.
+            if access.access == "none":
+                raise ServiceError("permission_denied", 403)
+            return
         row = (
             (
                 await conn.execute(
@@ -441,6 +451,7 @@ class DevelopmentCompactionSource:
             or grant.actor_id != frozen.owner_id
             or grant.actor_generation != frozen.authorization_generation
             or grant.revoked
+            or grant.expires_at is None
             or grant.expires_at <= time.time()
             or "shell.execute" not in grant.actions
         ):
