@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import {
-  Archive, ChevronRight, ChevronUp, CodeXml, Columns2, Download, FileText, Folder, FolderOpen,
+  Archive, Maximize2, Minimize2, ChevronRight, ChevronUp, CodeXml, Columns2, Download, FileText, Folder, FolderOpen,
   Image, KeyRound, PanelRight, Plus, Shield, Terminal, X,
 } from "lucide-react";
 import { parseTurn, sessionPath, type Turn, type SessionContextPolicy } from "../lib/session-contracts.ts";
@@ -20,9 +20,23 @@ import { Input } from "./ui/input.tsx";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
 import { PopoverMenu } from "./popover-menu.tsx";
 import "./development-panel.css";
+import { MessageMarkdown } from "./messages/MessageMarkdown";
+import { ContextSummary } from "./ContextSummary";
+import type { SessionContextState } from "../hooks/use-session-context";
+import type { DevelopmentActionDetail } from "../lib/workbench-events";
+import { projectTurn } from "../lib/session-presentation";
 
 // 开发信息栏与工作区：结构对应已验收的 H 原型（Environment/Context/Outputs + 右侧标签工作区），
 // 数据全部来自真实接口；后端尚未提供的能力一律"敬请期待"，不使用模拟数据。
+
+function workWidthLimit(element: HTMLElement | null): number {
+  const width = window.innerWidth;
+  const root = element?.closest(".chat-workbench");
+  const info = element?.closest(".dev-panel-root")?.querySelector(".g-info");
+  const available = root?.getBoundingClientRect().width ?? width;
+  const maximum = width > 1520 ? available - (info?.getBoundingClientRect().width ?? 0) - 480 : width - 24;
+  return Math.max(340, Math.min(860, width * .62, maximum));
+}
 
 type WorkTab =
   | { id: string; type: "browser"; title: string }
@@ -65,16 +79,41 @@ const lastSegment = (path: string) => path.split("/").at(-1) ?? path;
 
 const EMPTY_TABS: WorkTab[] = [];
 
-export function DevelopmentPanel({ chat, apiKey, active, fence }: {
+export function DevelopmentPanel({ chat, apiKey, active, fence, development, dark, context, onContextTrace }: {
   chat: SessionState; apiKey: string; active: boolean; fence: { current: number };
+  development?: DevelopmentState; dark?: boolean; context?: SessionContextState; onContextTrace?: () => void;
 }) {
-  const dev = useDevelopment(chat, apiKey, active, fence);
+  const fallbackDev = useDevelopment(chat, apiKey, active && !development, fence);
+  const dev = development ?? fallbackDev;
   const compaction = useSessionCompaction(chat, apiKey, active, fence);
-  const narrow = useMediaQuery("(max-width: 1180px)", 1180);
-  const workInline = useMediaQuery("(min-width: 1440px)", 1439);
-  const [infoOpen, setInfoOpen] = useState(() => window.innerWidth > 1180);
+  const narrow = useMediaQuery("(max-width: 1200px)", 1200);
+  const workInline = useMediaQuery("(min-width: 1521px)", 1520);
+  const [infoOpen, setInfoOpen] = useState(() => window.innerWidth > 1200);
   const [workOpen, setWorkOpen] = useState(false);
   const [split, setSplit] = useState(false);
+  const [maximized, setMaximized] = useState(false), [workWidth, setWorkWidth] = useState(440), [showAllFiles, setShowAllFiles] = useState(false);
+  const [workLimit, setWorkLimit] = useState(() => workWidthLimit(null));
+  const workElement = useRef<HTMLElement>(null);
+  const resizeStart = useRef<{ x: number; width: number; pointer: number } | null>(null);
+  useEffect(() => { workElement.current?.style.setProperty("--work-width", `${workWidth}px`); }, [workWidth, workOpen, maximized]);
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const start = resizeStart.current;
+      if (!start || event.pointerId !== start.pointer) return;
+      setWorkWidth(Math.max(340, Math.min(workWidthLimit(workElement.current), start.width + start.x - event.clientX)));
+    };
+    const stop = () => { resizeStart.current = null; };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop); window.addEventListener("pointercancel", stop); window.addEventListener("blur", stop);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); window.removeEventListener("pointercancel", stop); window.removeEventListener("blur", stop); };
+  }, []);
+  useEffect(() => {
+    const fit = () => { const limit = workWidthLimit(workElement.current); setWorkLimit(limit); setWorkWidth(value => Math.min(value, limit)); };
+    fit(); window.addEventListener("resize", fit);
+    const root = workElement.current?.closest(".chat-workbench");
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fit);
+    if (root) observer?.observe(root);
+    return () => { window.removeEventListener("resize", fit); observer?.disconnect(); };
+  }, [infoOpen, workInline, workOpen]);
   const [activeSlot, setActiveSlot] = useState(0);
   const [slots, setSlots] = useState<WorkTab[][]>([EMPTY_TABS, EMPTY_TABS]);
   const [activeTabs, setActiveTabs] = useState<(string | null)[]>([null, null]);
@@ -161,9 +200,33 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
     return () => window.removeEventListener("krim:open-aux", onOpenAux);
   }, [active, chat.ready, chat.actor, chat.workspace, chat.list]);
 
+  useEffect(() => {
+    const onAction = (event: Event) => {
+      const source = (event as CustomEvent<DevelopmentActionDetail>).detail;
+      if (!active || !chat.ready || !source || source.principal !== chat.actor?.principal_id || source.generation !== chat.actor?.generation || source.workspace !== chat.workspace || source.sessionId !== chat.id) return;
+      if (source.action === "files") addTab(filesTab(), 0);
+      else if (source.action === "browser") addTab({ id: "browser", type: "browser", title: "浏览器预览" }, 0);
+      else if (source.action === "info") setInfoOpen(value => !value);
+      else if (source.action === "context") setInfoOpen(true);
+      else if (source.action === "project") setDialog({ kind: "project" });
+      else if (source.action === "environment") setDialog({ kind: "environment" });
+    };
+    window.addEventListener("krim:development-action", onAction);
+    return () => window.removeEventListener("krim:development-action", onAction);
+  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, activeSlot]);
+  const outputPaths = new Set<string>();
+  for (const turn of chat.history ?? []) {
+    for (const item of projectTurn(turn, chat.turnEvents?.[turn.id] ?? [], [], { events: chat.details[turn.id]?.events, facts: chat.turnFacts?.[turn.id] ?? chat.details[turn.id]?.facts })) {
+      if (item.type !== "tool" || !item.arguments || typeof item.arguments !== "object") continue;
+      const args = item.arguments as Record<string, unknown>;
+      const path = args.path ?? args.file_path;
+      if (typeof path === "string" && path.length <= 4096 && !path.split(/[\\/]/).includes("..")) outputPaths.add(path);
+    }
+  }
+  const outputFiles = [...outputPaths];
   const environmentState = dev.environment?.state ?? null;
   const policy = chat.session?.context_policy ?? null;
-  const overlayWork = workOpen && !workInline;
+  const overlayWork = workOpen && (!workInline || maximized);
   const drawerInfo = infoOpen && narrow;
 
   return <div className="dev-panel-root" data-info={infoOpen ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline ? "inline" : "overlay") : "false"}>
@@ -206,6 +269,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
           <Button variant="ghost" size="icon-sm" aria-label="上下文用量说明" onClick={() => setDialog({ kind: "context" })}><EllipsisIcon /></Button>
         </div>
         <div className="g-section-body g-context-scroll">
+          {context ? <ContextSummary context={context} dark={dark} onTrace={onContextTrace}/> : <>
           <div className="g-context-overview">
             <span>{policy ? "会话上下文策略" : "会话载入后显示上下文容量"}</span>
             {policy && <span>{contextWindowLabel(policy)} · {policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条消息`}</span>}
@@ -217,7 +281,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
               <tr><td>输出预留</td><td>{fmtCount(policy.reserved_output_tokens)} tokens</td><td>—</td></tr>
             </tbody>
           </table>}
-          <p className="dev-context-note">上下文用量未提供。</p>
+          <p className="dev-context-note">上下文用量未提供。</p></>}
           <details className="g-detail">
             <summary><ChevronRight aria-hidden="true" />MCP tools<span className="g-detail-count">{dev.tools.length}</span></summary>
             <div className="g-detail-list" tabIndex={0} aria-label="会话工具目录">
@@ -260,6 +324,8 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
             }}><Plus aria-hidden="true" /></Button>
         </div>
         <div className="g-section-body g-output-scroll">
+          {(showAllFiles ? outputFiles : outputFiles.slice(0, 6)).map(path => <button type="button" className="g-output-row" key={path} title={path} onClick={() => addTab({ id: "file:" + path, type: "document", title: lastSegment(path), path }, 0)}><FileText aria-hidden="true"/><span>{path}</span></button>)}
+          {outputFiles.length > 6 && <Button variant="ghost" size="sm" onClick={() => setShowAllFiles(value => !value)}>{showAllFiles ? "收起" : `显示全部 ${outputFiles.length} 个文件`}</Button>}
           <button type="button" className="g-output-row" onClick={() => addTab(filesTab(), 0)}>
             <FolderOpen aria-hidden="true" /><span>项目文件</span>
           </button>
@@ -272,9 +338,11 @@ export function DevelopmentPanel({ chat, apiKey, active, fence }: {
         </div>
       </section>
     </section>}
-    {workOpen && <section className={`g-work${workInline ? "" : " is-overlay"}`} aria-label="开发工作区">
+    {workOpen && <section ref={workElement} className={`g-work${workInline ? "" : " is-overlay"}${maximized ? " is-maximized" : ""}`} aria-label="开发工作区">
+      {!maximized && <div className="g-work-resizer" role="separator" aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuenow={Math.round(workWidth)} aria-valuemin={340} aria-valuemax={Math.round(workLimit)} tabIndex={0} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* Synthetic pointers have no native capture. */ } resizeStart.current = { x: event.clientX, width: workWidth, pointer: event.pointerId }; }} onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setWorkWidth(value => Math.max(340, Math.min(workWidthLimit(workElement.current), value + (event.key === "ArrowLeft" ? 24 : -24)))); } }}/>}
       <div className="g-work-topbar">
         <strong>工作区</strong>
+        <Button variant="ghost" size="icon-sm" aria-label={maximized ? "还原工作区" : "最大化工作区"} onClick={() => setMaximized(value => !value)}>{maximized ? <Minimize2 aria-hidden="true"/> : <Maximize2 aria-hidden="true"/>}</Button>
         <Button variant="ghost" size="icon-sm" aria-label={split ? "合并分区" : "上下分区"} aria-pressed={split}
           title={split ? "合并分区" : "上下分区"} onClick={toggleSplit}><Columns2 aria-hidden="true" /></Button>
         <Button variant="ghost" size="icon-sm" aria-label="关闭工作区" onClick={() => setWorkOpen(false)}><X aria-hidden="true" /></Button>
@@ -513,7 +581,7 @@ function FileView({ apiKey, projectId, path }: {
     : <article className="g-document">
       <div className="g-source-line">项目文件 · {path}</div>
       <h1>{name}</h1>
-      <pre>{state.text}</pre>
+      {path.toLowerCase().endsWith(".md") || path.toLowerCase().endsWith(".markdown") ? <MessageMarkdown text={state.text ?? ""} onCopy={async text => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } }}/> : <MessageMarkdown text={`\`\`\`${({ ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", py: "python", json: "json", css: "css", html: "html", sh: "bash", yml: "yaml", yaml: "yaml", toml: "toml" } as Record<string, string>)[path.split(".").at(-1) ?? ""] ?? "text"}\n${state.text ?? ""}\n\`\`\``} onCopy={async text => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } }}/>}
       {state.truncated && <div className="dev-file-truncated">
         <span>文件较大，仅显示前段。</span>
         <Button variant="outline" size="sm" onClick={() => void downloadProjectFile(apiKey, projectId, path).catch(() => undefined)}>
@@ -626,8 +694,9 @@ function EnvironmentDialogBody({ dev, project, environmentState, onClose }: {
   </>;
 }
 
-function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose }: {
+export function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose, onChoose, canCreate = dev.canWrite }: {
   dev: DevelopmentState; apiKey: string; projectId: string | null; workspace: string; onClose: () => void;
+  onChoose?: (projectId: string) => void; canCreate?: boolean;
 }) {
   const [page, setPage] = useState<SandboxProject[] | null>(null);
   const [selected, setSelected] = useState<string | null>(projectId);
@@ -654,7 +723,7 @@ function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose }: {
     return () => { epoch.current++; controller.abort(); };
   }, [apiKey, workspace]);
   function createProject() {
-    if (!title.trim() || creatingBusy || !dev.canWrite) return;
+    if (!title.trim() || creatingBusy || !canCreate) return;
     setCreatingBusy(true); setError("");
     const body = pendingCreate.current ?? { request_key: crypto.randomUUID(), workspace_id: workspace, title: title.trim() };
     pendingCreate.current = body;
@@ -681,7 +750,7 @@ function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose }: {
   return <>
     <DialogHeader>
       <DialogTitle>项目</DialogTitle>
-      <DialogDescription>为这段会话绑定开发项目。</DialogDescription>
+      <DialogDescription>{onChoose ? "选择新会话使用的开发项目。" : "为这段会话绑定开发项目。"}</DialogDescription>
     </DialogHeader>
     {error && <p className="g-error" role="status">{error}</p>}
     <div className="g-project-options" role="radiogroup" aria-label="选择项目">
@@ -700,14 +769,16 @@ function ProjectDialogBody({ dev, apiKey, projectId, workspace, onClose }: {
       </div>
       <div className="g-inline-actions">
         <Button type="button" variant="ghost" size="sm" onClick={() => { setCreating(false); setTitle(""); setError(""); pendingCreate.current = null; }}>取消</Button>
-        <Button type="submit" size="sm" disabled={creatingBusy || !title.trim() || !dev.canWrite}>{creatingBusy ? "创建中…" : "创建项目"}</Button>
+        <Button type="submit" size="sm" disabled={creatingBusy || !title.trim() || !canCreate}>{creatingBusy ? "创建中…" : "创建项目"}</Button>
       </div>
     </form>}
     <div className="dev-dialog-footer">
-      {!creating && dev.canWrite && <Button variant="outline" size="sm" onClick={() => { setCreating(true); setError(""); }}>新建项目</Button>}
+      {!creating && canCreate && <Button variant="outline" size="sm" onClick={() => { setCreating(true); setError(""); }}>新建项目</Button>}
       <Button variant="ghost" size="sm" onClick={onClose}>关闭</Button>
-      <Button size="sm" disabled={dev.busy || selected === projectId || !dev.canWrite}
-        onClick={() => { void dev.bindProject(selected); onClose(); }}>{selected === null ? "解除绑定" : "绑定项目"}</Button>
+      <Button size="sm" disabled={dev.busy || (onChoose ? !selected || !canCreate : selected === projectId || !dev.canWrite)} onClick={() => {
+        if (onChoose && selected) { onChoose(selected); onClose(); }
+        else void dev.bindProject(selected).then(onClose);
+      }}>{onChoose ? "使用项目" : "绑定项目"}</Button>
     </div>
   </>;
 }

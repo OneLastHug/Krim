@@ -102,13 +102,13 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
     const session = byId.get(entry.session_id); if (!session) return null;
     const children = entry.pinned && chat.listView === "active" ? [] : childrenByParent.get(session.id) ?? [], closed = nodes.has(session.id), [state, label] = status(session);
     return <li key={session.id} className="session-tree-node"><div className={`chat-session-row session-depth-${depth}${sortClass("session", session.id)}`} data-session-row={session.id}>
-      <Button variant="ghost" className="session-select" aria-label={session.title} aria-current={chat.id === session.id ? "page" : undefined} onPointerDown={event => startDrag(event, "session", session.id)} onClick={() => select(session.id)}><CodeXml aria-hidden="true"/><span className="chat-session-label"><span>{session.title}</span></span></Button>
+      <Button variant="ghost" className="session-select" aria-label={session.title} aria-current={chat.id === session.id ? "page" : undefined} onPointerDown={event => startDrag(event, "session", session.id)} onClick={() => select(session.id)}>{entry.pinned && <CodeXml aria-hidden="true"/>}<span className="chat-session-label"><span>{session.title}</span></span></Button>
       {!!children.length && <button type="button" data-no-drag className="session-tree-disclosure" aria-label={`${closed ? "展开" : "收起"} ${session.title} 的子会话`} aria-expanded={!closed} onClick={() => setNodes(old => { const next = new Set(old); next.has(session.id) ? next.delete(session.id) : next.add(session.id); return next; })}>{closed ? <ChevronRight/> : <ChevronDown/>}</button>}
-      <span className={`session-status ${state}`} title={label} role="img" aria-label={label} tabIndex={0}/>
+      {state !== "idle" && <span className={`session-status ${state}`} title={label} role="img" aria-label={label}/> }
       <Button variant="ghost" className="session-more" aria-label={`${session.title} 的操作`} aria-haspopup="menu" aria-expanded={menu?.id === session.id} onClick={event => setMenu({ id: session.id, anchor: event.currentTarget })}><Ellipsis aria-hidden="true"/></Button>
     </div>{!!children.length && !closed && <ul className="session-tree-children">{children.map(child => row(child, depth + 1))}</ul>}</li>;
   }
-  const views = { active: "More", archived: "已归档", trash: "回收站" };
+  const views = { active: "会话视图 · 活跃", archived: "已归档", trash: "回收站" };
   const visible = layout.sessions.filter(entry => byId.has(entry.session_id));
   const childrenByParent = new Map<string, SidebarEntry[]>();
   for (const entry of visible) if (!entry.pinned && entry.parent_id) { const children = childrenByParent.get(entry.parent_id) ?? []; children.push(entry); childrenByParent.set(entry.parent_id, children); }
@@ -126,7 +126,7 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
         if (!list.length && item.id === "Pinned") return null;
         const closed = collapsed.has(item.id), memberIds = new Set(list.map(entry => entry.session_id)), roots = list.filter(entry => entry.pinned || !memberIds.has(entry.parent_id ?? ""));
         return <section className={`session-tree-group${sortClass("group", item.id)}`} key={item.id}>
-          <div className="session-tree-heading" data-group-handle={item.id}><button type="button" aria-expanded={!closed} onPointerDown={event => startDrag(event, "group", item.id)} onClick={() => setCollapsed(old => { const next = new Set(old); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })}>{item.title}<span data-no-drag>{closed ? <ChevronRight/> : <ChevronDown/>}</span></button>{item.id !== "Pinned" && chat.listView === "active" && onCreateInGroup && <Button variant="ghost" className="session-group-new" aria-label={`在 ${item.title} 新建会话`} disabled={!chat.canWrite} onClick={() => onCreateInGroup(item.id)}><Plus aria-hidden="true"/></Button>}</div>
+          <div className={`session-tree-heading${item.id === "Pinned" ? " is-pinned" : " is-project"}`} data-group-handle={item.id}><button type="button" aria-expanded={!closed} onPointerDown={event => startDrag(event, "group", item.id)} onClick={() => setCollapsed(old => { const next = new Set(old); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })}><span className="group-title">{item.title}</span><span data-no-drag>{closed ? <ChevronRight/> : <ChevronDown/>}</span></button>{item.id !== "Pinned" && chat.listView === "active" && onCreateInGroup && <Button variant="ghost" className="session-group-new" aria-label={`在 ${item.title} 新建会话`} disabled={!chat.canWrite} onClick={() => onCreateInGroup(item.id)}><Plus aria-hidden="true"/></Button>}</div>
           {!closed && <ul className="session-tree-list">{roots.map(entry => row(entry, 0))}</ul>}
         </section>;
       })}

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
+import { ArrowDown, Eye, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
 import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
@@ -12,9 +12,10 @@ import { ToolCallCard } from "./ToolCallCard";
 
 const EMPTY_EVENTS: Record<string, unknown>[] = [];
 
-export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; onTrace?: (turnId: string) => void; children?: ReactNode }) {
+export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionState; onTrace?: (turnId: string) => void; children?: ReactNode; empty?: ReactNode }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showJump, setShowJump] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const feedback = useCopyFeedback();
   const scroll = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
@@ -66,6 +67,27 @@ export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; o
     return () => { observer.disconnect(); document.fonts?.removeEventListener("loadingdone", resize); };
   }, [chat.id]);
 
+  useEffect(() => {
+    const content = thread.current;
+    if (!content) return;
+    const update = () => setPendingCount(content.querySelectorAll('.chat-approval,[data-pending-interaction="true"]').length);
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-pending-interaction"] });
+    return () => observer.disconnect();
+  }, [chat.id]);
+  useEffect(() => {
+    const focusTurn = () => {
+      if (new URL(location.href).searchParams.get("view") !== "chat") return;
+      const id = new URL(location.href).searchParams.get("turn");
+      if (!id || !scroll.current) return;
+      const target = [...scroll.current.querySelectorAll<HTMLElement>("[data-turn-id]")].find(element => element.dataset.turnId === id);
+      if (target) { stickToBottom.current = false; target.scrollIntoView?.({ block: "center" }); }
+    };
+    focusTurn();
+    window.addEventListener("krim:focus-turn", focusTurn); window.addEventListener("popstate", focusTurn);
+    return () => { window.removeEventListener("krim:focus-turn", focusTurn); window.removeEventListener("popstate", focusTurn); };
+  }, [chat.id, chat.history.length]);
   return <div className="chat-history-shell">
     <div className="chat-transcript" aria-label={c.history} ref={scroll} onScroll={() => {
       const panel = scroll.current;
@@ -75,7 +97,7 @@ export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; o
       setShowJump(!atBottom);
     }}>
       <div className="chat-thread" ref={thread}>
-        {!chat.history.length && <div className="chat-empty"><h2>{chat.session ? "发送第一条消息" : "选择或新建对话"}</h2></div>}
+        {!chat.history.length && (empty ?? <div className="chat-empty"><h2>{chat.session ? "发送第一条消息" : "选择或新建对话"}</h2></div>)}
         {chat.history.map(turn => {
           const detail = chat.details[turn.id];
           const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : EMPTY_EVENTS);
@@ -110,6 +132,7 @@ export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; o
             {turn.status === "running" && !items.length && <p className="chat-waiting" role="status">正在处理</p>}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">
+              {onTrace && turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="查看此轮 Trace" title="查看此轮 Trace" onClick={() => onTrace(turn.id)}><Eye aria-hidden="true"/></Button>}
               {lastAnswer && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制回答" title="复制回答" onClick={() => void feedback.copy(lastAnswer.text)}><Copy aria-hidden="true" /></Button>}
               {turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="更多操作" title="运行详情" aria-expanded={moreOpen} onClick={() => {
                 stickToBottom.current = false;
@@ -127,6 +150,7 @@ export function ChatHistory({ chat, onTrace, children }: { chat: SessionState; o
       </div>
     </div>
     {showJump && <Button variant="outline" size="icon-sm" className="chat-jump" aria-label="回到底部" onClick={bottom}><ArrowDown aria-hidden="true" /></Button>}
+    {showJump && pendingCount > 0 && <div className="chat-pending-location" role="status"><span>{pendingCount} 项待处理操作</span><Button variant="ghost" size="sm" onClick={() => thread.current?.querySelector<HTMLElement>('.chat-approval,[data-pending-interaction="true"]')?.scrollIntoView?.({ block: "center" })}>定位处理</Button></div>}
     <CopyFeedback {...feedback} />
   </div>;
 }

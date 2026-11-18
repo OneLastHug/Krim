@@ -3,18 +3,18 @@
   "scripts": [
     {
       "path": "assets/app.js",
-      "size_bytes": 1154758,
-      "sha256": "2bc883cbd8bb6cbe11798439ea525c76460de18520af31405e96496c5f819ada"
+      "size_bytes": 1191223,
+      "sha256": "cded6f3d8a4d209ca25b350cb88beebcf7368295769edce46168d4b38dc688e5"
     },
     {
       "path": "assets/observability.js",
-      "size_bytes": 85554,
-      "sha256": "68a0907a3f1d60ced280e37cbe4e6a60c27446081f04086476b4ae91497f2873"
+      "size_bytes": 68275,
+      "sha256": "162a4368e68e69a4fb0236f545d925bd9df44fc3a0520b82324a305a0f131255"
     },
     {
       "path": "assets/quality.js",
-      "size_bytes": 27717,
-      "sha256": "4c55cffdc6eb58c209053a212167130ecf2761e6bb283d0b4e1db1ec6f3a4b88"
+      "size_bytes": 27712,
+      "sha256": "5207661275d94c51e3223ef83fa5559dea34b9d0d6eb1e0d65d05aefa4350b66"
     }
   ]
 }

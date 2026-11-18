@@ -182,7 +182,8 @@ test("快捷查找筛选当前列表并通过原选择入口打开对话", async
     input!.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await until(() => expect(document.querySelectorAll(".session-search-results button")).toHaveLength(1));
-  expect(document.querySelector(".session-search-results button")?.textContent).toBe("会话 B");
+  expect(document.querySelector(".session-search-results button")?.textContent).toContain("会话 B");
+  expect(document.querySelector(".session-search-group")).toBeTruthy();
   await act(async () => input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
   await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("B"));
   await until(() => expect(document.querySelector(".session-search-dialog")).toBeNull());
@@ -190,17 +191,18 @@ test("快捷查找筛选当前列表并通过原选择入口打开对话", async
 });
 
 test("其他对话框打开时快捷查找不抢焦点", async () => {
+  override = path => path === "/v2/me" ? json({ principal_id: "operator", generation: 1, legacy: true, target_keys: ["demo", "target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] }) : undefined;
   await mount();
-  // 新建对话 Dialog（真实 role=dialog）打开时 Ctrl+K 不得抢焦点。
+  // 新建直达画布；真实项目 Dialog 打开时 Ctrl+K 仍不得抢焦点。
   await until(() => expect((host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement)?.disabled).toBe(false));
   await act(async () => (host.querySelector(".sidebar-buttons [aria-label='新建对话']") as HTMLButtonElement).click());
-  await until(() => expect(document.querySelector(".session-create-dialog")).toBeTruthy());
+  await act(async () => host.querySelector<HTMLButtonElement>(".empty-project-picker button")!.click());
+  await until(() => expect(document.querySelector('[aria-label="选择新会话项目"]')).toBeTruthy());
   await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
-  expect(document.querySelector(".session-create-dialog")).toBeTruthy();
+  expect(document.querySelector('[aria-label="选择新会话项目"]')).toBeTruthy();
   expect(document.querySelector(".session-search-dialog")).toBeNull();
-  // 行为变化：旧主题 Dialog 已改为 role=menu 的设置 popover；popover 不再触发对话框守卫，Ctrl+K 仍可打开查找。
-  await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".session-create-dialog button")].find(item => item.textContent?.trim() === "关闭")!.click());
-  await until(() => expect(document.querySelector(".session-create-dialog")).toBeNull());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="选择新会话项目"] button')].find(item => item.textContent?.trim() === "关闭")!.click());
+  await until(() => expect(document.querySelector('[aria-label="选择新会话项目"]')).toBeNull());
   await openSettingsPopover();
   await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true })));
   await until(() => expect(document.querySelector(".session-search-dialog")).toBeTruthy());

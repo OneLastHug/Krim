@@ -70,23 +70,49 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     setDraft(readDraft(localStorage, target)); setVersion(v => v + 1);
   }
   function historyReplace(url: URL) { window.history.replaceState(null, "", url); }
+  useEffect(() => {
+    const restore = () => {
+      const url = new URL(location.href);
+      if (url.searchParams.get("view") && url.searchParams.get("view") !== "chat") return;
+      const ws = url.searchParams.get("workspace") ?? selected.current.workspace;
+      const sid = url.searchParams.get("session") ?? "";
+      if (!actorRef.current?.value.workspaces.some(item => item.workspace_id === ws)) return;
+      if (ws !== selected.current.workspace || sid !== selected.current.id) select(ws, sid, url.searchParams.get("turn"));
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, [apiKey]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); }; }, []);
   useEffect(() => {
     if (!active) return;
-    setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+    if (actorRef.current?.key !== apiKey) {
+      setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+    }
     const controller = new AbortController(), f = fence.current, key = apiKey;
     const current = () => mounted.current && activeRef.current && !controller.signal.aborted && key === keyRef.current && f === fence.current;
     void request("/v2/me", key, undefined, controller.signal).then(raw => {
       if (!current()) return;
       const value = parseActor(raw); if (!value.workspaces.length) throw new Error("没有可用工作区");
-      let ws = selected.current.workspace, sid = selected.current.id;
+      const route = new URL(location.href);
+      let ws = route.searchParams.get("workspace") ?? selected.current.workspace;
+      let sid = route.searchParams.get("session") ?? selected.current.id;
       if (!value.workspaces.some(w => w.workspace_id === ws)) { ws = value.workspaces[0]!.workspace_id; sid = ""; }
       if (!sid) {
         try { const stored = JSON.parse(localStorage.getItem(CURRENT) ?? "null") as (Scope & { turn_id: string | null }) | null; if (stored && stored.principal_id === value.principal_id && stored.generation === value.generation && stored.workspace_id === ws) sid = stored.session_id ?? ""; } catch { /* 原创建intent由独立严格账本保护。 */ }
       }
+      const previous = actorRef.current?.value;
+      if (previous && (previous.principal_id !== value.principal_id || previous.generation !== value.generation || ws !== selected.current.workspace || JSON.stringify(previous.workspaces) !== JSON.stringify(value.workspaces))) {
+        setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+      }
       actorRef.current = { key, value }; selected.current = { workspace: ws, id: sid }; setActor({ key, value }); setWorkspace(ws); setId(sid); onLegacy(value.legacy);
       setDraft(readDraft(localStorage, { principal_id: value.principal_id, generation: value.generation, workspace_id: ws, session_id: sid || null })); refreshPending(); setNotice(null);
-    }).catch(error => { if (current()) setNotice(chatReason(error)); });
+    }).catch(error => {
+      if (!current()) return;
+      if (error instanceof RequestError && (error.status === 401 || error.status === 403)) {
+        actorRef.current = null; setActor(null); setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]); setDraft("");
+      }
+      setNotice(chatReason(error));
+    });
     return () => controller.abort();
   }, [apiKey, active, identityVersion, fenceGeneration]);
   useEffect(() => {
@@ -313,12 +339,12 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     }
   }
   function edit(text: string) { try { saveDraft(localStorage, scope(), text); setDraft(text); } catch (error) { setNotice(chatReason(error)); } }
-  async function create(title: string, target: string, groupId?: string) {
+  async function create(title: string, target: string, groupId?: string, initialDraft = title): Promise<Session | null | undefined> {
     let marker = "", ownsFlight = false; let current = () => false; let created: Session | null = null;
     const originalSession = id;
     try {
       const targetScope = scope(null); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
-      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, title);
+      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, initialDraft);
       const { intent, first } = prepareIntent(localStorage, targetScope, "session", { title, target_key: target }); refreshPending();
       await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; created = value as Session; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
       const who = actorRef.current?.value;
@@ -341,16 +367,23 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); return null; }
     finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
   }
-  async function submit() {
+  async function submit(text = draft, recipient = session) {
     let marker = "", ownsFlight = false; let current = () => false;
     try {
-      if (!session || session.id !== id || reading) return;
-      const targetScope = scope(id); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
+      if (!recipient || recipient.id !== selected.current.id || recipient.workspace_id !== selected.current.workspace || (recipient === session && reading)) return;
+      const targetScope = scope(recipient.id); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
       flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1);
-      const { intent, first } = prepareIntent(localStorage, targetScope, "turn", { text: draft, expected_revision: session.revision }); refreshPending();
+      const { intent, first } = prepareIntent(localStorage, targetScope, "turn", { text, expected_revision: recipient.revision }); refreshPending();
       await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; setListView("active"); select(intent.workspace_id, intent.session_id!, value.id); saveDraft(localStorage, targetScope, ""); setDraft(""); return true; });
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
+  }
+  async function createAndSubmit(text: string, target: string, groupId?: string) {
+    if (!text.trim()) return;
+    const created = await create(text.trim().split("\n")[0]!.slice(0, 128), target, groupId, text);
+    if (!created || selected.current.id !== created.id) return;
+    saveDraft(localStorage, scope(created.id), text); setDraft(text);
+    await submit(text, created);
   }
   async function recover(intent: Intent) {
     const marker = "find:" + intent.id; if (flights.current.has(marker)) return;
@@ -358,7 +391,14 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     try {
       const who = scope(); if (intent.principal_id !== who.principal_id) throw new Error("请连接原身份");
       select(intent.workspace_id, intent.session_id ?? ""); current = capture(); flight(marker, true);
-      await performIntent(localStorage, intent, apiKey, false, value => { if (!current()) return false; select(intent.workspace_id, intent.kind === "session" ? value.id : intent.session_id!, intent.kind === "turn" ? value.id : null); if (intent.kind === "turn") { saveDraft(localStorage, intent, ""); setDraft(""); } return true; });
+      await performIntent(localStorage, intent, apiKey, false, value => {
+        if (!current()) return false;
+        const firstDraft = intent.kind === "session" ? readDraft(localStorage, intent) : null;
+        select(intent.workspace_id, intent.kind === "session" ? value.id : intent.session_id!, intent.kind === "turn" ? value.id : null);
+        if (intent.kind === "turn") { saveDraft(localStorage, intent, ""); setDraft(""); }
+        else if (firstDraft !== null) { saveDraft(localStorage, { ...intent, session_id: value.id }, firstDraft); setDraft(firstDraft); }
+        return true;
+      });
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); refreshPending(); }
   }
@@ -492,6 +532,6 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     enabled: active && ready && session?.id === id && session.workspace_id === workspace && !session.deleted_at,
     running: history.some(turn => turn.status === "queued" || turn.status === "running"), fence,
   }, () => setVersion(value => value + 1));
-  return { execution, actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], listView, setSessionListView, lifecycle, session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
+  return { execution, actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], listView, setSessionListView, lifecycle, session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, createAndSubmit, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
 }
 export type SessionState = ReturnType<typeof useSession>;

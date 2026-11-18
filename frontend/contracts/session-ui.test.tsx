@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
-import { INTENTS, KNOWN, readIntents } from "../src/lib/session-requests";
+import { CURRENT, INTENTS, KNOWN, readIntents } from "../src/lib/session-requests";
 import { parseSession } from "../src/lib/session-contracts";
 import { navigationObservation, navigationObservationPage } from "./observability-navigation-fixture";
 
@@ -11,11 +11,12 @@ let root: Root, container: HTMLDivElement;
 let override: ((path: string, options: RequestInit) => Response | Promise<Response> | undefined) | undefined;
 const releases: (() => void)[] = [];
 const calls: { path: string; method: string; body: unknown }[] = [];
+let initialTurn: ReturnType<typeof turn> | null = null;
 const CONTROLS = "krim.agent-core.controls/1";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const session = (id = "A", key = "created") => ({ id, workspace_id: "local", owner_id: "local", create_key: key, title: "演示", target_key: "demo", target_fingerprint: "0".repeat(64), context_policy: { max_bytes: 131072, max_messages: 256, reserved_output_tokens: 2048, counter_version: "approx-utf8/1" }, revision: 0, status: "open", dispatch_paused: false, created_at: 1, closed_at: null });
 beforeEach(() => {
-  localStorage.clear(); history.replaceState({}, "", "/ui/?view=chat"); calls.length = 0; override = undefined;
+  localStorage.clear(); history.replaceState({}, "", "/ui/?view=chat"); calls.length = 0; override = undefined; initialTurn = null;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}) => {
@@ -27,6 +28,8 @@ beforeEach(() => {
     // 账号接入后的新身份链路：legacy服务器资料返回409 account_management_unavailable，接入信息404。
     if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
     if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
+    if (method === "POST" && path.endsWith("/sessions/A/turns")) { initialTurn = turn(body as Parameters<typeof turn>[0]); return json(initialTurn, 202); }
+    if (path.includes("/turns?")) return json(initialTurn ? [initialTurn] : []);
     if (path.includes("/turns")) return json([]);
     if (method === "POST" && path.endsWith("/sessions")) return json(session("A", (body as { request_key: string }).request_key), 201);
     if (path.endsWith("/sessions/A")) return json(session());
@@ -63,8 +66,13 @@ test("真实App StrictMode对话入口零自动POST，新建仅由显式操作",
   await until(() => expect(createButton()).toBeTruthy());
   expect(calls.filter(c => c.method === "POST")).toEqual([]);
   await act(async () => createButton().click());
-  await act(async () => button("创建对话").click());
-  await until(() => expect(calls.filter(c => c.method === "POST")).toHaveLength(1));
+  expect(document.querySelector(".session-create-dialog")).toBeNull();
+  expect(calls.filter(c => c.method === "POST")).toEqual([]);
+  await type("chat-prompt", "从首条任务创建会话");
+  await act(async () => button("发送").click());
+  await until(() => expect(calls.filter(c => c.method === "POST" && c.path.endsWith("/sessions"))).toHaveLength(1));
+  await until(() => expect(calls.filter(c => c.method === "POST" && c.path.endsWith("/A/turns"))).toHaveLength(1));
+  expect((calls.find(c => c.method === "POST" && c.path.endsWith("/sessions"))!.body as { title: string }).title).toBe("从首条任务创建会话");
   await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("A"));
 });
 
@@ -97,7 +105,8 @@ test("真实App创建并重读默认null消息上限的会话", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   await until(() => expect(createButton().disabled).toBe(false));
   await act(async () => createButton().click());
-  await act(async () => button("创建对话").click());
+  await type("chat-prompt", "默认容量的首条任务");
+  await act(async () => button("发送").click());
   await until(() => expect(new URL(location.href).searchParams.get("session")).toBe("A"));
   await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
   await until(() => expect(calls.some(call => call.path === base + "/A")).toBe(true));
@@ -119,6 +128,61 @@ test("身份GET失败后刷新只读恢复且零POST", async () => {
   await act(async () => (document.querySelector('[aria-label="刷新对话"]') as HTMLButtonElement).click());
   await until(() => expect(createButton().disabled).toBe(false));
   expect(calls.filter(c => c.method === "POST")).toHaveLength(0);
+});
+
+test("保留挂载后身份重新验证被拒绝仍清空私有视图与草稿", async () => {
+  server("none"); await mountExisting(); await type("chat-prompt", "未发送的私有草稿");
+  const previous = override;
+  override = (path, options) => path === "/v2/me" ? json({ error: { code: "unauthorized" } }, 401) : previous?.(path, options);
+  await openMorePopover(); await act(async () => menuItem("刷新对话").click());
+  await until(() => expect(container.textContent).toContain("密钥无效"));
+  expect(container.querySelector(".chat-session-row")).toBeNull();
+  expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(true);
+  expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe("");
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBinding ? "失败时保留草稿且不发送" : "成功后按新版本发送首条消息"}`, async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let created = false, bound = false, accepted: ReturnType<typeof turn> | null = null;
+  let sidebar = { revision: 0, groups: [] as { id: string; title: string }[], sessions: [] as { session_id: string; group_id: string | null; parent_id: string | null; pinned: boolean }[] };
+  const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: bound ? 1 : 0 });
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === "/v2/me/sandbox/projects?offset=0&limit=100") return json({ items: [project], total: 1, offset: 0, limit: 100 });
+    if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path.endsWith("/session-sidebar")) {
+      if (method === "PUT") { const body = JSON.parse(String(options.body)); sidebar = { revision: sidebar.revision + 1, groups: body.groups, sessions: body.sessions }; }
+      return json(sidebar);
+    }
+    if (path === base && method === "POST") { created = true; return json({ ...developmentSession(), create_key: JSON.parse(String(options.body)).request_key }, 201); }
+    if (path === base + "?limit=50") return json(created ? [developmentSession()] : []);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === bindingPath) {
+      if (method === "PUT") { if (rejectBinding) return json({ error: { code: "revision_conflict" } }, 409); bound = true; }
+      return json({ session_id: "A", project_id: bound ? "project-one" : null, revision: bound ? 1 : 0, session_revision: bound ? 1 : 0, workspace_id: "local" });
+    }
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    return undefined;
+  };
+  await act(async () => root.render(<StrictMode><App/></StrictMode>));
+  await until(() => expect(document.querySelector('option[value="project-one"]')).toBeTruthy());
+  await act(async () => { const select = document.getElementById("new-session-project") as HTMLSelectElement; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "project-one"); select.dispatchEvent(new Event("change", { bubbles: true })); });
+  await type("chat-prompt", "绑定后才发送的第一条任务");
+  await act(async () => button("发送").click());
+  await until(() => expect(calls.some(call => call.path === bindingPath && call.method === "PUT")).toBe(true));
+  if (rejectBinding) {
+    await until(() => expect(container.textContent).toContain("首条消息已保留"));
+    expect(calls.filter(call => call.path === base + "/A/turns" && call.method === "POST")).toHaveLength(0);
+    expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe("绑定后才发送的第一条任务");
+  } else {
+    await until(() => expect(accepted).not.toBeNull());
+    const sent = calls.filter(call => call.path === base + "/A/turns" && call.method === "POST");
+    expect(sent).toHaveLength(1); expect((sent[0]!.body as { expected_revision: number }).expected_revision).toBe(1);
+  }
 });
 
 async function type(id: string, value: string) {
@@ -390,6 +454,22 @@ test("双击固定原键，GET404不解除未知intent", async () => {
   await act(async () => button("查找原请求").click()); await until(() => expect(readIntents(localStorage)).toEqual([]));
 });
 
+test("冷启动 Trace 返回所选会话，不被本地上次选择覆盖", async () => {
+  server("none"); const previous = override!;
+  const observation = navigationObservation("B", "B1", "run-B1", "会话 B");
+  override = (path, options) => path.startsWith("/v2/workspaces/local/observations?") ? json(navigationObservationPage("local", [observation.item])) : path === "/v2/workspaces/local/sessions/B/turns/B1/observations" ? json(observation.detail) : previous(path, options);
+  localStorage.setItem(CURRENT, JSON.stringify({ principal_id: "local", generation: 1, workspace_id: "local", session_id: "A", turn_id: null }));
+  history.replaceState({}, "", "/ui/?view=trace&workspace=local&obs=runs&obs_session=B&obs_turn=B1");
+  await act(async () => root.render(<StrictMode><App/></StrictMode>));
+  await until(() => expect(document.querySelector(".obs-return-bar button")).toBeTruthy());
+  await act(async () => document.querySelector<HTMLButtonElement>(".obs-return-bar button")!.click());
+  await until(() => expect(document.querySelector(".chat-toolbar h1")?.textContent).toBe("会话 B"));
+  expect(new URL(location.href).searchParams.get("session")).toBe("B");
+  expect(new URL(location.href).searchParams.get("turn")).toBe("B1");
+  expect(calls.some(call => call.path === "/v2/workspaces/local/sessions/B")).toBe(true);
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
 test("消息更多操作提供可导航Trace路由且保持只读", async () => {
   server("none");
   const fallback = override!, base = "/v2/workspaces/local/sessions";
@@ -401,6 +481,7 @@ test("消息更多操作提供可导航Trace路由且保持只读", async () => 
     return fallback(path, options);
   };
   await mountExisting();
+  await type("chat-prompt", "保留这条未发送草稿");
   // 消息级「更多操作」与顶栏同名按钮重名，限定到回答区操作条；展开后「查看 Trace」入口不变。
   const messageMore = () => document.querySelector<HTMLButtonElement>('.chat-answer-actions [aria-label="更多操作"]');
   await until(() => expect(messageMore()).toBeTruthy());
@@ -411,12 +492,16 @@ test("消息更多操作提供可导航Trace路由且保持只读", async () => 
   const url = new URL(location.href);
   expect(url.searchParams.get("view")).toBe("trace");
   expect(url.searchParams.get("workspace")).toBe("local");
-  expect(url.searchParams.get("session")).toBe("A");
-  expect(url.searchParams.get("turn")).toBe("A1");
+  expect(url.searchParams.get("obs_session")).toBe("A");
+  expect(url.searchParams.get("obs_turn")).toBe("A1");
+  expect(url.searchParams.has("session")).toBe(false);
+  expect(url.searchParams.has("turn")).toBe(false);
   expect(calls.every(item => item.method === "GET")).toBe(true);
   await until(() => expect(button("返回对话")).toBeTruthy());
   await act(async () => button("返回对话").click());
   await until(() => expect(new URL(location.href).searchParams.get("view")).toBe("chat"));
   expect(new URL(location.href).searchParams.get("session")).toBe("A");
+  expect(new URL(location.href).searchParams.get("turn")).toBe("A1");
+  expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe("保留这条未发送草稿");
   expect(calls.every(item => item.method === "GET")).toBe(true);
 });
