@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import {
   Cpu, Globe, Copy, FileCode, GitFork, ArrowUpRight, Maximize2, Minimize2, ChevronRight, ChevronUp, Columns2, Download, FileText, Folder, FolderOpen,
-  Image, KeyRound, PanelRight, Plus, Shield, Terminal, X,
+  Image, KeyRound, Plus, Shield, Terminal, X,
 } from "lucide-react";
 import { parseTurn, sessionPath, type Turn, type SessionContextPolicy } from "../lib/session-contracts.ts";
 import {
@@ -261,11 +261,6 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
   const drawerInfo = infoOpen && narrow;
 
   return <div className={`dev-panel-root${workOpen && maximized ? " is-work-maximized" : ""}`} data-info={infoOpen && !(workOpen && maximized) ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline || maximized ? "inline" : "overlay") : "false"}>
-    {!infoOpen && !(workOpen && maximized) && <div className="dev-rail" role="toolbar" aria-label="开发面板开关" aria-orientation="vertical">
-      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label="显示信息栏" title="展开开发信息栏" onClick={() => setInfoOpen(true)}><PanelRight aria-hidden="true" /></Button>
-      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label={workOpen ? "关闭工作区" : "打开工作区"} title="打开项目文件" onClick={toggleFiles}><Folder aria-hidden="true" /></Button>
-      <Button variant="ghost" className="icon-button small dev-rail-button" aria-label="打开浏览器预览" title="打开浏览器预览" onClick={toggleBrowser}><Globe aria-hidden="true" /></Button>
-    </div>}
     {infoOpen && !(workOpen && maximized) && <section className="g-info" aria-label="开发信息栏">
       {(dev.notice || compaction.notice || dev.writes.length > 0) && <div className="dev-panel-status">
         {compaction.notice && <div className="dev-panel-notice" role="status"><p>{compaction.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭整理提示" onClick={compaction.dismiss}><X aria-hidden="true" /></Button></div>}
@@ -279,7 +274,6 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
       <section className="g-info-section environment">
         <div className="g-info-head">
           <h2>Environment</h2>
-          <Button variant="ghost" size="icon-sm" className="icon-button small" aria-label="关闭信息栏" title="收起信息栏" onClick={() => setInfoOpen(false)}><PanelRight aria-hidden="true" /></Button>
         </div>
         <div className="g-environment-body">
           <EnvRow icon={Terminal} label="Linux 容器" value={projectId ? environmentRowLabel(environmentState) : "未准备"}
