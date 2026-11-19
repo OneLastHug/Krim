@@ -25,7 +25,9 @@
 :is(.workbench-shell,.mobile-drawer-content) .g-work-tab > button:first-child svg { width:12.5px; height:12.5px; flex-shrink:0; }
 :is(.workbench-shell,.mobile-drawer-content) .g-work-slot .g-work-content { flex:1; }
 :is(.workbench-shell,.mobile-drawer-content) .chat-user-message { width:auto; margin:0; }
-:is(.workbench-shell,.mobile-drawer-content) .chat-user-actions { position:static; inset:auto; transform:none; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-user-actions { position:static; inset:auto; transform:none; flex-wrap:nowrap; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-user-wrap.has-turn-state { margin-bottom:8px; }
+:is(.workbench-shell,.mobile-drawer-content) .chat-user-wrap.has-turn-state .chat-user-actions { height:28px; opacity:1; pointer-events:auto; }
 :is(.workbench-shell,.mobile-drawer-content) .chat-answer-actions { height:auto; }
 :is(.workbench-shell,.mobile-drawer-content) .chat-message-action[data-slot="button"] { width:auto; min-width:28px; min-height:28px; height:28px; padding:0 6px; translate:none; }
 :is(.workbench-shell,.mobile-drawer-content) .chat-composer #chat-prompt { field-sizing:fixed; }

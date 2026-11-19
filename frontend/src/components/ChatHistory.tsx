@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Eye, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
+import { ArrowDown, Ban, CircleAlert, Clock, Eye, Copy, LoaderCircle, MoreHorizontal, Pencil, Shield, Square } from "lucide-react";
 import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
@@ -105,19 +105,20 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
           const lastAnswer = items.filter(item => item.type === "assistant").at(-1);
           const waitingApproval = items.some(item => item.type === "tool" && item.approval);
           const working = turn.status === "running" || turn.status === "queued";
+          const showState = turn.status !== "completed";
+          const stateLabel = waitingApproval ? "等待审批" : turnLabels[turn.status] ?? turn.status;
+          const StateIcon = waitingApproval ? Shield : turn.status === "running" ? LoaderCircle : turn.status === "queued" ? Clock : turn.status === "failed" ? CircleAlert : Ban;
           const moreOpen = expanded[turn.id] === true;
           const canReuse = chat.canWrite && chat.session?.status === "open" && !chat.turnPending;
           return <article className="chat-turn" key={turn.id} data-turn-id={turn.id}>
-            <div className="chat-user-wrap"><div className="chat-user-message">
+            <div className={`chat-user-wrap${showState ? " has-turn-state" : ""}`}><div className="chat-user-message">
               <div className="chat-user-text" data-ui-data>{turn.text}</div>
-              </div><div className="chat-user-actions">
+              </div><div className="chat-user-actions" role="group" aria-label="本轮消息操作">
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制用户消息" title="复制用户消息" onClick={() => void feedback.copy(turn.text)}><Copy aria-hidden="true" /></Button>
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复用提问" title="复用提问" disabled={!canReuse} onClick={() => reuse(turn.text)}><Pencil aria-hidden="true" /></Button>
+                {showState && <span className="chat-turn-status" role="status" aria-label={stateLabel} title={stateLabel}><StateIcon aria-hidden="true" className={turn.status === "running" && !waitingApproval ? "motion-safe:animate-spin" : undefined}/><span className="sr-only">{stateLabel}</span></span>}
+                {working && <Button type="button" variant="ghost" size="icon-sm" className="chat-message-action" aria-label="停止此轮" title="停止此轮" disabled={chat.controlling || !chat.canWrite} onClick={() => void chat.control(turn, "cancel")}><Square aria-hidden="true" /></Button>}
               </div>
-            </div>
-            <div className="chat-turn-meta">
-              {turn.status !== "completed" && <span role="status">{waitingApproval ? "等待审批" : turnLabels[turn.status] ?? turn.status}</span>}
-              {working && <Button variant="ghost" size="sm" disabled={chat.controlling || !chat.canWrite} onClick={() => void chat.control(turn, "cancel")}><Square aria-hidden="true" />停止此轮</Button>}
             </div>
             {!working && items.some(item => item.type === "assistant" && item.partial) && <p className="chat-partial-note">以下为已生成部分</p>}
             {items.map(item => {
@@ -129,7 +130,6 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
               const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
               return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
             })}
-            {turn.status === "running" && !items.length && <p className="chat-waiting" role="status">正在处理</p>}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">
               {onTrace && turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="查看此轮 Trace" title="查看此轮 Trace" onClick={() => onTrace(turn.id)}><Eye aria-hidden="true"/></Button>}

@@ -8,7 +8,9 @@ From `frontend`:
 npx vite --config vite.visual.config.ts --port 5196
 ```
 
-Scenes: `/?theme=bright`, `/?theme=warm`, `/?theme=dark`, `/?scene=empty`, and `/?scene=question`.
+Scenes: `/?theme=bright`, `/?theme=warm`, `/?theme=dark`, `/?scene=empty`, `/?scene=question`, `/?scene=running&prompt=你好`, and `/?scene=queued`.
+
+The running/queued scenes keep the final turn pending. Its stop button changes only local fixture state to cancelled; no request or model call is sent. The optional `prompt` query overrides the final user message for short/long text layout checks.
 
 Token display fixtures also support `/?usage=missing` and `/?usage=partial`. The default fixture has final reported usage deliberately different from its context estimate; verify both retain complete integers and are not substituted for one another. Partial usage leaves the total unknown and keeps an explicitly reported zero.
 
