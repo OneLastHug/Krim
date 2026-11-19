@@ -1,4 +1,4 @@
-/** 观测页面共用格式化：bytes 为准确分母，token 显示为估算；未知保持未知。 */
+/** 观测页面共用格式化：token 保留完整整数，上报值与估算值分开；未知保持未知。 */
 
 export function formatBytes(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
@@ -14,10 +14,7 @@ export function formatTokens(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "未知";
   const abs = Math.abs(value);
   const sign = value < 0 ? "−" : "";
-  if (abs >= 1_000_000) return "≈" + sign + (abs / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-  if (abs >= 10_000) return "≈" + sign + Math.round(abs / 1_000) + "K";
-  if (abs >= 1_000) return "≈" + sign + (abs / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
-  return "≈" + sign + String(Math.round(abs));
+  return "≈" + sign + formatCount(Math.round(abs));
 }
 
 export function formatCount(value: number | null | undefined): string {

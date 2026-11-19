@@ -10,6 +10,8 @@ npx vite --config vite.visual.config.ts --port 5196
 
 Scenes: `/?theme=bright`, `/?theme=warm`, `/?theme=dark`, `/?scene=empty`, and `/?scene=question`.
 
+Token display fixtures also support `/?usage=missing` and `/?usage=partial`. The default fixture has final reported usage deliberately different from its context estimate; verify both retain complete integers and are not substituted for one another. Partial usage leaves the total unknown and keeps an explicitly reported zero.
+
 The optional reference mode requires the local approved prototype at `docs/prototypes/qa-ui-improvements/index.html`:
 
 ```bash

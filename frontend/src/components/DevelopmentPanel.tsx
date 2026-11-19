@@ -71,7 +71,7 @@ function useMediaQuery(query: string, fallbackWidth: number) {
 
 const riskLabel = (risk: string | null) => (risk === "read" ? "只读" : risk === "write" ? "写操作" : risk ? risk : "未标注");
 const contextWindowLabel = (policy: SessionContextPolicy) => policy.counter_version !== "approx-utf8/1" && policy.max_tokens !== undefined
-  ? `${fmtCount(policy.max_tokens)} tokens` : policy.max_bytes === null ? "未提供" : fmtBytes(policy.max_bytes);
+  ? `${contextCount(policy.max_tokens)} tokens` : policy.max_bytes === null ? "未提供" : fmtBytes(policy.max_bytes);
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"];
 const isImagePath = (path: string) => IMAGE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(ext));
 const lastSegment = (path: string) => path.split("/").at(-1) ?? path;
@@ -305,12 +305,12 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
             <tbody>
               <tr><td>总容量</td><td>{contextWindowLabel(policy)}</td><td>—</td></tr>
               <tr><td>消息上限</td><td>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</td><td>—</td></tr>
-              <tr><td>输出预留</td><td>{fmtCount(policy.reserved_output_tokens)} tokens</td><td>—</td></tr>
+              <tr><td>输出预留</td><td>{contextCount(policy.reserved_output_tokens)} tokens</td><td>—</td></tr>
             </tbody>
           </table>}
           <p className="dev-context-note">上下文用量未提供。</p></>}
           <div className="g-context-end">
-            <span>{context?.used !== null && context?.used !== undefined && context.limit !== null ? `距自动压缩余 ${contextCount(Math.max(0, context.limit - context.used))}` : "整理在运行时内自动进行"}</span>
+            <span>{context?.used !== null && context?.used !== undefined && context.limit !== null ? `距压缩预估余 ${contextCount(Math.max(0, context.limit - context.used))}` : "整理在运行时内自动进行"}</span>
             <Button variant="outline" size="sm" disabled={compaction.disabled} aria-label="Compact session" onClick={() => void compaction.compact()}>{compaction.busy ? "提交中…" : "Compact"}</Button>
           </div>
           <details className="g-detail">
@@ -865,7 +865,7 @@ function ContextDialogBody({ chat }: { chat: SessionState }) {
     {policy ? <dl className="g-description-list">
       <dt>总容量</dt><dd>{contextWindowLabel(policy)}</dd>
       <dt>消息上限</dt><dd>{policy.max_messages === null ? "不设消息数上限" : `${fmtCount(policy.max_messages)} 条`}</dd>
-      <dt>输出预留</dt><dd>{fmtCount(policy.reserved_output_tokens)} tokens</dd>
+      <dt>输出预留</dt><dd>{contextCount(policy.reserved_output_tokens)} tokens</dd>
       <dt>计数口径</dt><dd className="g-mono">{policy.counter_version}</dd>
     </dl> : <p className="g-empty">会话载入后显示上下文容量。</p>}
     <p className="g-dialog-description">实时用量未提供。</p>

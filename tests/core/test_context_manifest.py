@@ -62,6 +62,63 @@ def test_manifest_counts_canonical_wrappers_and_repeated_messages_without_body()
     assert "private system prompt" not in encoded(manifest)
 
 
+def test_manifest_passes_counter_to_each_message_and_tool():
+    messages = [Message(role="system", content="system"), Message(role="user", content="任务")]
+    tools = [{"name": "lookup", "input_schema": {"type": "object"}}]
+    weights = {
+        encoded(messages[0].model_dump(mode="json")): 7,
+        encoded(messages[1].model_dump(mode="json")): 43,
+        encoded(tools[0]): 101,
+    }
+
+    class ComponentCounter:
+        version = "synthetic-components/1"
+        exact = False
+
+        def __init__(self):
+            self.seen = []
+
+        def count_text(self, text):
+            self.seen.append(text)
+            return weights[text]
+
+        def count_request(self, request_messages, request_tools):
+            return sum(weights[encoded(value)] for value in [*request_messages, *request_tools]) + 13
+
+    counter = ComponentCounter()
+    manifest = build_context_manifest(messages, tools, counter=counter)
+    items = {item["key"]: item for item in manifest["items"]}
+    assert counter.seen == list(weights)
+    assert items["message:0:system"]["estimated_tokens"] == 7
+    assert items["message:1:user"]["estimated_tokens"] == 43
+    assert items["tool:0"]["estimated_tokens"] == 101
+    assert items["unknown:request-envelope"]["estimated_tokens"] == 13
+    assert manifest["counter_version"] == counter.version
+    assert sum(item["estimated_tokens"] for item in items.values()) == 164
+
+
+@pytest.mark.parametrize("total", [0, 1, 5])
+def test_manifest_counter_boundary_reconciliation_stays_nonnegative(total):
+    class BoundaryCounter:
+        version = "synthetic-boundary/1"
+        exact = False
+
+        def count_text(self, text):
+            return 9
+
+        def count_request(self, messages, tools):
+            return total
+
+    manifest = build_context_manifest(
+        [Message(role="system", content="system"), Message(role="user", content="任务")],
+        [{"name": "lookup"}], counter=BoundaryCounter(),
+    )
+    assert manifest["estimated_tokens"] == total
+    assert all(item["estimated_tokens"] >= 0 for item in manifest["items"])
+    assert sum(item["estimated_tokens"] for item in manifest["items"]) == total
+    assert sum(item["input_bytes"] for item in manifest["items"]) == manifest["input_bytes"]
+
+
 def test_manifest_uses_explicit_metadata_and_hashes_content_changes():
     source = {"turn_id": "turn-1", "run_id": "run-1", "last_seq": 8,
               "fingerprint": "a" * 64}

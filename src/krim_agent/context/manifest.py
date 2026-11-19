@@ -207,6 +207,7 @@ def build_context_manifest(
                 message_index=index,
                 call_id=message.call_id if role == "tool" else None,
                 source_refs=refs,
+                counter=counter,
             )
         )
 
@@ -219,6 +220,7 @@ def build_context_manifest(
                 label=f"Tool: {name}" if name else f"Tool definition {index}",
                 value=value,
                 tool_index=index,
+                counter=counter,
             )
         )
 
