@@ -139,6 +139,46 @@ afterEach(async () => {
   window.innerWidth = previousWidth;
 });
 
+test.each([1600, 1024, 390])("%ipx 下只保留顶栏开关，信息栏关闭后不出现重复竖栏", async width => {
+  window.innerWidth = width;
+  readApi.mockImplementation((path: string) => route(path, {
+    "/v2/me/sandbox/sessions/session-A/project": bindingBound,
+    "/v2/me/sandbox/projects/proj-9": project,
+    "/v2/me/development/projects/proj-9/environment": environment,
+    "/v2/targets/target-development/tools": tools,
+    "/v2/me/mcp-connections": connections,
+    "/v2/me/sandbox/projects/proj-9/files?path=.&limit=100": {
+      path: ".", entries: [], offset: 0, next_offset: null, total: 0,
+      project_id: "proj-9", generation: 1, may_change: false,
+    },
+  }));
+  await render();
+  const action = async (value: "info" | "files" | "browser") => act(async () => {
+    window.dispatchEvent(new CustomEvent("krim:development-action", { detail: {
+      principal: "operator", generation: 3, workspace: "local", sessionId: "session-A", action: value,
+    } }));
+  });
+  expect(host.querySelector(".dev-rail")).toBeNull();
+  expect(host.querySelector('[aria-label="关闭信息栏"]')).toBeNull();
+  if (host.querySelector(".g-info")) await action("info");
+  expect(host.querySelector(".g-info")).toBeNull();
+  await action("info");
+  expect(host.querySelector(".g-info")).not.toBeNull();
+  expect(host.querySelector(".g-info-section.environment .g-info-head button")).toBeNull();
+  await action("info");
+  expect(host.querySelector(".g-info,.dev-rail")).toBeNull();
+  expect(host.querySelector(".dev-panel-root")?.getAttribute("data-info")).toBe("false");
+  await action("files");
+  expect(host.querySelector('[role="tabpanel"]')?.getAttribute("aria-label")).toBe("项目文件");
+  expect(host.querySelector(".dev-rail")).toBeNull();
+  await action("files");
+  expect(host.querySelector(".g-work")).toBeNull();
+  await action("browser");
+  expect(host.querySelector('[role="tabpanel"]')?.getAttribute("aria-label")).toBe("浏览器预览");
+  await action("browser");
+  expect(host.querySelector(".g-info,.g-work,.dev-rail")).toBeNull();
+});
+
 const compactPath = (id = "session-A") => `/v2/workspaces/local/sessions/${id}/context/compactions`;
 function compactReceipt(body: unknown, sessionId = "session-A") {
   return { request_key: (body as { request_key: string }).request_key, session_id: sessionId, revision: 1, reason: null, status: "pending", created_at: 1, created: true };
