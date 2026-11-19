@@ -53,6 +53,7 @@ function useFixture() { const value = useContext(FixtureContext); if (!value) th
 export function FixtureProvider({ children }: { children: ReactNode }) {
   const [id, setId] = useState(new URL(location.href).searchParams.get("scene") === "question" ? "s-sidebar-proj" : cases.currentSessionId), [draft, setDraft] = useState("");
   const [answered, setAnswered] = useState<string[]>([]);
+  const [stoppedTurns, setStoppedTurns] = useState<string[]>([]);
   const [mode, setMode] = useState<"manual" | "auto" | "bypass">("auto");
   const [projectOpen, setProjectOpen] = useState(false), [titles, setTitles] = useState<Record<string, string>>({});
   const [listView, setListView] = useState<"active" | "archived" | "trash">("active");
@@ -63,15 +64,19 @@ export function FixtureProvider({ children }: { children: ReactNode }) {
     const contextData = scenario?.context ?? cases.context;
     const selected = raw ? session(raw, titles[id]) : null;
     const project = selected ? projects.find(p => p.project_id === raw?.projectId) ?? projects[0]! : null;
+    const scene = new URL(location.href).searchParams.get("scene");
     const turns: Turn[] = selected ? (scenario?.turns ?? []).map((turn, index) => {
-      const transcript: HistoryMessage[] = [{ role: "user", content: turn.prompt, call_id: null, tool_calls: [] }];
+      const last = index === (scenario?.turns.length ?? 0) - 1;
+      const status: Turn["status"] = stoppedTurns.includes(turn.id) ? "cancelled" : last && scene === "running" ? "running" : last && scene === "queued" ? "queued" : "completed";
+      const prompt = last ? new URL(location.href).searchParams.get("prompt") ?? turn.prompt : turn.prompt;
+      const transcript: HistoryMessage[] = [{ role: "user", content: prompt, call_id: null, tool_calls: [] }];
       for (const [toolIndex, tool] of turn.tools.entries()) {
         const callId = `${turn.id}-call-${toolIndex}`;
         transcript.push({ role: "assistant", content: "", call_id: null, tool_calls: [{ kind: "tool_call", id: callId, name: tool.name, arguments: tool.args && typeof tool.args === "object" && !Array.isArray(tool.args) ? tool.args : { path: cases.outputs[toolIndex % cases.outputs.length] } }] });
         transcript.push({ role: "tool", content: tool.formatted ?? "已完成", call_id: callId, tool_calls: [] });
       }
       transcript.push({ role: "assistant", content: markdown(turn.answerHtml), call_id: null, tool_calls: [] });
-      return { id: turn.id, session_id: selected.id, workspace_id: "local", owner_id: actor.principal_id, ordinal: index + 1, request_key: `turn-${turn.id}`, text: turn.prompt, accepted_revision: 0, status: "completed", run_id: turn.runId, context_fingerprint: "b".repeat(64), transcript, code: null, created_at: 1, started_at: 1, finished_at: 2 };
+      return { id: turn.id, session_id: selected.id, workspace_id: "local", owner_id: actor.principal_id, ordinal: index + 1, request_key: `turn-${turn.id}`, text: prompt, accepted_revision: 0, status, run_id: status === "queued" ? null : turn.runId, context_fingerprint: "b".repeat(64), transcript, code: null, created_at: 1, started_at: status === "queued" ? null : 1, finished_at: status === "running" || status === "queued" ? null : 2 };
     }) : [];
     const manifest = selected ? { version: 1, counter_version: "approx-utf8/1", input_bytes: contextData.usedTokens * 4, estimated_tokens: contextData.usedTokens, model_context_window: 1000000, reserved_output_tokens: 32000, input_budget_bytes: null, compaction_changes: null, items_truncated: false, omitted_items: 0, source_refs_truncated: false,
       items: contextData.categories.map((category, index) => ({ key: `item-${index}`, category: category.key, label: category.key, content_hash: "c".repeat(64), input_bytes: category.tokens * 4, estimated_tokens: category.tokens, message_index: null, tool_index: null, call_id: null, provider_call_id: null, source_refs: null, source_refs_truncated: false })) } : null;
@@ -82,7 +87,7 @@ export function FixtureProvider({ children }: { children: ReactNode }) {
     const context = { data: selected ? { configuration: { model: "GPT-6 Luna", reasoning_effort: "Extra", thinking: null } } : null, manifest, reported, requestId: selected ? "fixture-request" : "", used: selected ? contextData.usedTokens : 0, limit: selected ? 900000 : null, turnId: turns.at(-1)?.id ?? "", loading: false, error: "", refresh: noOp } as unknown as SessionContextState;
     const execution = { identity: `visual:${id}`, loading: false, policy: { mode, project_id: project?.project_id ?? null, project_access: "write", revision: 1 }, error: "", changing: false, clearing: false, clearError: "", ruleCount: 0, hasPendingClear: false, hasPendingMode: false, projectOpen, project: project ? { title: project.title, is_creator: true, owner_id: actor.principal_id, project_access: "write", sandbox_status: "ready" } : null, projectError: "", openProject: async () => setProjectOpen(true), closeProject: () => setProjectOpen(false), changeMode: async (next: typeof mode) => { setMode(next); return true; }, retryMode: async () => false, clearRules: async () => {}, reload: noOp };
     const chat = { actor, ready: true, canWrite: true, canApprove: true, workspace: "local", id, session: selected, list: cases.sessions.filter(s => listView === "archived" ? s.lifecycle === "archived" : listView === "trash" ? false : s.lifecycle === "active").map(s => session(s, titles[s.id])), listView, history: turns, events: [], turnEvents: {}, turnFacts: {}, details: {}, currentTurn: turns.at(-1) ?? null, approvals: [], pending: [], pendingControls: [], notice: null, reading: false, creating: false, sending: false, busy: false, controlling: false, turnPending: undefined, newPending: undefined, draft, execution,
-      edit: setDraft, select: (_workspace: string, next: string) => { setId(next); setDraft(""); }, create: async () => null, createAndSubmit: async () => { setId(cases.currentSessionId); setDraft(""); }, submit: async () => setDraft(""), refresh: noOp, posting: () => false, recover: async () => {}, recoverControl: async () => {}, control: async () => {}, loadDetails: async () => {}, rename: async (title: string, target = id) => setTitles(previous => ({ ...previous, [target]: title })), lifecycle: async () => {}, setSessionListView: setListView } as unknown as SessionState;
+      edit: setDraft, select: (_workspace: string, next: string) => { setId(next); setDraft(""); }, create: async () => null, createAndSubmit: async () => { setId(cases.currentSessionId); setDraft(""); }, submit: async () => setDraft(""), refresh: noOp, posting: () => false, recover: async () => {}, recoverControl: async () => {}, control: async (turn: Turn | null, action: string) => { if (turn && action === "cancel") setStoppedTurns(previous => [...previous, turn.id]); }, loadDetails: async () => {}, rename: async (title: string, target = id) => setTitles(previous => ({ ...previous, [target]: title })), lifecycle: async () => {}, setSessionListView: setListView } as unknown as SessionState;
     const dev = { binding: selected && project ? { session_id: selected.id, project_id: project.project_id, workspace_id: "local", revision: 1, session_revision: 1 } : null, project,
       environment: project ? { owner_id: actor.principal_id, project_id: project.project_id, environment_id: `env-${project.project_id}`, generation: 1, state: "ready" } : null,
       tools: cases.tools.map((tool, index) => ({ ...tool, version: "1", input_schema: {}, output_schema: {}, fingerprint: String(index).padStart(64, "0"), source: null })),
@@ -103,7 +108,7 @@ export function FixtureProvider({ children }: { children: ReactNode }) {
     });
     const answer = async (request: { id: string }) => { setAnswered(previous => [...previous, request.id]); };
     return { chat, dev, context, sidebar: { layout, ready: true, saving: false, message: "", save: async next => { setLayout({ ...next, revision: layout.revision + 1 }); return true; }, reload: noOp }, features: { plan, planError: "", interactionError: "", interactions: { mode: pending.some(item => item.kind === "plan_confirmation") ? "plan" : "execute", revision: 1, pending }, paging: false, loadMore: async () => {}, reload: noOp, answer, cancel: answer } };
-  }, [id, draft, mode, projectOpen, titles, listView, layout, answered]);
+  }, [id, draft, mode, projectOpen, titles, listView, layout, answered, stoppedTurns]);
   return <FixtureContext.Provider value={value}>{children}</FixtureContext.Provider>;
 }
 export function useSession() { return useFixture().chat; }
