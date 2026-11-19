@@ -334,8 +334,11 @@ async def test_tool_timeout_waits_for_actual_executor_cleanup(tmp_path):
         settings=Settings(tool_timeout=0.7),
     ) as app:
         run = await app.service.start(RunRequest(text="/echo wait", request_key="tool-timeout"))
-        await asyncio.wait_for(entered.wait(), 0.6)
-        await app.service.wait(run.id)
+        # Model startup precedes the tool's own 0.7s budget. Observe the final
+        # producer state rather than imposing a shorter startup deadline.
+        async with asyncio.timeout(10):
+            await app.service.wait(run.id)
+        assert entered.is_set()
         assert (await app.service.get(run.id)).code == "tool_timeout" and cleaned.is_set()
 
 
@@ -487,7 +490,9 @@ async def test_close_failure_joins_every_run_before_shared_resources_and_writer_
     try:
         bad = await app.service.start(RunRequest(text="/echo bad", request_key="bad"))
         held = await app.service.start(RunRequest(text="/echo held", request_key="held"))
-        await asyncio.wait_for(asyncio.gather(*(e.wait() for e in entered.values())), 2)
+        # This case exercises close failure after both executors have entered;
+        # model startup time is not part of the close-ordering assertion.
+        await asyncio.wait_for(asyncio.gather(*(e.wait() for e in entered.values())), 10)
 
         async def fail_terminal(conn, run_id, kind, *args, **kwargs):
             if run_id == bad.id and kind == "terminal":
@@ -539,8 +544,10 @@ async def test_close_failure_joins_every_run_before_shared_resources_and_writer_
     finally:
         release.set()
         app.store._event = original_event
-        await asyncio.gather(*app.service.tasks.values(), *closes, return_exceptions=True)
-        await asyncio.gather(app.close(), return_exceptions=True)
+        # If startup failed before close tasks existed, cancel producers through
+        # normal application cleanup before joining potentially unbounded tools.
+        await asyncio.gather(app.close(), *closes, return_exceptions=True)
+        await asyncio.gather(*app.service.tasks.values(), return_exceptions=True)
 
 
 @pytest.mark.asyncio

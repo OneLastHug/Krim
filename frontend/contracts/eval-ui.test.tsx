@@ -296,10 +296,12 @@ for (const barrier of ["POST", "confirmation GET"] as const) {
 }
 
 test("HTTP capability is read only and follows the active key epoch", async () => {
+    let latestHealthRead = false;
     let release!: (response: Response) => void;
     const delayed = new Promise<Response>(resolve => { release = resolve; });
     intercept((path, options) => {
         if (path === "/healthz") {
+            if (new Headers(options.headers).get("Authorization") === "Bearer new-key") latestHealthRead = true;
             return new Headers(options.headers).get("Authorization") === "Bearer new-key" ? json({ http_enabled: false, provider: "offline-script" }) : delayed.then(() => json({ http_enabled: true, provider: "script+http" }));
         }
         return reads(path);
@@ -307,11 +309,12 @@ test("HTTP capability is read only and follows the active key epoch", async () =
     await mount();
     await openSettingsView();
     const capability = () => host.querySelector('[aria-label="HTTP 目标能力"]')?.textContent;
-    expect(capability()).toBe("HTTP 目标配置尚未确认");
+    expect(capability()).toBeUndefined();
     await connect("new-key");
-    await until(() => expect(capability()).toBe("未启用 HTTP 目标"));
+    await until(() => expect(latestHealthRead).toBe(true));
+    expect(capability()).toBeUndefined();
     await act(async () => release(json({ http_enabled: true })));
-    expect(capability()).toBe("未启用 HTTP 目标");
+    expect(capability()).toBeUndefined();
     expect(calls.filter(c => c.method === "POST")).toEqual([]);
     expect(calls.filter(c => c.path === "/healthz").length).toBeGreaterThanOrEqual(2);
 });
@@ -320,7 +323,7 @@ test("HTTP target and historical report keep their own identity", async () => {
     intercept(path => path === "/v1/eval-targets" ? json([{ key: "target-http" }]) : path === "/healthz" ? json({ http_enabled: true }) : reads(path));
     await mount();
     await until(() => expect(document.querySelector("#eval-target option")?.textContent).toBe("HTTP目标 · target-http"));
-    expect(host.querySelector('[aria-label="HTTP 目标能力"]')?.textContent).toBe("已启用 HTTP 目标");
+    expect(host.querySelector('[aria-label="HTTP 目标能力"]')).toBeNull();
     await type("open-eval-id", "historical-script");
     await click("打开评测");
     await until(() => expect(host.querySelector(".eval-report small")?.textContent).toBe("脚本 · " + realReport.target_descriptor.key));

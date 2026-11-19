@@ -1,5 +1,6 @@
 """无需旧冻结材料的外部工具责任链与装配回归。"""
 
+import os
 from dataclasses import replace
 
 import httpx
@@ -14,6 +15,7 @@ from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import ToolContext, ToolExecutor
 from krim_agent.tools.mcp import arguments_model, mcp_tools
+from krim_agent.tools.registry import ToolRegistry
 from krim_agent.tools.runtime import ToolRuntime, ToolRuntimeConfig
 from krim_agent.tools.web import web_tools
 from krim_agent.web_access import TavilyWebAccess, WebAccessConfig
@@ -105,15 +107,18 @@ async def execute(registry, arguments, policy, pre=None, post=None, allow=True):
     return result, events, approvals
 
 
-def test_legacy_descriptor_and_legacy_write_guard_stay_unchanged():
+def test_legacy_descriptor_metadata_and_legacy_write_guard():
     for spec, _ in builtin_registry()._frozen:
-        assert set(spec.descriptor()) == {
-            "name",
-            "version",
-            "implementation_digest",
-            "input_schema",
-            "output_schema",
+        expected = {
+            "name", "version", "implementation_digest", "input_schema", "output_schema",
         }
+        if spec.description:
+            expected.add("description")
+        descriptor = spec.descriptor()
+        assert set(descriptor) == expected
+        if spec.description:
+            assert descriptor["description"] == spec.description
+        assert not {"risk", "capability", "source", "policy_version"} & set(descriptor)
         with pytest.raises(ValueError):
             replace(spec, risk="write")
 
@@ -217,14 +222,110 @@ async def test_configured_runtime_mcp_only_default_asks_and_closes(monkeypatch, 
     assert created[0].closed
 
 
+def _secure_runtime_config_file(path):
+    path.chmod(0o600)
+    if os.name == "nt":
+        import subprocess
+
+        user = subprocess.run(["whoami"], check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"{user}:(F)",
+                "*S-1-5-18:(F)",
+                "*S-1-5-32-544:(F)",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+
 def test_host_config_refs_credentials_and_does_not_reuse_model_key(tmp_path):
     path = tmp_path / "tools.json"
     path.write_text(encoded({"web": {}, "tool_overrides": {}}))
+    _secure_runtime_config_file(path)
     loaded = ToolRuntimeConfig.load(path, environment={"KRIM_AGENT_WEB_API_KEY": "fake-key"})
     assert loaded.web.api_key.get_secret_value() == "fake-key"
     path.write_text(encoded({"web": {"api_key_env": "KRIM_AGENT_HTTP_API_KEY"}}))
+    _secure_runtime_config_file(path)
     with pytest.raises(ServiceError):
         ToolRuntimeConfig.load(path, environment={"KRIM_AGENT_HTTP_API_KEY": "do-not-use"})
+
+
+def test_runtime_config_rejects_untrusted_file_links_and_permissions(tmp_path):
+    payload = encoded({"web": {}, "tool_overrides": {}}).encode()
+    trusted = tmp_path / "trusted.json"
+    trusted.write_bytes(payload)
+    _secure_runtime_config_file(trusted)
+    assert ToolRuntimeConfig.load(trusted, environment={"KRIM_AGENT_WEB_API_KEY": ""})
+
+    loose = tmp_path / "loose.json"
+    loose.write_bytes(payload)
+    loose.chmod(0o644)
+    if os.name == "posix":
+        with pytest.raises(ServiceError):
+            ToolRuntimeConfig.load(loose, environment={"KRIM_AGENT_WEB_API_KEY": ""})
+
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(trusted)
+    with pytest.raises(ServiceError):
+        ToolRuntimeConfig.load(linked, environment={"KRIM_AGENT_WEB_API_KEY": ""})
+
+    hard = tmp_path / "hard.json"
+    hard.hardlink_to(trusted)
+    with pytest.raises(ServiceError):
+        ToolRuntimeConfig.load(hard, environment={"KRIM_AGENT_WEB_API_KEY": ""})
+
+
+def test_registry_accepts_large_catalog_and_rejects_duplicate_names():
+    from dataclasses import replace
+
+    base = builtin_registry()
+    spec = next(item for item, _ in base._frozen)
+    specs = tuple(replace(spec, name=f"tool_{index}") for index in range(70))
+    assert len(ToolRegistry(specs).schemas()) == 70
+    with pytest.raises(ValueError, match="工具名称冲突"):
+        ToolRegistry(specs + specs[:1])
+
+
+async def test_runtime_config_injects_pinned_policy_for_http_mcp(monkeypatch):
+    import krim_agent.tools.runtime as runtime_module
+
+    observed = []
+
+    def factory(config, *, egress_policy=None):
+        observed.append(egress_policy)
+        return Connection(config)
+
+    monkeypatch.setattr(runtime_module, "MCPConnection", factory)
+    source = MCPServerConfig(
+        name="remote",
+        transport="streamable_http",
+        url="https://mcp.example.test:8443/v1",
+        allowed_hosts=frozenset({"mcp.example.test", "redirect.example.test"}),
+        selected_tools=("search",),
+    )
+    runtime = await ToolRuntime.open(
+        builtin_registry(), ToolRuntimeConfig(mcp_servers=(source,)), demo_policy
+    )
+    try:
+        assert runtime.connections
+    finally:
+        await runtime.close()
+    assert len(observed) == 1
+    assert observed[0].validate_target("https://mcp.example.test:8443/v1").port == 8443
+    assert observed[0].validate_target("https://redirect.example.test:8443/next").host == (
+        "redirect.example.test"
+    )
+    from krim_agent.network.egress_policy import EgressViolation
+
+    with pytest.raises(EgressViolation):
+        observed[0].validate_target("https://other.example.test:8443/v1")
+    with pytest.raises(EgressViolation):
+        observed[0].validate_target("https://redirect.example.test:443/next")
 
 
 async def test_discovery_failure_closes_resources_and_old_registry_is_not_modified(monkeypatch):

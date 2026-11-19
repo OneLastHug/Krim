@@ -75,7 +75,7 @@ async def collect(fixture, *, config=None, messages=None, tools=None):
 async def test_messages_and_tools_are_projected_without_runtime_metadata():
     async with HTTPFixture() as fixture:
         provider = OpenAICompatibleProvider(
-            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture", max_tool_calls=1)
         )
         messages = [
             Message(role="system", content="受控"),
@@ -92,12 +92,12 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             assert "".join(e.text for e in second if isinstance(e, ModelText)) == "5"
             assert len(fixture.requests) == 2
             body = fixture.requests[1]["body"]
+            # 默认不带输出上限：max_tokens交由供应商真实能力，不再注入512演示值。
             assert set(body) == {
                 "model",
                 "messages",
                 "stream",
                 "n",
-                "max_tokens",
                 "stream_options",
                 "tools",
                 "parallel_tool_calls",
@@ -114,6 +114,15 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             assert all(r["accept_encoding"] == "identity" for r in fixture.requests)
         finally:
             await provider.close()
+
+
+async def test_explicit_output_budget_reaches_chat_wire():
+    async with HTTPFixture() as fixture:
+        config = OpenAICompatibleConfig(
+            base_url=fixture.url, model="fixture", max_output_tokens=640
+        )
+        await collect(fixture, config=config)
+        assert fixture.requests[0]["body"]["max_tokens"] == 640
 
 
 async def test_deepseek_disabled_thinking_preserves_real_tcp_tool_history():
@@ -603,7 +612,9 @@ async def d2_http_resource_record(request, monkeypatch):
         response = await actual_send(client, *args, **kwargs)
         wire = next((wire for wire in notes["wires"] if isinstance(wire, D2Wire)), None)
         if wire is not None:
-            original_raw = response.aiter_raw
+            # SDK 的响应外层是校验/规范化流；屏障仍观察底层真实 TCP 字节。
+            raw_response = getattr(response.stream, "raw", response)
+            original_raw = raw_response.aiter_raw
             async def consumed_bytes():
                 size = 0
                 async for chunk in original_raw():
@@ -615,7 +626,7 @@ async def d2_http_resource_record(request, monkeypatch):
                         total += len(part)
                         if size >= total:
                             wire.consumed[i].set()
-            response.aiter_raw = consumed_bytes
+            raw_response.aiter_raw = consumed_bytes
         return response
     monkeypatch.setattr(httpx.AsyncClient, "send", observed_send)
     try:
@@ -635,7 +646,11 @@ async def d2_http_resource_record(request, monkeypatch):
         path = Path(os.environ["KRIM_D2_EVIDENCE"]) / "cases"
         path.mkdir(exist_ok=True)
         consumer = Path(openai_compatible.__file__)
-        assert consumer.is_relative_to(Path(os.environ["KRIM_D2_ROOT"]) / "source/src")
+        consumer_path = await asyncio.to_thread(consumer.resolve)
+        source_path = await asyncio.to_thread(
+            (Path(os.environ["KRIM_D2_ROOT"]) / "source/src").resolve
+        )
+        assert consumer_path.is_relative_to(source_path)
         unexpected = [t.get_name() for t in asyncio.all_tasks()
                       if t is not asyncio.current_task() and t not in existing and not t.done()]
         providers = [{"calls": p.calls, "active": p.active, "closed": p.closed,
@@ -728,7 +743,8 @@ async def test_workspace_bad_tool_groups_zero_release(case, request):
     async with D2Wire(parts) as fixture:
         request.node.d2_notes["wires"].append(fixture)
         provider = OpenAICompatibleProvider(OpenAICompatibleConfig(
-            base_url=fixture.url, model="fixture", max_tool_calls=4))
+            base_url=fixture.url, model="fixture", max_tool_calls=4,
+            max_arguments_bytes=4096 if case == "argument-limit" else None))
         request.node.d2_notes["providers"].append(provider)
         events, errors = [], []
         async def consume():
@@ -784,7 +800,7 @@ async def test_single_call_default_and_sealed_cap(case, request):
     async with HTTPFixture(chunks=chunks) as fixture:
         request.node.d2_notes["wires"].append(fixture)
         if case == "invalid-cap":
-            for value in [0, 5, True, False, 1.0, "2", None]:
+            for value in [0, -1, True, False, 1.0, "2"]:
                 with pytest.raises(ValidationError):
                     OpenAICompatibleConfig(base_url=fixture.url, model="fixture",
                         max_tool_calls=value)
@@ -794,7 +810,7 @@ async def test_single_call_default_and_sealed_cap(case, request):
                                        **({"max_tool_calls": 4} if case == "explicit-four" else {}))
         if case == "constructed":
             config = OpenAICompatibleConfig.model_construct(
-                **(config.model_dump() | {"max_tool_calls": 5}))
+                **(config.model_dump() | {"max_tool_calls": 0}))
             with pytest.raises((ValidationError, ServiceError)):
                 OpenAICompatibleProvider(config)
             assert not fixture.requests
@@ -814,17 +830,13 @@ async def test_single_call_default_and_sealed_cap(case, request):
                 with pytest.raises(ServiceError, match="target_binding_changed"):
                     _ = [e async for e in provider.stream([Message(role="user", content="x")], [])]
                 assert not fixture.requests
-            elif case == "default-two":
-                with pytest.raises(ProviderError):
-                    _ = [e async for e in provider.stream([Message(role="user", content="x")], [])]
             else:
                 events = [e async for e in provider.stream([Message(role="user", content="x")], [])]
-                assert len(
-                    [
-                    e for e in events if type(
-                    e) is ModelToolCall]) == (4 if case == "explicit-four" else 1)
-            assert provider.execution_limits(
-                )["max_tool_calls"] == (4 if case in {"explicit-four", "seal-config"} else 1)
+                expected = 4 if case == "explicit-four" else 2 if case == "default-two" else 1
+                assert len([e for e in events if type(e) is ModelToolCall]) == expected
+            assert provider.execution_limits()["max_tool_calls"] == (
+                4 if case in {"explicit-four", "seal-config"} else None
+            )
         finally:
             await provider.close()
             if replacement is not None:

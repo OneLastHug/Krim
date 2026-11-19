@@ -12,7 +12,7 @@ jobs:
   fixture-and-frontend:
     name: Linux Python 3.12 and Node 24.15 fixture checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,7 +27,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install Python development dependencies
-        run: uv sync --locked --python 3.12 --group dev
+        run: uv sync --locked --python 3.12 --group dev --extra personal-mcp
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
       - name: Run fixture and frontend checks

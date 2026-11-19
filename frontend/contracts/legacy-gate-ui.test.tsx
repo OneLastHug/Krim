@@ -128,6 +128,7 @@ test("legacy身份在对话页不后台读取旧run，显式进入运行页后�
   // legacy 服务器：资料 409 → 账号菜单显示「本地账号」；等待身份链路安定。
   await until(() => expect(host.textContent).toContain("本地账号"));
   expect(calls.some(value => value.path.startsWith("/v1/runs/"))).toBe(false);
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".sidebar-code-action")].find(button => button.textContent === "更多")!.click());
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="导航到运行记录"]')!.click());
   await until(() => expect(host.querySelector("#result")?.textContent).toBe("原身份私有结果"));
 });

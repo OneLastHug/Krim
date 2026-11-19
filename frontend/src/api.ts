@@ -21,10 +21,10 @@ export function isUnadmittedCreate(error:unknown):error is RequestError{
     (error.status===429&&error.code==="capacity")
   );
 }
-export async function request(path:string,key:string,body?:unknown,signal?:AbortSignal):Promise<unknown>{
+export async function request(path:string,key:string,body?:unknown,signal?:AbortSignal,method?:"POST"|"PUT"|"DELETE"):Promise<unknown>{
   const headers:Record<string,string>={};if(key)headers.Authorization="Bearer "+key;
   if(body!==undefined)headers["Content-Type"]="application/json";
-  const response=await fetch(path,{method:body===undefined?"GET":"POST",headers,body:body===undefined?undefined:JSON.stringify(body),redirect:"error",signal:body===undefined?signal:undefined});
+  const response=await fetch(path,{method:method??(body===undefined?"GET":"POST"),headers,body:body===undefined?undefined:JSON.stringify(body),redirect:"error",signal:body===undefined?signal:undefined});
   const value:unknown=await response.json();
   if(!response.ok){const err=object(object(value).error);throw new RequestError(response.status,/^[a-z_]{1,64}$/.test(String(err.code))?String(err.code):"execution_error");}
   return value;

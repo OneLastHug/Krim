@@ -1,0 +1,14 @@
+[Unit]
+Description=Krim sandbox data root (XFS with project quotas)
+# 数据根必须是F盘承载的原生Linux文件系统内的专用XFS镜像（loopback），
+# 不放在WSL盘符映射挂载的Windows文件系统上；本单元不格式化、不改动任何现有分区。
+# 承载证据核对见 scripts/sandbox_admin.py preflight --evidence。
+
+[Mount]
+What=@KRIM_STORAGE_DISK@
+Where=@KRIM_STORAGE_ROOT@
+Type=xfs
+Options=loop,prjquota,nodev,nosuid
+
+[Install]
+WantedBy=multi-user.target

@@ -64,9 +64,9 @@ test("workspace_unavailable_is_truthful_and_zero_effect", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   await until(() => expect(createButton().disabled).toBe(false));
   await act(async () => createButton().click());
-  await until(() => expect(document.body.textContent).toContain("工作区未配置"));
-  const option = document.querySelector('option[value="target-workspace"]') as HTMLOptionElement;
-  expect(option?.disabled).toBe(true);
+  await until(() => expect(document.body.textContent).toContain("开始一个新任务"));
+  expect(document.querySelector('#chat-target')).toBeNull();
+  expect(document.querySelector('option[value="target-workspace"]')).toBeNull();
   expect(calls.filter(item => item.method === "POST")).toEqual([]);
   expect(container.textContent).not.toContain("核验通过");
 });

@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import JsonValue, ValidationError
 
+from krim_agent.context.counter import UsageCalibratedCounter, counter_for_model
+from krim_agent.context.manifest import ItemMetadata, build_context_manifest
 from krim_agent.contracts import Message, RunEvent, ServiceError
 from krim_agent.providers.types import (
     ModelProvider,
@@ -37,31 +40,38 @@ class StepResult:
 class ModelStep:
     def __init__(self, provider: ModelProvider,
                  emit: Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]],
-                 check: Callable[[], None], *, max_steps: int, max_output: int,
+                 check: Callable[[], None], *, max_steps: int | None, max_output: int | None,
                  deadline: float | None, workspace: bool,
-                 execution_budget: ExecutionBudget | None = None) -> None:
+                 execution_budget: ExecutionBudget | None = None,
+                 model_timeout: float | None = None) -> None:
         self.provider, self.emit, self.check = provider, emit, check
+        self.model_timeout = model_timeout
         self.max_steps, self.max_output = max_steps, max_output
         self.deadline, self.workspace = deadline, workspace
         self.execution_budget = execution_budget
         self.index = self.output_bytes = 0
         self.seen: set[str] = set()
+        model = getattr(getattr(provider, "config", None), "model", None)
+        self._raw_counter = counter_for_model(model if isinstance(model, str) else None)
+        self.token_counter = UsageCalibratedCounter(self._raw_counter)
 
     def request_budget(
         self,
-        max_group: int,
-        remaining_tools: int,
+        max_group: int | None,
+        remaining_tools: int | None,
         *,
         purpose: str = "task",
     ) -> ModelRequestBudget:
-        remaining_steps = self.max_steps - self.index
-        if remaining_steps <= 0:
+        remaining_steps = None if self.max_steps is None else self.max_steps - self.index
+        if remaining_steps is not None and remaining_steps <= 0:
             raise ServiceError("step_limit")
         provider_cap = getattr(getattr(self.provider, "config", None), "max_tool_calls", None)
-        limits = [max_group, remaining_tools]
+        limits = [value for value in (max_group, remaining_tools) if value is not None]
         if type(provider_cap) is int:
             limits.append(provider_cap)
-        max_this_step = 0 if purpose == "summary" else min(limits)
+        # None means this request admits the full returned batch; only configured
+        # limits narrow it, and none are folded into a default ceiling.
+        max_this_step = 0 if purpose == "summary" else min(limits) if limits else None
         return ModelRequestBudget(
             remaining_steps=remaining_steps,
             remaining_tool_calls=remaining_tools,
@@ -74,9 +84,11 @@ class ModelStep:
     ) -> list[Message]:
         result = list(messages)
         prompt = _BUDGET_PROMPT.format(
-            steps=budget.remaining_steps,
-            tools=budget.remaining_tool_calls,
-            step_tools=budget.max_tool_calls_this_step,
+            steps=(budget.remaining_steps if budget.remaining_steps is not None else "unlimited"),
+            tools=(budget.remaining_tool_calls
+                   if budget.remaining_tool_calls is not None else "unlimited"),
+            step_tools=(budget.max_tool_calls_this_step
+                        if budget.max_tool_calls_this_step is not None else "unlimited"),
         )
         if result and result[0].role == "system":
             system = result[0]
@@ -88,32 +100,60 @@ class ModelStep:
         return result
 
     async def call(self, messages: list[Message], tools: list[dict[str, JsonValue]], *,
-                   purpose: str = "task", max_group: int = 1,
-                   remaining_tools: int = 1, summary_bytes: int = 2048,
+                   purpose: str = "task", max_group: int | None = 1,
+                   remaining_tools: int | None = 1, summary_bytes: int | None = None,
                    request_budget: ModelRequestBudget | None = None,
-                   request_prepared: bool = False) -> StepResult:
+                   request_prepared: bool = False,
+                   request_metadata: Sequence[ItemMetadata | None] = (),
+                   model_context_window: int | None = None,
+                   reserved_output_tokens: int | None = None,
+                   input_budget_bytes: int | None = None,
+                   compaction_changes: Sequence[dict[str, JsonValue]] = ()) -> StepResult:
         self.check()
         budget = request_budget or self.request_budget(
             max_group, remaining_tools, purpose=purpose
         )
-        if self.index >= self.max_steps:
+        if self.max_steps is not None and self.index >= self.max_steps:
             raise ServiceError("step_limit")
         index, self.index = self.index, self.index+1
         clock = asyncio.get_running_loop().time
         run_deadline = (self.execution_budget.deadline if self.execution_budget is not None
                         else self.deadline)
-        end = min(run_deadline, clock()+20) if run_deadline is not None else None
+        model_deadline = None if self.model_timeout is None else clock() + self.model_timeout
+        deadlines = [value for value in (run_deadline, model_deadline) if value is not None]
+        end = min(deadlines) if deadlines else None
         span = secrets.token_hex(8)
-        extra: dict[str, JsonValue] = {"purpose": purpose} if self.workspace else {}
+        extra: dict[str, JsonValue] = {"purpose": purpose}
         text, calls = "", []
         usage: TokenUsage | None = None
         final_usage = False
         request_messages = (
             messages if request_prepared else self.with_budget_prompt(messages, budget)
         )
-        request_tools = tools if budget.max_tool_calls_this_step > 0 else []
+        request_tools = (
+            tools if budget.max_tool_calls_this_step is None
+            or budget.max_tool_calls_this_step > 0 else []
+        )
+        if not request_prepared and (not messages or messages[0].role != "system"):
+            request_metadata = (None, *request_metadata)
+        raw_input_tokens = self._raw_counter.count_request(request_messages, request_tools)
+        context_manifest = build_context_manifest(
+            request_messages,
+            request_tools,
+            message_metadata=request_metadata,
+            model_context_window=model_context_window,
+            reserved_output_tokens=reserved_output_tokens,
+            input_budget_bytes=input_budget_bytes,
+            counter=self.token_counter,
+        )
+        if compaction_changes:
+            context_manifest["compaction_changes"] = list(compaction_changes)
+        first_content_at: float | None = None
+        first_text_at: float | None = None
+        started_at = clock()
         async with asyncio.timeout_at(end):
-            await self.emit("model_start", {"span_id": span, "step_index": index, **extra})
+            await self.emit("model_start", {"span_id": span, "step_index": index,
+                "context_manifest": context_manifest, **extra})
             self.check()
             stream_with_budget = getattr(self.provider, "stream_with_budget", None)
             if callable(stream_with_budget):
@@ -128,11 +168,18 @@ class ModelStep:
                     try:
                         if type(delta) is ModelText:
                             item = ModelText.model_validate(delta.model_dump(mode="json"))
+                            received_at = clock()
+                            if item.text:
+                                if first_content_at is None:
+                                    first_content_at = received_at
+                                if first_text_at is None:
+                                    first_text_at = received_at
                             self.output_bytes += len(item.text.encode())
-                            if self.output_bytes > self.max_output:
+                            if self.max_output is not None and self.output_bytes > self.max_output:
                                 raise ServiceError("output_limit")
                             text += item.text
-                            if purpose == "summary" and len(text.encode()) > summary_bytes:
+                            if (purpose == "summary" and summary_bytes is not None
+                                    and len(text.encode()) > summary_bytes):
                                 raise ServiceError("summary_failed")
                             await self.emit("summary_text" if purpose == "summary" else "text",
                                 {"text": item.text, "step_index": index, **extra})
@@ -144,8 +191,11 @@ class ModelStep:
                                 raise ServiceError("duplicate_tool_call")
                             self.seen.add(call.id)
                             calls.append(call)
-                            if len(calls) > budget.max_tool_calls_this_step:
+                            if (budget.max_tool_calls_this_step is not None
+                                    and len(calls) > budget.max_tool_calls_this_step):
                                 raise ServiceError("tool_limit")
+                            if first_content_at is None:
+                                first_content_at = clock()
                         elif type(delta) is ModelUsage:
                             measured = ModelUsage.model_validate(delta.model_dump(mode="json"))
                             if (usage is not None and not measured.usage.follows(usage)
@@ -168,8 +218,17 @@ class ModelStep:
             self.check()
             if purpose == "summary" and not text.strip():
                 raise ServiceError("summary_failed")
+            if final_usage and usage is not None and usage.input_tokens is not None:
+                self.token_counter.observe(raw_input_tokens, usage.input_tokens)
             await self.emit("model_end", {"span_id": span, "step_index": index,
-                "tool_calls": [call.model_dump(mode="json") for call in calls], **extra})
+                "tool_calls": [call.model_dump(mode="json") for call in calls],
+                "timing_origin": "provider_event",
+                "elapsed_ms": max(0.0, (clock() - started_at) * 1000),
+                "first_content_ms": (max(0.0, (first_content_at - started_at) * 1000)
+                                      if first_content_at is not None else None),
+                "first_text_ms": (max(0.0, (first_text_at - started_at) * 1000)
+                                  if first_text_at is not None else None),
+                **extra})
             self.check()
         return StepResult(text, tuple(calls), index)
 
@@ -183,5 +242,7 @@ def binding_token() -> tuple[object, ...]:
         id(ModelStep.with_budget_prompt),
         id(ModelRequestBudget),
         id(ModelRequestBudget.__post_init__),
+        id(build_context_manifest),
+        source_digest(Path(__file__).parents[1].joinpath("context/manifest.py")),
         source_digest(__file__),
     )

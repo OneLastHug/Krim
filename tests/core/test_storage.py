@@ -135,6 +135,38 @@ async def test_lost_tool_result_commit_return_reads_original_event_without_reexe
 
 
 @pytest.mark.asyncio
+async def test_large_tool_events_roundtrip_replay_and_reopen_without_byte_quota(tmp_path):
+    path = tmp_path / "large-events.db"
+    store = await SQLiteStore.open(path)
+    content = "项目正文\n" * 100_000
+    assert len(content.encode()) > 1024**2
+    payloads = {
+        "tool_intent": {"name": "write", "arguments": {"content": content}},
+        "tool_end": {"name": "read", "value": {"text": content}},
+    }
+    try:
+        run, _ = await store.begin(RunRequest(text="large", request_key="large"), {})
+        for kind, data in payloads.items():
+            first = await store.append(run.id, kind, data, event_id=kind)
+            replay = await store.append(run.id, kind, data, event_id=kind)
+            assert replay == first and first.data == data
+            with pytest.raises(ServiceError, match="key_conflict"):
+                await store.append(run.id, kind, {"different": True}, event_id=kind)
+        assert store.healthy
+    finally:
+        await store.close()
+    reopened = await SQLiteStore.open(path, readonly=True)
+    try:
+        snapshot = await reopened.snapshot(run.id)
+        saved = {event.kind: event.data for event in snapshot.events if event.kind in payloads}
+        assert saved == payloads
+        for kind in payloads:
+            assert sum(event.kind == kind for event in snapshot.events) == 1
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("point", ["begin", "terminal"])
 async def test_run_commit_return_loss_is_confirmed_without_duplicate_run_or_model(tmp_path, point):
     from krim_agent.contracts import RunView

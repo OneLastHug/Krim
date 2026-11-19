@@ -1,10 +1,11 @@
 import "./styles/account-identity.css";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useScrollbars } from "./hooks/use-scrollbars";
+import { AppearanceSettings } from "./components/AppearanceSettings";
+import { useCallback, useEffect, useRef, useState, type ReactNode, lazy, Suspense } from "react";
 import { object, request } from "./api";
 import { AccountSettings, type AccountTab } from "./components/AccountSettings";
 import { useAccountIdentity } from "./hooks/use-account-identity";
 import { ChatWorkbench } from "./components/ChatWorkbench";
-import { TraceWorkbench } from "./components/TraceWorkbench";
 import { RunComposer } from "./components/RunComposer";
 import { RunAccess } from "./components/RunAccess";
 import { RunWorkspace } from "./components/RunWorkspace";
@@ -18,9 +19,13 @@ import { WorkbenchInspector } from "./components/WorkbenchInspector";
 import { parseActor, type Actor } from "./lib/session-contracts";
 import { readWorkbenchView, type WorkbenchView } from "./lib/workbench-route";
 import { useDisplayTheme } from "./lib/use-display-theme";
-import { useReadingSize, type ReadingSize } from "./hooks/use-reading-size";
+import { useReadingSize } from "./hooks/use-reading-size";
 import { chatReason } from "./lib/copy";
 import type { SessionState } from "./hooks/use-session";
+import type { ObsPage } from "./observability/obs-route";
+import { readObsState, writeObsState } from "./observability/obs-route";
+
+const ObservabilityModule = lazy(() => import("./observability").then(module => ({ default: module.ObservabilityModule })));
 
 function UnavailablePage({ title, children }: { title: string; children: ReactNode }) {
   return <section className="capability-page" aria-labelledby="capability-heading">
@@ -31,6 +36,7 @@ function UnavailablePage({ title, children }: { title: string; children: ReactNo
 }
 
 export function App() {
+  useScrollbars();
   const [key, setKey] = useState(""), [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
   const [loggedOut, setLoggedOut] = useState(false);
   const [accountTab, setAccountTab] = useState<AccountTab>("profile");
@@ -38,9 +44,9 @@ export function App() {
   const [keyPrepared, setKeyPrepared] = useState(false);
   const chatFence = useRef(0);
   const [mode, setMode] = useState<WorkbenchView>(() => readWorkbenchView(new URL(location.href)));
+  const [obsPage, setObsPage] = useState<ObsPage>(() => readObsState(new URL(location.href)).page);
   const [sourceRun, setSourceRun] = useState(() => new URL(location.href).searchParams.get("source_run") ?? "");
   const [selectedChatId, setSelectedChatId] = useState("");
-  const [selectedTraceRunId, setSelectedTraceRunId] = useState("");
   const chatNavigation = useRef<{ key: string; state: SessionState } | null>(null);
   const liveKey = useRef(key);
   liveKey.current = key;
@@ -60,6 +66,13 @@ export function App() {
   const { readingSize, selectReadingSize } = useReadingSize();
   const isLegacyRouteAvailable = !!identity?.legacy && !identityLoading;
   const run = useRun(key, mode === "run", isLegacyRouteAvailable ? JSON.stringify([identity!.principal_id, identity!.generation]) : null);
+
+  useEffect(() => {
+    const url = new URL(location.href);
+    if (mode === "trace" && url.searchParams.get("view") === "observe") {
+      window.history.replaceState(null, "", writeObsState(url, readObsState(url)));
+    }
+  }, [mode]);
 
   const receiveChatNavigation = useCallback((value: SessionState, sourceKey: string) => {
     if (sourceKey !== liveKey.current) return;
@@ -120,11 +133,12 @@ export function App() {
     liveKey.current = value;
     chatNavigation.current = null;
     run.invalidate();
-    setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
+    setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
     const url = new URL(location.href);
     url.searchParams.delete("source_run"); url.searchParams.delete("product_candidate_id");
+    for (const field of ["obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
     if (!preserveAccount) {
-      for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id"]) url.searchParams.delete(field);
+      for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
       url.hash = "";
       setAccountTab("profile");
     }
@@ -142,10 +156,10 @@ export function App() {
     run.invalidate();
     setKey(""); setLoggedOut(true); setIdentity(null); setLegacy(null);
     setIdentityError(message); setIdentityLoading(false); setKeyOpen(false); setTaskOpen(false);
-    setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
+    setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
     setAccountTab("profile"); setChatMount(revision => revision + 1);
     const url = new URL(location.href);
-    for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run"]) url.searchParams.delete(field);
+    for (const field of ["workspace", "session", "turn", "run_id", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run", "obs", "obs_status", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item", "obs_mode"]) url.searchParams.delete(field);
     url.hash = ""; window.history.replaceState(null, "", url);
   }
 
@@ -155,9 +169,8 @@ export function App() {
       chatFence.current++;
       const next = readWorkbenchView(new URL(location.href));
       setMode(next);
-      setSelectedTraceRunId("");
-      if (next !== "chat") setIdentityLoading(true);
-      setChatMount(value => value + 1);
+      setObsPage(readObsState(new URL(location.href)).page);
+      redrawRoute(value => value + 1);
       setSourceRun(new URL(location.href).searchParams.get("source_run") ?? ""); setSelectedProductTaskId("");
     };
     window.addEventListener("popstate", onPopState);
@@ -166,6 +179,10 @@ export function App() {
 
   function choose(view: WorkbenchView) {
     if (preparedKey.current) applyKey(preparedKey.current, true);
+    if (view === "chat" && mode === "trace" && readWorkbenchView(new URL(location.href)) === "trace") {
+      const selection = readObsState(new URL(location.href));
+      if (selection.session) { returnToTraceSession(selection.session); return; }
+    }
     const url = new URL(location.href);
     url.searchParams.set("view", view);
     if (productEnabled && (view === "eval" || view === "datasets")) {
@@ -173,10 +190,22 @@ export function App() {
     }
     if (view !== mode || url.href !== location.href) {
       chatFence.current++;
-      window.history.pushState(null, "", url);
+      if (url.href !== location.href) window.history.pushState(null, "", url);
       if (view !== "chat" && legacy === null) setIdentityLoading(true);
       setMode(view); redrawRoute(value => value + 1);
+      if (view === "trace") setObsPage(readObsState(url).page);
     }
+  }
+
+  function chooseObservabilityPage(page: ObsPage) {
+    if (!identity?.workspaces.some(value => value.workspace_id === productWorkspace)) return;
+    const next = { ...readObsState(new URL(location.href)), page };
+    const url = writeObsState(new URL(location.href), next);
+    url.searchParams.set("view", "trace");
+    url.searchParams.set("workspace", productWorkspace);
+    window.history.pushState(null, "", url);
+    setObsPage(page);
+    if (mode !== "trace") setMode("trace");
   }
 
   function chooseWorkspace(workspace: string) {
@@ -185,9 +214,9 @@ export function App() {
     chatNavigation.current = null;
     const url = new URL(location.href);
     url.searchParams.set("workspace", workspace);
-    for (const field of ["session", "turn", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run"]) url.searchParams.delete(field);
+    for (const field of ["session", "turn", "eval_id", "legacy_eval", "product_eval_id", "product_candidate_id", "source_run", "obs_session", "obs_turn", "obs_req", "obs_base", "obs_run", "obs_item"]) url.searchParams.delete(field);
     window.history.pushState(null, "", url);
-    setSelectedChatId(""); setSelectedTraceRunId(""); setSelectedProductTaskId(""); setSourceRun("");
+    setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
     setChatMount(value => value + 1);
   }
 
@@ -203,17 +232,17 @@ export function App() {
     setSourceRun(id); setSelectedProductTaskId(""); setMode("datasets");
   }
 
-  function openTrace(workspace: string, sessionId: string, turnId: string) {
+  function openTrace(workspace: string, sessionId: string, turnId: string, page: "runs" | "context" = "runs") {
     if (!workspace || !sessionId || !turnId) return;
     chatFence.current++;
-    const url = new URL(location.href);
-    url.searchParams.set("view", "trace");
+    const url = writeObsState(new URL(location.href), {
+      ...readObsState(new URL(location.href)), page, session: sessionId, turn: turnId,
+      run: "", request: "", base: "", item: "", status: "",
+    });
     url.searchParams.set("workspace", workspace);
-    url.searchParams.set("session", sessionId);
-    url.searchParams.set("turn", turnId);
     window.history.pushState(null, "", url);
     setMode("trace");
-    setSelectedTraceRunId("");
+    setObsPage(page);
     redrawRoute(value => value + 1);
   }
 
@@ -223,12 +252,13 @@ export function App() {
     const url = new URL(location.href);
     url.searchParams.set("view", "chat");
     url.searchParams.set("session", sessionId);
-    url.searchParams.delete("turn");
+    const observation = readObsState(url);
+    const turn = observation.session === sessionId ? observation.turn : "";
+    if (turn) url.searchParams.set("turn", turn); else url.searchParams.delete("turn");
     window.history.pushState(null, "", url);
-    setMode("chat");
-    setSelectedChatId("");
-    setSelectedTraceRunId("");
-    setChatMount(value => value + 1);
+    const state = chatNavigation.current?.state;
+    if (state?.ready && state.actor?.workspaces.some(item => item.workspace_id === productWorkspace)) state.select(productWorkspace, sessionId, turn || null);
+    setMode("chat"); setSelectedChatId(sessionId); redrawRoute(value => value + 1);
   }
 
   function openFeedbackCandidate(runId: string, candidateId: string) {
@@ -279,7 +309,7 @@ export function App() {
   const legacyEvaluation = productEnabled !== true || currentUrl.searchParams.has("eval_id") || currentUrl.searchParams.get("legacy_eval") === "1";
   const objectId = mode === "chat" ? selectedChatId
     : mode === "run" ? isLegacyRouteAvailable ? run.id || currentUrl.hash.slice(1) || currentUrl.searchParams.get("run_id") || "" : ""
-      : mode === "trace" ? selectedTraceRunId || (currentUrl.searchParams.get("turn") ?? "")
+      : mode === "trace" ? readObsState(currentUrl).run || readObsState(currentUrl).turn
         : mode === "eval" ? (legacyEvaluation ? currentUrl.searchParams.get("eval_id") ?? "" : selectedProductTaskId) : "";
   const navigationState = chatNavigation.current?.key === key ? chatNavigation.current.state : null;
   const sidebarChat = identity && navigationState?.actor && navigationState.actor.principal_id === identity.principal_id && navigationState.actor.generation === identity.generation ? navigationState : null;
@@ -316,6 +346,7 @@ export function App() {
 
   return <div className={`app-shell${legacy === false ? " core-member" : ""}`} data-reading-size={readingSize}>
     <WorkbenchLayout
+      apiKey={key}
       view={mode}
       identity={identity}
       identityLoading={identityLoading}
@@ -335,6 +366,8 @@ export function App() {
       httpEnabled={httpEnabled === true}
       beforeSessionSelect={recordChatSelection}
       onNavigate={choose}
+      onObservabilityPage={chooseObservabilityPage}
+      observabilityPage={obsPage}
       onConnect={() => setKeyOpen(true)}
       onOpenTask={() => setTaskOpen(true)}
       canOpenTask={isLegacyRouteAvailable}
@@ -342,12 +375,11 @@ export function App() {
         {mode !== "chat" && identity && identity.workspaces.length > 1 && <select className="workbench-workspace-select" aria-label="当前工作区" value={productWorkspace} onChange={event => chooseWorkspace(event.target.value)}>
           {identity.workspaces.map(value => <option key={value.workspace_id} value={value.workspace_id}>{workspaceNames[value.workspace_id] ?? "工作区"}</option>)}
         </select>}
-        <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
       </>}
       inspector={<WorkbenchInspector view={mode} objectId={objectId} identity={identity} accountName={accountName} gatewayName={gatewayName} workspaceNames={workspaceNames}/>}
     >
       <section className="page-view" hidden={mode !== "chat"} aria-label="对话页面">
-        {!loggedOut ? <ChatWorkbench key={chatMount} apiKey={key} active={mode === "chat"} fence={chatFence} onLegacy={setLegacy} onIdentity={acceptChatIdentity} onChatState={receiveChatNavigation} onTrace={openTrace} onSelection={setSelectedChatId} onConnect={() => setKeyOpen(true)}/>
+        {!loggedOut ? <ChatWorkbench key={chatMount} theme={theme} apiKey={key} active={mode === "chat"} fence={chatFence} onLegacy={setLegacy} onIdentity={acceptChatIdentity} onChatState={receiveChatNavigation} onTrace={openTrace} onSelection={setSelectedChatId} onConnect={() => setKeyOpen(true)}/>
           : <UnavailablePage title="登录 Krim">{identityError || "使用访问密钥登录你的账号。"}<br/><Button variant="outline" onClick={() => setKeyOpen(true)}>输入访问密钥</Button></UnavailablePage>}
       </section>
       <section className="page-view" hidden={mode !== "run"} aria-label="运行记录页面">
@@ -356,7 +388,9 @@ export function App() {
             : <div className="workbench"><RunComposer run={run} onConnect={() => setKeyOpen(true)}/><RunWorkspace key={run.id} run={run} onCandidate={id => { if (productEnabled) evaluateRun(productWorkspace, id); else { setSourceRun(id); choose("eval"); } }}/></div>)}
       </section>
       <section className="page-view" hidden={mode !== "trace"} aria-label="Trace 页面">
-        <TraceWorkbench apiKey={key} workspace={currentUrl.searchParams.get("workspace") ?? productWorkspace} identity={identity} active={mode === "trace" && !identityLoading} sessionId={currentUrl.searchParams.get("session") ?? undefined} turnId={currentUrl.searchParams.get("turn") ?? undefined} onSelection={setSelectedTraceRunId} onSession={returnToTraceSession} onEvaluate={productEnabled ? (workspace, runId) => evaluateRun(workspace, runId) : undefined}/>
+        {!loggedOut && <Suspense fallback={<UnavailablePage title="正在加载观测">正在载入观测模块。</UnavailablePage>}>
+          <ObservabilityModule key={`observability-${chatMount}`} active={mode === "trace"} apiKey={key} workspace={productWorkspace} identity={identity} identityLoading={identityLoading} theme={theme} page={obsPage} onPageChange={setObsPage} onNavigate={choose} onSession={returnToTraceSession} onEvaluate={productEnabled && productCanWrite ? runId => evaluateRun(productWorkspace, runId) : undefined}/>
+        </Suspense>}
       </section>
       {productEnabled && (mode === "datasets" || mode === "eval" && !legacyEvaluation) && (identityLoading || !identity) && <UnavailablePage title={identityLoading ? "正在读取工作区" : "请连接工作区"}>{identityError || "正在确认当前身份与工作区能力。"}</UnavailablePage>}
       {productEnabled && automationEnabled && mode === "eval" && !legacyEvaluation && <nav className="product-eval-actions" aria-label="评测功能"><Button variant={automationOpen ? "ghost" : "secondary"} aria-pressed={!automationOpen} onClick={() => setAutomationOpen(false)}>评测任务</Button><Button variant={automationOpen ? "secondary" : "ghost"} aria-pressed={automationOpen} onClick={() => setAutomationOpen(true)}>持续回归</Button></nav>}
@@ -377,7 +411,7 @@ export function App() {
             apiKey={key} identity={identity} profile={accountIdentity.profile} active tab={accountTab}
             onTabChange={setAccountTab} onProfileChange={refreshAccount}
             onKeyChange={value => applyKey(value, true)} onKeyPrepared={value => { preparedKey.current = value; setKeyPrepared(true); }} onLogout={() => logout()}
-            gatewayName={gatewayName} onConnect={() => setKeyOpen(true)}/>
+            gatewayName={gatewayName} onConnect={() => setKeyOpen(true)} appearance={<AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}/>
             : <UnavailablePage title={accountIdentity.profileLoading || identityLoading ? "正在读取账号" : "账号设置"}>
               {accountIdentity.profileError || identityError || "使用访问密钥登录后管理个人资料。"}<br/>
               <Button variant="outline" onClick={() => identity ? refreshAccount() : setKeyOpen(true)}>{identity ? "重新读取" : "输入访问密钥"}</Button>
@@ -386,12 +420,9 @@ export function App() {
         {accountIdentity.legacy && <section className="settings-page">
           <div className="settings-section"><h3>当前账号与工作区</h3>{identity ? <><p>{accountName} · {gatewayName}</p><ul>{identity.workspaces.map(workspace => <li key={workspace.workspace_id}><span>{workspaceNames[workspace.workspace_id] ?? "个人工作区"}</span><span>{workspace.role === "admin" ? "管理员" : workspace.role === "viewer" ? "只读" : "成员"}</span></li>)}</ul><p>{identity.legacy ? "旧版运行与评测能力可用。" : "当前身份提供工作区会话能力。"}</p></> : <p role="status">{identityLoading ? "正在读取账号与工作区能力。" : identityError || "登录后读取账号与工作区能力。"}</p>}</div>
         </section>}
-        <section className="settings-page">
-          <div className="settings-section"><h3>服务端能力</h3><p role="status" aria-label="HTTP 目标能力">{httpEnabled === null ? "HTTP 目标配置尚未确认" : httpEnabled ? "已启用 HTTP 目标" : "未启用 HTTP 目标"}</p></div>
-          <div className="settings-section"><h3>消息字号</h3><div className="theme-settings" role="group" aria-label="消息字号">{([12, 14, 16] as ReadingSize[]).map(size => <Button key={size} variant={readingSize === size ? "secondary" : "outline"} aria-pressed={readingSize === size} onClick={() => selectReadingSize(size)}>{size} px</Button>)}</div></div>
-          <div className="settings-section"><h3>显示</h3><p>当前主题：{theme === "warm" ? "暖纸" : theme === "bright" ? "浅色" : "深色"}</p><div className="theme-settings" role="group" aria-label="选择显示主题"><Button variant={theme === "warm" ? "secondary" : "outline"} aria-pressed={theme === "warm"} onClick={() => selectTheme("warm")}>暖纸</Button><Button variant={theme === "bright" ? "secondary" : "outline"} aria-pressed={theme === "bright"} onClick={() => selectTheme("bright")}>浅色</Button><Button variant={theme === "dark" ? "secondary" : "outline"} aria-pressed={theme === "dark"} onClick={() => selectTheme("dark")}>深色</Button></div></div>
-        </section>
+        {accountIdentity.legacy && <AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}
       </section>
     </WorkbenchLayout>
+    <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
   </div>;
 }

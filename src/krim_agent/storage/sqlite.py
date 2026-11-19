@@ -37,6 +37,17 @@ from krim_agent.runtime.contracts import RunEventPage, RunSnapshot, settled
 from . import sessions as session_sql
 from . import work as work_sql
 from .account_models import ACCOUNT_TABLE_NAMES, ACCOUNT_TABLES
+from .context_models import CONTEXT_TABLE_NAMES, CONTEXT_TABLES
+from .development_models import DEVELOPMENT_TABLE_NAMES, DEVELOPMENT_TABLES
+from .execution_policy_models import EXECUTION_POLICY_TABLE_NAMES, EXECUTION_POLICY_TABLES
+from .extension_models import (
+    EXTENSION_TABLE_NAMES,
+    EXTENSION_TABLES,
+    migrate_memory_scopes,
+)
+from .goal_models import GOAL_TABLE_NAMES, GOAL_TABLES
+from .interaction_models import INTERACTION_TABLE_NAMES, INTERACTION_TABLES
+from .mcp_models import MCP_TABLE_NAMES, MCP_TABLES
 from .models import (
     dataset_revisions,
     eval_items,
@@ -49,15 +60,35 @@ from .models import (
     sessions,
     turns,
 )
+from .planning_models import PLANNING_TABLE_NAMES, PLANNING_TABLES
+from .preview_models import PREVIEW_TABLE_NAMES, PREVIEW_TABLES
+from .project_membership_models import PROJECT_MEMBERSHIP_TABLE_NAMES, PROJECT_MEMBERSHIP_TABLES
+from .sandbox_models import SANDBOX_TABLE_NAMES, SANDBOX_TABLES
+from .session_lifecycle_models import (
+    SESSION_LIFECYCLE_TABLE_NAMES,
+    SESSION_LIFECYCLE_TABLES,
+)
+from .sidebar_models import SIDEBAR_TABLE_NAMES, SIDEBAR_TABLES
 
 APPLICATION_ID = 0x4B4C4331
-# 7：新增accounts/access_keys/account_workspaces/workspace_profiles/account_events/account_meta
-SCHEMA_VERSION = 7
+# 16：开发预览绑定与浏览器凭据；15：开发环境、统一操作回执与进程；14：会话归档；
+# 13：长任务；12：账号MCP；17：会话侧栏呈现
+# 18：会话计划、用户提问、压缩请求与项目记忆作用域。
+# 19: project capability ceilings and independent session execution policies.
+SCHEMA_VERSION = 19
+GENERAL_TABLE_NAMES = (
+    PLANNING_TABLE_NAMES | INTERACTION_TABLE_NAMES | CONTEXT_TABLE_NAMES | GOAL_TABLE_NAMES
+)
+MEMORY_SCOPE_COLUMNS = {
+    "workspace_id", "project_id", "source_kind", "memory_kind", "authorization_turn_id",
+}
 T = TypeVar("T")
 
 
 class SQLiteStore:
-    def __init__(self, engine: AsyncEngine, fd: int, readonly: bool, max_events: int) -> None:
+    def __init__(
+        self, engine: AsyncEngine, fd: int, readonly: bool, max_events: int | None,
+    ) -> None:
         self.engine, self.fd, self.readonly = engine, fd, readonly
         self.max_events = max_events
         self.lock = asyncio.Lock()
@@ -66,7 +97,9 @@ class SQLiteStore:
         self.schema_version = SCHEMA_VERSION
 
     @staticmethod
-    async def _validate_schema(conn: AsyncConnection, names: set[str]) -> None:
+    async def _validate_schema(
+        conn: AsyncConnection, names: set[str], *, version: int = SCHEMA_VERSION,
+    ) -> None:
         from .observation_outbox import TABLES
 
         for name in names:
@@ -74,6 +107,7 @@ class SQLiteStore:
             info = (await conn.exec_driver_sql(f'PRAGMA table_info("{name}")')).all()
             expected = [
                 (c.name, str(c.type).upper(), not c.nullable, c.primary_key) for c in table.columns
+                if not (version < 18 and name == "memories" and c.name in MEMORY_SCOPE_COLUMNS)
             ]
             actual = [(row[1], str(row[2]).upper(), bool(row[3]), bool(row[5])) for row in info]
             if actual != expected:
@@ -107,6 +141,8 @@ class SQLiteStore:
 
     @staticmethod
     async def _upgrade(conn: AsyncConnection) -> None:
+        from krim_agent.media.artifacts import MEDIA_TABLES
+
         await conn.run_sync(
             lambda sync: metadata.create_all(
                 sync,
@@ -129,12 +165,33 @@ class SQLiteStore:
                         )
                     ],
                     *ACCOUNT_TABLES,
+                    *SANDBOX_TABLES,
+                    *EXTENSION_TABLES,
+                    *MCP_TABLES,
+                    *SESSION_LIFECYCLE_TABLES,
+                    *DEVELOPMENT_TABLES,
+                    *PREVIEW_TABLES,
+                    *SIDEBAR_TABLES,
+                    *PLANNING_TABLES,
+                    *INTERACTION_TABLES,
+                    *CONTEXT_TABLES,
+                    *GOAL_TABLES,
+                    *MEDIA_TABLES,
+                    *PROJECT_MEMBERSHIP_TABLES,
+                    *EXECUTION_POLICY_TABLES,
                 ],
             )
         )
         from .observation_outbox import create_schema
 
         await create_schema(conn)
+        await migrate_memory_scopes(conn)
+        from krim_agent.project_access.policy import migrate_project_access
+
+        from .execution_policy import migrate as migrate_execution_policy
+
+        await migrate_project_access(conn)
+        await migrate_execution_policy(conn)
         await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod
@@ -172,8 +229,10 @@ class SQLiteStore:
 
     @classmethod
     async def open(
-        cls, path: Path, *, readonly: bool = False, max_events: int = 2048
+        cls, path: Path, *, readonly: bool = False, max_events: int | None = None
     ) -> SQLiteStore:
+        from krim_agent.media.artifacts import MEDIA_TABLE_NAMES
+
         from .observation_outbox import TABLES, create_schema
 
         path, fd, fresh = cls._open_file(path, readonly)
@@ -193,7 +252,8 @@ class SQLiteStore:
 
         @event.listens_for(engine.sync_engine, "begin")
         def begin(connection: Any) -> None:
-            connection.exec_driver_sql("BEGIN")
+            immediate = connection.get_execution_options().get("krim_immediate", False)
+            connection.exec_driver_sql("BEGIN IMMEDIATE" if immediate else "BEGIN")
 
         store = cls(engine, fd, readonly, max_events)
         try:
@@ -213,7 +273,22 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA application_id={APPLICATION_ID}")
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
-                    legacy = set(metadata.tables) - ACCOUNT_TABLE_NAMES
+                    current_tables = set(metadata.tables) | set(TABLES)
+                    schema19 = current_tables
+                    schema18 = (
+                        schema19 - PROJECT_MEMBERSHIP_TABLE_NAMES - EXECUTION_POLICY_TABLE_NAMES
+                    )
+                    schema17 = schema18 - GENERAL_TABLE_NAMES - MEDIA_TABLE_NAMES
+                    schema16 = schema17 - SIDEBAR_TABLE_NAMES
+                    schema15 = schema16 - PREVIEW_TABLE_NAMES
+                    schema14 = schema15 - DEVELOPMENT_TABLE_NAMES
+                    schema13 = schema14 - SESSION_LIFECYCLE_TABLE_NAMES
+                    schema12 = schema13 - {"sandbox_turn_contracts"}
+                    schema11 = schema12 - MCP_TABLE_NAMES
+                    schema10 = schema11 - EXTENSION_TABLE_NAMES
+                    schema7 = schema10 - SANDBOX_TABLE_NAMES
+                    legacy = schema7 - ACCOUNT_TABLE_NAMES - set(TABLES)
+
                     expected = {
                         1: {"runs", "run_events"},
                         2: {
@@ -236,15 +311,28 @@ class SQLiteStore:
                         4: legacy - {"park_checkpoints"},
                         5: (legacy | set(TABLES)) - {"park_checkpoints"},
                         6: legacy | set(TABLES),
-                        7: set(metadata.tables) | set(TABLES),
+                        7: schema7,
+                        8: schema10 - {"sandbox_session_bindings", "sandbox_quota_state"},
+                        9: schema10 - {"sandbox_quota_state"},
+                        10: schema10,
+                        11: schema11,
+                        12: schema12,
+                        13: schema13,
+                        14: schema14,
+                        15: schema15,
+                        16: schema16,
+                        17: schema17,
+                        18: schema18,
+                        19: schema19,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
-                        or version not in {1, 2, 3, 4, 5, 6, 7}
+                        or version not in
+                        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")
-                    await cls._validate_schema(conn, expected)
+                    await cls._validate_schema(conn, expected, version=version)
                     store.schema_version = version
                     if not readonly and version < SCHEMA_VERSION:
                         await cls._upgrade(conn)
@@ -313,11 +401,13 @@ class SQLiteStore:
                 select(func.count()).select_from(run_events).where(run_events.c.run_id == run_id)
             )
         ).scalar_one()
-        if not terminal and seq >= self.max_events - 1:
+        if not terminal and self.max_events is not None and seq >= self.max_events - 1:
             raise ServiceError("event_limit")
         record = RunEvent(run_id=run_id, seq=seq, event_id=event_id, kind=kind, data=data)
         try:
-            check_json(record.model_dump(mode="json"), max_bytes=65536)
+            # Durable tool arguments/results are not a transport page. A file
+            # mutation can exceed 64 KiB even when stdin/RPC chunks stay small.
+            check_json(record.model_dump(mode="json"))
         except ValueError:
             raise ServiceError("output_limit") from None
         await conn.execute(insert(run_events).values(**record.model_dump()))
@@ -445,7 +535,7 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, status, code)
-                    if self.schema_version in {5, 6, 7}
+                    if self.schema_version in range(5, SCHEMA_VERSION + 1)
                     else None
                 )
                 terminal_data: dict[str, JsonValue] = {
@@ -470,7 +560,7 @@ class SQLiteStore:
                     .where(runs.c.id == run_id)
                     .values(status=status, code=code, finished_at=time.time())
                 )
-                if self.schema_version in {3, 4, 5, 6, 7}:
+                if self.schema_version in range(3, SCHEMA_VERSION + 1):
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -514,7 +604,7 @@ class SQLiteStore:
                 e.event_id == "terminal:" + run_id and e.kind == "terminal" and e.data == expected
                 for e in snap.events
             )
-            if self.schema_version in {5, 6, 7}:
+            if self.schema_version in range(5, SCHEMA_VERSION + 1):
                 from . import observation_outbox as hot_sql
 
                 try:
@@ -539,22 +629,27 @@ class SQLiteStore:
 
         async def operation(conn: AsyncConnection) -> None:
             row = await self._row(conn, run_id)
+            if row["stop_requested"]:
+                raise ServiceError("cancelled")
             if row["status"] not in ("queued", "awaiting"):
                 raise ServiceError("run_closed")
             await conn.execute(update(runs).where(runs.c.id == run_id).values(status="running"))
 
         await settled(self._write(operation))
 
-    async def set_awaiting(self, run_id: str) -> None:
-        """运行中的运行标记为停靠等待人工审批（ADR-0015）。"""
+    async def set_awaiting(self, run_id: str) -> bool:
+        """Atomically park unless a stop request has already won the transition."""
 
-        async def operation(conn: AsyncConnection) -> None:
+        async def operation(conn: AsyncConnection) -> bool:
             row = await self._row(conn, run_id)
+            if row["stop_requested"]:
+                return False
             if row["status"] != "running":
                 raise ServiceError("run_closed")
             await conn.execute(update(runs).where(runs.c.id == run_id).values(status="awaiting"))
+            return True
 
-        await settled(self._write(operation))
+        return await settled(self._write(operation))
 
     async def write_checkpoint(
         self, run_id: str, checkpoint: dict[str, object], fingerprint_value: str
@@ -563,9 +658,7 @@ class SQLiteStore:
 
         async def operation(conn: AsyncConnection) -> None:
             await self._row(conn, run_id)
-            await conn.execute(
-                delete(park_checkpoints).where(park_checkpoints.c.run_id == run_id)
-            )
+            await conn.execute(delete(park_checkpoints).where(park_checkpoints.c.run_id == run_id))
             await conn.execute(
                 insert(park_checkpoints).values(
                     run_id=run_id,
@@ -629,9 +722,7 @@ class SQLiteStore:
             raise ServiceError("invalid_cursor", 416)
         event_count = (
             await conn.execute(
-                select(func.count())
-                .select_from(run_events)
-                .where(run_events.c.run_id == run_id)
+                select(func.count()).select_from(run_events).where(run_events.c.run_id == run_id)
             )
         ).scalar_one()
         if from_seq > event_count:
@@ -711,7 +802,11 @@ class SQLiteStore:
                 self.schema_version,
                 cast(dict[str, JsonValue], row["target"]),
             ),
-            await work_sql.load(conn, run_id) if self.schema_version in {4, 5, 6, 7} else None,
+            (
+                await work_sql.load(conn, run_id)
+                if self.schema_version in range(4, SCHEMA_VERSION + 1)
+                else None
+            ),
         )
 
     async def by_key(self, key: str) -> RunView | None:
@@ -726,7 +821,7 @@ class SQLiteStore:
             return self._view(row) if row is not None else None
 
     def _require_v2(self) -> None:
-        if self.schema_version not in {2, 3, 4, 5, 6, 7}:
+        if self.schema_version not in range(2, SCHEMA_VERSION + 1):
             raise ServiceError("schema_upgrade_required")
 
     async def _eval_write(
@@ -1211,14 +1306,17 @@ class SQLiteStore:
                     answered = {
                         str(e["data"]["request_id"])
                         for e in events
-                        if e["kind"] == "approval_reply"
+                        if e["kind"] in {"approval_reply", "execution_policy_allow"}
+                        and e["data"].get("request_id") is not None
                     }
-                    expires = [
-                        float(e["data"]["expires_at"])
-                        for e in events
+                    pending = [
+                        e["data"] for e in events
                         if e["kind"] == "approval_request"
                         and str(e["data"]["request_id"]) not in answered
                     ]
+                    if any(data.get("expires_at") is None for data in pending):
+                        continue  # No product countdown; keep the same parked run.
+                    expires = [float(data["expires_at"]) for data in pending]
                     if expires and max(expires) > time.time():
                         continue  # 跨重启存活：保持 awaiting
                     if not expires:
@@ -1226,13 +1324,15 @@ class SQLiteStore:
 
                 capture = (
                     await hot_sql.prepare_terminal(conn, run_id, "interrupted", "interrupted")
-                    if self.schema_version in {5, 6, 7}
+                    if self.schema_version in range(5, SCHEMA_VERSION + 1)
                     else None
                 )
-                recovered_code = "approval_expired" if row["status"] == "awaiting" \
-                    else "interrupted"
-                recovered_status = "failed" if recovered_code == "approval_expired" \
-                    else "interrupted"
+                recovered_code = (
+                    "approval_expired" if row["status"] == "awaiting" else "interrupted"
+                )
+                recovered_status = (
+                    "failed" if recovered_code == "approval_expired" else "interrupted"
+                )
                 terminal_data: dict[str, JsonValue] = {
                     "status": recovered_status,
                     "code": recovered_code,
@@ -1254,11 +1354,12 @@ class SQLiteStore:
                     update(runs)
                     .where(runs.c.id == run_id)
                     .values(
-                        status=recovered_status, code=recovered_code,
+                        status=recovered_status,
+                        code=recovered_code,
                         finished_at=time.time(),
                     )
                 )
-                if self.schema_version in {3, 4, 5, 6, 7}:
+                if self.schema_version in range(3, SCHEMA_VERSION + 1):
                     await session_sql.finish_turn(conn, await self._snapshot(conn, run_id))
                 if capture is not None:
                     await hot_sql.finalize_terminal(
@@ -1310,7 +1411,7 @@ class SQLiteStore:
                     .values(status="interrupted")
                 )
                 await self._finalize_eval(conn, eval_id, "interrupted", "interrupted")
-            if self.schema_version in {3, 4, 5, 6, 7}:
+            if self.schema_version in range(3, SCHEMA_VERSION + 1):
                 await session_sql.pause_queues(conn)
                 await session_sql.recover_controls(conn)
 

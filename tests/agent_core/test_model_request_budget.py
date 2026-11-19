@@ -9,8 +9,9 @@ from krim_agent.providers.openai_compatible import (
     OpenAICompatibleProvider,
     ProviderError,
 )
-from krim_agent.providers.types import ModelRequestBudget, ModelText, ModelToolCall
+from krim_agent.providers.types import ModelRequestBudget, ModelText, ModelToolCall, ModelUsage
 from krim_agent.runtime.model_step import ModelStep
+from krim_agent.usage import TokenUsage
 
 
 def frame(value):
@@ -57,13 +58,11 @@ def mock_provider(monkeypatch, responder, *, max_tool_calls=4, max_request_bytes
             stream=StreamBody(responder(len(requests))),
         )
 
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: original_client(
-            *args, transport=httpx.MockTransport(handler), **kwargs
-        ),
-    )
+    class MockClient(original_client):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockClient)
     provider = OpenAICompatibleProvider(
         OpenAICompatibleConfig(
             base_url="https://api.example.com/v1",
@@ -77,6 +76,39 @@ def mock_provider(monkeypatch, responder, *, max_tool_calls=4, max_request_bytes
 
 async def emit(_kind, _data):
     return None
+
+
+async def test_model_usage_calibrates_the_next_request_without_scaling_twice():
+    from krim_agent.context.counter import counter_for_model
+
+    messages = [Message(role="system", content="System"), Message(role="user", content="Task")]
+    budget = ModelRequestBudget(None, None, None)
+    prepared = ModelStep.with_budget_prompt(messages, budget)
+    raw = counter_for_model(None).count_request(prepared, [])
+    captured = []
+
+    class Provider:
+        async def stream(self, _messages, _tools):
+            yield ModelText(text="done")
+            yield ModelUsage(usage=TokenUsage(input_tokens=raw * 2, output_tokens=1), final=True)
+
+        async def close(self):
+            pass
+
+    async def record(kind, data):
+        captured.append((kind, data))
+
+    step = ModelStep(Provider(), record, lambda: None, max_steps=None, max_output=None,
+                     deadline=None, workspace=False)
+    await step.call(messages, [], max_group=None, remaining_tools=None)
+    assert step.token_counter.observations == 1
+    assert step.token_counter.ratio == pytest.approx(1.25)
+    await step.call(messages, [], max_group=None, remaining_tools=None)
+    assert step.token_counter.observations == 2
+    assert step.token_counter.ratio == pytest.approx(1.4375)
+    manifests = [data["context_manifest"] for kind, data in captured if kind == "model_start"]
+    assert len(manifests) == 2
+    assert manifests[0]["counter_version"].startswith("calibrated/")
 
 
 def registry_tools():
@@ -287,6 +319,53 @@ async def test_budget_prompt_counts_toward_http_request_byte_limit(monkeypatch):
         await provider.close()
 
 
+def test_request_budget_without_limits_admits_full_batch():
+    class BareProvider:
+        pass  # no config attribute: no provider-side cap either
+
+    step = ModelStep(
+        BareProvider(), emit, lambda: None, max_steps=None, max_output=None,
+        deadline=None, workspace=False,
+    )
+    unlimited = step.request_budget(None, None)
+    assert unlimited.max_tool_calls_this_step is None
+    assert unlimited.remaining_steps is None
+    assert unlimited.remaining_tool_calls is None
+    assert step.request_budget(None, 5).max_tool_calls_this_step == 5
+    assert step.request_budget(3, None).max_tool_calls_this_step == 3
+    assert step.request_budget(None, None, purpose="summary").max_tool_calls_this_step == 0
+    prompt = ModelStep.with_budget_prompt(
+        [Message(role="user", content="x")], unlimited
+    )[0].content
+    assert "Remaining model steps including this request: unlimited" in prompt
+    assert "remaining tool calls for this run: unlimited" in prompt
+    assert "tool calls allowed in this request: unlimited" in prompt
+
+
+@pytest.mark.asyncio
+async def test_unbounded_group_admits_the_complete_returned_batch(monkeypatch):
+    batch = [tool(index) for index in range(6)]
+    provider, requests = mock_provider(
+        monkeypatch, lambda _index: tool_group_response(*batch), max_tool_calls=None
+    )
+    step = ModelStep(
+        provider, emit, lambda: None, max_steps=None, max_output=None,
+        deadline=None, workspace=False,
+    )
+    try:
+        result = await step.call(
+            [Message(role="user", content="batch")], registry_tools(),
+            max_group=None, remaining_tools=None,
+        )
+        assert [call.id for call in result.calls] == [f"call-{index}" for index in range(6)]
+        assert "tool calls allowed in this request: unlimited" in (
+            requests[0]["messages"][0]["content"]
+        )
+        assert requests[0]["tools"]
+    finally:
+        await provider.close()
+
+
 def test_workspace_compaction_measure_includes_the_temporary_budget_prompt():
     from krim_agent.context.compaction import Compactor
     from krim_agent.context.types import CompactionPolicy, ContextPolicy
@@ -309,8 +388,11 @@ def test_workspace_compaction_measure_includes_the_temporary_budget_prompt():
         workspace=True,
     )
     compactor = object.__new__(Compactor)
+    from krim_agent.context.counter import DEFAULT_COUNTER as _DEFAULT_COUNTER
     compactor.step = step
     compactor.policy = ContextPolicy(max_bytes=8192, max_messages=16, reserved_output_tokens=1)
+    compactor.counts_tokens = compactor.policy.counts_tokens()
+    compactor._counter = _DEFAULT_COUNTER
     compactor.compaction = CompactionPolicy()
     compactor.request_limit = 8192
     compactor.max_group = 4
@@ -318,7 +400,7 @@ def test_workspace_compaction_measure_includes_the_temporary_budget_prompt():
     messages = [Message(role="system", content="system"), Message(role="user", content="history")]
     tools = registry_tools()
 
-    measured, _trigger = compactor.measure(messages, tools)
+    measured = compactor.measure(messages, tools)
     budget = step.request_budget(4, 32)
     request_messages = step.with_budget_prompt(messages, budget)
     expected = len(
@@ -338,8 +420,8 @@ def test_workspace_compaction_measure_includes_the_temporary_budget_prompt():
         ).encode()
     )
 
-    assert measured == expected
-    assert measured > raw
+    assert measured.size_bytes == expected
+    assert measured.size_bytes > raw
 
 
 def tool_group_response(*calls):
@@ -453,9 +535,11 @@ async def test_open_application_session_carries_budgets_across_real_tool_steps(
         assert f"Remaining model steps including this request: {steps}" in budget
         assert f"remaining tool calls for this run: {remaining}" in budget
         assert "tool calls allowed in this request: 4" in budget
-    assert len(requests[0]["tools"]) == 3
-    assert len(requests[1]["tools"]) == 3
-    assert len(requests[2]["tools"]) == 3
+    from krim_agent.tools.session import SESSION_CAPABILITIES
+
+    expected_tools = {"add", "echo", "lookup_note"} | set(SESSION_CAPABILITIES)
+    for request in requests:
+        assert {item["function"]["name"] for item in request["tools"]} == expected_tools
     assert any(message.get("tool_call_id") == "echo-first" for message in requests[1]["messages"])
     assert snapshot.request.text == request_text
     canonical_history = encoded([turn.model_dump(mode="json") for turn in history])

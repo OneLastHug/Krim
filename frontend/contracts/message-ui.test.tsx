@@ -23,6 +23,8 @@ test("共享消息保留高亮前代码的缩进、符号和换行", async () =>
   const code = "def example():\n\treturn '<tag> & value'\n";
   const copy = await render("```python\n" + code + "```");
   expect(host.querySelector(".hljs-keyword")).not.toBeNull();
+  expect(host.querySelector(".message-code-head > span")?.textContent).toBe("python");
+  expect(host.querySelector('.message-code-head [aria-label="复制代码"]')).not.toBeNull();
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="复制代码"]')!.click());
   expect(copy).toHaveBeenCalledExactlyOnceWith(code);
   expect(host.querySelector("pre")!.getAttribute("tabindex")).toBe("0");
@@ -30,7 +32,8 @@ test("共享消息保留高亮前代码的缩进、符号和换行", async () =>
 });
 
 test("未知语言和未闭合代码仍能复制文本", async () => {
-  const copy = await render("```not-registered\n    value: false\n\tresult: null");
+  const copy = await render("```not-registered docs/example.txt\n    value: false\n\tresult: null");
+  expect(host.querySelector(".message-code-head > span")?.textContent).toBe("docs/example.txt");
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="复制代码"]')!.click());
   expect(copy).toHaveBeenCalledExactlyOnceWith("    value: false\n\tresult: null\n");
 });

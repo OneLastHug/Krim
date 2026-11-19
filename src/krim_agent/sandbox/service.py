@@ -1,0 +1,1438 @@
+"""账号环境、项目归属与配额管理；执行后端未就绪时不伪报已限额。"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import difflib
+import hashlib
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+
+from pydantic import BaseModel, JsonValue, ValidationError
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from krim_agent.accounts.service import IdentityService
+from krim_agent.contracts import ServiceError, fingerprint
+from krim_agent.runtime.contracts import settled
+from krim_agent.sandbox.broker_client import BrokerClient
+from krim_agent.sandbox.configuration import SandboxConfiguration
+from krim_agent.sandbox.models import ConfigureQuotaBody, CreateProjectBody
+from krim_agent.security import PrincipalContext
+from krim_agent.storage.account_models import access_keys, account_workspaces, accounts
+from krim_agent.storage.sandbox_models import (
+    sandbox_environments as environments,
+)
+from krim_agent.storage.sandbox_models import (
+    sandbox_operations as operations,
+)
+from krim_agent.storage.sandbox_models import (
+    sandbox_projects as projects,
+)
+from krim_agent.storage.sqlite import SQLiteStore
+
+
+class SandboxService:
+    def __init__(
+        self, store: SQLiteStore, identities: IdentityService, configuration: SandboxConfiguration
+    ) -> None:
+        if not identities.managed:
+            raise ServiceError("accounts_not_initialized", 422)
+        if store.schema_version < 8:
+            raise ServiceError("schema_upgrade_required")
+        self.store = store
+        self.identities = identities
+        self.configuration = SandboxConfiguration.model_validate_json(
+            configuration.model_dump_json(exclude_unset=True)
+        )
+        self.broker = (
+            BrokerClient(configuration.broker_socket, owner_uid=configuration.broker_owner_uid)
+            if configuration.broker_socket is not None
+            else None
+        )
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def _live(self, actor: PrincipalContext) -> PrincipalContext:
+        if self.closed:
+            raise ServiceError("closed")
+        return self.identities.validate(actor)
+
+    async def _authorize(
+        self, conn: AsyncConnection, actor: PrincipalContext, *, admin: bool = False
+    ) -> None:
+        self._live(actor)
+        row = (
+            (
+                await conn.execute(
+                    select(accounts).where(accounts.c.principal_id == actor.principal_id)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if (
+            row is None
+            or row["status"] != "active"
+            or row["authorization_generation"] != actor.generation
+        ):
+            raise ServiceError("unauthorized", 401)
+        keyed = await conn.scalar(
+            select(access_keys.c.key_id)
+            .where(
+                access_keys.c.principal_id == actor.principal_id, access_keys.c.status == "active"
+            )
+            .limit(1)
+        )
+        if keyed is None:
+            raise ServiceError("unauthorized", 401)
+        if admin and row["platform_role"] != "platform_admin":
+            raise ServiceError("permission_denied", 403)
+
+    async def _read[T](
+        self,
+        actor: PrincipalContext,
+        read: Callable[[AsyncConnection], Awaitable[T]],
+        *,
+        admin: bool = False,
+    ) -> T:
+        self._live(actor)
+        try:
+            async with self.store.lock, self.store.engine.begin() as conn:
+                await self._authorize(conn, actor, admin=admin)
+                return await read(conn)
+        except ServiceError:
+            raise
+        except Exception:
+            raise ServiceError("storage_unavailable", 503) from None
+
+    @staticmethod
+    def _parse[T: BaseModel](model: type[T], value: object) -> T:
+        try:
+            return model.model_validate(value)
+        except (ValidationError, TypeError):
+            raise ServiceError("invalid_input", 422) from None
+
+    def _limits(self, row: Any | None) -> dict[str, Any]:
+        try:
+            quota = self.configuration.quotas.resolve(
+                None if row is None else row["profile_name"],
+                None if row is None else row["quota_override"],
+            )
+        except (ValueError, KeyError):
+            raise ServiceError("sandbox_config_invalid", 422) from None
+        return quota.model_dump(mode="json")
+
+    def _environment(self, principal_id: str, row: Any | None) -> dict[str, Any]:
+        return {
+            "principal_id": principal_id,
+            "environment_id": None if row is None else row["environment_id"],
+            "revision": 0 if row is None else row["revision"],
+            "status": "unprovisioned" if row is None else row["status"],
+            "profile_name": None if row is None else row["profile_name"],
+            "overrides": {} if row is None else row["quota_override"],
+            "limits": self._limits(row),
+            "usage": None,
+            "enforcement": (
+                "xfs_project_quota"
+                if row is not None and row["status"] == "ready"
+                else "not_provisioned"
+            ),
+            "runtime_available": False,
+        }
+
+    async def environment(
+        self,
+        actor: PrincipalContext,
+        principal_id: str | None = None,
+        *,
+        require_admin: bool = False,
+    ) -> dict[str, Any]:
+        target = principal_id or actor.principal_id
+
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            if (
+                await conn.scalar(
+                    select(accounts.c.principal_id).where(accounts.c.principal_id == target)
+                )
+                is None
+            ):
+                raise ServiceError("not_found", 404)
+            row = (
+                (
+                    await conn.execute(
+                        select(environments).where(environments.c.principal_id == target)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            return self._environment(target, row)
+
+        result = await self._read(actor, read, admin=require_admin or target != actor.principal_id)
+        if result["status"] == "ready":
+            if self.broker is None:
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            live = await self.broker.call("usage", environment_id=result["environment_id"])
+            await self._read(actor, read, admin=require_admin or target != actor.principal_id)
+            usage = live["usage"]
+            result["usage"] = {
+                "environment_bytes": usage["environment_bytes"],
+                "environment_inodes": usage["environment_inodes"],
+            }
+            result["applied_limits"] = {
+                "environment_bytes": usage["byte_limit"],
+                "environment_inodes": usage["inode_limit"],
+            }
+            if self.configuration.command_image is not None:
+                health = await self.broker.call("health")
+                result["runtime_available"] = (
+                    health.get("execution_available") is True
+                    and health.get("image") == self.configuration.command_image
+                    and "python" in health.get(
+                        "executable_programs", health.get("available_programs", ["python"])
+                    )
+                )
+                await self._read(actor, read, admin=require_admin or target != actor.principal_id)
+        if self.store.schema_version >= 10:
+            from krim_agent.storage.sandbox_models import sandbox_quota_state
+
+            async def quota_state(conn: AsyncConnection) -> Any:
+                return (
+                    (
+                        await conn.execute(
+                            select(sandbox_quota_state).where(
+                                sandbox_quota_state.c.principal_id == target
+                            )
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+
+            state = await self._read(
+                actor, quota_state, admin=require_admin or target != actor.principal_id
+            )
+            if state is not None:
+                result.update(
+                    quota_state=state["state"],
+                    desired_limits=state["desired"]["limits"],
+                    desired_revision=state["desired_revision"],
+                    applied_revision=state["applied_revision"],
+                    quota_operation_id=state["operation_id"],
+                )
+        return result
+
+    async def _visible_result(
+        self, conn: AsyncConnection, actor: PrincipalContext, kind: str, result: dict[str, Any]
+    ) -> None:
+        if kind == "configure_quota" and result.get("principal_id") != actor.principal_id:
+            await self._authorize(conn, actor, admin=True)
+        if result.get("session_id") is not None:
+            from krim_agent.sandbox.bindings import session_row
+
+            await session_row(conn, actor, result["session_id"])
+        project_id = result.get("project_id")
+        if project_id is not None:
+            row = (
+                (
+                    await conn.execute(
+                        select(projects).where(
+                            projects.c.project_id == project_id,
+                            projects.c.principal_id == actor.principal_id,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if (
+                row is None
+                or await conn.scalar(
+                    select(account_workspaces.c.workspace_id).where(
+                        account_workspaces.c.principal_id == actor.principal_id,
+                        account_workspaces.c.workspace_id == row["workspace_id"],
+                    )
+                )
+                is None
+            ):
+                raise ServiceError("not_found", 404)
+
+    async def _mutation(
+        self,
+        actor: PrincipalContext,
+        request_key: str,
+        payload: dict[str, JsonValue],
+        perform: Callable[[AsyncConnection], Awaitable[dict[str, Any]]],
+        *,
+        admin: bool = False,
+    ) -> dict[str, Any]:
+        self._live(actor)
+        if (
+            type(request_key) is not str
+            or not 1 <= len(request_key) <= 128
+            or any(ord(c) < 33 or ord(c) > 126 for c in request_key)
+        ):
+            raise ServiceError("invalid_input", 422)
+        digest = fingerprint(payload)
+        prior_health = self.store.healthy
+
+        async def lookup(conn: AsyncConnection) -> Any:
+            return (
+                (
+                    await conn.execute(
+                        select(operations).where(
+                            operations.c.principal_id == actor.principal_id,
+                            operations.c.request_key == request_key,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+
+        async def write(conn: AsyncConnection) -> dict[str, Any]:
+            await self._authorize(conn, actor, admin=admin)
+            previous = await lookup(conn)
+            if previous is not None:
+                if previous["request_hash"] != digest:
+                    raise ServiceError("key_conflict")
+                if previous["status"] != "completed":
+                    raise ServiceError("sandbox_operation_unknown")
+                await self._visible_result(conn, actor, previous["kind"], previous["result"])
+                return cast(dict[str, Any], previous["result"])
+            result = await perform(conn)
+            now = time.time()
+            await conn.execute(
+                insert(operations).values(
+                    operation_id=str(uuid.uuid4()),
+                    principal_id=actor.principal_id,
+                    request_key=request_key,
+                    request_hash=digest,
+                    project_id=result.get("project_id"),
+                    kind=payload["action"],
+                    status="completed",
+                    result=result,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return result
+
+        try:
+            return await settled(self.store._write(write))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if isinstance(error, ServiceError) and error.code != "storage_unavailable":
+                raise
+
+            # 提交回程未知：只读取原键，不重新执行 perform。
+            async def recover(conn: AsyncConnection) -> dict[str, Any] | None:
+                found = await lookup(conn)
+                if (
+                    found is not None
+                    and found["request_hash"] == digest
+                    and found["status"] == "completed"
+                ):
+                    await self._visible_result(conn, actor, found["kind"], found["result"])
+                    return cast(dict[str, Any], found["result"])
+                return None
+
+            try:
+                found = await self._read(actor, recover, admin=admin)
+                if found is not None:
+                    self.store.healthy = prior_health
+                    return found
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            raise ServiceError("sandbox_operation_unknown", 503) from None
+
+    async def configure_quota(
+        self, actor: PrincipalContext, principal_id: str, body: object, *, request_key: str
+    ) -> dict[str, Any]:
+        values = self._parse(ConfigureQuotaBody, body)
+        patch = values.overrides.model_dump(mode="json", exclude_unset=True)
+        try:
+            self.configuration.quotas.resolve(values.profile_name, values.overrides)
+        except (ValueError, KeyError):
+            raise ServiceError("sandbox_config_invalid", 422) from None
+
+        async def perform(conn: AsyncConnection) -> dict[str, Any]:
+            if (
+                await conn.scalar(
+                    select(accounts.c.principal_id).where(accounts.c.principal_id == principal_id)
+                )
+                is None
+            ):
+                raise ServiceError("not_found", 404)
+            row = (
+                (
+                    await conn.execute(
+                        select(environments).where(environments.c.principal_id == principal_id)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            current_revision = 0 if row is None else row["revision"]
+            if current_revision != values.expected_revision:
+                raise ServiceError("revision_conflict")
+            # Broker 的 apply 协议接入前，不修改已运行环境的硬配额。
+            if row is not None and row["status"] != "unprovisioned":
+                raise ServiceError("sandbox_backend_unavailable", 503)
+            now = time.time()
+            if row is None:
+                await conn.execute(
+                    insert(environments).values(
+                        environment_id=str(uuid.uuid4()),
+                        principal_id=principal_id,
+                        profile_name=values.profile_name,
+                        quota_override=patch,
+                        revision=1,
+                        status="unprovisioned",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            else:
+                await conn.execute(
+                    update(environments)
+                    .where(
+                        environments.c.environment_id == row["environment_id"],
+                        environments.c.revision == current_revision,
+                    )
+                    .values(
+                        profile_name=values.profile_name,
+                        quota_override=patch,
+                        revision=current_revision + 1,
+                        updated_at=now,
+                    )
+                )
+            saved = (
+                (
+                    await conn.execute(
+                        select(environments).where(environments.c.principal_id == principal_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return self._environment(principal_id, saved)
+
+        return await self._mutation(
+            actor,
+            request_key,
+            {
+                "action": "configure_quota",
+                "target": principal_id,
+                "body": values.model_dump(mode="json", exclude_unset=True),
+            },
+            perform,
+            admin=True,
+        )
+
+    @staticmethod
+    def _project(row: Any) -> dict[str, Any]:
+        return {
+            name: row[name]
+            for name in (
+                "project_id",
+                "environment_id",
+                "principal_id",
+                "workspace_id",
+                "title",
+                "generation",
+                "status",
+                "created_at",
+                "updated_at",
+            )
+        }
+
+    async def create_project(
+        self, actor: PrincipalContext, body: object, *, request_key: str
+    ) -> dict[str, Any]:
+        values = self._parse(CreateProjectBody, body)
+
+        async def perform(conn: AsyncConnection) -> dict[str, Any]:
+            member = (
+                (
+                    await conn.execute(
+                        select(account_workspaces).where(
+                            account_workspaces.c.principal_id == actor.principal_id,
+                            account_workspaces.c.workspace_id == values.workspace_id,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if member is None:
+                raise ServiceError("not_found", 404)
+            if member["role"] == "viewer":
+                raise ServiceError("permission_denied", 403)
+            row = (
+                (
+                    await conn.execute(
+                        select(environments).where(
+                            environments.c.principal_id == actor.principal_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            now = time.time()
+            if row is None:
+                environment_id = str(uuid.uuid4())
+                await conn.execute(
+                    insert(environments).values(
+                        environment_id=environment_id,
+                        principal_id=actor.principal_id,
+                        profile_name=None,
+                        quota_override={},
+                        revision=1,
+                        status="unprovisioned",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            else:
+                self._limits(row)
+                environment_id = row["environment_id"]
+            project_id = str(uuid.uuid4())
+            await conn.execute(
+                insert(projects).values(
+                    project_id=project_id,
+                    environment_id=environment_id,
+                    principal_id=actor.principal_id,
+                    workspace_id=values.workspace_id,
+                    title=values.title,
+                    generation=0,
+                    status="unprovisioned",
+                    lease_id=None,
+                    lease_expires_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            if self.store.schema_version >= 19:
+                from krim_agent.project_access.policy import initialize_project_access
+
+                await initialize_project_access(conn, project_id, actor.principal_id)
+            saved = (
+                (await conn.execute(select(projects).where(projects.c.project_id == project_id)))
+                .mappings()
+                .one()
+            )
+            return self._project(saved)
+
+        return await self._mutation(
+            actor,
+            request_key,
+            {
+                "action": "create_project",
+                "body": values.model_dump(mode="json"),
+            },
+            perform,
+        )
+
+    async def list_projects(
+        self, actor: PrincipalContext, *, offset: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 100
+        ):
+            raise ServiceError("invalid_input", 422)
+
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            visible = select(account_workspaces.c.workspace_id).where(
+                account_workspaces.c.principal_id == actor.principal_id
+            )
+            permitted = projects.c.principal_id == actor.principal_id
+            if self.store.schema_version >= 19:
+                from krim_agent.storage.project_membership_models import project_memberships
+
+                permitted = projects.c.project_id.in_(
+                    select(project_memberships.c.project_id).where(
+                        project_memberships.c.principal_id == actor.principal_id,
+                        project_memberships.c.access.in_(["read", "write"]),
+                    )
+                )
+            conditions = (permitted, projects.c.workspace_id.in_(visible))
+            total = await conn.scalar(select(func.count()).select_from(projects).where(*conditions))
+            rows = (
+                await conn.execute(
+                    select(projects)
+                    .where(*conditions)
+                    .order_by(projects.c.created_at, projects.c.project_id)
+                    .offset(offset)
+                    .limit(limit)
+                )
+            ).mappings()
+            return {
+                "items": [self._project(row) for row in rows],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }
+
+        return await self._read(actor, read)
+
+    async def project(
+        self, actor: PrincipalContext, project_id: str, *, write: bool = False
+    ) -> dict[str, Any]:
+        return self._project(await self._project_state(actor, project_id, write=write))
+
+    async def _project_state(
+        self, actor: PrincipalContext, project_id: str, *, write: bool = False
+    ) -> dict[str, Any]:
+        """已授权的内部状态；公开project响应仍隐藏租约字段。"""
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            if self.store.schema_version >= 19:
+                from krim_agent.project_access.policy import resolve_project_access
+
+                access = await resolve_project_access(conn, actor, project_id)
+                access.require(write=write)
+                authorized_row = (await conn.execute(select(projects).where(
+                    projects.c.project_id == project_id,
+                ))).mappings().one()
+                return dict(authorized_row)
+            row = (
+                (
+                    await conn.execute(
+                        select(projects).where(
+                            projects.c.project_id == project_id,
+                            projects.c.principal_id == actor.principal_id,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ServiceError("not_found", 404)
+            if (
+                await conn.scalar(
+                    select(account_workspaces.c.workspace_id).where(
+                        account_workspaces.c.principal_id == actor.principal_id,
+                        account_workspaces.c.workspace_id == row["workspace_id"],
+                    )
+                )
+                is None
+            ):
+                raise ServiceError("not_found", 404)
+            if write:
+                actor.member(row["workspace_id"], write=True)
+            return dict(row)
+
+        return await self._read(actor, read)
+
+    async def operation(self, actor: PrincipalContext, request_key: str) -> dict[str, Any]:
+        async def read(conn: AsyncConnection) -> dict[str, Any]:
+            row = (
+                (
+                    await conn.execute(
+                        select(operations).where(
+                            operations.c.principal_id == actor.principal_id,
+                            operations.c.request_key == request_key,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ServiceError("not_found", 404)
+            await self._visible_result(conn, actor, row["kind"], row["result"])
+            return {
+                "operation_id": row["operation_id"],
+                "request_key": row["request_key"],
+                "kind": row["kind"],
+                "status": row["status"],
+                "result": row["result"],
+            }
+
+        return await self._read(actor, read)
+
+    async def provision(
+        self, actor: PrincipalContext, *, request_key: str, project_id: str | None = None
+    ) -> dict[str, Any]:
+        """持久化准备意图后调用Broker；这些准备动作按内部ID可核实地幂等。"""
+        if self.broker is None:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        self._live(actor)
+        if (
+            type(request_key) is not str
+            or not 1 <= len(request_key) <= 128
+            or any(ord(c) < 33 or ord(c) > 126 for c in request_key)
+        ):
+            raise ServiceError("invalid_input", 422)
+        if project_id is not None:
+            await self.project(actor, project_id, write=True)
+        digest = fingerprint({"action": "provision", "project_id": project_id})
+
+        async def reserve(conn: AsyncConnection) -> dict[str, Any]:
+            await self._authorize(conn, actor)
+            existing = (
+                (
+                    await conn.execute(
+                        select(operations).where(
+                            operations.c.principal_id == actor.principal_id,
+                            operations.c.request_key == request_key,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                if existing["request_hash"] != digest:
+                    raise ServiceError("key_conflict")
+                await self._visible_result(conn, actor, "provision", existing["result"])
+                if existing["status"] != "completed":
+                    accepted = existing["result"]
+                    current = (
+                        (
+                            await conn.execute(
+                                select(environments).where(
+                                    environments.c.environment_id == accepted["environment_id"]
+                                )
+                            )
+                        )
+                        .mappings()
+                        .one()
+                    )
+                    if (
+                        current["revision"] != accepted["revision"]
+                        or self._limits(current) != accepted["limits"]
+                    ):
+                        raise ServiceError("revision_conflict")
+                return dict(existing)
+            now = time.time()
+            env = (
+                (
+                    await conn.execute(
+                        select(environments).where(
+                            environments.c.principal_id == actor.principal_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if env is None:
+                environment_id = str(uuid.uuid4())
+                await conn.execute(
+                    insert(environments).values(
+                        environment_id=environment_id,
+                        principal_id=actor.principal_id,
+                        profile_name=None,
+                        quota_override={},
+                        revision=1,
+                        status="unprovisioned",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                env = (
+                    (
+                        await conn.execute(
+                            select(environments).where(
+                                environments.c.environment_id == environment_id
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            intent = {
+                "environment_id": env["environment_id"],
+                "project_id": project_id,
+                "limits": self._limits(env),
+                "revision": env["revision"],
+            }
+            if project_id is not None:
+                project = (
+                    (
+                        await conn.execute(
+                            select(projects).where(
+                                projects.c.project_id == project_id,
+                                projects.c.principal_id == actor.principal_id,
+                            )
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if project is None or project["environment_id"] != env["environment_id"]:
+                    raise ServiceError("not_found", 404)
+                actor.member(project["workspace_id"], write=True)
+                if project["lease_id"] is not None or project["status"] not in {
+                    "ready",
+                    "unprovisioned",
+                }:
+                    raise ServiceError("workspace_busy")
+                await conn.execute(
+                    update(projects)
+                    .where(projects.c.project_id == project_id)
+                    .values(status="provisioning", updated_at=now)
+                )
+            operation_id = str(uuid.uuid4())
+            await conn.execute(
+                update(environments)
+                .where(environments.c.environment_id == env["environment_id"])
+                .values(status="provisioning")
+            )
+            await conn.execute(
+                insert(operations).values(
+                    operation_id=operation_id,
+                    principal_id=actor.principal_id,
+                    request_key=request_key,
+                    request_hash=digest,
+                    project_id=project_id,
+                    kind="provision",
+                    status="pending",
+                    result=intent,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return {"operation_id": operation_id, "status": "pending", "result": intent}
+
+        record = await settled(self.store._write(reserve))
+        if record["status"] == "completed":
+            return cast(dict[str, Any], record["result"])
+        intent = record["result"]
+        self._live(actor)
+        await self.broker.call(
+            "provision_environment",
+            environment_id=intent["environment_id"],
+            limits=intent["limits"],
+        )
+        if project_id is not None:
+            self._live(actor)
+            await self.broker.call(
+                "provision_project", environment_id=intent["environment_id"], project_id=project_id
+            )
+
+        async def finish(conn: AsyncConnection) -> dict[str, Any]:
+            await self._authorize(conn, actor)
+            env = (
+                (
+                    await conn.execute(
+                        select(environments).where(
+                            environments.c.environment_id == intent["environment_id"]
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if env["revision"] != intent["revision"]:
+                raise ServiceError("revision_conflict")
+            if project_id is not None:
+                project = (
+                    (
+                        await conn.execute(
+                            select(projects).where(projects.c.project_id == project_id)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                actor.member(project["workspace_id"], write=True)
+                await conn.execute(
+                    update(projects)
+                    .where(projects.c.project_id == project_id)
+                    .values(status="ready", updated_at=time.time())
+                )
+            await conn.execute(
+                update(environments)
+                .where(environments.c.environment_id == intent["environment_id"])
+                .values(status="ready", updated_at=time.time())
+            )
+            result = {
+                "environment_id": intent["environment_id"],
+                "project_id": project_id,
+                "status": "ready",
+                "enforcement": "xfs_project_quota",
+                "runtime_available": False,
+            }
+            await conn.execute(
+                update(operations)
+                .where(operations.c.operation_id == record["operation_id"])
+                .values(status="completed", result=result, updated_at=time.time())
+            )
+            return result
+
+        return await settled(self.store._write(finish))
+
+    async def directory(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str = ".",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        project = await self._project_state(actor, project_id)
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        result = await self.broker.call(
+            "list",
+            environment_id=project["environment_id"],
+            project_id=project_id,
+            path=path,
+            limit=limit,
+            offset=offset,
+        )
+        self._live(actor)
+        current = await self._project_state(actor, project_id)
+        return {
+            **result,
+            "project_id": project_id,
+            "generation": current["generation"],
+            "may_change": (
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
+                or current["generation"] != project["generation"]
+            ),
+        }
+
+    async def read_file(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str,
+        offset: int = 0,
+        limit: int = 65536,
+        expected_sha256: str | None = None,
+        expected_stat: list[int] | None = None,
+        _include_stat_token: bool = False,
+    ) -> dict[str, Any]:
+        project = await self._project_state(actor, project_id)
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        arguments = {
+            "environment_id": project["environment_id"],
+            "project_id": project_id,
+            "path": path,
+            "offset": offset,
+            "limit": limit,
+        }
+        if (expected_sha256 is None) != (expected_stat is None):
+            raise ServiceError("invalid_input", 422)
+        if expected_sha256 is not None:
+            arguments.update(
+                expected_sha256=expected_sha256,
+                expected_stat=expected_stat,
+            )
+        result = await self.broker.call("read", **arguments)
+        self._live(actor)
+        current = await self._project_state(actor, project_id)
+        response = {
+            **result,
+            "project_id": project_id,
+            "generation": current["generation"],
+            "may_change": (
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
+                or current["generation"] != project["generation"]
+            ),
+        }
+        if not _include_stat_token:
+            response.pop("stat_token", None)
+        return response
+
+    async def reconcile_command(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        operation_id: str,
+        *,
+        expected_generation: int,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        """用户明确核实原任务；不提供command参数，不按超时自动夺锁。"""
+        if type(expected_generation) is not int or confirmed is not True:
+            raise ServiceError("invalid_input", 422)
+        project = await self.project(actor, project_id, write=True)
+        if self.broker is None or project["generation"] != expected_generation:
+            raise ServiceError("input_revision_conflict")
+
+        async def accepted(conn: AsyncConnection) -> Any:
+            await self._authorize(conn, actor)
+            row = (
+                (
+                    await conn.execute(
+                        select(operations).where(
+                            operations.c.operation_id == operation_id,
+                            operations.c.principal_id == actor.principal_id,
+                            operations.c.project_id == project_id,
+                            operations.c.kind == "command",
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ServiceError("not_found", 404)
+            return dict(row)
+
+        original = await self._read(actor, accepted)
+        if original["status"] == "completed" and project["lease_id"] is None:
+            return cast(dict[str, Any], original["result"]["receipt"])
+        if project["lease_id"] != operation_id:
+            raise ServiceError("sandbox_cleanup_required")
+        result = await self.broker.call(
+            "command_reconcile",
+            environment_id=project["environment_id"],
+            project_id=project_id,
+            operation_id=operation_id,
+        )
+        if result["receipt"]["cleanup"] != "clean":
+            raise ServiceError("sandbox_cleanup_required")
+        receipt = {
+            **result["receipt"],
+            "operation_id": operation_id,
+            "project_id": project_id,
+            "generation": result["generation"],
+            "verification": "not_evaluated",
+        }
+
+        async def finish(conn: AsyncConnection) -> dict[str, Any]:
+            await self._authorize(conn, actor)
+            current = (
+                (await conn.execute(select(projects).where(projects.c.project_id == project_id)))
+                .mappings()
+                .one()
+            )
+            if current["generation"] != expected_generation or current["lease_id"] != operation_id:
+                raise ServiceError("input_revision_conflict")
+            await conn.execute(
+                update(projects)
+                .where(projects.c.project_id == project_id)
+                .values(
+                    status="ready",
+                    generation=result["generation"],
+                    lease_id=None,
+                    lease_expires_at=None,
+                    updated_at=time.time(),
+                )
+            )
+            await conn.execute(
+                update(operations)
+                .where(operations.c.operation_id == operation_id)
+                .values(
+                    status="completed",
+                    result={**original["result"], "receipt": receipt},
+                    updated_at=time.time(),
+                )
+            )
+            return receipt
+
+        return await settled(self.store._write(finish))
+
+    async def download_file(
+        self, actor: PrincipalContext, project_id: str, *, path: str,
+        allow_running: bool = False,
+    ) -> tuple[bytes, str]:
+        """Read authorized bytes; active reads require a stable stat-bound snapshot.
+
+        The explicit host-only flag does not grant access or a writing lease.
+        HTTP export callers retain the default idle-only contract.
+        """
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
+        project = await self._project_state(actor, project_id)
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        if type(allow_running) is not bool:
+            raise ServiceError("invalid_input", 422)
+        active = project["status"] != "ready" or project["lease_id"] is not None
+        if (not allow_running and active
+                or allow_running and project["status"] not in {"ready", "running"}):
+            raise ServiceError("workspace_busy")
+        binding = (project["generation"], project["status"], project["lease_id"])
+
+        async def unchanged() -> None:
+            current = await self._project_state(actor, project_id)
+            if (current["generation"], current["status"], current["lease_id"]) != binding:
+                raise ServiceError("artifact_conflict")
+
+        self._live(actor)
+        chunks = bytearray()
+        offset = 0
+        expected_hash: str | None = None
+        expected_stat: list[int] | None = None
+        generation: int | None = None
+        expected_size: int | None = None
+        while True:
+            if allow_running:
+                await unchanged()
+            result = await self.read_file(
+                actor,
+                project_id,
+                path=path,
+                offset=offset,
+                limit=65536,
+                expected_sha256=expected_hash if expected_stat is not None else None,
+                expected_stat=expected_stat,
+                _include_stat_token=True,
+            )
+            if allow_running:
+                await unchanged()
+            elif result["may_change"]:
+                raise ServiceError("input_revision_conflict")
+            if result["offset"] != offset:
+                raise ServiceError("artifact_conflict")
+            if expected_hash is None:
+                expected_hash = result["sha256"]
+                stat_token = result.get("stat_token")
+                if stat_token is not None:
+                    expected_stat = stat_token
+                elif allow_running and active:
+                    # A legacy broker cannot pin an actively writable inode.
+                    raise ServiceError("artifact_conflict")
+                generation = result["generation"]
+                expected_size = result["size"]
+            elif (result["sha256"] != expected_hash or result["generation"] != generation
+                    or result["size"] != expected_size
+                    or expected_stat is not None and result.get("stat_token") != expected_stat):
+                raise ServiceError("artifact_conflict")
+            block = base64.b64decode(result["data"], validate=True)
+            chunks.extend(block)
+            offset += len(block)
+            if result["eof"]:
+                break
+            if not block:
+                raise ServiceError("artifact_conflict")
+        self._live(actor)
+        current_project = await self._project_state(actor, project_id)
+        if (
+            current_project["generation"] != generation
+            or (current_project["generation"], current_project["status"],
+                current_project["lease_id"]) != binding
+            or not allow_running and (current_project["status"] != "ready"
+                                      or current_project["lease_id"] is not None)
+            or len(chunks) != expected_size
+        ):
+            raise ServiceError("artifact_conflict")
+        if hashlib.sha256(chunks).hexdigest() != expected_hash:
+            raise ServiceError("artifact_conflict")
+        return bytes(chunks), expected_hash or hashlib.sha256(b"").hexdigest()
+
+    async def project_file_digest(
+        self, actor: PrincipalContext, project_id: str, *, path: str
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
+        self._live(actor)
+        project = await self._project_state(actor, project_id)
+        if project["status"] != "ready" or project["lease_id"] is not None:
+            raise ServiceError("workspace_busy")
+        result = await self.read_file(actor, project_id, path=path, offset=0, limit=1)
+        return {
+            "project_id": project_id,
+            "path": path,
+            "generation": result["generation"],
+            "sha256": result["sha256"],
+            "size": result["size"],
+            "may_change": result["may_change"],
+        }
+
+    async def find_files(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str = ".",
+        include_glob: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import validate_glob
+
+        validate_glob(include_glob)
+        project = await self._project_state(actor, project_id)
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        result = await self.broker.call(
+            "find",
+            environment_id=project["environment_id"],
+            project_id=project_id,
+            path=path,
+            include_glob=include_glob,
+            limit=limit,
+            offset=offset,
+        )
+        self._live(actor)
+        current = await self._project_state(actor, project_id)
+        return {
+            **result,
+            "project_id": project_id,
+            "generation": current["generation"],
+            "may_change": (
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
+                or current["generation"] != project["generation"]
+            ),
+        }
+
+    async def preview_replace(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        path: str,
+        expected_generation: int,
+        expected_sha256: str,
+        find: str,
+        replacement: str,
+        occurrence: int = 1,
+    ) -> dict[str, Any]:
+        from krim_agent.sandbox.filesystem import _parts
+
+        _parts(path)
+        project = await self._project_state(actor, project_id)
+        if project["status"] != "ready" or project["lease_id"] is not None:
+            raise ServiceError("workspace_busy")
+        if project["generation"] != expected_generation:
+            raise ServiceError("input_revision_conflict")
+        if (
+            not find
+            or len(expected_sha256) != 64
+            or type(occurrence) is not int or occurrence < 1
+        ):
+            raise ServiceError("invalid_input", 422)
+        try:
+            current = await self.read_file(
+                actor,
+                project_id,
+                path=path,
+                offset=0,
+                limit=65536,
+                _include_stat_token=True,
+            )
+        except ServiceError as error:
+            if error.code == "artifact_limit":
+                raise ServiceError("sandbox_limit") from None
+            raise
+        if current["may_change"] or current["generation"] != expected_generation:
+            raise ServiceError("input_revision_conflict")
+        if current["sha256"] != expected_sha256:
+            raise ServiceError("source_changed")
+        raw_parts = [base64.b64decode(current["data"], validate=True)]
+        offset = len(raw_parts[0])
+        expected_stat = current.get("stat_token")
+        while offset < current["size"]:
+            try:
+                chunk = await self.read_file(
+                    actor,
+                    project_id,
+                    path=path,
+                    offset=offset,
+                    limit=65536,
+                    expected_sha256=expected_sha256 if expected_stat is not None else None,
+                    expected_stat=expected_stat,
+                )
+            except ServiceError as error:
+                if error.code == "artifact_limit":
+                    raise ServiceError("sandbox_limit") from None
+                raise
+            if (
+                chunk["may_change"]
+                or chunk["generation"] != expected_generation
+                or chunk["sha256"] != expected_sha256
+            ):
+                raise ServiceError("input_revision_conflict")
+            block = base64.b64decode(chunk["data"], validate=True)
+            if not block:
+                raise ServiceError("artifact_conflict")
+            raw_parts.append(block)
+            offset += len(block)
+        raw = b"".join(raw_parts)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ServiceError("source_changed")
+        if len(raw) != current["size"]:
+            raise ServiceError("artifact_conflict")
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ServiceError("invalid_input", 422) from None
+        count = 0
+        selected = None
+        cursor = 0
+        while True:
+            found = source.find(find, cursor)
+            if found < 0:
+                break
+            count += 1
+            if count == occurrence:
+                selected = found
+            cursor = found + len(find)
+        if selected is None:
+            raise ServiceError("not_found", 404)
+        char_offset = selected
+        byte_offset = len(source[:char_offset].encode("utf-8"))
+        delete_length = len(find.encode("utf-8"))
+        updated = source[:char_offset] + replacement + source[char_offset + len(find):]
+        if updated == source:
+            raise ServiceError("key_conflict")
+        def context_window(text: str, start_position: int, end_position: int) -> tuple[str, bool]:
+            start = text.rfind("\n", 0, start_position) + 1
+            for _ in range(3):
+                previous = text.rfind("\n", 0, max(0, start - 1))
+                start = previous + 1 if previous >= 0 else 0
+            end = text.find("\n", end_position)
+            end = len(text) if end < 0 else end + 1
+            for _ in range(3):
+                following = text.find("\n", end)
+                if following < 0:
+                    end = len(text)
+                    break
+                end = following + 1
+            if end - start <= 16384:
+                return text[start:end], False
+            first = text[start:start + 4096]
+            last = text[end - 4096:end]
+            return first + "\n... diff context omitted ...\n" + last, True
+
+        old_context, old_clipped = context_window(source, char_offset, char_offset + len(find))
+        new_context, new_clipped = context_window(
+            updated,
+            char_offset,
+            char_offset + len(replacement),
+        )
+        diff = "".join(difflib.unified_diff(
+            old_context.splitlines(keepends=True),
+            new_context.splitlines(keepends=True),
+            fromfile=path,
+            tofile=path,
+            fromfiledate="",
+            tofiledate="",
+            n=3,
+        ))
+        return {
+            "path": path,
+            "generation": expected_generation,
+            "source_sha256": expected_sha256,
+            "result_sha256": hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+            "occurrence": occurrence,
+            "matches": count,
+            "patch": {
+                "path": path,
+                "expected_generation": expected_generation,
+                "expected_sha256": expected_sha256,
+                "offset": byte_offset,
+                "delete_length": delete_length,
+                "replacement": replacement,
+            },
+            "diff": diff[:32768],
+            "diff_truncated": len(diff) > 32768 or old_clipped or new_clipped,
+            "replacement": replacement,
+            "find": find,
+            "preview_only": True,
+        }
+
+    async def search_files(
+        self,
+        actor: PrincipalContext,
+        project_id: str,
+        *,
+        query: str,
+        path: str = ".",
+        limit: int = 50,
+        offset: int = 0,
+        include_glob: str | None = None,
+        mode: str = "literal",
+        case_sensitive: bool = True,
+        before: int = 0,
+        after: int = 0,
+    ) -> dict[str, Any]:
+        project = await self._project_state(actor, project_id)
+        if self.broker is None or project["status"] not in {
+            "ready",
+            "running",
+            "blocked",
+            "restoring",
+        }:
+            raise ServiceError("sandbox_backend_unavailable", 503)
+        result = await self.broker.call(
+            "search",
+            environment_id=project["environment_id"],
+            project_id=project_id,
+            query=query,
+            path=path,
+            limit=limit,
+            offset=offset,
+            include_glob=include_glob,
+            mode=mode,
+            case_sensitive=case_sensitive,
+            before=before,
+            after=after,
+        )
+        self._live(actor)
+        current = await self._project_state(actor, project_id)
+        response = {
+            **result,
+            "project_id": project_id,
+            "generation": current["generation"],
+            "may_change": (
+                project["status"] != "ready"
+                or current["status"] != "ready"
+                or project["lease_id"] is not None
+                or current["lease_id"] is not None
+                or current["generation"] != project["generation"]
+            ),
+            "max_result_bytes": 64 * 1024,
+        }
+        if mode == "regex":
+            response.update(
+                regex_limit_bytes=64,
+                max_regex_scan_bytes=None,
+                max_regex_line_chars=None,
+            )
+        return response

@@ -44,11 +44,15 @@ def partition(
             "limits",
             "limits_fingerprint",
         }
-        optional = {"workspace_profile", "workspace_implementation", "workspace_verification"}
+        optional = {
+            "workspace_profile", "workspace_implementation", "workspace_verification", "agent_loop",
+        }
         if (
             not required <= set(binding)
             or set(binding) - required - optional
             or binding["schema_version"] != 2
+            or "agent_loop" in binding
+            and binding["agent_loop"] != "ai-python/0.9.0-host-v2"
         ):
             raise ServiceError("facts_corrupt")
         axis = {

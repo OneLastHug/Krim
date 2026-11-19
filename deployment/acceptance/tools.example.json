@@ -1,0 +1,18 @@
+{
+  "web": {
+    "endpoint": "https://api.tavily.com",
+    "api_key_env": "KRIM_ACCEPTANCE_WEB_API_KEY"
+  },
+  "mcp_servers": [
+    {
+      "name": "reference",
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "allowed_hosts": ["mcp.example.com"],
+      "selected_tools": ["read_reference"],
+      "readonly_tools": ["read_reference"],
+      "bearer_env": "KRIM_ACCEPTANCE_MCP_TOKEN",
+      "timeout_seconds": 60
+    }
+  ]
+}
