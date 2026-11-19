@@ -174,6 +174,10 @@ function RequestInspector({ request, onContext }: { request: ObsRequestRecord; o
       <div className="obs-fact"><span>首文本事件</span><strong>{request.timing?.first_text_ms === null || request.timing === null ? "未记录" : formatDuration(request.timing.first_text_ms)}</strong></div>
       <div className="obs-fact"><span>输入 token</span><strong>{formatReportedTokens(usage?.input_tokens ?? null)}</strong></div>
       <div className="obs-fact"><span>输出 token</span><strong>{formatReportedTokens(usage?.output_tokens ?? null)}</strong></div>
+      <div className="obs-fact"><span>总 token</span><strong>{formatReportedTokens(usage?.total_tokens ?? null)}</strong></div>
+      <div className="obs-fact"><span>缓存读取 token</span><strong>{formatReportedTokens(usage?.cached_input_tokens ?? null)}</strong></div>
+      <div className="obs-fact"><span>缓存写入 token</span><strong>{formatReportedTokens(usage?.cache_write_input_tokens ?? null)}</strong></div>
+      <div className="obs-fact"><span>推理输出 token</span><strong>{formatReportedTokens(usage?.reasoning_output_tokens ?? null)}</strong></div>
       <div className="obs-fact"><span>上报次数</span><strong>{request.usage ? `${request.usage.usage_reports} 次${request.usage.usage_final ? " · 含final" : ""}` : "无用量事件"}</strong></div>
       <div className="obs-fact"><span>清单</span><strong>{request.manifest ? `${formatBytes(request.manifest.input_bytes)} · ${request.manifest.items.length} 项` : request.manifest_status}</strong></div>
     </div>

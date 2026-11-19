@@ -60,6 +60,7 @@
     "contracts/message-ui.test.tsx",
     "contracts/agent-workspace-ui.test.tsx",
     "contracts/workbench-ui.test.tsx",
+    "contracts/workbench-refinements.test.tsx",
     "contracts/legacy-gate-ui.test.tsx",
     "contracts/trace-ui.test.tsx",
     "contracts/product-evaluation-ui.test.tsx",

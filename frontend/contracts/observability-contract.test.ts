@@ -4,6 +4,9 @@ import pageFixture from "./observability-api-page-fixture.json";
 import detailFixtures from "./observability-api-detail-fixtures.json";
 import { readWorkbenchView } from "../src/lib/workbench-route";
 import { readObsState, writeObsState } from "../src/observability/obs-route";
+import type { ObsRequestRecord } from "../src/observability/obs-contracts";
+import { contextRequestSnapshot } from "../src/hooks/use-session-context";
+import { formatCount, formatReportedTokens, formatTokens } from "../src/observability/obs-format";
 
 
 test("原Trace轮次深链进入运行诊断，新增观测链接作为同一分区别名", () => {
@@ -22,6 +25,71 @@ test("原Trace轮次深链进入运行诊断，新增观测链接作为同一分
 /** 来自隔离验收服务（合成脚本运行）的真实响应；不含任何正文。 */
 
 const page = parseObservationsPage(pageFixture);
+
+function tokenRequest(id: string, overrides: Partial<ObsRequestRecord> = {}): ObsRequestRecord {
+  return { id, step_index: 0, purpose: "task", status: "ok", started_at: 1, ended_at: 2,
+    duration_ms: 1000, duration_source: "mono", timing: null, tool_calls: 0, usage: null,
+    manifest: null, manifest_status: "missing", cost: null, cost_status: "unpriced", ...overrides };
+}
+const tokenManifest = parseManifest({ version: 1, counter_version: "heuristic-script/1", input_bytes: 37800,
+  estimated_tokens: 9450, model_context_window: 1000000, items_truncated: false, omitted_items: 0,
+  source_refs_truncated: false, items: [{ key: "message:0:user", category: "history", label: "User message",
+    content_hash: "a".repeat(64), input_bytes: 37800, estimated_tokens: 9450 }] });
+const reportedTokenUsage = { usage: { input_tokens: 9123, output_tokens: 2173, total_tokens: 11296,
+  cached_input_tokens: 4001, cache_write_input_tokens: 0, reasoning_output_tokens: 432 }, usage_reports: 3, usage_final: true };
+
+test("token 数量保留完整整数，只有预估格式带约等号", () => {
+  expect(formatReportedTokens(9123)).toBe("9,123");
+  expect(formatReportedTokens(1000001)).toBe("1,000,001");
+  expect(formatTokens(9123)).toBe("≈9,123");
+  expect(formatTokens(1000001)).toBe("≈1,000,001");
+  expect(formatCount(900000)).toBe("900,000");
+  expect(formatReportedTokens(0)).toBe("0");
+  expect(formatReportedTokens(null)).toBe("未知");
+  expect(formatTokens(Number.NaN)).toBe("未知");
+});
+
+test("侧栏按同一请求配对预估与实际 usage，忽略之后的压缩摘要请求", () => {
+  const request = tokenRequest("task", { manifest: tokenManifest, manifest_status: "present", usage: reportedTokenUsage });
+  const summary = tokenRequest("summary", { purpose: "compaction_summary", usage: { ...reportedTokenUsage,
+    usage: { ...reportedTokenUsage.usage, input_tokens: 10 } } });
+  const result = contextRequestSnapshot([request, summary]);
+  expect(result.requestId).toBe("task");
+  expect(result.manifest?.estimated_tokens).toBe(9450);
+  expect(result.reported).toEqual({ input: 9123, output: 2173, total: 11296, cached: 4001, cacheWrite: 0, reasoning: 432, final: true });
+});
+
+test("最新请求缺清单时不拿旧请求清单配对最新 usage", () => {
+  const result = contextRequestSnapshot([
+    tokenRequest("old", { manifest: tokenManifest, usage: reportedTokenUsage }),
+    tokenRequest("new", { usage: reportedTokenUsage }),
+  ]);
+  expect(result.requestId).toBe("new");
+  expect(result.manifest).toBeNull();
+  expect(result.reported?.input).toBe(9123);
+});
+
+test("最新请求缺 usage 时不回填前一次实际用量或使用预估值冒充", () => {
+  const result = contextRequestSnapshot([
+    tokenRequest("old", { usage: reportedTokenUsage }),
+    tokenRequest("new", { manifest: tokenManifest }),
+  ]);
+  expect(result.requestId).toBe("new");
+  expect(result.manifest).toBe(tokenManifest);
+  expect(result.reported).toBeNull();
+});
+
+test("部分上报保留未知总量，不把输入输出相加成上游总量", () => {
+  const result = contextRequestSnapshot([tokenRequest("partial", { usage: { ...reportedTokenUsage,
+    usage_final: false, usage: { ...reportedTokenUsage.usage, output_tokens: null, total_tokens: null } } })]);
+  expect(result.reported).toMatchObject({ input: 9123, output: null, total: null, cacheWrite: 0, final: false });
+});
+
+test("没有业务请求时不从摘要构造上下文和上报用量", () => {
+  expect(contextRequestSnapshot([])).toEqual({ requestId: "", manifest: null, reported: null });
+  expect(contextRequestSnapshot([tokenRequest("summary", { purpose: "summary", usage: reportedTokenUsage })]))
+    .toEqual({ requestId: "", manifest: null, reported: null });
+});
 
 test("真实列表页通过解析：浮点毫秒、完整状态与scope counted=returned_page", () => {
   expect(page.items.length).toBe(5);

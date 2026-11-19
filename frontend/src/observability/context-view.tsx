@@ -89,7 +89,7 @@ function buildWindowEntries(manifest: ObsManifest, hidden: Set<ObsCategory>): { 
   }
   const used = entries.reduce((sum, entry) => sum + entry.value, 0);
   const overflow = used + reserved > window;
-  if (reserved > 0) entries.push({ id: "ghost:reserved", name: "预留输出", value: reserved, kind: "ghost", sublabel: formatTokens(reserved) });
+  if (reserved > 0) entries.push({ id: "ghost:reserved", name: "预留输出", value: reserved, kind: "ghost", sublabel: formatReportedTokens(reserved) });
   const free = window - used - reserved;
   if (free > 0 && !overflow) entries.push({ id: "ghost:free", name: "可用空间", value: free, kind: "ghost", sublabel: formatTokens(free) });
   return { entries, overflow };
@@ -112,7 +112,7 @@ function ManifestSummary({ request }: { request: ObsRequestRecord }) {
         <p className="obs-big">{formatBytes(manifest.input_bytes)}<span className="obs-suffix">{formatTokens(manifest.estimated_tokens)} token（估算）</span></p>
         <p className="obs-caption">
           {window !== null
-            ? <>窗口 {formatTokens(window)} · 预留输出 {formatTokens(manifest.reserved_output_tokens)} · 预算 {manifest.input_budget_bytes === null ? "未知" : formatBytes(manifest.input_budget_bytes)}</>
+            ? <>窗口 {formatReportedTokens(window)} · 预留输出 {formatReportedTokens(manifest.reserved_output_tokens)} · 预算 {manifest.input_budget_bytes === null ? "未知" : formatBytes(manifest.input_budget_bytes)}</>
             : <>模型窗口未知，只展示已发送输入，不估算剩余空间{manifest.input_budget_bytes !== null ? ` · 输入预算 ${formatBytes(manifest.input_budget_bytes)}` : ""}</>}
         </p>
       </div>
