@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 RunStatus = Literal[
     "queued", "running", "awaiting", "completed", "failed", "aborted", "interrupted"
@@ -32,6 +33,14 @@ ERROR_CODES = frozenset(
         "mcp_connect_failed",
         "mcp_discovery_limit",
         "mcp_cursor_invalid",
+        "browser_invalid_input",
+        "browser_protocol",
+        "browser_output_limit",
+        "browser_artifact_invalid",
+        "browser_egress_denied",
+        "browser_worker_failed",
+        "browser_timeout",
+        "browser_closed",
         "web_invalid_input",
         "web_protocol",
         "web_extract_failed",
@@ -60,6 +69,10 @@ ERROR_CODES = frozenset(
         "completion_unverified",
         "input_revision_conflict",
         "sandbox_unavailable",
+        "sandbox_management_unavailable",
+        "sandbox_config_invalid",
+        "sandbox_backend_unavailable",
+        "sandbox_operation_unknown",
         "sandbox_setup",
         "sandbox_limit",
         "sandbox_cleanup_required",
@@ -71,6 +84,9 @@ ERROR_CODES = frozenset(
         "context_binding_changed",
         "access_policy_invalid",
         "session_closed",
+        "session_must_be_closed",
+        "session_in_trash",
+        "session_busy",
         "queue_timeout",
         "invalid_input",
         "invalid_json",
@@ -126,13 +142,32 @@ ERROR_CODES = frozenset(
         "readonly",
         "unauthorized",
         "origin_denied",
+        "preview_unavailable",
+        "preview_binding_drift",
+        "preview_inactive",
+        "preview_not_ready",
+        "preview_stop_incomplete",
+        "preview_revision_conflict",
+        "preview_route_unavailable",
+        "preview_route_invalidated",
+        "preview_route_capacity",
+        "preview_route_denied",
+        "development_tls_invalid",
+        "development_listener_failed",
+        "development_listener_stopped",
+        "development_listener_unconfigured",
         "local_only",
         "body_too_large",
         "source_not_eligible",
         "source_changed",
         "candidate_input_mismatch",
         "revision_conflict",
+        "sidebar_revision_conflict",
         "schema_upgrade_required",
+        "skill_name_conflict",
+        "skill_selection_invalid",
+        "invalid_skill",
+        "private_memory_workspace",
         "snapshot_changed",
         "target_binding_changed",
         "facts_corrupt",
@@ -153,18 +188,23 @@ class StrictModel(BaseModel):
     )
 
 
-def check_json(value: object, *, max_bytes: int = 65536, max_depth: int = 16) -> None:
+def check_json(value: object, *, max_bytes: int | None = None, max_depth: int = 16) -> None:
     def visit(item: object, depth: int) -> None:
         if depth > max_depth:
             raise ValueError("JSON 深度超限")
         if type(item) in (str, bool, int, float) or item is None:
             if type(item) is int and abs(item) > 9007199254740991:
                 raise ValueError("JSON 整数超限")
+            if type(item) is float and not math.isfinite(item):
+                raise ValueError("JSON 非有限数")
+            if type(item) is str:
+                item.encode("utf-8")
             return
         if isinstance(item, dict):
             for key, child in item.items():
                 if type(key) is not str:
                     raise ValueError("JSON 键必须为字符串")
+                key.encode("utf-8")
                 visit(child, depth + 1)
         elif isinstance(item, list):
             for child in item:
@@ -173,7 +213,9 @@ def check_json(value: object, *, max_bytes: int = 65536, max_depth: int = 16) ->
             raise ValueError("非 JSON 值")
 
     visit(value, 0)
-    if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode()) > max_bytes:
+    if max_bytes is not None and len(
+        json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+    ) > max_bytes:
         raise ValueError("JSON 字节超限")
 
 
@@ -190,12 +232,12 @@ def parse_json(raw: str) -> JsonValue:
         raise ValueError("JSON 非有限数")
 
     value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
-    check_json(value, max_bytes=1048576)
+    check_json(value)
     return cast(JsonValue, value)
 
 
 def encoded(value: object) -> str:
-    check_json(value, max_bytes=1048576)
+    check_json(value)
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
@@ -206,17 +248,19 @@ def fingerprint(value: object) -> str:
 
 
 class RunRequest(StrictModel):
-    text: str = Field(min_length=1, max_length=32768)
+    text: str = Field(min_length=1)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target: Literal[
-        "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"
+        "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace",
+        "target-development"
     ] = "demo"
 
     @field_validator("text")
     @classmethod
-    def bounded(cls, value: str) -> str:
-        if not value.strip() or len(value.encode()) > 32768:
-            raise ValueError("输入为空或字节超限")
+    def nonempty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("输入为空")
+        value.encode("utf-8")
         return value
 
 
@@ -272,6 +316,14 @@ class ApprovalReply(StrictModel):
     arguments_hash: str
     tool_hash: str
     allow: bool
+    scope: Literal["once", "session"] = "once"
+
+    @model_validator(mode="after")
+    def _denial_stays_once(self) -> ApprovalReply:
+        # 只有批准可以携带会话范围；拒绝永远是单次，不接受降格写法。
+        if not self.allow and self.scope != "once":
+            raise ValueError("denial cannot carry session scope")
+        return self
 
 
 class Message(StrictModel):

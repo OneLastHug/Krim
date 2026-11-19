@@ -9,6 +9,10 @@ class TokenUsage(StrictModel):
     input_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
     output_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
     total_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
+    # 输入/输出内部的子集，不能再次加到总量或上下文面积上。
+    cached_input_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
+    cache_write_input_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
+    reasoning_output_tokens: int | None = Field(default=None, ge=0, le=9007199254740991)
 
     @model_validator(mode="after")
     def counts(self) -> "TokenUsage":
@@ -24,6 +28,12 @@ class TokenUsage(StrictModel):
             and self.input_tokens + self.output_tokens != self.total_tokens
         ):
             raise ValueError("用量合计不一致")
+        for detail, total in ((self.cached_input_tokens, self.input_tokens),
+                              (self.cache_write_input_tokens, self.input_tokens),
+                              (self.reasoning_output_tokens, self.output_tokens)):
+            bound = total if total is not None else self.total_tokens
+            if detail is not None and bound is not None and detail > bound:
+                raise ValueError("用量子计数超过所属总量")
         return self
 
     def follows(self, old: "TokenUsage") -> bool:

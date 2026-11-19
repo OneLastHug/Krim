@@ -59,7 +59,7 @@ async def test_sol_effort_env_reaches_real_wire(tmp_path, monkeypatch):
             (tmp_path / "wire.json").write_text(json.dumps(fixture.requests, indent=2))
             assert all(r["body"].get("reasoning_effort") == "xhigh" for r in fixture.requests)
             assert all(r["body"]["model"] == "gpt-6.1-sol" for r in fixture.requests)
-            assert all(r["body"]["max_tokens"] == 512 for r in fixture.requests)
+            assert all("max_tokens" not in r["body"] for r in fixture.requests)
             assert all("max_completion_tokens" not in r["body"] for r in fixture.requests)
 
 
@@ -70,6 +70,9 @@ def live_settings(path, **changes):
             "provider": "http",
             "max_active_runs": 1,
             "run_timeout": 180,
+            # This fixture explicitly exercises the legacy bounded-demo profile,
+            # not the now-unlimited normal agent defaults.
+            "max_steps": 2,
             **changes,
         }
     )
@@ -113,7 +116,7 @@ async def test_unknown_host_selection_cannot_fall_back_via_model_copy(tmp_path, 
         ("REASONING_EFFORT", ""),
         ("READ_TIMEOUT_SECONDS", "NaN"),
         ("READ_TIMEOUT_SECONDS", "inf"),
-        ("READ_TIMEOUT_SECONDS", "91"),
+        # 上限le已随"取消短硬超时"移除：>90的读超时现在合法，负数仍拒绝。
         ("READ_TIMEOUT_SECONDS", "0"),
         ("READ_TIMEOUT_SECONDS", "true"),
     ],
@@ -438,6 +441,7 @@ async def test_live_profile_cli_history_and_trace(tmp_path, monkeypatch, phase):
                 "PROVIDER": "http",
                 "MAX_ACTIVE_RUNS": "1",
                 "RUN_TIMEOUT": "180",
+                "MAX_STEPS": "2",
                 "HTTP_BASE_URL": fixture.url,
                 "HTTP_MODEL": "gpt-6.1-sol",
                 "HTTP_API_KEY": "SYNTHETIC_SOL",
@@ -810,20 +814,24 @@ async def test_http_target_two_steps_one_add_and_frozen_identity(tmp_path, monke
                 and facts.tools[0].executor_started is True
             )
             assert trace.complete and trace.run_id == view.id
+            # 默认None：限额记录为显式None，请求体不再注入演示输出上限。
+            assert snapshot.target["limits"]["http"]["max_output_tokens"] is None
+            assert "max_tokens" not in fixture.requests[0]["body"]
             assert (
-                snapshot.target["limits"]["http"]["max_output_tokens"]
-                == fixture.requests[0]["body"]["max_tokens"]
-            )
-            assert (
-                snapshot.target["limits"]["http"]["read_timeout_seconds"]
-                == app.service.bindings["target-http"].loop.provider._client.timeout.read
+                snapshot.target["limits"]["http"]["read_timeout_seconds"] is None
+                and app.service.bindings["target-http"].loop.provider._client.timeout.read is None
             )
             public = json.dumps(snapshot.target) + trace.model_dump_json()
             assert "SYNTHETIC_OUTBOUND" not in public and fixture.url not in public
             denied = await app.service.start(
                 RunRequest(text="/note welcome", request_key="denied", target="target-http")
             )
-            assert (await app.service.wait(denied.id)).code == "permission_denied"
+            await app.service.wait(denied.id)
+            denied_facts = await app.service.result(denied.id)
+            assert len(denied_facts.tools) == 1
+            assert denied_facts.tools[0].status == "denied"
+            assert denied_facts.tools[0].code == "permission_denied"
+            assert denied_facts.tools[0].executor_started is False
             assert tools == ["add"]
             (tmp_path / "observed.json").write_text(
                 json.dumps(
@@ -1147,7 +1155,8 @@ async def test_sigkill_windows_restart_interrupts_with_zero_replay(tmp_path, pha
                 stderr=log,
             )
             try:
-                async with asyncio.timeout(6):
+                # 等待子进程导入 SDK 并到达强退屏障，不限制模型回复时延。
+                async with asyncio.timeout(20):
                     while not ready.exists():
                         assert process.returncode is None, (tmp_path / "worker.log").read_text()
                         await asyncio.sleep(0.01)
@@ -1424,7 +1433,7 @@ async def test_http_stream_reader_disconnect_does_not_cancel_run(tmp_path, monke
         probe = SnapshotConnections(app.store)
         reading = ContextVar("sse_read", default=False)
         entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        original_stream, original_snapshot = app.service.stream, app.store._snapshot
+        original_stream, original_page = app.service.stream, app.store._event_page
         sse_task = None
 
         async def tracked_stream(*args, **kwargs):
@@ -1441,17 +1450,17 @@ async def test_http_stream_reader_disconnect_does_not_cancel_run(tmp_path, monke
                 probe.record("sse-exited", lock_held=app.store.lock.locked())
                 exited.set()
 
-        async def snapshot(conn, run_id):
-            result = await original_snapshot(conn, run_id)
+        async def event_page(conn, run_id, from_seq, limit):
+            result = await original_page(conn, run_id, from_seq, limit)
             if reading.get() and not entered.is_set():
-                probe.record("sse-snapshot-query")
+                probe.record("sse-event-page-query")
                 entered.set()
                 await release.wait()
                 probe.record("sse-read-released")
             return result
 
         monkeypatch.setattr(app.service, "stream", tracked_stream)
-        monkeypatch.setattr(app.store, "_snapshot", snapshot)
+        monkeypatch.setattr(app.store, "_event_page", event_page)
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(16)

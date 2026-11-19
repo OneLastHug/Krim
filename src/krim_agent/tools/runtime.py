@@ -3,27 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
+import math
 import os
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
+from urllib.parse import urlsplit
 
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 
-from krim_agent.contracts import ServiceError, parse_json
+from krim_agent.contracts import ServiceError
 from krim_agent.mcp import MCPConnection, MCPServerConfig
+from krim_agent.network.egress_policy import EgressPolicy, EgressViolation
 from krim_agent.runtime.contracts import settled
 from krim_agent.web_access import TavilyWebAccess, WebAccessConfig
 
 from .bindings import resolve_tool_overrides
 from .builtins import demo_policy
-from .core import Decision, Invocation, Policy
+from .catalog_search import scope_key
+from .core import Decision, Invocation, Policy, ToolSpec
 from .mcp import mcp_tools
 from .registry import ToolRegistry
+from .session import SessionScopeResolver, ToolBundle
 from .web import web_tools
 
 
@@ -33,27 +40,29 @@ class ToolRuntimeConfig:
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     tool_overrides: Mapping[str, str] = field(default_factory=dict)
     public_tools: tuple[str, ...] | None = None
+    web_result_root: Path | None = None
 
     def __post_init__(self) -> None:
         servers = tuple(self.mcp_servers)
         if (
-            len(servers) > 8
-            or any(type(item) is not MCPServerConfig for item in servers)
+            any(type(item) is not MCPServerConfig for item in servers)
             or len({item.name for item in servers}) != len(servers)
             or self.web is not None
             and type(self.web) is not WebAccessConfig
         ):
             raise ValueError("外部工具配置无效")
-        copied = dict(self.tool_overrides)
-        if len(copied) > 16 or any(
-            not isinstance(k, str) or not isinstance(v, str) for k, v in copied.items()
+        if self.web_result_root is not None and (
+            not isinstance(self.web_result_root, Path) or not self.web_result_root.is_absolute()
         ):
+            raise ValueError("Web结果目录须为宿主绝对路径")
+        copied = dict(self.tool_overrides)
+        if any(not isinstance(k, str) or not isinstance(v, str) for k, v in copied.items()):
             raise ValueError("工具覆盖配置无效")
         object.__setattr__(self, "mcp_servers", servers)
         object.__setattr__(self, "tool_overrides", MappingProxyType(copied))
         if self.public_tools is not None:
             names = tuple(self.public_tools)
-            if len(names) > 16 or len(names) != len(set(names)):
+            if len(names) != len(set(names)):
                 raise ValueError("公开工具选择无效")
             object.__setattr__(self, "public_tools", names)
 
@@ -62,10 +71,7 @@ class ToolRuntimeConfig:
         """JSON只引用凭据变量名，不接受浏览器上传或配置内的明文Key。"""
         environment = os.environ if environment is None else environment
         try:
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
-                raise ValueError("配置必须是有界普通文件")
-            body = parse_json(path.read_text(encoding="utf-8"))
+            body = _read_runtime_config(path)
             if not isinstance(body, dict) or set(body) - {
                 "web",
                 "mcp_servers",
@@ -74,9 +80,12 @@ class ToolRuntimeConfig:
             }:
                 raise ValueError("配置字段无效")
             web = None
+            result_root = None
             if "web" in body:
                 raw_web = body["web"]
-                if not isinstance(raw_web, dict) or set(raw_web) - {"endpoint", "api_key_env"}:
+                if not isinstance(raw_web, dict) or set(raw_web) - {
+                    "endpoint", "api_key_env", "result_root",
+                }:
                     raise ValueError("网页配置字段无效")
                 key = _credential(
                     raw_web.get("api_key_env", "KRIM_AGENT_WEB_API_KEY"),
@@ -87,14 +96,19 @@ class ToolRuntimeConfig:
                     api_key=SecretStr(key) if key else None,
                     endpoint=cast(str, raw_web.get("endpoint", "https://api.tavily.com")),
                 )
+                raw_root = raw_web.get("result_root")
+                if raw_root is not None:
+                    if not isinstance(raw_root, str) or not raw_root:
+                        raise ValueError("Web结果目录无效")
+                    result_root = Path(raw_root)
             raw_servers = body.get("mcp_servers", [])
-            if not isinstance(raw_servers, list) or len(raw_servers) > 8:
+            if not isinstance(raw_servers, list):
                 raise ValueError("MCP配置无效")
-            servers = []
-            for raw in raw_servers:
-                if not isinstance(raw, dict) or set(raw) & {"headers", "env"}:
+            servers: list[MCPServerConfig] = []
+            for raw_server in raw_servers:
+                if not isinstance(raw_server, dict) or set(raw_server) & {"headers", "env"}:
                     raise ValueError("配置须引用凭据名而非明文值")
-                values: dict[str, Any] = dict(raw)
+                values: dict[str, Any] = dict(raw_server)
                 headers = _credential_map(values.pop("headers_env", {}), environment)
                 env = _credential_map(values.pop("env_env", {}), environment)
                 bearer = values.pop("bearer_env", None)
@@ -132,9 +146,287 @@ class ToolRuntimeConfig:
                 tuple(servers),
                 cast(dict[str, str], mapping),
                 tuple(cast(list[str], public)) if public is not None else None,
+                web_result_root=result_root,
             )
-        except (OSError, ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
             raise ServiceError("invalid_input", 422) from None
+
+
+def _validate_windows_acl(descriptor: int) -> None:
+    """Require a user-owned config without write ACEs for broad principals."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    win_dll = cast(Any, importlib.import_module("ctypes")).WinDLL
+    msvcrt = cast(Any, importlib.import_module("msvcrt"))
+    advapi32 = win_dll("Advapi32.dll", use_last_error=True)
+    kernel32 = win_dll("Kernel32.dll", use_last_error=True)
+    security_descriptor = ctypes.c_void_p()
+    owner_sid = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    get_security_info = advapi32.GetSecurityInfo
+    get_security_info.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = wintypes.DWORD
+    result = get_security_info(
+        wintypes.HANDLE(cast(int, msvcrt.get_osfhandle(descriptor))),
+        1,  # SE_FILE_OBJECT
+        0x00000001 | 0x00000004,  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+        ctypes.byref(owner_sid),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(security_descriptor),
+    )
+    if result != 0:
+        raise ValueError("无法读取配置文件ACL")
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = [("user", _SidAndAttributes)]
+
+    class _AceHeader(ctypes.Structure):
+        _fields_ = [
+            ("ace_type", ctypes.c_ubyte),
+            ("ace_flags", ctypes.c_ubyte),
+            ("ace_size", wintypes.WORD),
+        ]
+
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    token = wintypes.HANDLE()
+    allocated_sids: list[ctypes.c_void_p] = []
+    try:
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+        ):
+            raise ValueError("无法读取当前用户Token")
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        if not size.value:
+            raise ValueError("无法读取当前用户SID")
+        token_buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token, 1, token_buffer, size, ctypes.byref(size)
+        ):
+            raise ValueError("无法读取当前用户SID")
+        current_sid = ctypes.cast(token_buffer, ctypes.POINTER(_TokenUser)).contents.user.sid
+
+        get_security_descriptor_owner = advapi32.GetSecurityDescriptorOwner
+        get_security_descriptor_owner.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_security_descriptor_owner.restype = wintypes.BOOL
+        owner_defaulted = wintypes.BOOL()
+        if not get_security_descriptor_owner(
+            security_descriptor, ctypes.byref(owner_sid), ctypes.byref(owner_defaulted)
+        ):
+            raise ValueError("无法读取配置文件所有者")
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        equal_sid.restype = wintypes.BOOL
+        if not equal_sid(owner_sid, current_sid):
+            raise ValueError("配置文件所有者不可信")
+
+        # A null DACL grants full access to everyone, so it is never trusted.
+        get_security_descriptor_dacl = advapi32.GetSecurityDescriptorDacl
+        get_security_descriptor_dacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_security_descriptor_dacl.restype = wintypes.BOOL
+        dacl_present = wintypes.BOOL()
+        dacl_defaulted = wintypes.BOOL()
+        if not get_security_descriptor_dacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ) or not dacl_present.value or not dacl.value:
+            raise ValueError("配置文件ACL缺失")
+
+        class _Acl(ctypes.Structure):
+            _fields_ = [
+                ("revision", ctypes.c_ubyte),
+                ("sbz1", ctypes.c_ubyte),
+                ("size", wintypes.WORD),
+                ("ace_count", wintypes.WORD),
+                ("sbz2", wintypes.WORD),
+            ]
+
+        acl = ctypes.cast(dacl, ctypes.POINTER(_Acl)).contents
+        get_ace = advapi32.GetAce
+        get_ace.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+        get_ace.restype = wintypes.BOOL
+        write_mask = 0x00000002 | 0x00000004 | 0x00000010 | 0x00000100
+        write_mask |= 0x00010000 | 0x00040000 | 0x00080000 | 0x40000000 | 0x10000000
+        allowed_ace_types = {0}  # Standard ACCESS_ALLOWED_ACE_TYPE.
+        known_non_grant_types = {1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 17, 18, 19, 20, 21}
+        permitted_sids: list[ctypes.c_void_p] = [current_sid]
+        convert_sid = advapi32.ConvertStringSidToSidW
+        convert_sid.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+        convert_sid.restype = wintypes.BOOL
+        for value in ("S-1-5-18", "S-1-5-32-544"):
+            sid = ctypes.c_void_p()
+            if not convert_sid(value, ctypes.byref(sid)):
+                raise ValueError("无法读取系统ACL主体")
+            allocated_sids.append(sid)
+            permitted_sids.append(sid)
+
+        for index in range(acl.ace_count):
+            ace = ctypes.c_void_p()
+            if not get_ace(dacl, index, ctypes.byref(ace)) or ace.value is None:
+                raise ValueError("无法读取配置文件ACE")
+            address = ace.value
+            header = ctypes.cast(ace, ctypes.POINTER(_AceHeader)).contents
+            if header.ace_type not in allowed_ace_types:
+                if header.ace_type in known_non_grant_types:
+                    continue
+                raise ValueError("配置文件ACL含未知ACE类型")
+            mask = ctypes.c_uint32.from_address(address + ctypes.sizeof(_AceHeader)).value
+            if not mask & write_mask:
+                continue
+            sid_offset = 8
+            ace_sid = ctypes.c_void_p(address + sid_offset)
+            if not any(equal_sid(ace_sid, permitted) for permitted in permitted_sids):
+                raise ValueError("配置文件ACL允许不可信主体写入")
+    finally:
+        for sid in allocated_sids:
+            kernel32.LocalFree(sid)
+        if token.value:
+            kernel32.CloseHandle(token)
+        if security_descriptor.value:
+            kernel32.LocalFree(security_descriptor)
+
+
+def _config_object(items: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {}
+    for name, value in items:
+        if name in result:
+            raise ValueError("配置含重复JSON字段")
+        result[name] = value
+    return result
+
+
+def _config_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("配置含非有限JSON数值")
+    return number
+
+
+def _config_constant(value: str) -> None:
+    raise ValueError("配置含非有限JSON数值")
+
+
+def _read_runtime_config(path: Path) -> JsonValue:
+    if not isinstance(path, Path):
+        raise ValueError("配置路径无效")
+    path = path.absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("配置路径不得包含符号链接")
+    known = path.lstat()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size)
+        known_identity = (
+            known.st_dev, known.st_ino, known.st_mode, known.st_nlink, known.st_size
+        )
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or identity != known_identity
+            or os.name == "posix"
+            and (
+                info.st_mode & 0o077
+                or not hasattr(os, "geteuid")
+                or info.st_uid != os.geteuid()
+            )
+        ):
+            raise ValueError("配置必须是权限受限的普通文件")
+        try:
+            _validate_windows_acl(descriptor)
+        except Exception:
+            raise ValueError("配置文件ACL无效") from None
+        # Parse the trusted file directly instead of retaining chunks + joined
+        # bytes + decoded text, and avoid the generic transport JSON byte quota.
+        # json.load still allocates the catalog itself; that is the requested
+        # configuration, not an unbounded response cache.
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            body = json.load(
+                stream, object_pairs_hook=_config_object,
+                parse_float=_config_float, parse_constant=_config_constant,
+            )
+        after = os.fstat(descriptor)
+        path_after = path.lstat()
+        if (
+            os.lseek(descriptor, 0, os.SEEK_CUR) != info.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_nlink,
+                after.st_mtime_ns, after.st_ctime_ns)
+            != (info.st_dev, info.st_ino, info.st_size, info.st_nlink,
+                info.st_mtime_ns, info.st_ctime_ns)
+            or (path_after.st_dev, path_after.st_ino) != (info.st_dev, info.st_ino)
+            or any(part.is_symlink() for part in (path, *path.parents))
+        ):
+            raise ValueError("配置文件在读取期间发生变化")
+        return cast(JsonValue, body)
+    finally:
+        os.close(descriptor)
+
+
+def _mcp_egress_policy(server: MCPServerConfig) -> EgressPolicy:
+    try:
+        parsed = urlsplit(server.url or "")
+        host = parsed.hostname
+        configured_port = parsed.port
+        port = configured_port if configured_port is not None else (
+            443 if parsed.scheme == "https" else 80
+        )
+        if host is None:
+            raise ValueError("MCP endpoint is missing a host")
+        policy_type = EgressPolicy.authorize_loopback if parsed.scheme == "http" else EgressPolicy
+        # The host list is an explicit redirect boundary. Keep every configured
+        # host, but pin all of them to the endpoint's configured port.
+        return policy_type(server.allowed_hosts, {port})
+    except (EgressViolation, ValueError):
+        raise ServiceError("invalid_input", 422) from None
 
 
 def _credential(name: object, env: Mapping[str, str], *, required: bool = True) -> str:
@@ -162,6 +454,50 @@ class ToolRuntime:
     web: TavilyWebAccess | None = None
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
+    def bundle(self, resolve: SessionScopeResolver) -> ToolBundle:
+        """Borrow host external capabilities without copying base/workspace tools.
+
+        The runtime remains the sole connection owner. Each session receives
+        fresh wrappers, while the external source and binding fingerprints stay
+        intact. An explicit MCP override still checks both alias and target.
+        """
+        self.registry.assert_current()
+        cache: dict[int, ToolSpec] = {}
+
+        def scoped(spec: ToolSpec) -> ToolSpec:
+            if id(spec) in cache:
+                return cache[id(spec)]
+            execute = spec.external_executor
+            assert execute is not None
+            if spec.binding_target is not None:
+                target = scoped(spec.binding_target)
+                result = replace(
+                    spec, external_executor=target.external_executor, binding_target=target,
+                )
+            else:
+                async def invoke(invocation: Invocation, arguments: Any) -> Any:
+                    scope = await resolve(invocation)
+                    key = scope_key(scope)
+                    value = await execute(invocation, arguments)
+                    if scope_key(await resolve(invocation)) != key:
+                        raise ServiceError("permission_denied", 403)
+                    return value
+                result = replace(spec, external_executor=invoke)
+            cache[id(spec)] = result
+            return result
+
+        specs = tuple(scoped(spec) for spec, _ in self.registry._frozen if spec.source is not None)
+        names = {spec.name for spec in specs}
+        names.update(spec.binding_target.name for spec in specs if spec.binding_target is not None)
+
+        async def policy(invocation: Invocation) -> Decision:
+            scope_key(await resolve(invocation))
+            if invocation.name not in names:
+                return "deny"
+            return await self.policy(invocation) if self.policy is not None else "ask"
+
+        return ToolBundle(specs, policy)
+
     @classmethod
     async def open(
         cls, base: ToolRegistry, config: ToolRuntimeConfig, policy: Policy | None
@@ -172,15 +508,30 @@ class ToolRuntime:
         web = None
         try:
             if config.web is not None or set(config.tool_overrides) & {"web_search", "web_fetch"}:
-                web = TavilyWebAccess(config.web or WebAccessConfig())
+                web = TavilyWebAccess(
+                    config.web or WebAccessConfig(), result_root=config.web_result_root,
+                )
                 specs.extend(web_tools(web))
             for server in config.mcp_servers:
-                connection = MCPConnection(server)
+                if server.transport == "streamable_http":
+                    connection = MCPConnection(
+                        server, egress_policy=_mcp_egress_policy(server)
+                    )
+                else:
+                    connection = MCPConnection(server)
                 connections.append(connection)
                 await connection.connect()
                 specs.extend(mcp_tools(connection))
+            if config.web is None or config.web.api_key is None:
+                # Override placeholders are needed only during binding; never
+                # advertise an HTTP capability lacking its configured credential.
+                original_ids = {id(spec) for spec, _ in base._frozen}
+                specs = [spec for spec in specs if id(spec) in original_ids
+                         or spec.source is None or spec.source.kind != "http"
+                         or spec.name in config.tool_overrides]
             registry = resolve_tool_overrides(
-                tuple(specs), config.tool_overrides, config.public_tools
+                tuple(specs), config.tool_overrides, config.public_tools,
+                dependencies=(base,),
             )
             effective = policy
             if policy is demo_policy:

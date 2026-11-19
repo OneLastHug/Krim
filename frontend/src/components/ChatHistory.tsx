@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowDown, Copy, MoreHorizontal, Pencil, Square } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowDown, Ban, CircleAlert, Clock, Eye, Copy, LoaderCircle, MoreHorizontal, Pencil, Shield, Square } from "lucide-react";
 import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
@@ -12,9 +12,10 @@ import { ToolCallCard } from "./ToolCallCard";
 
 const EMPTY_EVENTS: Record<string, unknown>[] = [];
 
-export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (turnId: string) => void }) {
+export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionState; onTrace?: (turnId: string) => void; children?: ReactNode; empty?: ReactNode }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showJump, setShowJump] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const feedback = useCopyFeedback();
   const scroll = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
@@ -66,6 +67,27 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
     return () => { observer.disconnect(); document.fonts?.removeEventListener("loadingdone", resize); };
   }, [chat.id]);
 
+  useEffect(() => {
+    const content = thread.current;
+    if (!content) return;
+    const update = () => setPendingCount(content.querySelectorAll('.chat-approval,[data-pending-interaction="true"]').length);
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-pending-interaction"] });
+    return () => observer.disconnect();
+  }, [chat.id]);
+  useEffect(() => {
+    const focusTurn = () => {
+      if (new URL(location.href).searchParams.get("view") !== "chat") return;
+      const id = new URL(location.href).searchParams.get("turn");
+      if (!id || !scroll.current) return;
+      const target = [...scroll.current.querySelectorAll<HTMLElement>("[data-turn-id]")].find(element => element.dataset.turnId === id);
+      if (target) { stickToBottom.current = false; target.scrollIntoView?.({ block: "center" }); }
+    };
+    focusTurn();
+    window.addEventListener("krim:focus-turn", focusTurn); window.addEventListener("popstate", focusTurn);
+    return () => { window.removeEventListener("krim:focus-turn", focusTurn); window.removeEventListener("popstate", focusTurn); };
+  }, [chat.id, chat.history.length]);
   return <div className="chat-history-shell">
     <div className="chat-transcript" aria-label={c.history} ref={scroll} onScroll={() => {
       const panel = scroll.current;
@@ -75,7 +97,7 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
       setShowJump(!atBottom);
     }}>
       <div className="chat-thread" ref={thread}>
-        {!chat.history.length && <div className="chat-empty"><h2>{chat.session ? "发送第一条消息" : "选择或新建对话"}</h2></div>}
+        {!chat.history.length && (empty ?? <div className="chat-empty"><h2>{chat.session ? "发送第一条消息" : "选择或新建对话"}</h2></div>)}
         {chat.history.map(turn => {
           const detail = chat.details[turn.id];
           const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : EMPTY_EVENTS);
@@ -83,19 +105,20 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
           const lastAnswer = items.filter(item => item.type === "assistant").at(-1);
           const waitingApproval = items.some(item => item.type === "tool" && item.approval);
           const working = turn.status === "running" || turn.status === "queued";
+          const showState = turn.status !== "completed";
+          const stateLabel = waitingApproval ? "等待审批" : turnLabels[turn.status] ?? turn.status;
+          const StateIcon = waitingApproval ? Shield : turn.status === "running" ? LoaderCircle : turn.status === "queued" ? Clock : turn.status === "failed" ? CircleAlert : Ban;
           const moreOpen = expanded[turn.id] === true;
           const canReuse = chat.canWrite && chat.session?.status === "open" && !chat.turnPending;
           return <article className="chat-turn" key={turn.id} data-turn-id={turn.id}>
-            <div className="chat-user-message">
+            <div className={`chat-user-wrap${showState ? " has-turn-state" : ""}`}><div className="chat-user-message">
               <div className="chat-user-text" data-ui-data>{turn.text}</div>
-              <div className="chat-user-actions">
+              </div><div className="chat-user-actions" role="group" aria-label="本轮消息操作">
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制用户消息" title="复制用户消息" onClick={() => void feedback.copy(turn.text)}><Copy aria-hidden="true" /></Button>
                 <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复用提问" title="复用提问" disabled={!canReuse} onClick={() => reuse(turn.text)}><Pencil aria-hidden="true" /></Button>
+                {showState && <span className="chat-turn-status" role="status" aria-label={stateLabel} title={stateLabel}><StateIcon aria-hidden="true" className={turn.status === "running" && !waitingApproval ? "motion-safe:animate-spin" : undefined}/><span className="sr-only">{stateLabel}</span></span>}
+                {working && <Button type="button" variant="ghost" size="icon-sm" className="chat-message-action" aria-label="停止此轮" title="停止此轮" disabled={chat.controlling || !chat.canWrite} onClick={() => void chat.control(turn, "cancel")}><Square aria-hidden="true" /></Button>}
               </div>
-            </div>
-            <div className="chat-turn-meta">
-              {turn.status !== "completed" && <span role="status">{waitingApproval ? "等待审批" : turnLabels[turn.status] ?? turn.status}</span>}
-              {working && <Button variant="ghost" size="sm" disabled={chat.controlling || !chat.canWrite} onClick={() => void chat.control(turn, "cancel")}><Square aria-hidden="true" />停止此轮</Button>}
             </div>
             {!working && items.some(item => item.type === "assistant" && item.partial) && <p className="chat-partial-note">以下为已生成部分</p>}
             {items.map(item => {
@@ -105,11 +128,11 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
               const approval = item.approval;
               const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";
               const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
-              return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={allow => { if (approval) void chat.control(turn, "approval", approval, allow); }} />;
+              return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
             })}
-            {turn.status === "running" && !items.length && <p className="chat-waiting" role="status">正在处理</p>}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">
+              {onTrace && turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="查看此轮 Trace" title="查看此轮 Trace" onClick={() => onTrace(turn.id)}><Eye aria-hidden="true"/></Button>}
               {lastAnswer && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="复制回答" title="复制回答" onClick={() => void feedback.copy(lastAnswer.text)}><Copy aria-hidden="true" /></Button>}
               {turn.run_id && <Button variant="ghost" size="icon-sm" className="chat-message-action" aria-label="更多操作" title="运行详情" aria-expanded={moreOpen} onClick={() => {
                 stickToBottom.current = false;
@@ -123,9 +146,11 @@ export function ChatHistory({ chat, onTrace }: { chat: SessionState; onTrace?: (
             </section>}
           </article>;
         })}
+        {children}
       </div>
     </div>
     {showJump && <Button variant="outline" size="icon-sm" className="chat-jump" aria-label="回到底部" onClick={bottom}><ArrowDown aria-hidden="true" /></Button>}
+    {showJump && pendingCount > 0 && <div className="chat-pending-location" role="status"><span>{pendingCount} 项待处理操作</span><Button variant="ghost" size="sm" onClick={() => thread.current?.querySelector<HTMLElement>('.chat-approval,[data-pending-interaction="true"]')?.scrollIntoView?.({ block: "center" })}>定位处理</Button></div>}
     <CopyFeedback {...feedback} />
   </div>;
 }

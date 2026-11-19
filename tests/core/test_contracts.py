@@ -11,17 +11,32 @@ def test_strict_json_rejects_ambiguous_content(raw):
         parse_json(raw)
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), {1: "bad"}, [[[[]]]]])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), {1: "bad"}, [[[[]]]],
+                                   "\ud800", {"\ud800": "bad"}])
 def test_finite_json_rejects_bad_values(value):
     with pytest.raises(ValueError):
         check_json(value, max_depth=2)
 
 
-def test_request_rejects_unknown_fields_and_byte_overflow():
+def test_json_content_has_no_default_byte_quota_and_explicit_windows_work():
+    from krim_agent.contracts import encoded, fingerprint
+
+    value = {"content": "中😀" * 400000}
+    check_json(value)
+    serialized = encoded(value)
+    assert len(serialized.encode()) > 1048576
+    assert parse_json(serialized) == value
+    assert fingerprint(value) == fingerprint(parse_json(serialized))
+    with pytest.raises(ValueError, match="字节超限"):
+        check_json(value, max_bytes=65536)
+
+
+def test_request_rejects_unknown_fields_and_empty_text_but_has_no_byte_quota():
     with pytest.raises(ValidationError):
         RunRequest(text="x", request_key="k", provider_url="secret")
+    assert len(RunRequest(text="中" * 12000, request_key="k").text) == 12000
     with pytest.raises(ValidationError):
-        RunRequest(text="中" * 12000, request_key="k")
+        RunRequest(text=" \n\t", request_key="k")
 
 
 @pytest.mark.parametrize(

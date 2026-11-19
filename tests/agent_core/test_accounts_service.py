@@ -5,11 +5,12 @@ import sqlite3
 
 import pytest
 from pydantic import SecretStr
+from test_extension_migration import downgrade_to_version
 
 from krim_agent.accounts import IdentityService
 from krim_agent.contracts import RunRequest, ServiceError
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
-from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 ACCOUNT_TABLES = [
     "accounts",
@@ -30,14 +31,7 @@ def raw(path, names):
 
 
 def drop_accounts(path):
-    conn = sqlite3.connect(path)
-    try:
-        for name in ACCOUNT_TABLES:
-            conn.execute(f'DROP TABLE "{name}"')
-        conn.execute("PRAGMA user_version=6")
-        conn.commit()
-    finally:
-        conn.close()
+    downgrade_to_version(path, 6)
 
 
 def table_names(path):
@@ -92,7 +86,7 @@ async def test_fresh_store_is_unmanaged_and_fails_closed(tmp_path):
         with pytest.raises(ServiceError, match="unauthorized"):
             service.resolve("local")
         assert (tmp_path / "identity.sqlite").exists()
-        assert store.schema_version == 7
+        assert store.schema_version == SCHEMA_VERSION
         assert set(ACCOUNT_TABLES) <= table_names(tmp_path / "identity.sqlite")
     finally:
         await service.close()
@@ -869,7 +863,7 @@ async def test_schema7_upgrade_preserves_old_rows(tmp_path):
         conn.close()
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == 7
+        assert writer.schema_version == SCHEMA_VERSION
         assert raw(database, ["runs", "run_events"]) == before
         assert set(ACCOUNT_TABLES) <= table_names(database)
         service = await IdentityService.open(writer)
@@ -927,7 +921,7 @@ async def test_upgrade_failure_rolls_back_before_unlock(tmp_path, monkeypatch):
     monkeypatch.setattr(SQLiteStore, "_upgrade", staticmethod(original))
     probe = await SQLiteStore.open(database)
     try:
-        assert probe.schema_version == 7
+        assert probe.schema_version == SCHEMA_VERSION
     finally:
         await probe.close()
 

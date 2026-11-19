@@ -108,7 +108,14 @@ async def test_search_uses_bearer_header_and_only_default_payload_fields():
             "ok": True,
             "operation": "search",
             "results": [
-                {"title": "Example", "url": "https://example.com/page", "content": "hello"}
+                {
+                    "title": "Example",
+                    "url": "https://example.com/page",
+                    "content": "hello",
+                    "result_ref": result["results"][0]["result_ref"],
+                    "total_chars": 5,
+                    "next_offset": None,
+                }
             ],
             "usage": {"credits": 1},
             "request_id": "request-1",
@@ -154,7 +161,9 @@ async def test_search_clips_content_and_keeps_tool_json_under_limit():
         result = await access.search("hello")
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
         assert result["truncated"] is True
-        assert result["results"][0]["content"].endswith("[truncated]")
+        assert result["results"][0]["content"] == "界" * 3_000
+        assert result["results"][0]["total_chars"] == 20_000
+        assert result["results"][0]["next_offset"] == 3_000
         assert len(encoded) <= 60 * 1024
     finally:
         await access.close()
@@ -209,7 +218,7 @@ async def test_malformed_body_returns_generic_protocol_error():
         await client.aclose()
 
 
-async def test_compressed_response_is_limited_after_decompression():
+async def test_compressed_response_larger_than_two_mib_is_spooled_and_parsed():
     inflated = b'{"results":[],"padding":"' + b"x" * (2 * 1024 * 1024) + b'"}'
     compressed = gzip.compress(inflated)
     stream = ByteStream([compressed[:100], compressed[100:]])
@@ -223,16 +232,16 @@ async def test_compressed_response_is_limited_after_decompression():
 
     access, client = make_access(handler)
     try:
-        with pytest.raises(ServiceError) as error:
-            await access.search("hello")
-        assert error.value.code == "web_response_too_large"
+        result = await access.search("hello")
+        assert result["ok"] is True
+        assert result["results"] == []
         assert stream.closed
     finally:
         await access.close()
         await client.aclose()
 
 
-async def test_output_metadata_limit_is_enforced_even_without_content():
+async def test_oversized_result_metadata_is_bounded_without_dropping_result():
     large_title = "T" * (70 * 1024)
 
     async def handler(_request):
@@ -243,9 +252,10 @@ async def test_output_metadata_limit_is_enforced_even_without_content():
 
     access, client = make_access(handler)
     try:
-        with pytest.raises(ServiceError) as error:
-            await access.search("hello")
-        assert error.value.code == "web_output_too_large"
+        result = await access.search("hello")
+        assert result["truncated"] is True
+        assert result["results"][0]["title"].endswith("[truncated]")
+        assert len(result["results"][0]["title"]) == 4096
     finally:
         await access.close()
         await client.aclose()
@@ -278,7 +288,10 @@ async def test_fetch_sends_one_url_markdown_and_marks_content_truncation():
         assert request.url.path == "/extract"
         assert result["operation"] == "fetch"
         assert result["results"][0]["url"] == service_url
-        assert result["results"][0]["content"].endswith("[truncated]")
+        assert result["results"][0]["content"] == "body" * 3750
+        assert result["results"][0]["total_chars"] == 24_000
+        assert result["results"][0]["next_offset"] == 15_000
+        assert result["results"][0]["result_ref"].startswith("wr_")
         assert len(result["results"][0]["content"]) == 15_000
         assert result["usage"] == {"credits": 1}
         assert result["request_id"] == "extract-1"

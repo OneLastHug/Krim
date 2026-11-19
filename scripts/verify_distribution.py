@@ -45,6 +45,7 @@ EXPECTED_SDIST_INCLUDE = [
     "README.md",
     ".gitignore",
     "src/krim_agent",
+    "deployment/browser",
     "frontend/src",
     "frontend/scripts",
     "frontend/package.json",

@@ -13,9 +13,10 @@ def resolve_tool_overrides(
     specs: tuple[ToolSpec, ...],
     overrides: Mapping[str, str],
     public_tools: tuple[str, ...] | None = None,
+    *, dependencies: tuple[ToolRegistry, ...] = (),
 ) -> ToolRegistry:
     catalog = {spec.name: spec for spec in specs}
-    if len(catalog) != len(specs) or len(overrides) > 16:
+    if len(catalog) != len(specs):
         raise ServiceError("invalid_input", 422)
     names = tuple(catalog) if public_tools is None else public_tools
     if len(names) != len(set(names)) or set(names) - set(catalog) or set(overrides) - set(names):
@@ -39,4 +40,4 @@ def resolve_tool_overrides(
         ):
             raise ServiceError("invalid_input", 422)
         result.append(replace(target, name=name, binding_target=target, overridable=False))
-    return ToolRegistry(tuple(result))
+    return ToolRegistry(tuple(result), dependencies=dependencies)

@@ -17,6 +17,7 @@ from krim_agent.contracts import (
     fingerprint,
     parse_json,
 )
+from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import ExecutionBudget, settled
 
 from .core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
@@ -24,19 +25,33 @@ from .mcp_schema import MCPContract
 from .output import OutputContract
 from .pipeline import CURRENT, Middleware, Scope, Wrap, _calling
 from .registry import ToolRegistry
+from .session import SESSION_RISKS
 
 type Emit = Callable[[str, dict[str, JsonValue]], Awaitable[RunEvent]]
-type Approve = Callable[[Invocation, float], Awaitable[bool]]
+type Approve = Callable[[Invocation, float | None], Awaitable[bool]]
+
+
+@dataclass
+class StartupHandoff:
+    """会话启动闸门的交接单元（ADR-0015 热切换）。
+
+    派发方在闸门内完成最新策略判定后把锁放进此单元；executor 在 entered
+    边界（started 标记落定、真实执行即将派发）把 ``gate`` 置 None 并释放
+    锁。置 None 即"已交接"，保证 acquire 与 release 恰好各一次。
+    """
+
+    gate: asyncio.Lock | None
 
 
 @dataclass(frozen=True)
 class ToolContext:
     emit: Emit
     approve: Approve
-    timeout: float
+    timeout: float | None
     assert_target_current: Callable[[], None] = lambda: None
     scope: Scope | None = None
-    approval_timeout: float = 300
+    approval_timeout: float | None = None
+    startup_gate: StartupHandoff | None = None
 
 
 @dataclass(frozen=True)
@@ -76,14 +91,42 @@ class ToolExecutor:
         decisions = [await self.policy(invocation)]
         if spec.binding_target is not None:
             target = spec.binding_target
-            decisions.append(await self.policy(replace(
-                invocation, name=target.name, tool_hash=target.fingerprint)))
+            projected = replace(invocation, name=target.name, tool_hash=target.fingerprint)
+            # A binding target is a host-validated second policy check. Give it
+            # its own matching call scope rather than weakening session resolve
+            # to accept arbitrary model-supplied names on an existing call.
+            with _calling(projected):
+                current = CURRENT.get()
+                token = CURRENT.set(replace(current, invocation=projected)
+                                    if current is not None else None)
+                try:
+                    decisions.append(await self.policy(projected))
+                finally:
+                    CURRENT.reset(token)
         if any(value not in {"allow", "ask"} for value in decisions):
             return "deny"
         return "ask" if "ask" in decisions else "allow"
 
+    async def redecide(
+        self, invocation: Invocation, spec: ToolSpec, scope: Scope | None = None,
+    ) -> Decision:
+        """队列→实际执行边界的最新策略重读（ADR-0015 热切换）。
+
+        不信任冻结 Admission：会话执行模式、项目访问与本会话允许规则每次
+        都从权威存储重读。deny/参数/registry 校验仍由 execute 内的 check()
+        与冻结 Admission 负责，这里只重跑策略链（含 binding target 的
+        独立二次判定）。
+        """
+        with _calling(invocation):
+            token = CURRENT.set(
+                replace(scope, invocation=invocation) if scope is not None else None)
+            try:
+                return await self._decision(invocation, spec)
+            finally:
+                CURRENT.reset(token)
+
     async def admit(
-        self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float
+        self, invocation: Invocation, context: ToolContext, *, timeout_seconds: float | None
     ) -> Admission:
         """入场判定（ADR-0015）：指纹核对、严格入参校验、pre 钩子、middleware、策略判定。
 
@@ -152,7 +195,8 @@ class ToolExecutor:
             fields["arguments"] = parse_json(invocation.arguments_json)
             outcome = ToolObservation.model_validate(fields)
             clock = asyncio.get_running_loop().time
-            deadline = clock() + context.timeout if context.scope is not None else None
+            deadline = (clock() + context.timeout
+                        if context.scope is not None and context.timeout is not None else None)
             tool_budget: ExecutionBudget | None = None
             decision = "deny"
             entering = returned = available = cancelled = False
@@ -160,6 +204,16 @@ class ToolExecutor:
             code: str | None = None
             first: asyncio.Task[JsonValue] | None = None
             repeated = False
+            handoff = context.startup_gate if admission is not None else None
+
+            def release_handoff() -> None:
+                # entered 边界（started 标记落定）后模式切换不再约束本次执行；
+                # 未交接（deny/确认停靠/异常）路径由 finally 兜底释放。
+                nonlocal handoff
+                if handoff is not None and handoff.gate is not None:
+                    lock, handoff.gate = handoff.gate, None
+                    lock.release()
+
             token = CURRENT.set(replace(context.scope,
                 invocation=invocation) if context.scope is not None else None)
 
@@ -182,9 +236,8 @@ class ToolExecutor:
                 if not admission.start_emitted and context.scope is None:
                     # legacy的tool_start仍在原工具timeout之外。
                     await context.emit("tool_start", outcome.model_dump(mode="json"))
-                if context.scope is None:
+                if context.scope is None and context.timeout is not None:
                     deadline = clock() + context.timeout
-                assert deadline is not None
                 tool_budget = ExecutionBudget(deadline)
                 tool_timeout = asyncio.timeout_at(deadline)
                 tool_budget.bind(tool_timeout)
@@ -213,11 +266,14 @@ class ToolExecutor:
                         })
                         check()
                         entering = True
+                        # 交接完成：started 标记与 intent 已落库，真实执行在
+                        # 闸门外进行，模式切换只能约束之后排队的调用。
+                        release_handoff()
                         if spec.external_executor is not None:
                             raw = await spec.external_executor(invocation, parsed)
                         elif spec.scoped_executor is None:
                             raw = await spec.executor(parsed)
-                        elif context.scope is None:
+                        elif context.scope is None and spec.capability not in SESSION_RISKS:
                             entering = False
                             raise ServiceError("workspace_contract_required")
                         else:
@@ -254,7 +310,7 @@ class ToolExecutor:
                             before = asdict(snapshot)
                             try:
                                 response = await self.wrap(snapshot, next_once)
-                            except ServiceError:
+                            except (ServiceError, RequestPending):
                                 raise
                             except Exception:
                                 raise ServiceError("middleware_error") from None
@@ -288,6 +344,11 @@ class ToolExecutor:
                         except Exception:
                             raise ServiceError("post_hook_error") from None
                         check()
+            except RequestPending:
+                # Durable user input yields without recording a failed tool result.
+                release_handoff()
+                CURRENT.reset(token)
+                raise
             except asyncio.CancelledError:
                 cancelled, code = True, "cancelled"
             except TimeoutError:
@@ -324,4 +385,5 @@ class ToolExecutor:
                     raise asyncio.CancelledError
                 return outcome
             finally:
+                release_handoff()
                 CURRENT.reset(token)

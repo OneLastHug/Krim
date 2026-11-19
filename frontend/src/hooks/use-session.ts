@@ -3,6 +3,9 @@ import { object, request, RequestError } from "../api";
 import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
+import { DEFAULT_GROUP, includeSessions, parseSidebar } from "../lib/session-sidebar";
+import { useExecutionPolicy } from "./use-execution-policy";
+import type { ApprovalScope } from "../lib/execution-policy";
 
 interface Detail { facts: Record<string, unknown> | null; trace: Record<string, unknown>; events: Record<string, unknown>[]; loadedForStatus?: Turn["status"]; traceLoaded?: boolean }
 interface ControlIntent extends Scope { target: string; turn_id: string; body: Record<string, unknown>; rejected: boolean }
@@ -13,7 +16,7 @@ function controls(): Record<string, ControlIntent> {
     const i = object(item), body = object(i.body);
     if (typeof i.principal_id !== "string" || !Number.isSafeInteger(i.generation) || typeof i.workspace_id !== "string" || typeof i.session_id !== "string" || typeof i.turn_id !== "string" || typeof i.target !== "string" || typeof i.rejected !== "boolean" || typeof body.request_key !== "string") throw new Error("无法读取未确认请求");
     const base = sessionPath(i.workspace_id) + "/" + encodeURIComponent(i.session_id);
-    const allowed = [base + "/close", base + "/resume", base + "/rename", turnPath(i.workspace_id, i.session_id, i.turn_id) + "/cancel"];
+    const allowed = [base + "/close", base + "/resume", base + "/rename", turnPath(i.workspace_id, i.session_id, i.turn_id) + "/cancel", base + "/lifecycle/archive", base + "/lifecycle/unarchive", base + "/lifecycle/trash", base + "/lifecycle/restore"];
     if (!allowed.includes(i.target) && !i.target.startsWith(turnPath(i.workspace_id, i.session_id, i.turn_id) + "/approvals/")) throw new Error("无法读取未确认请求");
   }
   return value as unknown as Record<string, ControlIntent>;
@@ -25,6 +28,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   const initial = new URL(location.href);
   const [workspace, setWorkspace] = useState(initial.searchParams.get("workspace") ?? "");
   const [id, setId] = useState(initial.searchParams.get("session") ?? "");
+  const [listView, setListView] = useState<"active" | "archived" | "trash">("active");
   const [actor, setActor] = useState<{ key: string; value: Actor } | null>(null);
   const [list, setList] = useState<Session[]>([]), [session, setSession] = useState<Session | null>(null), [history, setHistory] = useState<Turn[]>([]);
   const [draft, setDraft] = useState(""), [notice, setNotice] = useState<string | null>(null), [reading, setReading] = useState(false);
@@ -58,27 +62,57 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     if (turnId) url.searchParams.set("turn", turnId); else url.searchParams.delete("turn");
     historyReplace(url);
     if (selected.current.workspace !== ws) setList([]);
-    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setEvents([]); setApprovals([]); setNotice(null);
+    // A turn receipt refreshes the current session; retain its transcript until reload.
+    if (selected.current.workspace !== ws || selected.current.id !== sessionId) {
+      setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setEvents([]); setApprovals([]);
+    }
+    selected.current = { workspace: ws, id: sessionId }; setWorkspace(ws); setId(sessionId); setNotice(null);
     setDraft(readDraft(localStorage, target)); setVersion(v => v + 1);
   }
   function historyReplace(url: URL) { window.history.replaceState(null, "", url); }
+  useEffect(() => {
+    const restore = () => {
+      const url = new URL(location.href);
+      if (url.searchParams.get("view") && url.searchParams.get("view") !== "chat") return;
+      const ws = url.searchParams.get("workspace") ?? selected.current.workspace;
+      const sid = url.searchParams.get("session") ?? "";
+      if (!actorRef.current?.value.workspaces.some(item => item.workspace_id === ws)) return;
+      if (ws !== selected.current.workspace || sid !== selected.current.id) select(ws, sid, url.searchParams.get("turn"));
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, [apiKey]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; invalidate(); }; }, []);
   useEffect(() => {
     if (!active) return;
-    setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+    if (actorRef.current?.key !== apiKey) {
+      setActor(null); actorRef.current = null; setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+    }
     const controller = new AbortController(), f = fence.current, key = apiKey;
     const current = () => mounted.current && activeRef.current && !controller.signal.aborted && key === keyRef.current && f === fence.current;
     void request("/v2/me", key, undefined, controller.signal).then(raw => {
       if (!current()) return;
       const value = parseActor(raw); if (!value.workspaces.length) throw new Error("没有可用工作区");
-      let ws = selected.current.workspace, sid = selected.current.id;
+      const route = new URL(location.href);
+      let ws = route.searchParams.get("workspace") ?? selected.current.workspace;
+      let sid = route.searchParams.get("session") ?? selected.current.id;
       if (!value.workspaces.some(w => w.workspace_id === ws)) { ws = value.workspaces[0]!.workspace_id; sid = ""; }
       if (!sid) {
         try { const stored = JSON.parse(localStorage.getItem(CURRENT) ?? "null") as (Scope & { turn_id: string | null }) | null; if (stored && stored.principal_id === value.principal_id && stored.generation === value.generation && stored.workspace_id === ws) sid = stored.session_id ?? ""; } catch { /* 原创建intent由独立严格账本保护。 */ }
       }
+      const previous = actorRef.current?.value;
+      if (previous && (previous.principal_id !== value.principal_id || previous.generation !== value.generation || ws !== selected.current.workspace || JSON.stringify(previous.workspaces) !== JSON.stringify(value.workspaces))) {
+        setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]);
+      }
       actorRef.current = { key, value }; selected.current = { workspace: ws, id: sid }; setActor({ key, value }); setWorkspace(ws); setId(sid); onLegacy(value.legacy);
       setDraft(readDraft(localStorage, { principal_id: value.principal_id, generation: value.generation, workspace_id: ws, session_id: sid || null })); refreshPending(); setNotice(null);
-    }).catch(error => { if (current()) setNotice(chatReason(error)); });
+    }).catch(error => {
+      if (!current()) return;
+      if (error instanceof RequestError && (error.status === 401 || error.status === 403)) {
+        actorRef.current = null; setActor(null); setList([]); setSession(null); setHistory([]); setDetails({}); setTurnEvents({}); setTurnFacts({}); setApprovals([]); setEvents([]); setDraft("");
+      }
+      setNotice(chatReason(error));
+    });
     return () => controller.abort();
   }, [apiKey, active, identityVersion, fenceGeneration]);
   useEffect(() => {
@@ -90,6 +124,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
       let activeRun: { turn: Turn; cursor: number; events: Record<string, unknown>[] } | null = null;
       let turns: Turn[] = [], historyLoaded = false, recoveredPartial = false;
+      const hydratedFinished = new Set<string>();
       async function readEvents(turn: Turn, start: number, target: Record<string, unknown>[]) {
         let next = start, raw: unknown;
         do {
@@ -122,6 +157,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
           const facts = await readFacts(turn);
           if (facts === null) return false;
           keepRunData(turn, runEvents, facts);
+          hydratedFinished.add(turn.id);
         } catch (error) {
           if (!current()) return false;
           if (error instanceof RequestError && (error.status === 401 || error.status === 403)) throw error;
@@ -131,9 +167,18 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
         return true;
       }
       try {
-        const rows = await request(sessionPath(workspace) + "?limit=50", apiKey, undefined, controller.signal);
-        if (!current()) return; if (!Array.isArray(rows)) throw new Error("对话列表无效");
-        const sessions = rows.map(parseSession); if (sessions.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配"); setList(sessions);
+        const suffix = listView === "active" ? "" : listView === "trash" ? "/lifecycle/trash" : "/lifecycle/archived";
+        const sessions: Session[] = [];
+        for (let offset = 0; offset < 10000; offset += 50) {
+          const rows = await request(sessionPath(workspace) + suffix + (offset ? `?offset=${offset}&limit=50` : "?limit=50"), apiKey, undefined, controller.signal);
+          if (!current()) return; if (!Array.isArray(rows)) throw new Error("对话列表无效");
+          const page = rows.map(parseSession);
+          if (page.some(s => s.workspace_id !== workspace)) throw new Error("对话身份不匹配");
+          sessions.push(...page); if (page.length < 50) break;
+          if (offset === 9950) throw new Error("对话列表容量超限");
+        }
+        if (new Set(sessions.map(s => s.id)).size !== sessions.length) throw new Error("对话列表重复，请刷新");
+        setList(sessions);
         if (!id) { setSession(null); setHistory([]); return; }
         while (current()) {
           const value = parseSession(await request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal));
@@ -169,6 +214,12 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
               setEvents([...activeRun.events]); setApprovals([]); activeRun = null; recoveredPartial = true;
             }
           }
+          const recentCompleted = [...turns].reverse().find(item => item.status === "completed" && !!item.run_id
+            && !!item.transcript?.length && !item.transcript.some(message => message.role === "assistant"));
+          if (recentCompleted && !hydratedFinished.has(recentCompleted.id)) {
+            const finishedEvents: Record<string, unknown>[] = [];
+            if (!await hydrateFinished(recentCompleted, finishedEvents, 0)) return;
+          }
           if (running?.run_id) {
             if (!activeRun || activeRun.turn.id !== running.id || activeRun.turn.run_id !== running.run_id) {
               runId = running.run_id; cursor = 0; timeline.length = 0;
@@ -195,28 +246,144 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     }
     void load(); return () => controller.abort();
   }, [apiKey, active, ready, actor, workspace, id, version, fenceGeneration]);
+  function setSessionListView(view: "active" | "archived" | "trash") {
+    if (view === listView) return;
+    invalidate();
+    setList([]);
+    setListView(view);
+    setVersion(value => value + 1);
+  }
+  async function lifecycle(action: "archive" | "unarchive" | "trash" | "restore", sessionId = id) {
+    if (!ready || !membership || membership.role === "viewer" || !sessionId) return;
+    const selectedSession = list.find(item => item.id === sessionId)
+      ?? (session?.id === sessionId ? session : null);
+    if (!selectedSession) return;
+    const marker = "lifecycle:" + sessionId;
+    if (flights.current.has(marker)) return;
+    const identity = actorRef.current?.value;
+    if (!identity || selectedSession.owner_id !== identity.principal_id) return;
+    flight(marker, true);
+    const intentKey = "lifecycle:" + JSON.stringify({
+      principal_id: identity.principal_id,
+      generation: identity.generation,
+      workspace_id: workspace,
+      session_id: sessionId,
+      action,
+    });
+    const requestKey = crypto.randomUUID();
+    const lifecycleBase = sessionPath(workspace) + "/" + encodeURIComponent(sessionId) + "/lifecycle";
+    const target = lifecycleBase + "/" + action;
+    const values = controls();
+    const existing = values[intentKey];
+    const saved: ControlIntent = existing ?? {
+      principal_id: identity.principal_id,
+      generation: identity.generation,
+      workspace_id: workspace,
+      session_id: sessionId,
+      turn_id: "",
+      target,
+      body: { request_key: requestKey, expected_revision: selectedSession.lifecycle_revision },
+      rejected: false,
+    };
+    if (!existing) {
+      values[intentKey] = saved;
+      try { saveControls(values); }
+      catch (error) { flight(marker, false); setNotice(chatReason(error)); return; }
+    }
+    const sameView = () => { const latest = actorRef.current?.value; return mounted.current && !!latest && latest.principal_id === identity.principal_id && latest.generation === identity.generation && selected.current.workspace === workspace; };
+    try {
+      let raw: unknown = undefined;
+      if (existing && !saved.rejected) {
+        // 结果未知时先查回执：命中即已生效；404 证明未执行，保留原键提交。
+        try { raw = await request(lifecycleBase + "/by-key/" + encodeURIComponent(String(saved.body.request_key)), apiKey); }
+        catch (error) { if (!(error instanceof RequestError && error.status === 404)) { if (sameView()) setNotice(chatReason(error)); return; } }
+      }
+      if (raw === undefined) {
+        try {
+          raw = await request(saved.rejected ? saved.target : target, apiKey, saved.rejected ? saved.body : {
+            request_key: saved.body.request_key,
+            expected_revision: saved.body.expected_revision,
+          });
+        } catch (error) {
+          if (error instanceof RequestError && error.status === 401 && error.code === "unauthorized") {
+            saved.rejected = true;
+            values[intentKey] = saved;
+            saveControls(values);
+          }
+          throw error;
+        }
+      }
+      const updated = parseSession(raw);
+      if (updated.id !== sessionId || updated.workspace_id !== workspace) throw new Error("对话身份不匹配");
+      if (!sameView()) return;
+      const latest = controls();
+      delete latest[intentKey];
+      saveControls(latest);
+      if (action === "trash" && selected.current.id === sessionId) select(workspace, "");
+      if (action === "restore" && selected.current.id === sessionId) setSessionListView("active");
+      invalidate();
+      setNotice(null);
+      setVersion(value => value + 1);
+    } catch (error) {
+      if (error instanceof RequestError && error.status === 409 && error.code === "revision_conflict") {
+        const latest = controls();
+        if (latest[intentKey]?.body.request_key === saved.body.request_key) delete latest[intentKey];
+        saveControls(latest);
+        if (sameView()) { invalidate(); setVersion(value => value + 1); setNotice(chatReason(error)); }
+        return;
+      }
+      if (sameView()) setNotice(chatReason(error));
+    } finally {
+      flight(marker, false);
+      refreshPending();
+    }
+  }
   function edit(text: string) { try { saveDraft(localStorage, scope(), text); setDraft(text); } catch (error) { setNotice(chatReason(error)); } }
-  async function create(title: string, target: string) {
-    let marker = "", ownsFlight = false; let current = () => false;
+  async function create(title: string, target: string, groupId?: string, initialDraft = title): Promise<Session | null | undefined> {
+    let marker = "", ownsFlight = false; let current = () => false; let created: Session | null = null;
+    const originalSession = id;
     try {
       const targetScope = scope(null); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
-      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, title);
+      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, initialDraft);
       const { intent, first } = prepareIntent(localStorage, targetScope, "session", { title, target_key: target }); refreshPending();
-      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; select(intent.workspace_id, value.id); setSession(value as Session); return true; });
+      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; created = value as Session; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
+      const who = actorRef.current?.value;
+      const sameAccount = () => mounted.current && activeRef.current && keyRef.current === apiKey && actorRef.current?.value.principal_id === targetScope.principal_id && actorRef.current?.value.generation === targetScope.generation && selected.current.workspace === targetScope.workspace_id;
+      if (created && who && sameAccount()) {
+        try {
+          const path = `/v2/workspaces/${encodeURIComponent(targetScope.workspace_id)}/session-sidebar`;
+          const prior = parseSidebar(await request(path, apiKey));
+          if (!sameAccount()) return created;
+          const next = includeSessions(prior, [...list.filter(session => session.id !== created!.id), created]);
+          if (next.groups.length > 100 || new TextEncoder().encode(JSON.stringify(next)).length > 64000) throw new Error("排序容量超限");
+          const destination = groupId ?? prior.sessions.find(entry => entry.session_id === originalSession)?.group_id ?? DEFAULT_GROUP;
+          if (!next.groups.some(group => group.id === destination)) throw new Error("会话分组已变化");
+          const entries = next.sessions.map(entry => entry.session_id === created!.id ? { ...entry, group_id: destination } : entry);
+          await request(path, apiKey, { expected_revision: prior.revision, groups: next.groups, sessions: entries }, undefined, "PUT");
+          if (sameAccount()) window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: targetScope.principal_id, workspace: targetScope.workspace_id } }));
+        } catch { if (sameAccount()) setNotice("会话已创建，分组保存结果未确认。请重新读取排序后检查。"); }
+      }
+      return created;
+    } catch (error) { if (current()) setNotice(chatReason(error)); return null; }
+    finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
+  }
+  async function submit(text = draft, recipient = session) {
+    let marker = "", ownsFlight = false; let current = () => false;
+    try {
+      if (!recipient || recipient.id !== selected.current.id || recipient.workspace_id !== selected.current.workspace || (recipient === session && reading)) return;
+      const targetScope = scope(recipient.id); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
+      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1);
+      const { intent, first } = prepareIntent(localStorage, targetScope, "turn", { text, expected_revision: recipient.revision }); refreshPending();
+      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; setListView("active"); select(intent.workspace_id, intent.session_id!, value.id); saveDraft(localStorage, targetScope, ""); setDraft(""); return true; });
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
   }
-  async function submit() {
-    let marker = "", ownsFlight = false; let current = () => false;
-    try {
-      if (!session || session.id !== id) return;
-      if (new TextEncoder().encode(draft).length > 32768) { setNotice("输入超出容量，请修改后提交"); return; }
-      const targetScope = scope(id); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
-      flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1);
-      const { intent, first } = prepareIntent(localStorage, targetScope, "turn", { text: draft, expected_revision: session.revision }); refreshPending();
-      await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; select(intent.workspace_id, intent.session_id!, value.id); saveDraft(localStorage, targetScope, ""); setDraft(""); return true; });
-    } catch (error) { if (current()) setNotice(chatReason(error)); }
-    finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
+  async function createAndSubmit(text: string, target: string, groupId?: string) {
+    if (!text.trim()) return;
+    const created = await create(text.trim().split("\n")[0]!.slice(0, 128), target, groupId, text);
+    if (!created || selected.current.id !== created.id) return;
+    saveDraft(localStorage, scope(created.id), text); setDraft(text);
+    await submit(text, created);
   }
   async function recover(intent: Intent) {
     const marker = "find:" + intent.id; if (flights.current.has(marker)) return;
@@ -224,37 +391,47 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     try {
       const who = scope(); if (intent.principal_id !== who.principal_id) throw new Error("请连接原身份");
       select(intent.workspace_id, intent.session_id ?? ""); current = capture(); flight(marker, true);
-      await performIntent(localStorage, intent, apiKey, false, value => { if (!current()) return false; select(intent.workspace_id, intent.kind === "session" ? value.id : intent.session_id!, intent.kind === "turn" ? value.id : null); if (intent.kind === "turn") { saveDraft(localStorage, intent, ""); setDraft(""); } return true; });
+      await performIntent(localStorage, intent, apiKey, false, value => {
+        if (!current()) return false;
+        const firstDraft = intent.kind === "session" ? readDraft(localStorage, intent) : null;
+        select(intent.workspace_id, intent.kind === "session" ? value.id : intent.session_id!, intent.kind === "turn" ? value.id : null);
+        if (intent.kind === "turn") { saveDraft(localStorage, intent, ""); setDraft(""); }
+        else if (firstDraft !== null) { saveDraft(localStorage, { ...intent, session_id: value.id }, firstDraft); setDraft(firstDraft); }
+        return true;
+      });
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); refreshPending(); }
   }
-  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string) {
+  async function control(turn: Turn | null, action: "cancel" | "close" | "resume" | "approval" | "rename", approval?: Record<string, unknown>, allow?: boolean, title?: string, target?: Session, approvalScope: ApprovalScope = "once") {
     const who = actorRef.current, member = who?.value.workspaces.find(w => w.workspace_id === workspace);
-    if (!activeRef.current || !who || who.key !== keyRef.current || !session || session.id !== id || session.workspace_id !== workspace || selected.current.id !== id || selected.current.workspace !== workspace) return;
+    const controlled = target ?? session;
+    if (!activeRef.current || !who || who.key !== keyRef.current || !controlled || controlled.workspace_id !== workspace || !target && controlled.id !== id || selected.current.id !== id || selected.current.workspace !== workspace) return;
+    if (target && (action !== "rename" || !list.some(value => value.id === target.id && value.revision === target.revision) || target.workspace_id !== workspace || target.owner_id !== who.value.principal_id)) return;
+    const targetId = controlled.id;
     const canWriteNow = !!member && member.role !== "viewer";
     const canApproveNow = canWriteNow && member.approve;
     if (action === "rename") {
-      if (!canWriteNow || typeof title !== "string" || !title.trim() || title.trim().length > 128 || session.status !== "open") return;
+      if (!canWriteNow || typeof title !== "string" || !title.trim() || title.trim().length > 128 || controlled.status !== "open") return;
     } else if (action === "approval") {
       if (!canApproveNow || !turn || !turn.run_id || typeof allow !== "boolean" || turn.status !== "running" || turn.session_id !== id || turn.workspace_id !== workspace || !history.some(item => item.id === turn.id && item.run_id === turn.run_id && item.status === "running") || !approval) return;
       const stillPending = approvals.some(item => item.request_id === approval.request_id && item.run_id === turn.run_id && item.call_id === approval.call_id && item.arguments_hash === approval.arguments_hash && item.tool_hash === approval.tool_hash);
       if (!stillPending) return;
     } else if (!canWriteNow) return;
     if (action === "cancel" && (!turn || turn.session_id !== id || turn.workspace_id !== workspace || !["queued", "running"].includes(turn.status) || !history.some(item => item.id === turn.id && item.status === turn.status))) return;
-    if (action === "close" && session.status !== "open" || action === "resume" && session.status !== "closed") return;
-    const marker = action + ":" + (approval?.request_id ?? turn?.id ?? id); if (flights.current.has(marker)) return;
+    if (action === "close" && controlled.status !== "open" || action === "resume" && controlled.status !== "closed") return;
+    const marker = action + ":" + (approval?.request_id ?? turn?.id ?? targetId); if (flights.current.has(marker)) return;
     let current = () => false;
     try {
-      const targetScope = scope(id); let cacheKey = JSON.stringify({ ...targetScope, marker });
+      const targetScope = scope(targetId); let cacheKey = JSON.stringify({ ...targetScope, marker });
       flight(marker, true); invalidate(); current = capture(); setVersion(v => v + 1);
-      const values = controls(), sessionTarget = sessionPath(workspace) + "/" + encodeURIComponent(id);
+      const values = controls(), sessionTarget = sessionPath(workspace) + "/" + encodeURIComponent(targetId);
       const expectedTarget = action === "approval" ? turnPath(workspace, id, turn!.id) + "/approvals/" + encodeURIComponent(String(approval!.request_id)) : action === "cancel" ? turnPath(workspace, id, turn!.id) + "/cancel" : sessionTarget + "/" + action;
-      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.generation === targetScope.generation && value.workspace_id === workspace && value.session_id === id && value.target === expectedTarget);
+      const previous = Object.entries(values).find(([, value]) => value.principal_id === targetScope.principal_id && value.generation === targetScope.generation && value.workspace_id === workspace && value.session_id === targetId && value.target === expectedTarget);
       if (previous) cacheKey = previous[0];
       let saved = previous?.[1] ?? values[cacheKey], first = saved === undefined;
       if (!saved) {
         const path = expectedTarget;
-        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow } : { request_key: crypto.randomUUID(), expected_revision: session.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
+        const body = action === "approval" ? { request_key: crypto.randomUUID(), call_id: approval!.call_id, arguments_hash: approval!.arguments_hash, tool_hash: approval!.tool_hash, allow, ...(allow && approvalScope === "session" ? { scope: "session" } : {}) } : { request_key: crypto.randomUUID(), expected_revision: controlled.revision, ...(action === "rename" ? { title: title!.trim() } : {}) };
         saved = { ...targetScope, target: path, turn_id: turn?.id ?? "", body, rejected: false }; values[cacheKey] = saved; saveControls(values);
       }
       first = first || saved.rejected;
@@ -272,11 +449,11 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
         throw error;
       }
       const value = object(raw); if (value.session_id !== saved.session_id || value.request_key !== saved.body.request_key) throw new Error("控制身份不匹配");
-      if (current() && value.status === "completed") { const latest = controls(); delete latest[cacheKey]; saveControls(latest); setVersion(v => v + 1); setNotice(null); }
+      if (current() && value.status === "completed") { const latest = controls(); delete latest[cacheKey]; saveControls(latest); setVersion(v => v + 1); setNotice(null); if (action === "approval") execution.reload(); }
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); }
   }
-  async function rename(title: string) { await control(null, "rename", undefined, undefined, title); }
+  async function rename(title: string, sessionId = id) { const target = sessionId === id ? undefined : list.find(value => value.id === sessionId); if (sessionId !== id && !target) return; await control(null, "rename", undefined, undefined, title, target); }
   function loadDetails(turn: Turn): Promise<void> {
     const identity = actorRef.current?.value;
     if (!identity || identity.principal_id !== actor?.value.principal_id || turn.session_id !== id || turn.workspace_id !== workspace || !turn.run_id) return Promise.resolve();
@@ -327,9 +504,18 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     try {
       const actorScope = scope(); if (saved.principal_id !== actorScope.principal_id) throw new Error("请连接原身份");
       select(saved.workspace_id, saved.session_id!, saved.turn_id || null); current = capture(); flight(marker, true);
-      const raw = object(await request(saved.rejected ? saved.target : sessionPath(saved.workspace_id) + "/" + encodeURIComponent(saved.session_id!) + "/controls/by-key/" + encodeURIComponent(String(saved.body.request_key)), apiKey, saved.rejected ? saved.body : undefined));
-      if (!current()) return; if (raw.session_id !== saved.session_id || raw.request_key !== saved.body.request_key) throw new Error("控制身份不匹配");
-      if (raw.status === "completed") { const values = controls(); for (const [key, value] of Object.entries(values)) if (value.body.request_key === saved.body.request_key && value.session_id === saved.session_id) delete values[key]; saveControls(values); setVersion(v => v + 1); }
+      const isLifecycle = saved.target.includes("/lifecycle/");
+      const raw = await request(saved.rejected ? saved.target : sessionPath(saved.workspace_id) + "/" + encodeURIComponent(saved.session_id!) + (isLifecycle ? "/lifecycle/by-key/" : "/controls/by-key/") + encodeURIComponent(String(saved.body.request_key)), apiKey, saved.rejected ? saved.body : undefined);
+      if (!current()) return;
+      if (isLifecycle) {
+        // lifecycle回执即SessionView：能查到即已生效；404保留原键等待安全重试。
+        const value = parseSession(raw);
+        if (value.id !== saved.session_id || value.workspace_id !== saved.workspace_id) throw new Error("对话身份不匹配");
+        const values = controls(); for (const [key, item] of Object.entries(values)) if (item.body.request_key === saved.body.request_key && item.session_id === saved.session_id) delete values[key]; saveControls(values); setVersion(v => v + 1);
+        return;
+      }
+      const control = object(raw); if (control.session_id !== saved.session_id || control.request_key !== saved.body.request_key) throw new Error("控制身份不匹配");
+      if (control.status === "completed") { const values = controls(); for (const [key, value] of Object.entries(values)) if (value.body.request_key === saved.body.request_key && value.session_id === saved.session_id) delete values[key]; saveControls(values); setVersion(v => v + 1); }
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { flight(marker, false); }
   }
@@ -338,8 +524,14 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   const newPending = visiblePending.find(i => i.kind === "session" && i.workspace_id === workspace);
   const currentTurn = history.find(t => t.status === "running") ?? history.find(t => t.status === "queued") ?? history.at(-1) ?? null;
   let pendingControls: ControlIntent[] = []; try { pendingControls = ready ? Object.values(controls()).filter(i => i.principal_id === actor.value.principal_id && i.workspace_id === workspace) : []; } catch { /* 控制事件会明确报告损坏，不能重新POST。 */ }
-  const controlling = flights.current.has("close:" + id) || flights.current.has("resume:" + id) || flights.current.has("rename:" + id) || history.some(t => flights.current.has("cancel:" + t.id)) || approvals.some(a => flights.current.has("approval:" + String(a.request_id)));
+  const controlling = flights.current.has("close:" + id) || flights.current.has("resume:" + id) || flights.current.has("rename:" + id) || flights.current.has("lifecycle:" + id) || history.some(t => flights.current.has("cancel:" + t.id)) || approvals.some(a => flights.current.has("approval:" + String(a.request_id)));
   const posting = (i: Intent) => flights.current.has("post:" + JSON.stringify({ principal_id: i.principal_id, generation: i.generation, workspace_id: i.workspace_id, session_id: i.session_id }));
-  return { actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
+  const execution = useExecutionPolicy({ apiKey, principalId: ready ? actor.value.principal_id : "",
+    generation: ready ? actor.value.generation : 0, workspaceId: workspace, sessionId: id,
+    sessionRevision: session?.revision ?? 0,
+    enabled: active && ready && session?.id === id && session.workspace_id === workspace && !session.deleted_at,
+    running: history.some(turn => turn.status === "queued" || turn.status === "running"), fence,
+  }, () => setVersion(value => value + 1));
+  return { execution, actor: ready ? actor.value : null, workspace, id, list: ready ? list : [], listView, setSessionListView, lifecycle, session: ready && session?.id === id ? session : null, history: ready ? history : [], details: ready ? details : {}, turnEvents: ready ? turnEvents : {}, turnFacts: ready ? turnFacts : {}, approvals: ready ? approvals : [], events: ready ? events : [], currentTurn: ready ? currentTurn : null, draft, notice: notice ?? (pendingState.error || null), reading, ready, canWrite: !!membership && membership.role !== "viewer", canApprove: !!membership && membership.role !== "viewer" && membership.approve, pending: visiblePending, pendingControls, turnPending, newPending, sending: ready && flights.current.has("post:" + JSON.stringify(scope(id))), creating: ready && flights.current.has("post:" + JSON.stringify(scope(null))), busy: flights.current.size > 0, controlling, posting, edit, create, createAndSubmit, submit, recover, recoverControl, control, rename, loadDetails, select, refresh: () => { invalidate(); setIdentityVersion(v => v + 1); setVersion(v => v + 1); refreshPending(); } };
 }
 export type SessionState = ReturnType<typeof useSession>;

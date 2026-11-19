@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 
 def v1(path):
@@ -43,14 +43,17 @@ async def test_v1_upgrade_atomic_and_readonly_pure(tmp_path):
     try:
         async with store.engine.begin() as conn:
             version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar_one()
-        assert version == 4
+        assert version == SCHEMA_VERSION
         async with store.engine.begin() as conn:
             tables = (
                 (await conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'"))
                 .scalars()
                 .all()
             )
-        assert set(tables) == {
+        from tests.agent_core.test_extension_migration import HISTORICAL_TABLES
+
+        assert set(tables) == HISTORICAL_TABLES[SCHEMA_VERSION]
+        assert {
             "runs",
             "run_events",
             "dataset_revisions",
@@ -64,7 +67,7 @@ async def test_v1_upgrade_atomic_and_readonly_pure(tmp_path):
             "compactions",
             "tool_effects",
             "artifact_revisions",
-        }
+        } <= set(tables)
     finally:
         await store.close()
 

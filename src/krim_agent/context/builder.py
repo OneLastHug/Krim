@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, cast
 
 from pydantic import JsonValue
 
-from krim_agent.contracts import Message, ServiceError, encoded, fingerprint
+from krim_agent.context.counter import DEFAULT_COUNTER, TOKEN_WINDOW_VERSION, TokenCounter
+from krim_agent.context.serialization import byte_size, encoded, fingerprint
+from krim_agent.contracts import Message, ServiceError
 from krim_agent.source_fingerprints import source_digest
 
 from .types import ContextPolicy, ContextSnapshot, HistorySource
@@ -92,21 +94,50 @@ def check_budget(
     messages: list[Message],
     tools: list[dict[str, JsonValue]],
     policy: ContextPolicy,
-    request_limit: int,
+    request_limit: int | None,
+    counter: TokenCounter | None = None,
 ) -> int:
+    """冻结/发送前的准入检查；返回规范JSON字节数。
+
+    ``request_limit`` 是宿主/传输层显式声明的请求字节容量，None表示未声明；
+    ``policy.max_bytes`` 是可选字节预算，None表示未配置。两者都只在显式
+    给出时比较，不引入新的默认字节cap。token窗口代另按计数器执行
+    ``max_tokens`` 窗口（输入加预留输出不得超过窗口）。``counter`` 缺省时
+    使用模块级分段估计器。
+    """
     if not messages or messages[0].role != "system":
         raise ServiceError("facts_corrupt")
     validate_groups(messages[1:])
-    raw = encoded(
-        {"messages": [m.model_dump(mode="json") for m in messages], "tools": tools}
-    ).encode()
-    if (
+    size = byte_size({"messages": [m.model_dump(mode="json") for m in messages], "tools": tools})
+    over = (
         len(messages) > policy.max_messages
-        or len(raw) + 1024 > request_limit
-        or len(raw) + 1024 + policy.reserved_output_tokens * 4 > policy.max_bytes
-    ):
+        if policy.max_messages is not None
+        else False
+    )
+    if request_limit is not None:
+        over = over or size + 1024 > request_limit
+    if policy.max_bytes is not None:
+        # legacy字节代保留旧输出预留折算（reserved*4）；token代只比较序列化
+        # 输入字节本身，输出预留已在token窗口(max_tokens-reserved)内计量。
+        if policy.counter_version == TOKEN_WINDOW_VERSION:
+            over = over or size + 1024 > policy.max_bytes
+        else:
+            over = over or size + 1024 + policy.reserved_output_tokens * 4 > policy.max_bytes
+    if not over and policy.counter_version == TOKEN_WINDOW_VERSION:
+        tokens = (counter or DEFAULT_COUNTER).count_request(messages, tools)
+        over = tokens + policy.reserved_output_tokens > policy.max_tokens
+    if over:
         raise ServiceError("context_budget", 422)
-    return len(raw)
+    return size
+
+
+def count_request_tokens(
+    messages: list[Message],
+    tools: list[dict[str, JsonValue]],
+    counter: TokenCounter | None = None,
+) -> int:
+    """真实token计数端口：触发点判定与展示共用同一计数来源。"""
+    return (counter or DEFAULT_COUNTER).count_request(messages, tools)
 
 
 def prepare(
@@ -116,26 +147,37 @@ def prepare(
     current: str,
     tools: list[dict[str, JsonValue]],
     policy: ContextPolicy,
-    request_limit: int,
+    request_limit: int | None,
+    extensions: list[Message] | None = None,
+    extension_snapshot: dict[str, JsonValue] | None = None,
+    counter: TokenCounter | None = None,
 ) -> ContextSnapshot:
+    extra = extensions or []
     messages = [
         Message(role="system", content=system),
         *history,
+        *extra,
         Message(role="user", content=current),
     ]
-    size = check_budget(messages, tools, policy, request_limit)
+    size = check_budget(messages, tools, policy, request_limit, counter)
+    if policy.counter_version == TOKEN_WINDOW_VERSION:
+        estimated_tokens = (counter or DEFAULT_COUNTER).count_request(messages, tools)
+    else:
+        estimated_tokens = (size + 3) // 4
     return ContextSnapshot(
         messages=tuple(messages),
         sources=tuple(sources),
+        extensions=extension_snapshot or {},
         policy=policy,
         tool_fingerprint=fingerprint(tools),
         builder_fingerprint=identity(),
         input_bytes=size,
-        estimated_tokens=(size + 3) // 4,
+        estimated_tokens=estimated_tokens,
         source_fingerprint=fingerprint(
             {
                 "history": [m.model_dump(mode="json") for m in history],
                 "sources": [v.model_dump(mode="json") for v in sources],
             }
+            | ({"extensions": extension_snapshot} if extension_snapshot else {})
         ),
     )

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "scripts": [
+    {
+      "path": "assets/app.js",
+      "size_bytes": 1203892,
+      "sha256": "4ca46d62e7b5836f5b6989da3629ecdc8aadafe473981f33b432332c177bc0c1"
+    },
+    {
+      "path": "assets/observability.js",
+      "size_bytes": 67624,
+      "sha256": "04da40708bbf633b421540aec5dfeff6a92c71bb18290a53692515841e49f810"
+    },
+    {
+      "path": "assets/quality.js",
+      "size_bytes": 27685,
+      "sha256": "1b0256c1e44806cdc32a7938a70800b700e473ce170912e9d8b3fd5aabf8157e"
+    }
+  ]
+}

@@ -11,7 +11,6 @@ from krim_agent.contracts import ServiceError
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage import sessions as session_sql
-from krim_agent.storage.account_models import ACCOUNT_TABLES
 from krim_agent.storage.models import runs, turns
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
@@ -27,31 +26,11 @@ async def test_eval_consumers_use_actual_validated_schema(tmp_path):
 
 
 def downgrade(path, version):
-    conn = sqlite3.connect(path)
-    try:
-        for table in reversed(ACCOUNT_TABLES):
-            conn.execute('DROP TABLE "' + table.name + '"')
-        for name in [
-            "park_checkpoints",
-            "observation_outbox",
-            "capture_policies",
-            "capture_meta",
-            "tool_effects",
-            "compactions",
-            "work_turns",
-            "artifact_revisions",
-            "work_sessions",
-        ]:
-            conn.execute('DROP TABLE "' + name + '"')
-        for name in ["session_controls", "turns", "sessions"] if version < 3 else []:
-            conn.execute('DROP TABLE "' + name + '"')
-        if version == 1:
-            for name in ["eval_items", "evaluations", "dataset_revisions"]:
-                conn.execute('DROP TABLE "' + name + '"')
-        conn.execute(f"PRAGMA user_version={version}")
-        conn.commit()
-    finally:
-        conn.close()
+    # One explicit historical schema map, including all later feature tables.
+    # Partial DROP lists silently leave newer tables in a supposed v1/v2 DB.
+    from tests.agent_core.test_extension_migration import downgrade_to_version
+
+    downgrade_to_version(path, version)
 
 
 def table_rows(path, names):
@@ -287,10 +266,22 @@ async def test_restart_interrupts_and_pauses_queue_without_replay(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
+        # Cold interpreter/import/schema startup is separate from the actual
+        # crash barrier. The second marker still requires the real executor.
+        ready = marker.with_suffix(".ready.json")
+        async with asyncio.timeout(30):
+            while not ready.exists():
+                if child.returncode is not None:
+                    stdout, stderr = await child.communicate()
+                    raise AssertionError(("worker exited before ready", stdout, stderr))
+                await asyncio.sleep(0.005)
+        boot = json.loads(ready.read_text())
+        assert boot["namespace_local_pid"] == child.pid and boot["phase"] == phase
         async with asyncio.timeout(8):
             while not marker.exists():
                 if child.returncode is not None:
-                    raise AssertionError("worker exited before barrier")
+                    stdout, stderr = await child.communicate()
+                    raise AssertionError(("worker exited before barrier", stdout, stderr))
                 await asyncio.sleep(0.005)
         info = json.loads(marker.read_text())
         if phase == "provider":
@@ -342,7 +333,9 @@ async def test_restart_interrupts_and_pauses_queue_without_replay(
         )
         if phase == "tool":
             facts = await app.service.result(first.run_id)
-            assert facts.tools[0].status == "unknown" and facts.tools[0].result_available is None
+            assert facts.tools[0].status == "unknown"
+            assert facts.tools[0].executor_started is False
+            assert facts.tools[0].result_available is False
         assert app.provider.calls == 0 and len(wire.requests) == requests
         assert len(effects.read_text().splitlines()) == executions
         assert (
@@ -480,4 +473,7 @@ async def test_trusted_session_source_damage_still_fails_closed(tmp_path, wire, 
         with pytest.raises(ServiceError, match="facts_corrupt"):
             await app.evaluations.candidate(turn.run_id)
         assert len(wire.requests) == 2 and len(wire.executions) == 1
-        assert not probe.pending and probe.unsafe == 0
+        # The live dispatcher may own an unrelated bounded read. Inspect after
+        # that read settles, without permitting another checkout to race here.
+        async with asyncio.timeout(5), app.store.lock:
+            assert not probe.pending and probe.unsafe == 0

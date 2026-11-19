@@ -2,9 +2,11 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+import krim_agent
 from krim_agent.tools.mcp import arguments_model
 from krim_agent.tools.mcp_schema import MCPContract
 
@@ -56,6 +58,8 @@ def test_unsupported_regex_or_dialect_rejected_at_registration(schema):
 
 def test_output_pattern_guard_in_separate_bounded_process():
     script = """
+import sys
+sys.path.insert(0, sys.argv[1])
 from krim_agent.tools.mcp_schema import MCPContract
 schema = {'type':'object','properties':{'text':{'type':'string','pattern':'(a+)+$'}}}
 try:
@@ -65,7 +69,11 @@ except ValueError:
 else:
     raise AssertionError('pattern accepted incorrect value')
 """
+    # Test the same source tree under -I, including when the parent uses
+    # PYTHONPATH rather than an installed wheel. No environment inheritance.
+    package_root = str(Path(krim_agent.__file__).resolve().parent.parent)
     process = subprocess.run(
-        [sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=10
+        [sys.executable, "-I", "-c", script, package_root],
+        capture_output=True, text=True, timeout=10,
     )
     assert process.returncode == 0 and process.stdout.strip() == "rejected", process.stderr

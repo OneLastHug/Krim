@@ -992,7 +992,10 @@ async def test_incremental_measure_matches_wire_bytes(
     messages += [Message(role="user", content=content*100)]
     budget = selected.step.request_budget(selected.max_group, selected.remaining_tools)
     request_messages = selected.step.with_budget_prompt(messages, budget)
-    request_tools = selected.tools if budget.max_tool_calls_this_step > 0 else []
+    request_tools = (
+        selected.tools if budget.max_tool_calls_this_step is None
+        or budget.max_tool_calls_this_step > 0 else []
+    )
     expected = len(encoded({
         "messages": [message.model_dump(mode="json") for message in request_messages],
         "tools": request_tools,

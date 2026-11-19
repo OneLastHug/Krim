@@ -106,7 +106,7 @@ def mount_sessions(app: FastAPI) -> None:
     async def listing(
         workspace_id: str,
         request: Request,
-        offset: int = Query(default=0, ge=0, le=100000),
+        offset: int = Query(default=0, ge=0),
         limit: int = Query(default=20, ge=1, le=50),
     ) -> list[SessionView]:
         return await service(request).list(principal(request), workspace_id, offset, limit)
@@ -161,7 +161,7 @@ def mount_sessions(app: FastAPI) -> None:
         workspace_id: str,
         session_id: str,
         request: Request,
-        offset: int = Query(default=0, ge=0, le=100000),
+        offset: int = Query(default=0, ge=0),
         limit: int = Query(default=20, ge=1, le=50),
     ) -> list[TurnView]:
         return await service(request).turns(

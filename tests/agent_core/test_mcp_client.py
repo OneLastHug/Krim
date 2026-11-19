@@ -33,7 +33,7 @@ class _FakeSession:
         self.closed = True
 
     async def initialize(self):
-        return SimpleNamespace()
+        return SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
 
     async def list_tools(self, cursor=None):
         if not self.pages:
@@ -111,6 +111,16 @@ def _stdio_config(**changes):
     return MCPServerConfig(**values)
 
 
+def test_timeout_is_configurable_without_product_cap():
+    assert _stdio_config().timeout_seconds == 10.0
+    assert _stdio_config(timeout_seconds=3600).timeout_seconds == 3600
+    assert _stdio_config(timeout_seconds=0.05).timeout_seconds == 0.05
+    with pytest.raises(ValidationError):
+        _stdio_config(timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        _stdio_config(timeout_seconds=-1)
+
+
 def test_config_validates_transport_security_and_digest_redacts_secret_values():
     with pytest.raises(ValidationError):
         MCPServerConfig(
@@ -150,6 +160,23 @@ def test_config_validates_transport_security_and_digest_redacts_secret_values():
     assert base.configuration_digest == different_secret.configuration_digest
     assert base.configuration_digest != other_endpoint.configuration_digest
     assert "secret-one" not in base.configuration_digest
+
+    env_one = MCPServerConfig(
+        name="stdio-env",
+        transport="stdio",
+        command="fixture",
+        env={"MCP_TOKEN": "token-one", "MODE": "one"},
+    )
+    env_two = MCPServerConfig(
+        name="stdio-env",
+        transport="stdio",
+        command="fixture",
+        env={"MCP_TOKEN": "token-two", "MODE": "two"},
+    )
+    assert env_one.configuration_digest == env_two.configuration_digest
+    assert "token-one" not in env_one.configuration_digest
+    assert "token-two" not in env_two.configuration_digest
+    assert '"environment"' not in env_one.configuration_digest
 
 
 async def test_mock_discovery_selects_only_approved_tools_and_defensively_copies_schema(
@@ -252,7 +279,8 @@ async def test_mock_discovery_rejects_cursor_cycles_and_unknown_selection(
     await connection.close()
 
 
-async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success(monkeypatch):
+async def test_mock_call_errors_are_not_returned_as_success_and_large_output_completes(monkeypatch):
+    oversized = {"value": "x" * (64 * 1024 + 17)}
     _install_fake_sdk(
         monkeypatch,
         pages=[_page(_tool("echo"))],
@@ -260,11 +288,7 @@ async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success
             SimpleNamespace(
                 isError=True, structuredContent={"secret": "server detail"}, content=[]
             ),
-            SimpleNamespace(
-                isError=False,
-                structuredContent={"value": "x" * (64 * 1024)},
-                content=[],
-            ),
+            SimpleNamespace(isError=False, structuredContent=oversized, content=[]),
         ],
     )
     connection = MCPConnection(_stdio_config())
@@ -275,10 +299,7 @@ async def test_mock_call_errors_and_oversized_output_are_not_returned_as_success
         assert error.value.status == 502
         assert error.value.code == "mcp_tool_failed"
         assert "server detail" not in str(error.value)
-        with pytest.raises(ServiceError) as oversized:
-            await connection.call_tool("echo", {})
-        assert oversized.value.status == 502
-        assert oversized.value.code == "mcp_output_too_large"
+        assert await connection.call_tool("echo", {}) == oversized
     finally:
         await connection.close()
 
@@ -348,6 +369,26 @@ async def test_real_official_sdk_stdio_fixture_connects_calls_and_closes():
     finally:
         await asyncio.create_task(connection.close())
     assert connection.closed
+
+
+async def test_stdio_configuration_rejects_control_characters():
+    with pytest.raises(ValidationError):
+        _stdio_config(command="fixture\nmalicious")
+    with pytest.raises(ValidationError):
+        _stdio_config(args=("--value\x7f",))
+    with pytest.raises(ValidationError):
+        _stdio_config(env={"SAFE": "value\nextra"})
+
+
+def test_stdio_environment_clears_unapproved_inherited_values(monkeypatch):
+    from krim_agent.mcp.client import _stdio_environment
+
+    monkeypatch.setenv("PATH", "/trusted/bin")
+    monkeypatch.setenv("KRIM_AGENT_API_KEY", "private-model-key")
+    result = _stdio_environment({"MCP_TOKEN": "explicit-secret"})
+    assert result["PATH"] == "/trusted/bin"
+    assert result["KRIM_AGENT_API_KEY"] == ""
+    assert result["MCP_TOKEN"] == "explicit-secret"
 
 
 @pytest.mark.skipif(

@@ -120,6 +120,7 @@ class LocalBoundary:
             return
         if not public:
             if managed:
+                assert identities is not None
                 # 托管身份只认IdentityService；认证失败不回落LOCAL或旧全局key。
                 # 节流按来源地址分桶：坏客户端不阻其他地址的合法认证。
                 address = str(client[0]) if client is not None else ""
@@ -147,15 +148,15 @@ class LocalBoundary:
                 scope.setdefault("state", {})["principal"] = principal
             else:
                 scope.setdefault("state", {})["principal"] = LOCAL
+        # Read the complete request once; byte volume is not a product quota.
+        # Authentication/origin checks precede body reads, and JSON structure is
+        # validated before replaying a single stream to the application.
         body = bytearray()
         while True:
             part = await receive()
             if part["type"] == "http.disconnect":
                 return
             body.extend(part.get("body", b""))
-            if len(body) > 65536:
-                await reject("body_too_large", 413)
-                return
             if not part.get("more_body", False):
                 break
         if body:

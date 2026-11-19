@@ -94,8 +94,9 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
         active = (
-            await open_application(config.database, settings=config, http_config=http_config,
-                                   tool_config=tool_config)
+            await open_application(
+                config.database, settings=config, http_config=http_config, tool_config=tool_config
+            )
             if owned
             else application
         )
@@ -290,6 +291,9 @@ def create_app(
     mount_sessions(app)
     mount_traces(app)
     mount_workspace(app)
+    from .observations import mount_observations
+
+    mount_observations(app)
     from krim_agent.evaluation.product import EvaluationProduct
 
     from .evaluations import mount_evaluations
@@ -316,6 +320,35 @@ def create_app(
     from .accounts import mount_accounts
 
     mount_accounts(app)
+
+    from .context import mount_context
+    from .execution_policy import mount_execution_policy
+    from .extensions import mount_extensions
+    from .goals import mount_goals
+    from .interaction import mount_interaction
+    from .planning import mount_planning
+    from .session_lifecycle import mount_session_lifecycle
+    from .session_sidebar import mount_session_sidebar
+
+    mount_extensions(app)
+    mount_planning(app)
+    mount_interaction(app)
+    mount_context(app)
+    mount_goals(app)
+    mount_session_lifecycle(app)
+    mount_session_sidebar(app)
+    mount_execution_policy(app)
+
+    from .account_mcp import mount_account_mcp
+
+    mount_account_mcp(app)
+
+    from .sandbox import mount_sandbox
+
+    mount_sandbox(app)
+    from .development import mount_development
+
+    mount_development(app)
 
     @app.get("/v1/eval-targets")
     async def targets(request: Request) -> list[dict[str, JsonValue]]:

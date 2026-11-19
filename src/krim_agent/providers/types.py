@@ -38,20 +38,31 @@ type ModelEvent = ModelText | ModelToolCall | ModelUsage
 
 @dataclass(frozen=True, slots=True)
 class ModelRequestBudget:
-    """单次请求的剩余执行预算；不进入持久会话历史。"""
+    """单次请求的剩余执行预算；不进入持久会话历史。
 
-    remaining_steps: int
-    remaining_tool_calls: int
-    max_tool_calls_this_step: int
+    ``max_tool_calls_this_step`` 为 None 表示本步不裁剪工具批次（调度宽度
+    上限未配置）：provider与执行层必须放行模型返回的完整批次，不得把
+    None折叠成1或0。
+    """
+
+    remaining_steps: int | None
+    remaining_tool_calls: int | None
+    max_tool_calls_this_step: int | None
 
     def __post_init__(self) -> None:
-        values = (self.remaining_steps, self.remaining_tool_calls, self.max_tool_calls_this_step)
-        if any(type(value) is not int for value in values):
-            raise TypeError("model request budgets must be integers")
+        if any(value is not None and type(value) is not int
+               for value in (self.remaining_steps, self.remaining_tool_calls)):
+            raise TypeError("model run budgets must be integers or None")
+        if self.max_tool_calls_this_step is not None and type(
+                self.max_tool_calls_this_step) is not int:
+            raise TypeError("per-request tool budget must be an integer or None")
         if (
-            self.remaining_steps < 1
-            or self.remaining_tool_calls < 0
-            or not 0 <= self.max_tool_calls_this_step <= self.remaining_tool_calls
+            self.remaining_steps is not None and self.remaining_steps < 1
+            or self.remaining_tool_calls is not None and self.remaining_tool_calls < 0
+            or self.max_tool_calls_this_step is not None and self.max_tool_calls_this_step < 0
+            or self.remaining_tool_calls is not None
+            and self.max_tool_calls_this_step is not None
+            and self.max_tool_calls_this_step > self.remaining_tool_calls
         ):
             raise ValueError("model request budget is out of range")
 

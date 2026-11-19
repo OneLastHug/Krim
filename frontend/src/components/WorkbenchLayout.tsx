@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, ArrowUpRight, ChevronDown, Database, Eye, FlaskConical, Folder, MessageSquare, MoreVertical, PanelLeft, Play, RefreshCw, SquarePlus, Terminal } from "lucide-react";
+import { Activity, ArrowUpRight, Database, Eye, FlaskConical, Folder, Globe, MessageSquare, MoreVertical, PanelLeft, PanelRight, RefreshCw, SquarePlus } from "lucide-react";
 import type { AccountTab } from "./AccountSettings";
 import type { Actor } from "../lib/session-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { workbenchTitles, type WorkbenchView } from "../lib/workbench-route";
 import type { DisplayTheme } from "../lib/use-display-theme";
 import type { ReadingSize } from "../hooks/use-reading-size";
-import { chatCopy as c } from "../lib/copy";
+import type { ObsPage } from "../observability/obs-route";
+import { openDevelopmentPanel, type DevelopmentPanelSnapshot } from "../lib/workbench-events";
+import { request } from "../api";
+import { parseSidebar } from "../lib/session-sidebar";
 import { AppSidebar } from "./AppSidebar";
 import { PopoverMenu } from "./popover-menu";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 
 function useMediaQuery(query: string) {
@@ -24,9 +26,9 @@ function useMediaQuery(query: string) {
       window.addEventListener("resize", update);
       return () => window.removeEventListener("resize", update);
     }
-    const update = () => setMatches(media.matches);
-    update(); media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
+    const update = () => setMatches(window.matchMedia?.(query).matches ?? window.innerWidth <= fallbackWidth);
+    update(); media.addEventListener?.("change", update); window.addEventListener("resize", update);
+    return () => { media.removeEventListener?.("change", update); window.removeEventListener("resize", update); };
   }, [query, fallbackWidth]);
   return matches;
 }
@@ -41,7 +43,8 @@ const themes: { id: DisplayTheme; label: string }[] = [
 ];
 const readingSizes = [12, 14, 16] as const;
 
-export function WorkbenchLayout({ view, identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children }: {
+export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, identityError, accountName = "", gatewayName = "", workspaceNames = {}, accountAdmin = false, onAccountTab, onLogout, theme, onThemeSelect, readingSize, onReadingSizeSelect, chatTitle, chat, httpEnabled, beforeSessionSelect, onNavigate, onConnect, onOpenTask, canOpenTask, actions, inspector, children, onObservabilityPage, observabilityPage }: {
+  apiKey?: string;
   view: WorkbenchView; identity: Actor | null; identityLoading: boolean; identityError: string;
   accountName?: string; gatewayName?: string; workspaceNames?: Record<string, string>; accountAdmin?: boolean;
   onAccountTab?: (tab: AccountTab) => void; onLogout?: () => void;
@@ -49,26 +52,59 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   readingSize: ReadingSize; onReadingSizeSelect: (size: ReadingSize) => void;
   chatTitle: string; chat: SessionState | null;
   httpEnabled: boolean; beforeSessionSelect?: (workspace: string, sessionId: string) => void;
-  onNavigate: (view: WorkbenchView) => void; onConnect: () => void;
+  onNavigate: (view: WorkbenchView) => void; onObservabilityPage?: (page: ObsPage) => void; observabilityPage: ObsPage; onConnect: () => void;
   onOpenTask: () => void; canOpenTask: boolean;
   actions: ReactNode; inspector: ReactNode; children: ReactNode;
 }) {
-  const narrow = useMediaQuery("(max-width: 1100px)"), mobile = useMediaQuery("(max-width: 700px)");
+  const narrow = useMediaQuery("(max-width: 1200px)"), mobile = useMediaQuery("(max-width: 700px)");
   const [navOpen, setNavOpen] = useState(false), [inspectorOpen, setInspectorOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false), [createOpen, setCreateOpen] = useState(false), [moreOpen, setMoreOpen] = useState(false);
-  const [createTitle, setCreateTitle] = useState("新对话"), [createTarget, setCreateTarget] = useState("demo");
+  const [collapsed, setCollapsed] = useState(false), [moreOpen, setMoreOpen] = useState(false);
+  const [searchGroups, setSearchGroups] = useState<Record<string, string>>({});
   const [searchOpen, setSearchOpen] = useState(false), [query, setQuery] = useState(""), [searchIndex, setSearchIndex] = useState(0);
   const moreRef = useRef<HTMLButtonElement>(null);
   const previousIdentity = useRef("");
   const currentTitle = view === "chat" ? chatTitle || workbenchTitles[view] : workbenchTitles[view];
-  const sidebarProps = { active: view, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout };
+  const sidebarProps = { active: view, apiKey, onCreateInGroup: openCreate, identity, identityLoading, identityError, chat, httpEnabled, beforeSessionSelect, onClose: () => setNavOpen(false), accountName, gatewayName, workspaceNames, accountAdmin, onAccountTab, onLogout, onObservabilityPage, observabilityPage };
   const chatSession = view === "chat" ? chat : null;
   const canCreate = !!chatSession?.ready && chatSession.canWrite;
-  const workspaceConfigured = chat?.actor?.target_keys?.includes("target-workspace") === true;
   const canRefresh = !!chatSession?.ready && !!chatSession.session;
   const canCloseSession = canRefresh && chatSession.session?.status === "open" && chatSession.canWrite && !chatSession.controlling;
   const paused = chatSession?.session?.dispatch_paused === true;
   const results = chat?.ready ? chat.list.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())) : [];
+  const snapshotScope = JSON.stringify([apiKey, chat?.actor?.principal_id, chat?.actor?.generation, chat?.workspace, chat?.id]);
+  const [snapshot, setSnapshot] = useState<{ scope: string; value: DevelopmentPanelSnapshot } | null>(null);
+  const panel = snapshot?.scope === snapshotScope && chat?.ready ? snapshot.value : null;
+  useEffect(() => {
+    if (!chat?.ready || !chat.actor) return;
+    const current = { principal: chat.actor.principal_id, generation: chat.actor.generation, workspace: chat.workspace, sessionId: chat.id };
+    const receive = (event: Event) => {
+      const value = (event as CustomEvent<DevelopmentPanelSnapshot>).detail;
+      if (!value || value.principal !== current.principal || value.generation !== current.generation || value.workspace !== current.workspace || value.sessionId !== current.sessionId) return;
+      setSnapshot({ scope: snapshotScope, value });
+    };
+    window.addEventListener("krim:development-state", receive);
+    window.dispatchEvent(new CustomEvent("krim:development-state-request", { detail: current }));
+    return () => window.removeEventListener("krim:development-state", receive);
+  }, [snapshotScope, chat?.ready]);
+  function openCreate(groupId?: string) {
+    if (!chat?.ready || !chat.canWrite || chat.creating || chat.newPending) return;
+    beforeSessionSelect?.(chat.workspace, "");
+    chat.select(chat.workspace, "");
+    window.dispatchEvent(new CustomEvent("krim:new-session", { detail: { principal: chat.actor?.principal_id, generation: chat.actor?.generation, workspace: chat.workspace, group: groupId } }));
+    if (view !== "chat") onNavigate("chat");
+    setNavOpen(false);
+    requestAnimationFrame(() => document.getElementById("chat-prompt")?.focus());
+  }
+  useEffect(() => {
+    setSearchGroups({});
+    if (!searchOpen || !chat?.ready) return;
+    const controller = new AbortController();
+    void request(`/v2/workspaces/${encodeURIComponent(chat.workspace)}/session-sidebar`, apiKey, undefined, controller.signal).then(raw => {
+      const layout = parseSidebar(raw), titles = new Map(layout.groups.map(group => [group.id, group.title]));
+      if (!controller.signal.aborted) setSearchGroups(Object.fromEntries(layout.sessions.map(item => [item.session_id, titles.get(item.group_id ?? "") ?? "未分组"])));
+    }).catch(() => { /* Search remains usable when grouping metadata is unavailable. */ });
+    return () => controller.abort();
+  }, [searchOpen, apiKey, chat?.ready, chat?.workspace, identity?.principal_id, identity?.generation]);
   function openSearch() {
     if (!identity) return;
     if (view !== "chat") onNavigate("chat");
@@ -85,6 +121,10 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
   }, [identity?.principal_id, identity?.generation, identityError]);
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.isComposing && !document.querySelector('[role="dialog"]')) {
+        if (event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); openCreate(); return; }
+        if (!event.shiftKey && event.key.toLowerCase() === "b") { event.preventDefault(); if (mobile) setNavOpen(value => !value); else setCollapsed(value => !value); return; }
+      }
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.isComposing && event.key.toLowerCase() === "k") {
         if (document.querySelector('[role="dialog"]') && !searchOpen) return;
         event.preventDefault(); openSearch();
@@ -98,18 +138,20 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
     {!mobile && <div className="desktop-sidebar" inert={collapsed}>
       <AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
         theme={theme} onThemeSelect={onThemeSelect} readingSize={readingSize} onReadingSizeSelect={onReadingSizeSelect}
-        onCreate={() => setCreateOpen(true)} />
+        onCreate={() => openCreate()} />
     </div>}
     <div className="workbench-main">
-      <header className="chat-toolbar" aria-label="会话标题栏">
+      <header className={`chat-toolbar${view !== "chat" ? " is-bordered" : ""}`} aria-label="会话标题栏">
         <Button variant="ghost" className="icon-button" aria-label={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} title={mobile ? "打开导航" : collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={mobile ? navOpen : !collapsed} onClick={() => mobile ? setNavOpen(true) : setCollapsed(value => !value)}><PanelLeft aria-hidden="true" /></Button>
         <span className="actions-divider" aria-hidden="true"></span>
-        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1></div>
+        <div className="toolbar-title"><h1 title={currentTitle}>{currentTitle}</h1>{view === "chat" && panel?.projectTitle && <button type="button" className="toolbar-project-pill" title="查看项目权限详情" onClick={() => chat && openDevelopmentPanel(chat, "project")}><Folder aria-hidden="true"/>{panel.projectTitle}</button>}</div>
         <div className="toolbar-actions">
-          {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => setCreateOpen(true)}><SquarePlus aria-hidden="true" /></Button>}
-          <Button variant="ghost" className="icon-button" aria-label="终端（规划中）" title="终端（规划中）" disabled><Terminal aria-hidden="true" /></Button>
-          <Button variant="ghost" className="icon-button" aria-label="运行（规划中）" title="运行（规划中）" disabled><Play aria-hidden="true" /></Button>
-          <Button variant="ghost" className="icon-button" aria-label="打开工作目录（规划中）" title="打开工作目录（规划中）" disabled><Folder aria-hidden="true" /></Button>
+          {view === "chat" && <Button variant="ghost" className="icon-button" aria-label="新建对话" title="新建对话" disabled={!canCreate} onClick={() => openCreate()}><SquarePlus aria-hidden="true" /></Button>}
+          {view === "chat" && <>
+            <Button variant="ghost" className="icon-button" aria-label="项目文件工作区" title="项目文件工作区" aria-pressed={panel?.filesOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "files")}><Folder aria-hidden="true"/></Button>
+            <Button variant="ghost" className="icon-button" aria-label="浏览器预览" title="浏览器实时预览" aria-pressed={panel?.browserOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "browser")}><Globe aria-hidden="true"/></Button>
+            <Button variant="ghost" className="icon-button" aria-label="开发信息栏" title="开发信息栏" aria-pressed={panel?.infoOpen ?? false} disabled={!chat?.ready} onClick={() => chat && openDevelopmentPanel(chat, "info")}><PanelRight aria-hidden="true"/></Button>
+          </>}
           <Button variant="ghost" className="icon-button" ref={moreRef} aria-label="更多操作" title="更多操作" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}><MoreVertical aria-hidden="true" /></Button>
         </div>
         <PopoverMenu open={moreOpen} anchor={moreRef.current} onClose={() => setMoreOpen(false)} label="更多操作">
@@ -121,41 +163,24 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
           </button>}
           {paused && <button type="button" role="menuitem" className="menu-item" disabled={!chatSession.canWrite || chatSession.controlling} onClick={() => { setMoreOpen(false); void chatSession.control(null, "resume"); }}>恢复分发</button>}
           {canCloseSession && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.control(null, "close"); }}>关闭对话</button>}
-          <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); setInspectorOpen(open => !open); }}>
+          {chatSession?.ready && chatSession.canWrite && chatSession.session?.status === "closed" && chatSession.session?.owner_id === chatSession.actor?.principal_id && !chatSession.controlling && <>
+            {chatSession.listView !== "trash" && !chatSession.session.deleted_at && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle(chatSession.session?.archived_at ? "unarchive" : "archive"); }}>{chatSession.session.archived_at ? "取消归档对话" : "归档对话"}</button>}
+            {chatSession.listView !== "trash" && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle("trash"); }}>移入回收站</button>}
+            {chatSession.listView === "trash" && <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); void chatSession.lifecycle("restore"); }}>恢复对话</button>}
+          </>}
+          <button type="button" role="menuitem" className="menu-item" onClick={() => { setMoreOpen(false); if (view === "chat" && chat) openDevelopmentPanel(chat, "info"); else setInspectorOpen(open => !open); }}>
             {inspectorOpen ? "关闭详情面板" : "打开详情面板"}
           </button>
         </PopoverMenu>
       </header>
-      <div className={`workbench-content${inspectorOpen && !narrow ? " inspector-open" : ""}`}>
+      <div className={`workbench-content${inspectorOpen && view !== "chat" && !narrow ? " inspector-open" : ""}`}>
         <main className="workbench-page" id="main-content" tabIndex={-1}>{children}</main>
-        {inspectorOpen && !narrow && <div className="inspector-desktop">{inspector}</div>}
+        {inspectorOpen && view !== "chat" && !narrow && <div className="inspector-desktop">{inspector}</div>}
       </div>
     </div>
-    <Dialog open={navOpen && mobile} onOpenChange={setNavOpen}><DialogContent className="mobile-drawer-content" aria-label="主导航与对话" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>主导航与对话</DialogTitle></DialogHeader><AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
+    <Dialog open={navOpen && mobile} onOpenChange={setNavOpen}><DialogContent className="mobile-drawer-content" aria-label="主导航与对话" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>导航与会话</DialogTitle></DialogHeader><AppSidebar {...sidebarProps} footerExtra={actions} onNavigate={onNavigate} onOpenSearch={openSearch} onConnect={onConnect}
       theme={theme} onThemeSelect={onThemeSelect} readingSize={readingSize} onReadingSizeSelect={onReadingSizeSelect}
-      onCreate={() => setCreateOpen(true)} className="drawer-sidebar" /></DialogContent></Dialog>
-    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="session-create-dialog" aria-describedby={undefined}>
-      <DialogHeader><DialogTitle>{c.create}</DialogTitle></DialogHeader>
-      {chat && <form className="session-create-form" onSubmit={e => { e.preventDefault(); beforeSessionSelect?.(chat.workspace, ""); void chat.create(createTitle, createTarget).then(() => setCreateOpen(false)); }}>
-        <div className="session-create-field">
-          <Label htmlFor="session-title">{c.title}</Label>
-          <Input id="session-title" value={createTitle} onChange={e => setCreateTitle(e.target.value)} maxLength={128} required autoComplete="off" />
-        </div>
-        <div className="session-create-field chat-target">
-          <Label htmlFor="chat-target">{c.target}</Label>
-          <div className="session-target-select">
-            <select id="chat-target" aria-describedby={workspaceConfigured ? undefined : "session-target-help"} value={createTarget} onChange={e => setCreateTarget(e.target.value)}>
-              <option value="demo">{c.defaultTarget}</option>
-              {httpEnabled && chat.actor?.target_keys?.includes("target-http") && <option value="target-http">HTTP</option>}
-              <option value="target-workspace" disabled={!workspaceConfigured}>工作区</option>
-            </select>
-            <ChevronDown aria-hidden="true" />
-          </div>
-          {!workspaceConfigured && <p className="session-target-help" id="session-target-help" role="status">工作区未配置</p>}
-        </div>
-        <div className="dialog-actions"><Button type="submit" disabled={chat.creating || !!chat.newPending || !createTitle.trim()}>{chat.creating ? "提交中" : c.createSubmit}</Button></div>
-      </form>}
-    </DialogContent></Dialog>
+      onCreate={() => openCreate()} className="drawer-sidebar" /></DialogContent></Dialog>
     <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="session-search-dialog" aria-label="查找对话" aria-describedby={undefined}>
       <DialogHeader><DialogTitle>查找对话</DialogTitle></DialogHeader>
       <Input aria-label="搜索当前列表" placeholder="按名称查找当前列表…" value={query} onChange={event => { setQuery(event.target.value); setSearchIndex(0); }} onKeyDown={event => {
@@ -164,10 +189,10 @@ export function WorkbenchLayout({ view, identity, identityLoading, identityError
         if (event.key === "ArrowUp") { event.preventDefault(); setSearchIndex(value => Math.max(0, value - 1)); }
         if (event.key === "Enter" && results[searchIndex]) { event.preventDefault(); selectSearch(results[searchIndex]!.id); }
       }} />
-      <div className="session-search-results">{results.map((item, index) => <Button key={item.id} variant="ghost" className={index === searchIndex ? "is-highlighted" : ""} onMouseEnter={() => setSearchIndex(index)} onClick={() => selectSearch(item.id)}>{item.title}{item.status === "closed" && <span>已关闭</span>}</Button>)}{!results.length && <p>{chat?.ready ? "当前列表中没有匹配的对话" : "正在读取对话列表"}</p>}</div>
+      <div className="session-search-results search-results">{results.map((item, index) => <Button key={item.id} variant="ghost" className={`search-result-btn${index === searchIndex ? " is-highlighted" : ""}`} onMouseEnter={() => setSearchIndex(index)} onClick={() => selectSearch(item.id)}><span className="search-result-main"><strong>{item.title}</strong><small className="session-search-group">{searchGroups[item.id] ?? workspaceNames[chat?.workspace ?? ""] ?? "当前工作区"}</small></span>{item.status === "closed" && <span>已关闭</span>}</Button>)}{!results.length && <p>{chat?.ready ? "当前列表中没有匹配的对话" : "正在读取对话列表"}</p>}</div>
       <p className="session-search-scope">仅查找当前工作区已加载的对话</p>
     </DialogContent></Dialog>
-    <Dialog open={inspectorOpen && narrow} onOpenChange={setInspectorOpen}><DialogContent className="mobile-inspector-content" aria-label="对象详情" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>对象详情</DialogTitle></DialogHeader>{inspector}</DialogContent></Dialog>
+    <Dialog open={inspectorOpen && view !== "chat" && narrow} onOpenChange={setInspectorOpen}><DialogContent className="mobile-inspector-content" aria-label="对象详情" aria-describedby={undefined}><DialogHeader className="drawer-heading"><DialogTitle>对象详情</DialogTitle></DialogHeader>{inspector}</DialogContent></Dialog>
   </div>;
 }
 

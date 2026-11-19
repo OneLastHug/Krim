@@ -55,7 +55,7 @@ async def test_api_private_result_trace_approval_and_safe_errors(tmp_path):
                     "/v1/runs", content=body, headers={"content-type": "application/json"}
                 )
                 assert response.status_code == 422 and "SYNTHETIC_SECRET" not in response.text
-            assert (await client.post("/v1/runs", content="x" * 65537)).status_code == 413
+            assert (await client.post("/v1/runs", content="x" * 65537)).status_code == 422
             assert (
                 await client.get("/healthz", headers={"origin": "https://evil.invalid"})
             ).status_code == 403
@@ -140,7 +140,7 @@ async def test_exception_secret_is_private_across_trace_health_errors_and_app_lo
 ):
     import logging
 
-    from conftest import registry_for
+    from agent_helpers import registry_for
 
     caplog.set_level(logging.DEBUG, logger="krim_agent")
     secret = "SYNTHETIC_EXCEPTION_AND_RESULT_827c"
@@ -195,7 +195,7 @@ async def test_ui_static_exact_resources_headers_and_private_paths(tmp_path, key
     app = create_app(Settings(database=database, api_key=key))
     expected_csp = (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; "
         "frame-ancestors 'none'"
     )
     async with httpx.AsyncClient(
