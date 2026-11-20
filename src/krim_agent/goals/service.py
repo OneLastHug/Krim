@@ -37,13 +37,15 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import JsonValue
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from krim_agent.contracts import ServiceError
 from krim_agent.planning.contracts import PlanSnapshot
 from krim_agent.security import PrincipalContext
 from krim_agent.storage import goals as sql
-from krim_agent.storage.models import sessions
+from krim_agent.storage.goal_models import goal_continuations
+from krim_agent.storage.models import run_events, sessions
 from krim_agent.tools.session import SessionScopeResolver, SessionToolScope, ToolBundle
 
 from .continuation import (
@@ -53,11 +55,13 @@ from .continuation import (
     RESUME_TURN_PREFIX,
     TERMINAL_TURN_STATUSES,
     ContinuationDecision,
+    ContinuationPolicy,
     ContinuationQueue,
     ContinuationRequest,
     StopReason,
     TurnFinishedContext,
     continuation_text,
+    recovery_text,
 )
 from .contracts import (
     EvidenceRef,
@@ -77,7 +81,6 @@ if TYPE_CHECKING:
     from krim_agent.storage.sqlite import SQLiteStore
 
 TOOL_ACTIONS = frozenset({"set", "progress", "block", "complete"})
-REPEATED_FAILURE_THRESHOLD = 2
 REPLACEABLE_STATUSES = frozenset({"paused", "blocked"})
 _SNAPSHOT_RAISE = object()
 
@@ -94,10 +97,12 @@ class GoalService:
         *,
         snapshots: Callable[[PrincipalContext, str, str], Awaitable[PlanSnapshot]] | None = None,
         queue: ContinuationQueue | None = None,
+        continuation_policy: ContinuationPolicy | None = None,
     ) -> None:
         self.store, self.identities = store, identities
         # PlanningService.snapshot(actor, workspace_id, session_id) compatible port.
         self.snapshots, self.queue = snapshots, queue
+        self.continuation_policy = continuation_policy or ContinuationPolicy()
 
     # ---- authorization -------------------------------------------------
 
@@ -908,11 +913,44 @@ class GoalService:
                 )
                 return _stop("approval_expired", goal)
             return _stop("user_stopped", goal)
+        if await self._has_unknown_execution(conn, context.run_id):
+            # An intent without a trustworthy terminal observation may represent
+            # a committed side effect. Do not enqueue a turn that could repeat it.
+            return _stop("operation_unknown", goal)
+
+        recovery_signature: str | None = None
+        recovery_attempt = 0
+        targeted_recovery = False
         if settled is not None and settled["progressed"] is False:
-            repeats = await self._repeated_failures(conn, goal.goal_id, context.code)
-            if repeats >= REPEATED_FAILURE_THRESHOLD:
-                await self._auto_block(conn, context, goal, context.code or "failed")
-                return _stop("repeated_failure", goal)
+            if context.status == "completed" and not await self._has_waiting_task(
+                conn, context.run_id
+            ):
+                recovery_signature = await self._run_signature(conn, context.run_id)
+                if recovery_signature is not None:
+                    repeats = await self._repeated_signature_runs(
+                        conn, goal.goal_id, recovery_signature
+                    )
+                    if repeats >= self.continuation_policy.identical_no_progress_limit:
+                        used = await self._targeted_recovery_attempts(conn, goal.goal_id)
+                        if used >= self.continuation_policy.max_targeted_recovery_attempts:
+                            await self._auto_block(
+                                conn,
+                                context,
+                                goal,
+                                "repeated_no_progress",
+                                reason=(
+                                    "完成轮次连续重复相同的已观测执行轨迹且没有新增目标证据；"
+                                    "定向纠偏次数已用尽，等待用户调整目标。"
+                                ),
+                            )
+                            return _stop("repeated_no_progress", goal)
+                        targeted_recovery = True
+                        recovery_attempt = used + 1
+            elif context.status != "completed":
+                repeats = await self._repeated_failures(conn, goal.goal_id, context.code)
+                if repeats >= self.continuation_policy.repeated_failure_limit:
+                    await self._auto_block(conn, context, goal, context.code or "failed")
+                    return _stop("repeated_failure", goal)
         continue_key = _continue_key(goal, context)
         queued = await sql.continuations_with_status(conn, context.session_id, ("queued",))
         for row in queued:
@@ -934,8 +972,10 @@ class GoalService:
             origin_run_id=cast(str, goal.origin_run_id),
             source_turn_id=context.turn_id,
             source_run_id=context.run_id,
-            reason="goal_active",
-            text=continuation_text(goal),
+            reason=("repeated_no_progress_recovery" if targeted_recovery else "goal_active"),
+            recovery_attempt=recovery_attempt,
+            progress_signature=recovery_signature if targeted_recovery else None,
+            text=recovery_text(goal) if targeted_recovery else continuation_text(goal),
         )
         now = time.time()
         inserted = await sql.insert_continuation(
@@ -988,7 +1028,20 @@ class GoalService:
         if row["status"] != "queued":
             # Replayed finish: the settled row already records progress.
             return row
-        progressed = goal.revision > row["goal_revision_base"] or goal.status != "active"
+        baseline = await sql.version(conn, goal.goal_id, row["goal_revision_base"])
+        if baseline is None:
+            raise ServiceError("facts_corrupt")
+        try:
+            prior_evidence = [
+                EvidenceRef.model_validate(item).model_dump(mode="json")
+                for item in baseline["evidence_refs"]
+            ]
+        except (TypeError, ValueError):
+            raise ServiceError("facts_corrupt") from None
+        current_evidence = [item.model_dump(mode="json") for item in goal.evidence_refs]
+        progressed = goal.status != "active" or any(
+            item not in prior_evidence for item in current_evidence
+        )
         values = {
             "status": "consumed",
             "turn_id": context.turn_id,
@@ -1001,10 +1054,109 @@ class GoalService:
         await sql.update_continuation(conn, context.session_id, continue_key, values)
         return {**row, **values}
 
+    async def _run_events(self, conn: AsyncConnection, run_id: str) -> tuple[Any, ...]:
+        from krim_agent.contracts import RunEvent
+
+        rows = (
+            await conn.execute(
+                select(run_events).where(run_events.c.run_id == run_id).order_by(run_events.c.seq)
+            )
+        ).mappings().all()
+        try:
+            return tuple(RunEvent.model_validate(dict(row)) for row in rows)
+        except (TypeError, ValueError):
+            raise ServiceError("facts_corrupt") from None
+
+    async def _run_signature(self, conn: AsyncConnection, run_id: str) -> str | None:
+        from krim_agent.context.builder import deterministic_signature
+
+        return deterministic_signature(await self._run_events(conn, run_id))
+
+    async def _has_unknown_execution(self, conn: AsyncConnection, run_id: str) -> bool:
+        from krim_agent.context.builder import has_unknown_execution
+
+        return has_unknown_execution(await self._run_events(conn, run_id))
+
+    async def _has_waiting_task(self, conn: AsyncConnection, run_id: str) -> bool:
+        from krim_agent.context.builder import has_waiting_task
+
+        return has_waiting_task(await self._run_events(conn, run_id))
+
+    async def _repeated_signature_runs(
+        self, conn: AsyncConnection, goal_id: str, signature: str
+    ) -> int:
+        rows = (
+            await conn.execute(
+                select(goal_continuations)
+                .where(
+                    goal_continuations.c.goal_id == goal_id,
+                    goal_continuations.c.status == "consumed",
+                )
+                .order_by(
+                    goal_continuations.c.updated_at.desc(),
+                    goal_continuations.c.request_key.desc(),
+                )
+            )
+        ).mappings().all()
+        count = 0
+        for item in rows:
+            if item["outcome"] != "completed" or item["progressed"] is not False:
+                break
+            turn = await sql.turn_row(conn, item["turn_id"]) if item["turn_id"] else None
+            if turn is None or not isinstance(turn.get("run_id"), str):
+                break
+            previous = await self._run_signature(conn, turn["run_id"])
+            if previous is None or previous != signature:
+                break
+            count += 1
+        return count
+
+    async def _targeted_recovery_attempts(
+        self, conn: AsyncConnection, goal_id: str
+    ) -> int:
+        rows = (
+            await conn.execute(
+                select(
+                    goal_continuations.c.payload,
+                    goal_continuations.c.outcome,
+                    goal_continuations.c.progressed,
+                )
+                .where(
+                    goal_continuations.c.goal_id == goal_id,
+                    goal_continuations.c.status == "consumed",
+                )
+                .order_by(
+                    goal_continuations.c.updated_at.desc(),
+                    goal_continuations.c.request_key.desc(),
+                )
+            )
+        ).mappings().all()
+        count = 0
+        for item in rows:
+            if item["outcome"] != "completed" or item["progressed"] is not False:
+                break
+            request = _request_for({"payload": item["payload"]})
+            if request.reason == "repeated_no_progress_recovery":
+                count += 1
+        return count
+
     async def _repeated_failures(
         self, conn: AsyncConnection, goal_id: str, code: str | None
     ) -> int:
-        rows = await sql.consumed_failures(conn, goal_id)
+        rows = (
+            await conn.execute(
+                select(goal_continuations.c.code, goal_continuations.c.progressed)
+                .where(
+                    goal_continuations.c.goal_id == goal_id,
+                    goal_continuations.c.status == "consumed",
+                    goal_continuations.c.outcome == "failed",
+                )
+                .order_by(
+                    goal_continuations.c.updated_at.desc(),
+                    goal_continuations.c.request_key.desc(),
+                )
+            )
+        ).mappings().all()
         count = 0
         for item in rows:
             if item["code"] != code or item["progressed"] is not False:
@@ -1026,8 +1178,10 @@ class GoalService:
             expected_revision=goal.revision,
             action="block",
             reason=reason
-            or f"连续{REPEATED_FAILURE_THRESHOLD}次相同失败且没有新进展（{code}）；"
-            "等待用户调整目标后继续。",
+            or (
+                f"连续{self.continuation_policy.repeated_failure_limit}次相同失败且没有新证据（{code}）；"
+                "等待用户调整目标后继续。"
+            ),
         )
         digest = goal_digest(
             {

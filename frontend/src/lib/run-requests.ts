@@ -1,26 +1,36 @@
-import { object, parseRun, request, isUnadmittedCreate } from "../api";
+import { object, parseRun, request, isUnadmittedCreate } from "../api.ts";
 export const INTENT = "krim-agent-intent", CURRENT = "krim-agent-run";
+export type FormalTarget = "target-http" | "target-development";
+type StoredTarget = "demo" | "target-v1" | "target-v2" | "target-bad" | "target-http" | "target-workspace" | "target-development";
+const storedTargets = new Set<StoredTarget>(["demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace", "target-development"]);
+export function defaultFormalTarget(targetKeys?: readonly string[] | null): FormalTarget | null {
+    if (targetKeys?.includes("target-development")) return "target-development";
+    if (targetKeys?.includes("target-http")) return "target-http";
+    return null;
+}
 export interface Intent {
     text: string;
     request_key: string;
-    target: "demo";
+    target: StoredTarget;
 }
 export function savedIntent(store: Storage): Intent | null {
     const raw = store.getItem(INTENT);
     if (!raw)
         return null;
     const body = object(JSON.parse(raw));
-    if (typeof body.text !== "string" || typeof body.request_key !== "string" || body.target !== "demo")
+    if (typeof body.text !== "string" || typeof body.request_key !== "string" || !storedTargets.has(body.target as StoredTarget))
         throw new Error("invalid_record");
-    return { text: body.text, request_key: body.request_key, target: "demo" };
+    return { text: body.text, request_key: body.request_key, target: body.target as StoredTarget };
 }
-export async function createOrFind(store: Storage, text: string, key: string, current: () => boolean) {
+export async function createOrFind(store: Storage, text: string, key: string, current: () => boolean, target: FormalTarget | null) {
     if (!current()) throw new Error("request_scope_changed");
     const saved = savedIntent(store);
-    const body: Intent = saved ?? { text, request_key: crypto.randomUUID(), target: "demo" };
     if (saved && saved.text !== text)
         throw new Error("request_conflict");
-    store.setItem(INTENT, JSON.stringify(body));
+    if (!saved && !target)
+        throw new Error("target_unavailable");
+    const body: Intent = saved ?? { text, request_key: crypto.randomUUID(), target: target as FormalTarget };
+    if (!saved) store.setItem(INTENT, JSON.stringify(body));
     const path = "/v1/runs/by-key/" + encodeURIComponent(body.request_key);
     let run;
     try {

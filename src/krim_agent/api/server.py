@@ -12,6 +12,7 @@ from pydantic import JsonValue
 from krim_agent import __version__
 from krim_agent.composition import Application, open_application
 from krim_agent.config import Settings
+from krim_agent.configuration import ServiceConfiguration
 from krim_agent.contracts import (
     ApprovalReply,
     RunEvent,
@@ -78,27 +79,31 @@ def create_app(
     application: Application | None = None,
     http_config: OpenAICompatibleConfig | None = None,
     tool_config: ToolRuntimeConfig | None = None,
+    configuration: ServiceConfiguration | None = None,
 ) -> FastAPI:
-    if application is not None and (http_config is not None or tool_config is not None):
+    if application is not None and any(item is not None for item in (
+        settings, http_config, tool_config, configuration,
+    )):
+        raise ServiceError("provider_config", 422)
+    if configuration is not None and any(item is not None for item in (
+        settings, http_config, tool_config,
+    )):
         raise ServiceError("provider_config", 422)
     config = (
-        settings
-        if settings is not None
-        else (application.settings if application is not None else Settings.from_env())
+        configuration.settings if configuration is not None else
+        settings if settings is not None else
+        application.settings if application is not None else Settings()
     )
-
-    if application is None and "product_eval_enabled" not in config.model_fields_set:
-        config = config.model_copy(update={"product_eval_enabled": True})
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = application is None
         active = (
+            await open_application(config.database, configuration=configuration)
+            if owned and configuration is not None else
             await open_application(
                 config.database, settings=config, http_config=http_config, tool_config=tool_config
-            )
-            if owned
-            else application
+            ) if owned else application
         )
         assert active is not None
         app.state.application = active
@@ -198,8 +203,10 @@ def create_app(
         return {
             "status": "healthy" if current.store.healthy else "degraded",
             "edition": "agent-core",
-            "provider": "script+http" if enabled else "offline-script",
+            "provider": "http" if enabled else "unconfigured",
             "http_enabled": enabled,
+            "run_ready": enabled,
+            "run_unavailable_reason": None if enabled else "provider_not_configured",
             "product_eval_enabled": current.evaluation_product is not None,
             "evaluation_automation_enabled": current.evaluation_automation is not None,
             "active": sum(not t.done() for t in current.service.tasks.values()),

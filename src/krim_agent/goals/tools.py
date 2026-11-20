@@ -108,6 +108,7 @@ def bundle(service: GoalService, resolve: SessionScopeResolver) -> ToolBundle:
                 scoped_executor=execute,
                 capability="session_read",
                 risk="read",
+                concurrency="parallel",
                 description=(
                     "Read the session goal: revision, status, objective, completion "
                     "criteria and evidence refs, plus the latest continuation state. Omit "

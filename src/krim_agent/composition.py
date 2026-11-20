@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -17,6 +16,7 @@ from krim_agent.account_mcp.secrets import AuthenticatedSecretVault, MasterKeyri
 from krim_agent.account_mcp.service import AccountMCPService
 from krim_agent.accounts.service import IdentityService
 from krim_agent.config import SESSION_FIELDS, Settings, minimum_limit
+from krim_agent.configuration import ServiceConfiguration
 from krim_agent.context.service import ContextService
 from krim_agent.context.tools import compact_context_bundle
 from krim_agent.contracts import ServiceError, fingerprint
@@ -28,8 +28,6 @@ from krim_agent.evaluation.automation import EvaluationAutomation
 from krim_agent.evaluation.ports import AdapterLease
 from krim_agent.evaluation.product import EvaluationProduct
 from krim_agent.evaluation.service import EvaluationService
-from krim_agent.evaluation.targets import controlled_policy, make_eval_bindings
-from krim_agent.execution.linux import SandboxRunner
 from krim_agent.extensions import ExtensionService
 from krim_agent.goals import GoalService
 from krim_agent.interaction import InteractionService
@@ -37,9 +35,9 @@ from krim_agent.media.artifacts import SQLiteMediaArtifacts
 from krim_agent.media.ffmpeg import FFmpegImageTransform
 from krim_agent.media.service import ImageCapabilities
 from krim_agent.planning.service import PlanningService
-from krim_agent.providers.fake import FakeProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.providers.types import ModelProvider
+from krim_agent.providers.unconfigured import UnconfiguredProvider
 from krim_agent.runtime.contracts import settled
 from krim_agent.runtime.engine import AgentLoop
 from krim_agent.runtime.run_tools import RunTools, open_run_tools
@@ -55,19 +53,14 @@ from krim_agent.security import LOCAL, AccessPolicy, PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry, demo_policy
 from krim_agent.tools.bundles import compose_executor, policy_spec
 from krim_agent.tools.core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.memory import MemoryToolService
-from krim_agent.tools.pipeline import Middleware, Wrap
 from krim_agent.tools.registry import ToolRegistry
 from krim_agent.tools.runtime import ToolRuntime, ToolRuntimeConfig
 from krim_agent.tools.session import SessionToolScope
-from krim_agent.tools.workspace import registry as workspace_registry
 from krim_agent.workspace.artifacts import ArtifactStore
-from krim_agent.workspace.operations import WorkspaceOperations
-from krim_agent.workspace.targets import WorkspaceConfiguration
 
 
 @dataclass
@@ -82,9 +75,7 @@ class Application:
     sessions: SessionService | None = None
     access_policy: AccessPolicy | None = field(default=None, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
-    work: WorkspaceOperations | None = None
     artifacts: ArtifactStore | None = None
-    runner: SandboxRunner | None = None
     product_evaluations: EvalApplication | None = None
     evaluation_product: EvaluationProduct | None = None
     evaluation_automation: EvaluationAutomation | None = None
@@ -100,6 +91,7 @@ class Application:
     context_service: ContextService | None = None
     goals: GoalService | None = None
     media: SessionMediaHost | None = None
+    configuration_snapshot: dict[str, JsonValue] = field(default_factory=dict, repr=False)
 
     async def __aenter__(self) -> Application:
         return self
@@ -149,16 +141,8 @@ class Application:
                 await self.service.close()
         finally:
             try:
-                try:
-                    if self.work is not None:
-                        await self.work.close()
-                finally:
-                    try:
-                        if self.runner is not None:
-                            await cast(Callable[[], Awaitable[None]], self.runner.close)()
-                    finally:
-                        if self.artifacts is not None:
-                            await self.artifacts.close()
+                if self.artifacts is not None:
+                    await self.artifacts.close()
             finally:
                 try:
                     try:
@@ -201,206 +185,87 @@ async def open_application(
     settings: Settings | None = None,
     provider: ModelProvider | None = None,
     registry: ToolRegistry | None = None,
-    policy: Policy | None = demo_policy,
+    policy: Policy | None = None,
     http_config: OpenAICompatibleConfig | None = None,
     pre: PreHook | None = None,
     post: PostHook | None = None,
     access_policy: AccessPolicy | None = None,
-    workspace_profile: WorkspaceConfiguration | None = None,
-    workspace_middleware: tuple[Middleware, ...] = (),
-    workspace_wrap: Wrap | None = None,
     tool_config: ToolRuntimeConfig | None = None,
     development_configuration: DevelopmentConfiguration | None = None,
+    sandbox_configuration: SandboxConfiguration | None = None,
+    configuration: ServiceConfiguration | None = None,
+    legacy_artifact_root: Path | None = None,
+    personal_mcp_key_file: Path | None = None,
 ) -> Application:
     from sqlalchemy import select
 
-    from krim_agent.contracts import TERMINAL
     from krim_agent.providers.openai_compatible import ProviderError
-    from krim_agent.storage.models import runs, session_controls, sessions, tool_effects, turns
 
-    config = settings if settings is not None else Settings(database=path)
-    if config.provider not in ("script", "http"):
-        raise ProviderError("provider_config", 422)
-    live = config.provider == "http"
-    if config.http_mode not in ("bounded-demo", "agent") or (
-        config.http_mode == "agent" and not live
-    ):
-        raise ProviderError("provider_config", 422)
-    agent_http = live and config.http_mode == "agent"
+    if configuration is not None:
+        if any(item is not None for item in (
+            settings, provider, registry, http_config, access_policy, tool_config,
+            development_configuration, sandbox_configuration, legacy_artifact_root,
+            personal_mcp_key_file,
+        )) or path != configuration.settings.database:
+            raise ServiceError("invalid_input", 422)
+        settings = configuration.settings
+        http_config = configuration.model
+        sandbox_configuration = configuration.sandbox
+        development_configuration = configuration.development
+        tool_config = configuration.tools
+        access_policy = configuration.access
+        legacy_artifact_root = configuration.legacy_artifact_root
+        personal_mcp_key_file = configuration.personal_mcp_key_file
+    try:
+        config = Settings.model_validate(
+            settings.model_dump() if settings is not None else {"database": path}
+        )
+    except ValueError:
+        raise ServiceError("invalid_input", 422) from None
     if config.evaluation_automation_enabled and not config.product_eval_enabled:
         raise ServiceError("invalid_input", 422)
-    sandbox_configuration = (
-        SandboxConfiguration.load(config.sandbox_config_file)
-        if config.sandbox_config_file is not None
-        else None
-    )
-    if development_configuration is not None and config.development_config_file is not None:
-        raise ServiceError("sandbox_config_invalid", 422)
-    development_configuration = development_configuration or (
-        DevelopmentConfiguration.load(config.development_config_file)
-        if config.development_config_file is not None else None
-    )
-    if development_configuration is not None and sandbox_configuration is None:
-        raise ServiceError("sandbox_config_invalid", 422)
+    if development_configuration is not None:
+        if {"max_steps", "max_tool_calls", "history_compaction"} & (
+            development_configuration.model_fields_set
+        ):
+            # Do not silently discard an explicitly supplied legacy safeguard.
+            # The same limits must be declared in the shared execution policy.
+            raise ServiceError("invalid_input", 422)
+        if sandbox_configuration is None:
+            raise ServiceError("sandbox_config_invalid", 422)
     reset_source_fingerprints()
-    if workspace_profile is not None and config.workspace_profile_file is not None:
-        raise ServiceError("workspace_unavailable")
-    workspace = workspace_profile or (
-        WorkspaceConfiguration.load(config.workspace_profile_file)
-        if config.workspace_profile_file is not None
-        else None
-    )
-    if workspace is not None:
-        workspace.__post_init__()
-    raw_http_fields = set(http_config.model_fields_set) if http_config is not None else set()
     if isinstance(provider, OpenAICompatibleProvider):
-        cap = (
-            workspace.profile.max_tools_per_step
-            if workspace is not None
-            else (
-                minimum_limit(config.max_tools_per_step, provider.config.max_tool_calls)
-                if agent_http else 1
-            )
-        )
-        if (provider.binding_token() != provider._sealed
-                or provider.config.max_tool_calls is not None
-                and provider.config.max_tool_calls != cap):
+        if http_config is not None or provider.binding_token() != provider._sealed:
             raise ProviderError("provider_config", 422)
-        if workspace is not None and http_config is not None:
-            raise ProviderError("provider_config", 422)
-    if http_config is not None:
-        cap = (
-            workspace.profile.max_tools_per_step
-            if workspace is not None
-            else (config.max_tools_per_step if agent_http else 1)
-        )
-        if "max_tool_calls" in raw_http_fields and http_config.max_tool_calls is not None:
-            if agent_http and workspace is None:
-                if cap is not None and http_config.max_tool_calls > cap:
-                    raise ProviderError("provider_config", 422)
-                cap = http_config.max_tool_calls
-            elif http_config.max_tool_calls != cap:
-                raise ProviderError("provider_config", 422)
-        if workspace is not None or agent_http:
-            http_config = OpenAICompatibleConfig.model_validate(
-                http_config.model_dump() | {"max_tool_calls": cap}
-            )
-    if (
-        workspace is not None
-        and http_config is None
-        and not isinstance(provider, OpenAICompatibleProvider)
-    ):
-        raise ServiceError("workspace_unavailable")
-    primary_settings = config
-    if workspace is not None and isinstance(provider, OpenAICompatibleProvider) and not live:
-        primary_settings = config.model_copy(update={"max_tools_per_step": 1, "max_tool_calls": 1})
-    if live:
-        specified = config.model_fields_set
-        try:
-            config = Settings.model_validate(config.model_dump())
-        except ValueError:
-            raise ProviderError("provider_config", 422) from None
-        if provider is not None:
-            if http_config is not None or not isinstance(provider, OpenAICompatibleProvider):
-                raise ProviderError("provider_config", 422)
-            http_config = provider.config
-            if provider.binding_token() != provider._sealed:
-                raise ProviderError("provider_config", 422)
-        if http_config is None:
-            raise ProviderError("provider_config", 422)
+        http_config = provider.config
     if http_config is not None:
         try:
             http_config = OpenAICompatibleConfig.model_validate(http_config.model_dump())
+            http_config = http_config.model_copy(update={
+                "max_tool_calls": minimum_limit(config.max_tools_per_step,
+                                                http_config.max_tool_calls),
+            })
         except ValueError:
             raise ProviderError("provider_config", 422) from None
-    if agent_http:
-        assert http_config is not None
-        primary_settings = Settings.model_validate(
-            config.model_dump()
-            | {
-                "system_prompt": config.system_prompt
-                if "system_prompt" in specified
-                else ("你是 Krim Agent。使用获授权工具完成用户任务；依据实际结果回答。"),
-                "target_version": config.target_version
-                if "target_version" in specified
-                else ("agent-http/1"),
-                "max_tools_per_step": minimum_limit(
-                    config.max_tools_per_step, http_config.max_tool_calls,
-                ),
-                "max_request_bytes": minimum_limit(
-                    config.max_request_bytes, http_config.max_request_bytes,
-                ),
-            }
-        )
-    elif live:
-        assert http_config is not None
-        prompt = "你是 Krim Agent。使用受控工具完成用户任务，保持数值精度。"
-        version = "demo-live-xhigh/1"
-        if (
-            http_config.model != "gpt-6.1-sol"
-            or http_config.reasoning_effort != "xhigh"
-            or not http_config.api_key.get_secret_value()
-            or http_config.read_timeout_seconds is None
-            or not 60 <= http_config.read_timeout_seconds <= 90
-            or config.run_timeout is None or not 180 <= config.run_timeout <= 240
-            or config.max_active_runs != 1
-            or config.max_steps is None or config.max_steps < 2
-            or "system_prompt" in specified
-            and config.system_prompt != prompt
-            or "target_version" in specified
-            and config.target_version != version
-        ):
-            raise ProviderError("provider_config", 422)
-        try:
-            primary_settings = Settings.model_validate(
-                config.model_dump()
-                | {
-                    "system_prompt": prompt,
-                    "target_version": version,
-                    "max_steps": 2,
-                    "max_tools_per_step": 1,
-                    "max_tool_calls": 1,
-                    "max_input_bytes": min(4096, config.max_input_bytes or 4096),
-                    "max_output_bytes": min(8192, config.max_output_bytes or 8192),
-                    "max_request_bytes": min(32768, config.max_request_bytes or 32768),
-                    "tool_timeout": min(2, config.tool_timeout or 2),
-                }
-            )
-        except ValueError:
-            raise ProviderError("provider_config", 422) from None
-    elif (
-        http_config is not None
-        and http_config.read_timeout_seconds is not None
-        and http_config.read_timeout_seconds > 5
-        or isinstance(provider, OpenAICompatibleProvider)
-        and provider.config.read_timeout_seconds is not None
-        and provider.config.read_timeout_seconds > 5
-    ):
-        raise ProviderError("provider_config", 422)
-    if access_policy is not None and config.access_policy_file is not None:
-        raise ServiceError("access_policy_invalid", 422)
+    primary_settings = config.model_copy(update={
+        "max_tools_per_step": minimum_limit(
+            config.max_tools_per_step,
+            http_config.max_tool_calls if http_config is not None else None,
+        ),
+        "max_request_bytes": minimum_limit(
+            config.max_request_bytes,
+            http_config.max_request_bytes if http_config is not None else None,
+        ),
+    })
     try:
-        active_access = (
-            AccessPolicy.model_validate(deepcopy(access_policy.model_dump()))
-            if access_policy is not None
-            else AccessPolicy.load(config.access_policy_file)
-            if config.access_policy_file is not None
-            else None
-        )
+        active_access = (AccessPolicy.model_validate(deepcopy(access_policy.model_dump()))
+                         if access_policy is not None else None)
     except ValueError:
         raise ServiceError("access_policy_invalid", 422) from None
     if active_access is not None and config.api_key.get_secret_value():
         raise ServiceError("access_policy_invalid", 422)
-    tools = registry if registry is not None else builtin_registry()
-    if tool_config is not None and config.tool_config_file is not None:
-        raise ServiceError("invalid_input", 422)
-    external_config = (
-        tool_config
-        if tool_config is not None
-        else ToolRuntimeConfig.load(config.tool_config_file)
-        if config.tool_config_file is not None
-        else None
-    )
+    tools = registry if registry is not None else ToolRegistry(())
+    external_config = tool_config
     if external_config is not None and external_config.web_result_root is None:
         database_path = await asyncio.to_thread(path.absolute)
         external_config = replace(
@@ -415,18 +280,16 @@ async def open_application(
     store = await SQLiteStore.open(path, max_events=config.max_events)
     owned: list[ModelProvider] = []
     artifacts = None
-    runner = None
-    operations = None
     application: Application | None = None
     tool_runtime: ToolRuntime | None = None
     development: DevelopmentService | None = None
     try:
         identities = await IdentityService.open(store)
-        if config.personal_mcp_key_file is not None and not identities.managed:
+        if personal_mcp_key_file is not None and not identities.managed:
             raise ServiceError("accounts_not_initialized", 422)
         personal_mcp_vault = (
-            AuthenticatedSecretVault(MasterKeyring.load(config.personal_mcp_key_file))
-            if config.personal_mcp_key_file is not None
+            AuthenticatedSecretVault(MasterKeyring.load(personal_mcp_key_file))
+            if personal_mcp_key_file is not None
             else None
         )
         if identities.managed and (
@@ -439,72 +302,22 @@ async def open_application(
             raise ServiceError("accounts_not_initialized", 422)
         if sandbox_configuration is not None and not identities.managed:
             raise ServiceError("accounts_not_initialized", 422)
-        if external_config is not None:
+        if external_config is not None and (provider is not None or http_config is not None):
+            # Management-only startup must not open remote tools for an Agent
+            # that has no model and no executable binding.
             tool_runtime = await ToolRuntime.open(tools, external_config, policy)
             tools, policy = tool_runtime.registry, tool_runtime.policy
-        if workspace is None:
-            # 只读判定恢复需求；缺可信工作区资源时不先写 interrupted/paused。
-            async with store.engine.connect() as conn:
-                pending = (
-                    await conn.execute(select(runs.c.request).where(runs.c.status.not_in(TERMINAL)))
-                ).scalars()
-                needs_workspace = any(
-                    isinstance(body, dict) and body.get("target") == "target-workspace"
-                    for body in pending
-                )
-                if 3 <= store.schema_version <= 19:
-                    queued = await conn.scalar(
-                        select(turns.c.id)
-                        .join(sessions, turns.c.session_id == sessions.c.id)
-                        .where(
-                            sessions.c.target_key == "target-workspace",
-                            turns.c.status.in_(["queued", "running"]),
-                        )
-                        .limit(1)
-                    )
-                    control = await conn.scalar(
-                        select(session_controls.c.request_key)
-                        .join(sessions, session_controls.c.session_id == sessions.c.id)
-                        .where(
-                            sessions.c.target_key == "target-workspace",
-                            session_controls.c.status == "pending",
-                        )
-                        .limit(1)
-                    )
-                    needs_workspace = needs_workspace or queued is not None or control is not None
-                if store.schema_version in range(4, 20):
-                    active_effect = await conn.scalar(
-                        select(tool_effects.c.call_id)
-                        .where(tool_effects.c.phase.in_(["intent", "dispatch_intent"]))
-                        .limit(1)
-                    )
-                    needs_workspace = needs_workspace or active_effect is not None
-            if needs_workspace:
-                raise ServiceError("workspace_unavailable")
-        else:
-            artifacts = ArtifactStore(store, workspace.artifact_root)
-            operations = WorkspaceOperations(
-                store,
-                artifacts,
-                workspace.profile,
-                access_policy=active_access,
-                identities=identities if identities.managed else None,
-            )
-            # 构造器用原票据/inode/UID完成真实资源恢复；失败则仅 finally 收已拥有资源。
-            runner = SandboxRunner(
-                workspace.execution, hook=operations.runner_hook, fence=operations.runner_fence
-            )
-            operations.runner = runner
+        # Retired workspace runs are recovered as interrupted, never replayed
+        # against a different environment or newly configured model.
         await store.recover()
-        selected = (
-            provider
-            if provider is not None
-            else (
-                OpenAICompatibleProvider(http_config, max_connections=config.max_active_runs)
-                if live and http_config is not None
-                else FakeProvider()
-            )
-        )
+        from krim_agent.storage.sessions import retire_queued_targets
+
+        await retire_queued_targets(store)
+        if legacy_artifact_root is not None:
+            artifacts = ArtifactStore(store, legacy_artifact_root, read_only=True)
+        selected = (provider if provider is not None else
+                    OpenAICompatibleProvider(http_config, max_connections=config.max_active_runs)
+                    if http_config is not None else UnconfiguredProvider())
         if provider is None:
             owned.append(selected)
         executor = ToolExecutor(tools, policy, pre, post)
@@ -517,69 +330,20 @@ async def open_application(
                 mode="json", exclude={"database", "api_key", "system_prompt", *SESSION_FIELDS}
             ),
         }
-        bindings = make_eval_bindings(store, config)
-        owned.extend(b.loop.provider for b in bindings.values())
-        bindings["demo"] = RunBinding.freeze("demo", loop, primary_settings)
-        if live:
+        bindings: dict[str, RunBinding] = {}
+        if not isinstance(selected, UnconfiguredProvider):
             bindings["target-http"] = RunBinding.freeze("target-http", loop, primary_settings)
-        elif http_config is not None:
-            http_provider = OpenAICompatibleProvider(
-                http_config, max_connections=config.max_active_runs
-            )
-            owned.append(http_provider)
-            bindings["target-http"] = (
-                _make_http_binding(store, config, http_provider, registry=tools, policy=policy)
-                if tool_runtime is not None
-                else _make_http_binding(store, config, http_provider)
-            )
-        if workspace is not None:
-            if "target-http" not in bindings and isinstance(provider, OpenAICompatibleProvider):
-                bindings["target-http"] = (
-                    _make_http_binding(store, config, provider, registry=tools, policy=policy)
-                    if tool_runtime is not None
-                    else _make_http_binding(store, config, provider)
-                )
-            http_binding = bindings.get("target-http")
-            if http_binding is None or not isinstance(
-                http_binding.loop.provider, OpenAICompatibleProvider
-            ):
-                raise ServiceError("workspace_unavailable")
-            assert artifacts is not None and operations is not None and runner is not None
-            work_settings = config.model_copy(
-                update={
-                    "system_prompt": (
-                        "你是 Krim Agent。使用获授权工作区工具完成任务；模型陈述不等于完成核验。"
-                    ),
-                    "target_version": "workspace/1",
-                    "max_request_bytes": config.request_capacity(http_binding.loop.provider),
-                }
-            )
-            work_loop = AgentLoop(
-                store,
-                http_binding.loop.provider,
-                ToolExecutor(
-                    workspace_registry(operations),
-                    operations.policy,
-                    pre,
-                    post,
-                    middleware=workspace_middleware,
-                    wrap=workspace_wrap,
-                ),
-                work_settings,
-                work=operations,
-            )
-            bindings["target-workspace"] = RunBinding.freeze(
-                "target-workspace", work_loop, work_settings
-            )
         sandbox_service = (
             SandboxService(store, identities, sandbox_configuration)
             if sandbox_configuration is not None
             else None
         )
-        if sandbox_service is not None and sandbox_service.configuration.command_image is not None:
+        if (sandbox_service is not None
+                and sandbox_service.configuration.command_image is not None
+                and "target-http" in bindings):
             base_binding = bindings.get("target-http")
             if base_binding is None:
-                raise ServiceError("sandbox_config_invalid", 422)
+                raise ServiceError("provider_not_configured", 503)
             sandbox_operations = SandboxOperations(sandbox_service)
             sandbox_settings = base_binding.settings.model_copy(
                 update={"target_version": "sandbox/1"}
@@ -595,7 +359,7 @@ async def open_application(
                 "target-http", sandbox_loop, sandbox_settings
             )
         development = None
-        if development_configuration is not None:
+        if development_configuration is not None and not isinstance(selected, UnconfiguredProvider):
             if sandbox_service is None or sandbox_service.broker is None:
                 raise ServiceError("sandbox_config_invalid", 422)
             await asyncio.to_thread(DevelopmentService.prepare_private, development_configuration)
@@ -610,9 +374,6 @@ async def open_application(
             development_settings = config.model_copy(update={
                 "target_version": "development/1",
                 "run_timeout": config.run_timeout, "tool_timeout": config.tool_timeout,
-                "max_steps": development_configuration.max_steps,
-                "max_tool_calls": development_configuration.max_tool_calls,
-                "development_history_compaction": development_configuration.history_compaction,
                 "system_prompt": (
                     "你是Krim开发Agent。在已授权项目中使用Shell和文件工具完成任务。"
                     "自行计划、开发、运行测试并根据失败修复。"
@@ -647,7 +408,11 @@ async def open_application(
         interactions = InteractionService(store, feature_identities)
         extensions = ExtensionService(store, feature_identities)
         memory_tools = MemoryToolService(store, feature_identities, extensions=extensions)
-        goals = GoalService(store, feature_identities, snapshots=planning.snapshot)
+        goals = GoalService(
+            store, feature_identities, snapshots=planning.snapshot,
+            continuation_policy=(configuration.continuation_policy
+                                 if configuration is not None else None),
+        )
         context_service = ContextService(
             store,
             feature_identities,
@@ -686,7 +451,7 @@ async def open_application(
             media.bundle(),
         )
         assembled_loops: set[int] = set()
-        for key in ("demo", "target-http", "target-development"):
+        for key in ("target-http", "target-development"):
             binding = bindings.get(key)
             if binding is None:
                 continue
@@ -777,9 +542,7 @@ async def open_application(
                 goals=goals,
             ),
             active_access,
-            work=operations,
             artifacts=artifacts,
-            runner=runner,
             tool_runtime=tool_runtime,
             identities=identities,
             sandbox=sandbox_service,
@@ -792,22 +555,18 @@ async def open_application(
             media=media,
             account_mcp=account_mcp if identities.managed else None,
             development=development,
+            configuration_snapshot=(configuration.snapshot if configuration is not None else {}),
         )
         goals.queue = application.sessions
         if evaluation_path is not None:
-            adapters = {
-                "krim-script-" + key.removeprefix("target-"): AdapterLease(
-                    NeutralKrimAdapter(
-                        store,
-                        service,
-                        key,
-                        neutral_key="krim-script-" + key.removeprefix("target-"),
-                    ),
+            assert application.sessions is not None
+            adapters = ({
+                "krim-session": AdapterLease(
+                    NeutralKrimAdapter(store, service, application.sessions,
+                                       key="target-http", neutral_key="krim-session"),
                     owned=True,
                 )
-                for key in ("target-v1", "target-v2", "target-bad")
-                if key in service.bindings
-            }
+            } if "target-http" in bindings else {})
             neutral = await open_eval(evaluation_path, adapters=adapters)
             application.product_evaluations = neutral
             assert application.sessions is not None
@@ -868,16 +627,8 @@ async def open_application(
             await settled(application.close())
             raise
         try:
-            try:
-                if operations is not None:
-                    await settled(operations.close())
-            finally:
-                try:
-                    if runner is not None:
-                        await settled(cast(Callable[[], Awaitable[None]], runner.close)())
-                finally:
-                    if artifacts is not None:
-                        await settled(artifacts.close())
+            if artifacts is not None:
+                await settled(artifacts.close())
         finally:
             try:
                 try:
@@ -897,30 +648,3 @@ async def open_application(
             if isinstance(outcome, BaseException):
                 raise outcome from None
         raise
-
-
-def _make_http_binding(
-    store: SQLiteStore,
-    settings: Settings,
-    provider: OpenAICompatibleProvider,
-    *,
-    registry: ToolRegistry | None = None,
-    policy: Policy | None = controlled_policy,
-) -> RunBinding:
-    config = settings.model_copy(
-        update={
-            "system_prompt": "使用受控工具回答任务；保持数值精度。",
-            "target_version": "target-http/1",
-            "max_request_bytes": settings.request_capacity(provider),
-            "max_tools_per_step": minimum_limit(
-                settings.max_tools_per_step, provider.config.max_tool_calls,
-            ),
-        }
-    )
-    loop = AgentLoop(
-        store,
-        provider,
-        ToolExecutor(registry if registry is not None else builtin_registry(), policy),
-        config,
-    )
-    return RunBinding.freeze("target-http", loop, config)

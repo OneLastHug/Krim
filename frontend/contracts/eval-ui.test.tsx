@@ -33,7 +33,7 @@ function reads(path: string) {
     if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
     if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);
     if (path === "/v1/eval-targets")
-        return json([{ key: "target-v1" }, { key: "target-v2" }, { key: "target-bad" }]);
+        return json([{ key: "target-v1" }, { key: "target-v2" }, { key: "target-bad" }, { key: "target-http" }]);
     if (path === "/v1/eval-rules")
         return json(realReport.rules);
     if (path.includes("/report")) {
@@ -82,6 +82,39 @@ async function openSettingsView() {
 beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=eval"); calls = []; host = document.createElement("div"); document.body.append(host); root = createRoot(host); vi.stubGlobal("crypto", webcrypto); intercept(path => reads(path)); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 test("zero automatic writes", async () => { await mount(); expect(calls.filter(c => c.method === "POST")).toEqual([]); });
+test("new evaluation defaults only to a configured HTTP target", async () => {
+    await mount();
+    await until(() => expect(document.querySelector("#eval-target option")?.textContent).toBe("HTTP目标 · target-http"));
+    expect((document.getElementById("eval-target") as HTMLSelectElement).value).toBe("target-http");
+    expect(calls.filter(c => c.path === "/v1/evals" && c.method === "POST")).toEqual([]);
+});
+test("script-only catalogue leaves new evaluation unavailable", async () => {
+    intercept((path, options) => {
+        if (path === "/v1/eval-targets") return json([{ key: "target-v1" }, { key: "target-v2" }, { key: "target-bad" }]);
+        if (path === "/v1/datasets" && options.method === "POST") return json(revision(JSON.parse(String(options.body))));
+        return reads(path);
+    });
+    await mount();
+    await oneCase();
+    await click("冻结修订");
+    await until(() => expect(document.getElementById("dataset-fingerprint")).toBeTruthy());
+    expect(document.querySelectorAll("#eval-target option")).toHaveLength(0);
+    expect((document.getElementById("eval-target") as HTMLSelectElement).value).toBe("");
+    expect((document.getElementById("eval-start") as HTMLButtonElement).disabled).toBe(true);
+    expect(host.textContent).toContain("当前没有已配置的正式评测目标");
+    expect(calls.filter(c => c.path === "/v1/evals" && c.method === "POST")).toEqual([]);
+});
+test("saved scripted evaluation intent is recovered by its original key only", async () => {
+    const intent = { request_key: "original-script-key", dataset: realReport.dataset, target_key: "target-v2", rules: [], execution: { repetitions: 1, concurrency: 1, item_timeout_seconds: 12, scorer_timeout_seconds: 1, batch_timeout_seconds: 600 } };
+    localStorage.setItem(EVAL_INTENT, JSON.stringify(intent));
+    intercept(path => path.startsWith("/v1/evals/by-key/original-script-key") ? json({ ...evalView("old-script"), request_key: intent.request_key }) : reads(path));
+    await mount();
+    await click("查找评测");
+    await until(() => expect(document.getElementById("eval-id")?.textContent).toBe("old-script"));
+    expect(calls.filter(c => c.path === "/v1/evals" && c.method === "POST")).toEqual([]);
+    expect(calls.filter(c => c.path.startsWith("/v1/evals/by-key/")).every(c => c.path === "/v1/evals/by-key/original-script-key" && c.method === "GET")).toBe(true);
+    expect(localStorage.getItem(EVAL_INTENT)).toBeNull();
+});
 test("真实App提供评测与显式冻结入口", async () => { await mount(); expect(host.textContent).toContain("冻结修订"); expect(document.getElementById("case-expected")).not.toBeNull(); });
 test("freeze unauthorized keeps draft for explicit retry and one intent per double click", async () => {
     let stored: Dataset | null = null;
@@ -219,7 +252,7 @@ test("corrected catalogue authentication clears only its own stale notice", asyn
     await mount();
     await until(() => expect(document.querySelector(".evaluation-results>.notice")?.textContent).toBe("密钥无效"));
     await connect("correct");
-    await until(() => expect(document.querySelectorAll("#eval-target option")).toHaveLength(3));
+    await until(() => expect(document.querySelectorAll("#eval-target option")).toHaveLength(1));
     expect(document.querySelector(".evaluation-results>.notice")).toBeNull();
     expect(calls.filter(c => c.method === "POST")).toEqual([]);
 });

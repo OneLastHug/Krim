@@ -14,7 +14,7 @@ const calls: { path: string; method: string; body: unknown }[] = [];
 let initialTurn: ReturnType<typeof turn> | null = null;
 const CONTROLS = "krim.agent-core.controls/1";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const session = (id = "A", key = "created") => ({ id, workspace_id: "local", owner_id: "local", create_key: key, title: "演示", target_key: "demo", target_fingerprint: "0".repeat(64), context_policy: { max_bytes: 131072, max_messages: 256, reserved_output_tokens: 2048, counter_version: "approx-utf8/1" }, revision: 0, status: "open", dispatch_paused: false, created_at: 1, closed_at: null });
+const session = (id = "A", key = "created") => ({ id, workspace_id: "local", owner_id: "local", create_key: key, title: "演示", target_key: "target-http", target_fingerprint: "0".repeat(64), context_policy: { max_bytes: 131072, max_messages: 256, reserved_output_tokens: 2048, counter_version: "approx-utf8/1" }, revision: 0, status: "open", dispatch_paused: false, created_at: 1, closed_at: null });
 beforeEach(() => {
   localStorage.clear(); history.replaceState({}, "", "/ui/?view=chat"); calls.length = 0; override = undefined; initialTurn = null;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -24,7 +24,7 @@ beforeEach(() => {
     calls.push({ path, method, body });
     const overridden = override?.(path, options); if (overridden !== undefined) return overridden;
     if (path === "/healthz") return json({ http_enabled: false });
-    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-http"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
     // 账号接入后的新身份链路：legacy服务器资料返回409 account_management_unavailable，接入信息404。
     if (path === "/v2/me/profile") return json({ error: { code: "account_management_unavailable" } }, 409);
     if (path.startsWith("/v2/targets/")) return json({ error: { code: "not_found" } }, 404);

@@ -33,7 +33,16 @@ class ModelUsage(StrictModel):
     final: bool = False
 
 
+class ModelProgress(StrictModel):
+    """Content-free stream activity and cumulative tool-argument byte count."""
+
+    kind: Literal["progress"] = "progress"
+    phase: Literal["response", "text", "tool_start", "tool_arguments", "tool_complete"]
+    argument_bytes: int = Field(default=0, ge=0)
+
+
 type ModelEvent = ModelText | ModelToolCall | ModelUsage
+type ModelStreamEvent = ModelEvent | ModelProgress
 
 
 @dataclass(frozen=True, slots=True)

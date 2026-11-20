@@ -999,11 +999,9 @@ def write_profile_files(
     namespace_probe: dict[str, Any],
     manifest: dict[str, Any],
     record,
-) -> tuple[Path, Path]:
+) -> Path:
     load_project_modules()
     from krim_agent.execution.types import Profile
-    from krim_agent.workspace.targets import WorkspaceConfiguration, environment
-    from krim_agent.workspace.types import WorkspaceProfile
 
     material = run_root / "materials/d1-os"
     evidence = run_root / "evidence/d1-os"
@@ -1065,7 +1063,7 @@ def write_profile_files(
         },
     }
     write_json_exclusive(base_path, base)
-    execution = Profile(
+    Profile(
         rootfs=rootfs,
         base=base_path,
         cgroup_root=cgroup_root,
@@ -1074,35 +1072,13 @@ def write_profile_files(
         binary=BWRAP,
         **PROFILE_LIMITS,
     )
-    profile = WorkspaceProfile(max_tools_per_step=1, environment=environment(execution))
-    value = {
-        "profile": profile.model_dump(mode="json"),
-        "execution": {
-            "rootfs": str(execution.rootfs),
-            "base": str(execution.base),
-            "cgroup_root": str(execution.cgroup_root),
-            "material": str(execution.material),
-            "evidence": str(execution.evidence),
-            "wall": execution.wall,
-            "cpu_seconds": execution.cpu_seconds,
-            "memory": execution.memory,
-            "pids": execution.pids,
-            "output": execution.output,
-            "binary": str(execution.binary),
-        },
-        "artifact_root": str(run_root / "artifacts"),
-    }
-    config_path = run_root / "workspace-profile.json"
-    write_json_exclusive(config_path, value)
-    WorkspaceConfiguration.load(config_path)
     record(
-        "workspace_configuration_validated",
+        "sandbox_execution_profile_validated",
         base=str(base_path),
-        workspace_profile=str(config_path),
-        artifact_root=value["artifact_root"],
+        cgroup_root=str(cgroup_root),
         profile_limits=PROFILE_LIMITS,
     )
-    return base_path, config_path
+    return base_path
 
 
 def qualify_and_hold() -> int:
@@ -1117,7 +1093,6 @@ def qualify_and_hold() -> int:
     record = create_event_recorder(log_path)
     before_fds = fds()
     base_path: Path | None = None
-    profile_path: Path | None = None
     try:
         if os.getuid() != 1000 or os.geteuid() != 1000 or os.geteuid() == 0:
             raise PreparationError("qualify must run as the dedicated non-root krim user UID 1000")
@@ -1151,7 +1126,7 @@ def qualify_and_hold() -> int:
             raise PreparationError("delegated cgroup root contains an unremoved probe leaf")
         if list((run_root / "materials/d1-os/tickets").glob("*")):
             raise PreparationError("cgroup cleanup tickets remain")
-        base_path, profile_path = write_profile_files(
+        base_path = write_profile_files(
             run_root,
             rootfs,
             root,
@@ -1164,7 +1139,6 @@ def qualify_and_hold() -> int:
             "status": "BASE-QUALIFIED",
             "run_root": str(run_root),
             "base": str(base_path),
-            "workspace_profile": str(profile_path),
             "cgroup_root": str(root),
             "delegation": delegation,
             "bwrap_version": version,
@@ -1178,7 +1152,7 @@ def qualify_and_hold() -> int:
         write_json_exclusive(run_root / "evidence/preparation/result.json", result)
         record("qualification_complete", **result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
-        return hold_service(run_root, base_path, profile_path, record)
+        return hold_service(run_root, base_path, record)
     except BaseException as error:
         failure = {
             "status": "NOT_READY",
@@ -1193,14 +1167,12 @@ def qualify_and_hold() -> int:
             pass
         if base_path is not None:
             base_path.unlink(missing_ok=True)
-        if profile_path is not None:
-            profile_path.unlink(missing_ok=True)
         print(json.dumps(failure, ensure_ascii=False, sort_keys=True), flush=True)
         return 1
 
 
-def hold_service(run_root: Path, base_path: Path, profile_path: Path, record) -> int:
-    """Keep the systemd-owned cgroup inode alive; invalidate profile on stop."""
+def hold_service(run_root: Path, base_path: Path, record) -> int:
+    """Keep the systemd-owned cgroup inode alive; invalidate qualification on stop."""
     stopping = False
 
     def request_stop(signum, _frame):
@@ -1216,7 +1188,6 @@ def hold_service(run_root: Path, base_path: Path, profile_path: Path, record) ->
     finally:
         # A base record bound to a vanished cgroup inode must never remain usable.
         base_path.unlink(missing_ok=True)
-        profile_path.unlink(missing_ok=True)
         record("service_profile_invalidated", reason="delegated systemd service stopped")
         write_json_exclusive(
             run_root / "evidence/preparation/PROFILE-INVALIDATED.json",

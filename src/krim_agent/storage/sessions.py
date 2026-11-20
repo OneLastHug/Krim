@@ -29,6 +29,7 @@ from krim_agent.context.types import (
     upgrade_to_token_window,
 )
 from krim_agent.contracts import (
+    RETIRED_TARGETS,
     TERMINAL,
     Message,
     RunRequest,
@@ -1412,7 +1413,11 @@ async def source(
 
 
 def task_transcript(snapshot: RunSnapshot) -> list[Message]:
-    """Filter explicit summary events and infer old steps from summary_text."""
+    """Freeze a complete, event-backed projection for the run being finalized.
+
+    Existing terminal turns are not read through this write path, so repairing
+    future projections never rewrites their frozen transcript snapshots.
+    """
     from dataclasses import replace
 
     summary_steps = {
@@ -1430,7 +1435,9 @@ def task_transcript(snapshot: RunSnapshot) -> list[Message]:
             and event.data.get("step_index") in summary_steps
         )
     )
-    return builder.transcript(replace(snapshot, events=events))
+    projected = builder.transcript(replace(snapshot, events=events))
+    builder.validate_groups(projected)
+    return projected
 
 
 async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
@@ -1455,7 +1462,10 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
         )
         await conn.execute(
             update(turns)
-            .where(turns.c.id == snapshot.session_context.turn_id)
+            .where(
+                turns.c.id == snapshot.session_context.turn_id,
+                turns.c.run_id == snapshot.run.id,
+            )
             .values(
                 status="cancelled" if snapshot.run.status == "aborted" else snapshot.run.status,
                 code=snapshot.run.code,
@@ -1479,7 +1489,10 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
         )
         await conn.execute(
             update(turns)
-            .where(turns.c.id == snapshot.session_context.turn_id)
+            .where(
+                turns.c.id == snapshot.session_context.turn_id,
+                turns.c.run_id == snapshot.run.id,
+            )
             .values(
                 status="cancelled" if snapshot.run.status == "aborted" else snapshot.run.status,
                 code=snapshot.run.code,
@@ -1493,7 +1506,10 @@ async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
     status = "cancelled" if snapshot.run.status == "aborted" else snapshot.run.status
     await conn.execute(
         update(turns)
-        .where(turns.c.id == snapshot.session_context.turn_id)
+        .where(
+                turns.c.id == snapshot.session_context.turn_id,
+                turns.c.run_id == snapshot.run.id,
+            )
         .values(
             status=status,
             code=snapshot.run.code,
@@ -1544,6 +1560,177 @@ async def queued(store: SQLiteStore) -> list[str]:
         return result
 
     return await read(store, operation)
+
+
+async def retire_queued_targets(
+    store: SQLiteStore,
+    targets: frozenset[str] = RETIRED_TARGETS,
+) -> int:
+    """Interrupt old-target turns that have no run and cannot be dispatched.
+
+    Request bodies, accepted revisions, and frozen history are left untouched.
+    The status and control updates share one transaction so the session dispatcher
+    cannot see a retired queued turn after startup recovery.
+    """
+    selected = frozenset(targets)
+    if not selected:
+        return 0
+    planned_sessions: list[str] = []
+    planned_turns: list[str] = []
+    planned_resumes: list[str] = []
+    selection_complete = False
+    now = time.time()
+    result_value = {"status": "interrupted", "code": "target_retired"}
+
+    async def operation(conn: AsyncConnection) -> int:
+        nonlocal selection_complete
+        planned_sessions[:] = list(
+            await conn.scalars(
+                select(sessions.c.id).where(sessions.c.target_key.in_(selected))
+            )
+        )
+        selection_complete = True
+        if not planned_sessions:
+            return 0
+        queued_rows = (
+            await conn.execute(
+                select(turns.c.id)
+                .where(
+                    turns.c.session_id.in_(planned_sessions),
+                    turns.c.status == "queued",
+                    turns.c.run_id.is_(None),
+                )
+                .order_by(turns.c.created_at, turns.c.ordinal)
+            )
+        ).all()
+        planned_turns[:] = [cast(str, row.id) for row in queued_rows]
+        if planned_turns:
+            work_rows = (
+                await conn.execute(
+                    select(work_turns.c.turn_id, work_turns.c.run_id).where(
+                        work_turns.c.turn_id.in_(planned_turns)
+                    )
+                )
+            ).all()
+            if any(row.run_id is not None for row in work_rows):
+                raise ServiceError("facts_corrupt")
+            await conn.execute(
+                update(turns)
+                .where(
+                    turns.c.id.in_(planned_turns),
+                    turns.c.status == "queued",
+                    turns.c.run_id.is_(None),
+                )
+                .values(status="interrupted", code="target_retired", finished_at=now)
+            )
+            await conn.execute(
+                update(work_turns)
+                .where(
+                    work_turns.c.turn_id.in_(planned_turns),
+                    work_turns.c.run_id.is_(None),
+                )
+                .values(phase="interrupted", finished_at=now)
+            )
+        resume_rows = (
+            await conn.execute(
+                select(session_controls.c.id).where(
+                    session_controls.c.session_id.in_(planned_sessions),
+                    session_controls.c.kind == "resume",
+                    session_controls.c.status == "pending",
+                )
+            )
+        ).all()
+        planned_resumes[:] = [cast(str, row.id) for row in resume_rows]
+        if planned_resumes:
+            await conn.execute(
+                update(session_controls)
+                .where(
+                    session_controls.c.id.in_(planned_resumes),
+                    session_controls.c.status == "pending",
+                )
+                .values(status="completed", result=result_value, finished_at=now)
+            )
+        await conn.execute(
+            update(sessions)
+            .where(sessions.c.id.in_(planned_sessions))
+            .values(dispatch_paused=True)
+        )
+        return len(planned_turns)
+
+    async def confirm() -> int | None:
+        async def verify(conn: AsyncConnection) -> int | None:
+            if not selection_complete:
+                return None
+            if not planned_sessions:
+                return 0
+            if planned_turns:
+                turns_ok = (
+                    await conn.scalar(
+                        select(func.count()).select_from(turns).where(
+                            turns.c.id.in_(planned_turns),
+                            turns.c.status == "interrupted",
+                            turns.c.code == "target_retired",
+                            turns.c.run_id.is_(None),
+                        )
+                    )
+                    or 0
+                )
+                if turns_ok != len(planned_turns):
+                    return None
+                work_rows = (
+                    await conn.execute(
+                        select(work_turns.c.phase, work_turns.c.finished_at).where(
+                            work_turns.c.turn_id.in_(planned_turns),
+                            work_turns.c.run_id.is_(None),
+                        )
+                    )
+                ).all()
+                if any(row.phase != "interrupted" or row.finished_at is None for row in work_rows):
+                    return None
+            if planned_resumes:
+                controls_ok = (
+                    await conn.scalar(
+                        select(func.count()).select_from(session_controls).where(
+                            session_controls.c.id.in_(planned_resumes),
+                            session_controls.c.status == "completed",
+                            session_controls.c.result == result_value,
+                        )
+                    )
+                    or 0
+                )
+                if controls_ok != len(planned_resumes):
+                    return None
+            paused = (
+                await conn.scalar(
+                    select(func.count()).select_from(sessions).where(
+                        sessions.c.id.in_(planned_sessions),
+                        sessions.c.dispatch_paused.is_(True),
+                    )
+                )
+                or 0
+            )
+            if paused != len(planned_sessions):
+                return None
+            remaining = (
+                await conn.scalar(
+                    select(func.count())
+                    .select_from(turns.join(sessions, sessions.c.id == turns.c.session_id))
+                    .where(
+                        sessions.c.id.in_(planned_sessions),
+                        sessions.c.target_key.in_(selected),
+                        turns.c.status == "queued",
+                        turns.c.run_id.is_(None),
+                    )
+                )
+                or 0
+            )
+            if remaining:
+                return None
+            return len(planned_turns)
+
+        return await read(store, verify)
+
+    return await store._eval_write(operation, confirm)
 
 
 async def fail_queued(

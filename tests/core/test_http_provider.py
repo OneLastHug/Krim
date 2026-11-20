@@ -11,8 +11,8 @@ from krim_agent.providers.openai_compatible import (
     OpenAICompatibleProvider,
     ProviderError,
 )
-from krim_agent.providers.types import ModelText, ModelToolCall, ModelUsage
-from krim_agent.tools.builtins import builtin_registry
+from krim_agent.providers.types import ModelProgress, ModelText, ModelToolCall, ModelUsage
+from tests.support.builtins import builtin_registry
 
 
 @pytest.mark.parametrize(
@@ -116,6 +116,56 @@ async def test_messages_and_tools_are_projected_without_runtime_metadata():
             await provider.close()
 
 
+async def test_streamed_tool_args_emit_safe_progress_without_payloads():
+    raw_arguments = '{"token":"sensitive-value"}'
+    fragments = (raw_arguments[:9], raw_arguments[9:])
+    chunks = [
+        frame(choice({
+            "reasoning_content": "private-reasoning",
+            "tool_calls": [{
+                "index": 0,
+                "id": "wire-1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": part},
+            }],
+        }))
+        for part in fragments
+    ]
+    chunks += [frame(choice(finish="tool_calls")), frame("[DONE]")]
+    tools = [{
+        "name": "lookup",
+        "input_schema": {
+            "type": "object",
+            "properties": {"token": {"type": "string"}},
+            "required": ["token"],
+            "additionalProperties": False,
+        },
+    }]
+    async with HTTPFixture(chunks=chunks) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+        )
+        try:
+            events = [event async for event in provider.stream_with_diagnostics(
+                [Message(role="user", content="lookup")], tools, None,
+            )]
+        finally:
+            await provider.close()
+    progress = [event for event in events if isinstance(event, ModelProgress)]
+    assert any(event.phase == "tool_arguments" for event in progress)
+    assert max(event.argument_bytes for event in progress) == len(raw_arguments.encode())
+    serialized = repr([event.model_dump(mode="json") for event in progress])
+    assert "sensitive-value" not in serialized
+    assert "private-reasoning" not in serialized
+    call = next(event for event in events if isinstance(event, ModelToolCall))
+    assert call.arguments == {"token": "sensitive-value"}
+    async with HTTPFixture(chunks=chunks) as fixture:
+        normal_events = await collect(
+            fixture, messages=[Message(role="user", content="lookup")], tools=tools,
+        )
+    assert not any(isinstance(event, ModelProgress) for event in normal_events)
+
+
 async def test_explicit_output_budget_reaches_chat_wire():
     async with HTTPFixture() as fixture:
         config = OpenAICompatibleConfig(
@@ -204,8 +254,11 @@ async def test_text_stream_arrives_before_done_and_closes_early():
         )
         stream = provider.stream([Message(role="user", content="hold")], [])
         try:
-            first = await anext(stream)
-            assert isinstance(first, ModelText) and first.text == "等待"
+            while True:
+                first = await anext(stream)
+                if isinstance(first, ModelText):
+                    break
+            assert first.text == "等待"
             assert not fixture.release.is_set()
             await stream.aclose()
             await asyncio.wait_for(fixture.idle.wait(), 2)
@@ -643,14 +696,19 @@ async def d2_http_resource_record(request, monkeypatch):
         notes["owned_tasks_created"] = len(owned_tasks)
         notes["owned_tasks_joined"] = all(task.done()
             or task is asyncio.current_task() for task in owned_tasks)
-        path = Path(os.environ["KRIM_D2_EVIDENCE"]) / "cases"
-        path.mkdir(exist_ok=True)
+        # Protocol/resource assertions below always run. The archived D2
+        # qualification receipt additionally requires its original source root.
+        # Ordinary regression runs must not invent that archive to emit a receipt.
+        path = None
         consumer = Path(openai_compatible.__file__)
-        consumer_path = await asyncio.to_thread(consumer.resolve)
-        source_path = await asyncio.to_thread(
-            (Path(os.environ["KRIM_D2_ROOT"]) / "source/src").resolve
-        )
-        assert consumer_path.is_relative_to(source_path)
+        if "KRIM_D2_ROOT" in os.environ or "KRIM_D2_EVIDENCE" in os.environ:
+            path = Path(os.environ["KRIM_D2_EVIDENCE"]) / "cases"
+            path.mkdir(exist_ok=True)
+            consumer_path = await asyncio.to_thread(consumer.resolve)
+            source_path = await asyncio.to_thread(
+                (Path(os.environ["KRIM_D2_ROOT"]) / "source/src").resolve
+            )
+            assert consumer_path.is_relative_to(source_path)
         unexpected = [t.get_name() for t in asyncio.all_tasks()
                       if t is not asyncio.current_task() and t not in existing and not t.done()]
         providers = [{"calls": p.calls, "active": p.active, "closed": p.closed,
@@ -662,11 +720,12 @@ async def d2_http_resource_record(request, monkeypatch):
             "sha256": hashlib.sha256(await asyncio.to_thread(consumer.read_bytes)).hexdigest()},
             "providers": providers, "wires": wires, "FD_before": before, "FD_after": fds(),
             "FD_equal": before == fds(), "unexpected_tasks": unexpected}
-        (
-            path / (
-            hashlib.sha256(
-            request.node.nodeid.encode()).hexdigest()+".json")).write_text(json.dumps(result,
-            indent=2))
+        if path is not None:
+            (
+                path / (
+                hashlib.sha256(
+                request.node.nodeid.encode()).hexdigest()+".json")).write_text(json.dumps(result,
+                indent=2))
         assert all(p["closed"] and p["active"] == 0
             and p["calls"] == p["streams_closed"] for p in providers)
         assert all(w["active"] == 0 and w["tasks"] == 0 and not w["server_serving"] for w in wires)

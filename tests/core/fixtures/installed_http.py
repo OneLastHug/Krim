@@ -24,7 +24,7 @@ from krim_agent.evaluation.types import EvalRequest, FreezeRequest, rule
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.sdk import RunSDK
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 

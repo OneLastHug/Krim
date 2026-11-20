@@ -3,8 +3,8 @@
   "scripts": [
     {
       "path": "assets/app.js",
-      "size_bytes": 1203892,
-      "sha256": "4ca46d62e7b5836f5b6989da3629ecdc8aadafe473981f33b432332c177bc0c1"
+      "size_bytes": 1204615,
+      "sha256": "b87665f94dffac08f5d9ea9e050fded8e233e5c8ea366a5317860fbb9f26b291"
     },
     {
       "path": "assets/observability.js",

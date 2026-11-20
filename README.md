@@ -14,17 +14,19 @@ Krim Agent 是 Python Agent 工作台：在持久对话中运行任务、审批�
 uv sync --frozen
 ```
 
-启动本机 API（Application Programming Interface，应用程序接口）与同包网页；`serve` 表示提供服务：
+启动本机 API 与同包网页。统一配置样例和启动说明见 [deployment/krim.yaml.example](deployment/krim.yaml.example) 与 [deployment/CONFIGURATION.md](deployment/CONFIGURATION.md)：
 
 ```bash
-uv run --frozen python -m krim_agent serve --database .data/krim.sqlite --port 8765
+cp deployment/krim.yaml.example krim.yaml
+chmod 600 krim.yaml
+uv run --frozen python -m krim_agent serve --config krim.yaml
 ```
 
-浏览器打开 `http://127.0.0.1:8765/ui/`。默认不需要模型密钥，可在“对话”中新建会话，用 `/add 2 3`、`/echo 你好`、`/note welcome` 或 `/slow` 体验工具、审批与停止。
+样例中的 `model: null` 允许 API、管理和历史读取启动；运行就绪状态为 `false`，直到主配置中提供真实模型。数据库、环境、工具、访问策略、服务器和评测设置都在同一 YAML 文件中，主机路径相对该文件定位。
 
-HTTP 模型地址、凭据和预算由可信宿主设置，网页不接收供应商地址或密钥。网页搜索/读取与 MCP 工具通过独立宿主配置启用，支持 stdio、Streamable HTTP 和显式覆盖；工具凭据与模型凭据分离。工作区文件任务还需要有效的 Linux 隔离配置；只提供普通对话服务时，不展示为可执行文件环境。SQLite 按单进程单写端运行；无访问策略的本机模式只供回环访问。
+模型、访问令牌和 MCP 凭据只通过显式 `env:` 秘密引用接入。程序不会自动读取 `.env`，Web 页面也不接收供应商地址或密钥。`environment.sandbox` 和 `environment.development` 分别配置对应宿主环境；未配置工具时不添加演示工具。
 
-HTTP 模型接入使用 Vercel Labs Python AI SDK `ai[openai]`，固定为 `0.9.0`，支持 Chat Completions 与 Responses 协议，直连宿主配置的兼容端点。模型协议与流式事件由 SDK 处理；Krim 校验完整响应、工具参数和调用批次，再派发工具。单次请求按宿主声明的模型容量准备上下文，累计步骤、工具调用、输出、事件和运行时长默认不设应用配额。
+HTTP 模型接入使用 Vercel Labs Python AI SDK `ai[openai]`，固定为 `0.9.0`，支持 Chat Completions 与 Responses 协议，直连主配置中的兼容端点。模型协议与流式事件由 SDK 处理；Krim 校验完整响应、工具参数和调用批次，再派发工具。默认调度宽度为 8；累计步骤、工具调用、输出、事件和运行时长未配置时不设应用层限额。
 
 ## 工作流
 
@@ -43,7 +45,7 @@ HTTP 模型接入使用 Vercel Labs Python AI SDK `ai[openai]`，固定为 `0.9.
 
 目标工具记录完成条件、状态和证据；宿主在一轮完成后顺序排队下一轮。等待用户、待批、受阻、暂停、停止或会话归档时停止续跑，新用户消息优先。目标不依赖 Todo 全部勾选来判定成功。
 
-开发配置 `schema_version: 2` 默认 `resource_policy: "unlimited"`，CPU、内存、PID、进程数与累计步骤／工具调用可为 `null`；显式选择 `limited` 时只执行配置的额度。分页和一次响应等待窗口用于继续读取，不裁掉文件或日志的剩余部分。旧容器先验证身份和空闲状态再重建；已有 XFS 配额通过管理员预览／确认清除并读回，保存配置本身不代表内核额度已经迁移。旧 `WorkspaceProfile` 及已冻结审批、结果仍按其原版本核验。
+主配置 `environment.development` 使用 `schema_version: 2`、默认 `resource_policy: "unlimited"`；CPU、内存、PID 与进程数可为 `null`，任务步骤和工具调用预算统一在 `execution` 中设置。分页和一次响应等待窗口用于继续读取，不裁掉文件或日志的剩余部分。旧容器先验证身份和空闲状态再重建；已有 XFS 配额通过管理员预览／确认清除并读回，保存配置本身不代表内核额度已经迁移。旧 `WorkspaceProfile` 及已冻结审批、结果仍按其原版本核验。
 
 ## 账号管理
 
@@ -57,7 +59,7 @@ python -m krim_agent account --help
 
 首次初始化、旧身份导入和紧急恢复由可信宿主离线执行，必须先停止同一数据库的服务；服务运行中的管理走带认证的 HTTP API。旧策略导入保留 principal、workspace、角色和 legacy 标记，原本机数据需要显式认领，不会自动分给首个新账号。
 
-默认 `KRIM_AGENT_IDENTITY_MODE=auto` 会识别已经初始化的账号数据库；`managed` 要求数据库已初始化。托管模式不能同时配置旧全局 `KRIM_AGENT_API_KEY` 或访问策略文件，也不会在认证失败时回退到本机身份。`KRIM_AGENT_GATEWAY_DISPLAY_NAME` 只设置公开网关名称，不改变模型路由或凭据。
+账号模式由主配置 `access.identity_mode` 选择：`auto` 识别已初始化的账号数据库，`managed` 要求数据库已初始化。托管模式使用数据库账号，不配置全局 `access.api_key` 或静态 `access.policy`；显示名称通过 `access.gateway_display_name` 设置，不改变模型路由或凭据。
 
 管理入口为 `/v2/admin/accounts`，个人资料为 `/v2/me/profile`；写操作需要 `request_key`，资料和成员修改另需预期版本。原 `/v2/me` 结构不变。平台管理员不自动获得其他账号会话和文件的读取权限，仍需满足工作区授权。
 
@@ -65,13 +67,13 @@ python -m krim_agent account --help
 
 ## 沙箱管理后端（开发中）
 
-设置 `KRIM_AGENT_SANDBOX_CONFIG_FILE` 指向权限为 `0600` 的可信 JSON 文件可启用管理接口；未配置时保持旧行为，且需要已初始化的托管账号。配置结构为 `quotas.defaults`、`quotas.profiles`，管理员再通过 `PUT /v2/admin/accounts/{principal_id}/sandbox/quota` 设置 `profile_name` 和 `overrides`，依次覆盖全局默认与规格模板。未准备环境的写操作要求 `request_key` 和 `expected_revision`；首次配置版本为 0。已准备环境采用在线预览/确认流程，目标配置和实际限额分开。该 PUT 完整替换账号配额选择：省略或传 `profile_name: null` 使用全局默认，省略 `overrides` 清空账号覆盖；更新前先读取当前配置并明确提交需要保留的字段。
+在主配置 `environment.sandbox` 中设置 `quotas.defaults` 与 `quotas.profiles`，即可向管理员开放 `/v2/admin/accounts/{principal_id}/sandbox/quota` 配额管理。管理员通过 `profile_name` 和 `overrides` 选择规格，未准备环境的写操作要求 `request_key` 与 `expected_revision`；首次配置版本为 0。已准备环境采用在线预览/确认流程，目标配置和实际限额分开。该 PUT 完整替换账号配额选择：省略或传 `profile_name: null` 使用全局默认，省略 `overrides` 清空账号覆盖；更新前先读取当前配置并明确提交需要保留的字段。
 
 额度可调整项目环境字节/inode、检查点容量/数量/期限及独立冻结预算；`frozen_bytes: null` 表示关闭冻结能力。`GET /v2/me/sandbox` 返回合并后的配置，`/v2/me/sandbox/projects` 提供账号私有项目管理。未接通 Broker 时，状态为 `unprovisioned`，用量未知，保存配额不表示硬限制已生效。
 
-配置 `broker_socket` 可连接独立的本机存储 Broker。控制面不持有 Docker socket；Broker 校验 Unix 对端 UID，管理 XFS 项目硬配额与内部 ID 对应的持久目录。通过 `POST /v2/me/sandbox/projects/{project_id}/provision`（携带 `request_key`）准备目录后，`/files` 提供有界分页列表，`/file?path=...` 提供分块读取，`/search?query=...` 提供有界文本搜索；用量与已应用限额从 Broker 查询。
+主配置中的 `environment.sandbox.broker_socket` 可连接独立的本机存储 Broker。控制面不持有 Docker socket；Broker 校验 Unix 对端 UID，管理 XFS 项目硬配额与内部 ID 对应的持久目录。通过 `POST /v2/me/sandbox/projects/{project_id}/provision`（携带 `request_key`）准备目录后，`/files` 提供有界分页列表，`/file?path=...` 提供分块读取，`/search?query=...` 提供有界文本搜索；用量与已应用限额从 Broker 查询。
 
-存储管理默认不开放命令。可信配置显式增加 `command_image`（已安装镜像的固定 `sha256` ID），并在 Broker 用 `--image` 指定同一镜像后，`target-http` 会切为 `sandbox/1` 命令工具集；旧会话绑定不会静默改写。该目标只能通过持久会话使用，模型调用 `sandbox_command_run` 必须先人工批准，再取得项目租约、捕获执行前检查点、验证实际 cgroup 后启动 runsc。当前命令只支持受限 Python，默认20秒、网络关闭，拒绝任意宿主路径或 Docker 参数。新版文件工具包括项目查询、列表、读取、搜索、写文件、建目录和删单文件；写操作同样需审批、租约和修改前检查点。
+主配置中的 `environment.sandbox.command_image` 显式指定已安装镜像的固定 `sha256` ID，并在 Broker 用 `--image` 指定同一镜像后，`target-http` 会切为 `sandbox/1` 命令工具集；旧会话绑定不会静默改写。该目标只能通过持久会话使用，模型调用 `sandbox_command_run` 必须先人工批准，再取得项目租约、捕获执行前检查点、验证实际 cgroup 后启动 runsc。当前命令只支持受限 Python，默认20秒、网络关闭，拒绝任意宿主路径或 Docker 参数。新版文件工具包括项目查询、列表、读取、搜索、写文件、建目录和删单文件；写操作同样需审批、租约和修改前检查点。
 
 失败和取消保留已经发生的文件修改，原操作只核实、不自动重跑；回执标记 `verification=not_evaluated`，退出0不是项目完成证明。检查点独立持有者引用、两阶段 GC、多文件恢复和在线调额已接入后端。开发目标另提供持久终端、受控联网与 Git；宿主及个人 MCP 接入同一运行路径。独立冻结核验仍需专门验收。实际镜像匹配且 Broker 可用时才报告 `runtime_available=true`。
 

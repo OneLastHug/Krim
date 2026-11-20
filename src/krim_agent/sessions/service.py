@@ -19,6 +19,7 @@ from krim_agent.accounts.service import IdentityService
 from krim_agent.config import Settings, minimum_limit
 from krim_agent.context.types import ContextPolicy, upgrade_to_token_window
 from krim_agent.contracts import (
+    RETIRED_TARGETS,
     ApprovalReply,
     RunStatus,
     ServiceError,
@@ -363,8 +364,12 @@ class SessionService:
                 self.settings,
                 principal=principal,
             )
+        if body.target_key in RETIRED_TARGETS:
+            raise ServiceError("target_retired", 410)
         binding = self.runs.bindings.get(body.target_key)
         if binding is None:
+            if not self.runs.bindings:
+                raise ServiceError("provider_not_configured", 503)
             raise ServiceError("invalid_input", 422)
         binding.assert_current()
         output = (
@@ -426,6 +431,19 @@ class SessionService:
             request = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
         accepted_session = await self.get(principal, workspace, session_id, write=True)
         selected_binding = self.runs.bindings.get(accepted_session.target_key)
+        retired = accepted_session.target_key in RETIRED_TARGETS
+        if retired or selected_binding is None:
+            # Existing idempotency keys still reach the storage equality check;
+            # a new turn must never silently acquire another target's privileges.
+            try:
+                await sql.turn_by_key(self.store, session_id, request.request_key)
+            except ServiceError as error:
+                if error.code != "not_found":
+                    raise
+                raise ServiceError(
+                    "target_retired" if retired else "provider_not_configured",
+                    410 if retired else 503,
+                ) from None
         if (
             selected_binding is not None
             and selected_binding.loop.sandbox is not None

@@ -19,6 +19,7 @@ import { WorkspacePanel } from "./WorkspacePanel";
 import { Dialog, DialogContent } from "./ui/dialog";
 import { PopoverMenu } from "./popover-menu";
 import { contextCount } from "./ContextSummary";
+import { defaultFormalTarget } from "../lib/run-requests";
 import "../styles/chat-workbench.css";
 
 const EMPTY_SESSION_LIST: SessionState["list"] = [];
@@ -61,7 +62,8 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
     return () => window.removeEventListener("krim:new-session", onNew);
   }, [chat.actor?.principal_id, chat.actor?.generation, chat.workspace]);
   async function start() {
-    const target = chat.actor?.target_keys?.includes("target-development") ? "target-development" : chat.actor?.target_keys?.includes("target-http") ? "target-http" : "demo";
+    const target = defaultFormalTarget(chat.actor?.target_keys);
+    if (!target) { setStartNotice("当前账号未配置正式运行目标，无法创建新对话。"); return; }
     const text = chat.draft;
     if (!newProject || target !== "target-development") { await chat.createAndSubmit(text, target, group); return; }
     const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, group, text);

@@ -147,7 +147,6 @@ async def test_real_sdk_read_approval_resume_and_results() -> None:
         ("arguments_hash", "0" * 64),
         ("arguments", {"value": 99}),
         ("request_id", None),
-        ("expires_at", None),
         ("expires_at", "invalid"),
         ("budget_remaining", "missing"),
     ],
@@ -272,7 +271,12 @@ async def test_batch_admits_every_call_before_ordered_execution() -> None:
         [turn(("read", "one", 1), ("write", "two", 2), ("read", "three", 3)), done()]
     )
     await harness.adapter().run(model(provider), [ai.user_message("go")])
-    assert harness.trace == ["admit:read", "admit:write", "admit:read", "read", "write", "read"]
+    trace = harness.trace
+    first_dispatch = next(index for index, item in enumerate(trace) if item in {"read", "write"})
+    initial_admissions = ["admit:read", "admit:write", "admit:read"]
+    assert trace[:3] == initial_admissions
+    assert all(item.startswith("admit:") for item in trace[:first_dispatch])
+    assert [item for item in trace if item in {"read", "write"}] == ["read", "write", "read"]
 
 
 @pytest.mark.asyncio

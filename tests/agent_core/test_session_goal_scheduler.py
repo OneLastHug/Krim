@@ -19,7 +19,7 @@ from krim_agent.goals.continuation import (
     TurnFinishedContext,
 )
 from krim_agent.goals.contracts import GoalControlRequest, GoalCreateRequest, GoalUpdate
-from krim_agent.providers.fake import FakeProvider
+from tests.support.fake_provider import FakeProvider
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
 from krim_agent.storage.goal_models import goal_continuations

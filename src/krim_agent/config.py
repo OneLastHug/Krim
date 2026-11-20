@@ -1,10 +1,15 @@
-"""Trusted host runtime configuration; credentials never come from the browser."""
+"""Validated internal runtime settings projection.
 
-import os
+Service configuration is read only by :mod:`krim_agent.configuration`; this
+module deliberately has no environment or file-loading entrypoint.
+"""
+
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+
+DEFAULT_TOOL_PARALLELISM = 8
 
 
 def minimum_limit(*values: int | None) -> int | None:
@@ -18,14 +23,14 @@ class Settings(BaseModel):
         extra="forbid", frozen=True, allow_inf_nan=False, hide_input_in_errors=True
     )
     database: Path = Path(".data/krim-agent.db")
-    provider: Literal["script", "http"] = "script"
-    http_mode: Literal["bounded-demo", "agent"] = "bounded-demo"
+    provider: Literal["http"] = "http"
     api_key: SecretStr = Field(default=SecretStr(""), repr=False)
-    system_prompt: str = "你是 Krim Agent 离线演示。"
-    target_version: str = "demo-v1"
+    system_prompt: str = "你是 Krim Agent 的 AI 助手。"
+    target_version: str = "agent-v1"
     max_steps: int | None = Field(default=None, ge=1)
     max_tools_per_step: int | None = Field(default=None, ge=1)
-    read_parallelism: int = Field(default=4, ge=1)  # 执行调度宽度，不限制任务总量
+    # 执行调度宽度，不限制任务总量。
+    read_parallelism: int = Field(default=DEFAULT_TOOL_PARALLELISM, ge=1)
     max_tool_calls: int | None = Field(default=None, ge=1)
     max_active_runs: int | None = Field(default=None, ge=1)
     max_events: int | None = Field(default=None, ge=4)
@@ -39,14 +44,8 @@ class Settings(BaseModel):
     # windows remain supported without a 24-hour application ceiling.
     approval_timeout: float | None = Field(default=None, gt=0)
 
-    access_policy_file: Path | None = None
     identity_mode: Literal["auto", "managed", "legacy"] = "auto"
     gateway_display_name: str | None = Field(default=None, min_length=1, max_length=64)
-    sandbox_config_file: Path | None = None
-    development_config_file: Path | None = None
-    workspace_profile_file: Path | None = None
-    tool_config_file: Path | None = None
-    personal_mcp_key_file: Path | None = None
     product_eval_enabled: bool = False
     product_eval_database: Path | None = None
     evaluation_automation_enabled: bool = False
@@ -81,26 +80,10 @@ class Settings(BaseModel):
                       if isinstance(value, int) and not isinstance(value, bool)]
         return min(candidates) if candidates else None
 
-    @classmethod
-    def from_env(cls) -> "Settings":
-        values = {
-            name: os.environ["KRIM_AGENT_" + name.upper()]
-            for name in cls.model_fields
-            if "KRIM_AGENT_" + name.upper() in os.environ
-        }
-        return cls.model_validate(values)
-
-
 SESSION_FIELDS = frozenset(
     {
-        "access_policy_file",
         "identity_mode",
         "gateway_display_name",
-        "workspace_profile_file",
-        "sandbox_config_file",
-        "development_config_file",
-        "tool_config_file",
-        "personal_mcp_key_file",
         "product_eval_enabled",
         "product_eval_database",
         "evaluation_automation_enabled",

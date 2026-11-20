@@ -2,6 +2,7 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
+import { INTENT } from "../src/lib/run-requests";
 (globalThis as typeof globalThis & {
     IS_REACT_ACT_ENVIRONMENT: boolean;
 }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,7 +30,7 @@ function read(path: string) {
         return json({ run_id: id, trace_id: "trace-" + id, complete: true, spans: [], reasons: [] });
     return json(view(id));
 }
-const identity = { principal_id: "local", generation: 1, legacy: true, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] };
+const identity = { principal_id: "local", generation: 1, legacy: true, target_keys: ["target-http"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] };
 let identityRead = false;
 function intercept(handler: (path: string, options: RequestInit) => Promise<Response> | Response) {
     identityRead = false;
@@ -71,9 +72,18 @@ async function connectKey(key: string) {
 }
 async function click(label: string) { await act(async () => button(label).click()); }
 async function type(id: string, value: string) { await act(async () => { const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement; expect(input).toBeTruthy(); Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }
-beforeEach(() => { localStorage.clear(); history.replaceState(null, "", "/ui/?view=run"); calls = []; container = document.createElement("div"); document.body.append(container); root = createRoot(container); intercept((p) => read(p)); });
+beforeEach(() => { identity.target_keys = ["target-http"]; localStorage.clear(); history.replaceState(null, "", "/ui/?view=run"); calls = []; container = document.createElement("div"); document.body.append(container); root = createRoot(container); intercept((p) => read(p)); });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 test("真实App StrictMode及重挂没有自动POST", async () => { await mount(); await act(async () => root.unmount()); root = createRoot(container); await mount(); expect(calls.filter(c => c.method === "POST")).toEqual([]); expect(container.textContent).toContain("暂无任务"); });
+test("new run without a formal target does not create a demo request", async () => {
+    identity.target_keys = [];
+    await mount();
+    await type("prompt", "new request");
+    await click("创建任务");
+    await until(() => expect(container.textContent).toContain("当前身份未配置正式运行目标"));
+    expect(calls.filter(c => c.method === "POST")).toEqual([]);
+    expect(localStorage.getItem(INTENT)).toBeNull();
+});
 test("双击创建固定原键并只有一次POST", async () => {
     let release!: (r: Response) => void;
     const held = new Promise<Response>(r => { release = r; });
@@ -84,6 +94,7 @@ test("双击创建固定原键并只有一次POST", async () => {
     expect(calls.filter(c => c.method === "POST")).toHaveLength(1);
     const submitted = calls.find(c => c.method === "POST")!.body!;
     expect(submitted.text).toBe("/add 2 3");
+    expect(submitted.target).toBe("target-http");
     expect(typeof submitted.request_key).toBe("string");
     expect(JSON.parse(localStorage.getItem("krim-agent-intent")!)).toEqual(submitted);
     await act(async () => release(json({ ...view("A"), request_key: submitted.request_key })));
@@ -97,6 +108,7 @@ test("未知intent在404及重挂后保留原输入原键，只能查找", async
     expect((document.getElementById("prompt") as HTMLTextAreaElement).value).toBe(intent.text);
     await click("查找任务");
     expect(calls.every(c => c.method === "GET")).toBe(true);
+    expect(calls.some(c => c.path === "/v1/runs/by-key/original-key" && c.method === "GET")).toBe(true);
     expect(JSON.parse(localStorage.getItem("krim-agent-intent")!)).toEqual(intent);
     await act(async () => root.unmount());
     root = createRoot(container);

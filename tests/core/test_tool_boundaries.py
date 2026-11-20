@@ -206,7 +206,7 @@ def test_output_schema_never_fetches_remote_or_accepts_invalid_schema(schema):
 def test_registry_rejects_write_and_duplicate_names():
     from dataclasses import replace
 
-    from krim_agent.tools.builtins import builtin_registry
+    from tests.support.builtins import builtin_registry
 
     spec = builtin_registry()._frozen[0][0]
     with pytest.raises(ValueError):

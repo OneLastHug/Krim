@@ -13,7 +13,7 @@ from krim_agent.providers.openai_compatible import (
     ProviderError,
 )
 from krim_agent.providers.types import ModelText, ModelToolCall
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 
 
 class RepeatedMetadataWire(HTTPFixture):

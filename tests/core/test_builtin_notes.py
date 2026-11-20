@@ -1,7 +1,7 @@
 import pytest
 
 from krim_agent.contracts import encoded, parse_json
-from krim_agent.tools.builtins import NoteInput, builtin_registry, lookup_note
+from tests.support.builtins import NoteInput, builtin_registry, lookup_note
 from krim_agent.tools.output import OutputContract
 
 

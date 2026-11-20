@@ -22,6 +22,7 @@ from ai.types.tools import ToolApproval
 from ai.types.tools import ToolSpec as SDKToolSpec
 from pydantic import JsonValue
 
+from krim_agent.config import DEFAULT_TOOL_PARALLELISM
 from krim_agent.contracts import (
     TERMINAL,
     ServiceError,
@@ -38,7 +39,7 @@ from krim_agent.development.contracts import (
     RunOwnership,
 )
 from krim_agent.interaction.contracts import RequestPending
-from krim_agent.runtime.contracts import RunStore
+from krim_agent.runtime.contracts import RunStore, settled
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Admission, StartupHandoff, ToolContext, ToolExecutor
 
@@ -73,6 +74,75 @@ class _Entry:
     # 后置 None，executor 在 entered 边界释放。停靠/异常路径由 ordered() 兜底。
 
 
+class _ExecutionSlots:
+    """Gate SDK-owned tool tasks with a fair exclusive-call barrier."""
+
+    def __init__(self, width: int, entries: Sequence[_Entry]) -> None:
+        self.width = width
+        self.entries = tuple(entries)
+        self.order = {id(entry): index for index, entry in enumerate(entries)}
+        self.condition = asyncio.Condition()
+        self.ready = {
+            id(entry) for entry in entries if entry.admission.decision == "allow"
+        }
+        self.active: set[int] = set()
+
+    @staticmethod
+    def parallel(entry: _Entry) -> bool:
+        return (
+            entry.invocation.name not in INPUT_TOOLS
+            and entry.admission.spec.concurrency == "parallel"
+        )
+
+    async def enter(self, entry: _Entry, check_stop: Callable[[], Awaitable[None]]) -> None:
+        key = id(entry)
+        async with self.condition:
+            self.ready.add(key)
+            while True:
+                earlier_exclusive = any(
+                    id(candidate) in self.ready
+                    and self.order[id(candidate)] < self.order[key]
+                    and not self.parallel(candidate)
+                    for candidate in self.entries
+                )
+                active_exclusive = any(
+                    not self.parallel(next(item for item in self.entries if id(item) == active))
+                    for active in self.active
+                )
+                if self.parallel(entry):
+                    admitted = (
+                        not active_exclusive
+                        and len(self.active) < self.width
+                        and not earlier_exclusive
+                    )
+                else:
+                    waiting = sorted(
+                        (item for item in self.entries if id(item) in self.ready),
+                        key=lambda item: self.order[id(item)],
+                    )
+                    admitted = not self.active and bool(waiting) and waiting[0] is entry
+                if admitted:
+                    self.ready.discard(key)
+                    self.active.add(key)
+                    self.condition.notify_all()
+                    return
+                try:
+                    await asyncio.wait_for(self.condition.wait(), timeout=0.25)
+                except TimeoutError:
+                    await check_stop()
+
+    async def leave(self, entry: _Entry) -> None:
+        async with self.condition:
+            self.ready.discard(id(entry))
+            self.active.discard(id(entry))
+            self.condition.notify_all()
+
+    async def skip(self, entry: _Entry) -> None:
+        async with self.condition:
+            self.ready.discard(id(entry))
+            self.condition.notify_all()
+
+
 class _OrderedAgent(ai.Agent):
     """Keep SDK's entire loop; wrap only the public resolve dispatch seam."""
 
@@ -88,14 +158,17 @@ class _OrderedAgent(ai.Agent):
         entry = owner.entries[part.tool_call_id]
 
         async def ordered() -> events.ToolCallResult:
-            for predecessor in entry.predecessors:
-                await predecessor.wait()
             try:
+                for predecessor in entry.predecessors:
+                    await predecessor.wait()
                 await owner.check_stop()
-                if owner.deferred and (not owner.batch_approvals
-                        or owner.deferred.metadata.get("interaction_request_id")):
-                    # Do not start a later call while an earlier one is parked.
-                    # It remains in the checkpoint's assistant turn for replay.
+                if owner.deferred and (
+                    owner.deferred.metadata.get("interaction_request_id")
+                    or not owner.batch_approvals
+                    or entry.admission.decision != "ask"
+                ):
+                    # Approval prompts may batch, but later effects cannot cross an
+                    # unresolved declaration-order barrier.
                     return deferred_tool_result(
                         owner.deferred,
                         tool_call_id=part.tool_call_id,
@@ -178,6 +251,8 @@ class _OrderedAgent(ai.Agent):
                         # execute() 已移交交接单元时为 None；停靠/异常在此兜底释放。
                         startup_lock.release()
             finally:
+                if owner._slots is not None:
+                    await settled(owner._slots.skip(entry))
                 entry.gate.set()
 
         # The SDK runner deduplicates by this id *within this run only*.
@@ -206,7 +281,7 @@ class SDKAdapter:
         environment: EnvironmentHandle | None = None,
         ownership: RunOwnership | None = None,
         run_id: str | None = None,
-        read_parallelism: int = 1,
+        read_parallelism: int = DEFAULT_TOOL_PARALLELISM,
         batch_approvals: bool = False,
         fail_on_tool_error: bool = False,
         read_result: Callable[[str], Awaitable[JsonValue]],
@@ -240,6 +315,7 @@ class SDKAdapter:
         self.startup_gate = startup_gate
         self.authorize_media, self.media_limits = authorize_media, media_limits
         self.entries: dict[str, _Entry] = {}
+        self._slots: _ExecutionSlots | None = None
         self.replies: dict[str, bool] = {}
         self.deferred: messages.HookPart[Any] | None = None
         self.step = 0
@@ -321,33 +397,17 @@ class SDKAdapter:
         return ToolContext(emit=emit, approve=unexpected_approval, timeout=5.0)
 
     def order(self, entries: Sequence[_Entry]) -> None:
-        """Fence native SDK tasks in bounded adjacent read groups.
-
-        SDK ToolRunner still creates, joins and cancels every task. These gates
-        express host ordering only; they do not execute or schedule a tool.
-        """
-        plan = list(entries)
-        if self.batch_approvals:
-            # Legacy host batches execute all allowed calls before opening the
-            # common approval window. A first ask must not consume that window
-            # while later allowed work is still running.
-            plan = [entry for entry in entries if entry.admission.decision != "ask"]
-            plan += [entry for entry in entries if entry.admission.decision == "ask"]
-        previous: tuple[asyncio.Event, ...] = ()
-        index = 0
-        while index < len(plan):
-            group = [plan[index]]
-            while (len(group) < self.read_parallelism
-                   and index + len(group) < len(plan)
-                   and group[-1].admission.spec.risk == "read"
-                   and plan[index + len(group)].admission.spec.risk == "read"
-                   and group[-1].admission.decision == "allow"
-                   and plan[index + len(group)].admission.decision == "allow"):
-                group.append(plan[index + len(group)])
-            for entry in group:
-                entry.predecessors = previous
-            previous = tuple(entry.gate for entry in group)
-            index += len(group)
+        """Fence SDK tasks by declaration; the gate never creates or schedules tasks."""
+        self._slots = _ExecutionSlots(self.read_parallelism, entries)
+        prior_exclusive: list[asyncio.Event] = []
+        for entry in entries:
+            entry.predecessors = tuple(prior_exclusive)
+            is_parallel = (
+                self._slots.parallel(entry) and entry.admission.decision != "ask"
+            )
+            if entry.admission.decision != "deny" and not is_parallel:
+                # A pending approval is a barrier but never owns an execution slot.
+                prior_exclusive.append(entry.gate)
 
     async def revalidate(self, entry: _Entry, *, after_approval: bool = False) -> Admission:
         """队列→实际执行边界（及批准回程后）的会话策略重验（ADR-0015 热切换）。
@@ -459,8 +519,9 @@ class SDKAdapter:
                     span_id=entry.invocation.span_id,
                     arguments=cast(dict[str, JsonValue],
                                    parse_json(entry.invocation.arguments_json)),
-                    status="unknown", decision="deny", executor_started=False,
-                    result_available=False,
+                    status="unknown", decision=entry.admission.decision,
+                    executor_started=False, result_available=False,
+                    code=entry.admission.code,
                 ).model_dump(mode="json"),
             )
         self.entries.update(prepared)
@@ -531,8 +592,15 @@ class SDKAdapter:
             await self.context().emit("tool_end", observation.model_dump(mode="json"))
             await self.check_stop()
             return observation.model_dump(mode="json")
+        slots = self._slots
+        needs_slot = entry.admission.decision != "deny"
+        if needs_slot:
+            if slots is None:
+                raise ValueError("tool execution has no response admission gate")
+            await slots.enter(entry, self.check_stop)
         token = CURRENT_OPERATION.set(identity)
         try:
+            await self.check_stop()
             dispatch_context = self.context()
             if handoff is not None:
                 dispatch_context = replace(dispatch_context, startup_gate=handoff)
@@ -541,10 +609,14 @@ class SDKAdapter:
             )
         finally:
             CURRENT_OPERATION.reset(token)
-            if handoff is not None and handoff.gate is not None:
-                # executor 未到达 entered 边界（lookup 短路/前置异常）：兜底释放。
-                unreleased, handoff.gate = handoff.gate, None
-                unreleased.release()
+            try:
+                if needs_slot and slots is not None:
+                    await settled(slots.leave(entry))
+            finally:
+                if handoff is not None and handoff.gate is not None:
+                    # executor 未到达 entered 边界（lookup 短路/前置异常）：兜底释放。
+                    unreleased, handoff.gate = handoff.gate, None
+                    unreleased.release()
         # Existing RunStore tool_end is the result record; the C0 receipt stores
         # only its reference. A crash before this receipt leaves accepted/unknown,
         # which lookup will not dispatch again.

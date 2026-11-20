@@ -92,6 +92,7 @@ def bundle(service: PlanningService, resolve: SessionScopeResolver) -> ToolBundl
                 scoped_executor=execute,
                 capability="session_read",
                 risk="read",
+                concurrency="parallel",
                 description=(
                     "Read the current session plan, counts and revision. Use statuses to focus "
                     "on pending/in_progress/blocked steps. Continue with next_offset and the "

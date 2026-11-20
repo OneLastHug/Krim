@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import time
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -25,21 +23,9 @@ from krim_agent.api.sessions import stream_recheck as session_stream_recheck
 from krim_agent.config import Settings
 from krim_agent.contracts import RunEvent, ServiceError
 from krim_agent.evaluation.automation import EvaluationAutomation
-from krim_agent.runtime.service import RunBinding
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
 from krim_agent.sessions.types import SessionCreate, TurnRequest, TurnView
 from krim_agent.storage import sessions as session_sql
-from krim_agent.tools.builtins import demo_policy
-from krim_agent.workspace.operations import WorkspaceOperations
-from krim_agent.workspace.types import (
-    ArtifactRevision,
-    Completion,
-    ExecutionAccess,
-    GrantSnapshot,
-    WorkFrame,
-    WorkspaceProfile,
-    WorkspaceTurnRequest,
-)
 
 
 def directory() -> dict[str, PrincipalContext]:
@@ -342,7 +328,7 @@ async def test_managed_session_stream_terminates_on_rotation(tmp_path, wire, mon
         app.identities = stub
         alice = stub.directory["alice"]
         session = await app.sessions.create(
-            alice, "alpha", SessionCreate(request_key="sse", target_key="demo")
+            alice, "alpha", SessionCreate(request_key="sse", target_key="target-http")
         )
         turn = await app.sessions.submit(
             alice,
@@ -415,151 +401,6 @@ def create_app_local(app):
     return create_app(application=app)
 
 
-def workspace_profile() -> WorkspaceProfile:
-    return WorkspaceProfile(environment={}, max_tools_per_step=1)
-
-
-def work_frame(actor: str, grant: GrantSnapshot) -> WorkFrame:
-    session_id = str(uuid.uuid4())
-    return WorkFrame(
-        session_id=session_id,
-        turn_id=str(uuid.uuid4()),
-        actor_id=actor,
-        grant=grant,
-        original_request=WorkspaceTurnRequest(
-            request_key="frame",
-            text="t",
-            expected_revision=0,
-            completion=Completion(),
-        ),
-        input_revision=ArtifactRevision(
-            revision_id=str(uuid.uuid4()),
-            session_id=session_id,
-            parent_id=None,
-            revision=0,
-            source_kind="input",
-            request_key="frame",
-            request_hash="0" * 64,
-            manifest=(),
-            manifest_hash="0" * 64,
-            producer_run_id=None,
-            producer_call_id=None,
-        ),
-        source_refs=(),
-        subject={},
-        conditions={},
-        effective_fingerprint="0" * 64,
-        phase="running",
-        verification=None,
-    )
-
-
-def binding_loop(operations: WorkspaceOperations, settings: Settings) -> SimpleNamespace:
-    """RunBinding.runtime_identities所需的最小loop形状；仅取对象身份。"""
-    provider = SimpleNamespace(stream=lambda self=None: None)
-    executor = SimpleNamespace(
-        registry=SimpleNamespace(),
-        policy=demo_policy,
-        pre=None,
-        post=None,
-        middleware=(),
-        wrap=None,
-        execute=lambda invocation, parameters, context: None,
-    )
-    verifier = SimpleNamespace(
-        verify=lambda *args, **kwargs: None,
-        descriptor=lambda: {},
-        binding_token=lambda: "token",
-        assert_current=lambda: None,
-    )
-    return SimpleNamespace(
-        provider=provider,
-        executor=executor,
-        settings=settings,
-        work=operations,
-        sandbox=None,
-        context_service=None,
-        session_tool_host=None,
-        session_media=None,
-        _verifier=verifier,
-    )
-
-
-def artifact_stub() -> SimpleNamespace:
-    return SimpleNamespace(
-        fd=3,
-        root=Path("/tmp"),
-        _blob=lambda *args: None,
-        _stage=lambda *args: None,
-        input=lambda *args: None,
-        publish=lambda *args: None,
-        _owned=lambda *args: None,
-    )
-
-
-def test_workspace_fence_and_dispatch_use_live_authorization(tmp_path):
-    stub = StubIdentities(directory(), {"Bearer alice-managed": "alice"})
-    operations = WorkspaceOperations(
-        None, artifact_stub(), workspace_profile(), identities=stub
-    )
-    alice = stub.directory["alice"]
-    grant = ExecutionAccess(alice, "alpha", str(uuid.uuid4())).grant()
-    frame = work_frame("alice", grant)
-    assert operations.principal(frame) == alice
-    scope = operations.scope(frame, lambda: None, time.monotonic() + 30)
-    scope.check()
-    # 改名不改变PrincipalContext：围栏继续通过（无generation/membership漂移）。
-    scope.check()
-    # 轮换：generation与memberships不变，已接受任务继续。
-    assert stub.resolve("alice") == alice
-    scope.check()
-    # 成员降级：下一授权节点按新权限复核，围栏拒绝旧快照。
-    stub.directory["alice"] = PrincipalContext(
-        "alice", 1, (Membership(workspace_id="alpha", role="viewer"),)
-    )
-    with pytest.raises(ServiceError, match="target_binding_changed"):
-        scope.check()
-    # 成员完全移除：授权读取本身失败，同样不放行。
-    stub.directory["alice"] = PrincipalContext("alice", 1, ())
-    with pytest.raises(ServiceError, match="not_found"):
-        scope.check()
-    # 停用：实时解析失败，不再放行任何副作用。
-    stub.blocked.add("alice")
-    with pytest.raises(ServiceError, match="permission_denied"):
-        operations.principal(frame)
-
-
-def test_workspace_legacy_operations_unchanged():
-    operations = WorkspaceOperations(None, artifact_stub(), workspace_profile())
-    grant = GrantSnapshot(
-        actor_id="local",
-        generation=1,
-        workspace_id="local",
-        operations=("read", "write", "exec", "approve"),
-    )
-    frame = work_frame("local", grant)
-    assert operations.principal(frame).principal_id == "local"
-
-
-def test_runtime_binding_survives_rotation_and_renames(tmp_path):
-    stub = StubIdentities(directory(), {"Bearer alice-managed": "alice"})
-    settings = Settings(database=tmp_path / "binding.sqlite")
-    operations = WorkspaceOperations(
-        None, artifact_stub(), workspace_profile(), identities=stub
-    )
-    loop = binding_loop(operations, settings)
-    frozen = RunBinding.runtime_identities(loop)
-    # 轮换/改名只改变服务内部状态：稳定引用下绑定指纹不漂移。
-    stub.rotate("Bearer alice-managed", "Bearer alice-managed-2")
-    stub.directory["alice"] = PrincipalContext(
-        "alice", 1, (Membership(workspace_id="alpha", role="admin"),)
-    )
-    assert RunBinding.runtime_identities(loop) == frozen
-    # 替换服务对象属于环境漂移：绑定必须检测到。
-    operations.identities = StubIdentities(directory(), {})
-    assert RunBinding.runtime_identities(loop) != frozen
-
-
 def turn_view(owner: str, workspace: str = "alpha") -> TurnView:
     return TurnView(
         id=str(uuid.uuid4()),
@@ -601,11 +442,11 @@ async def test_managed_dispatch_validates_queue_owner(tmp_path, wire):
         assert app.sessions._dispatch_block(view) == "permission_denied"
         app.sessions._revoked.discard("alice")
         assert app.sessions._dispatch_block(turn_view("bob")) is None
-        # viewer失去写授权：其queued demo/http任务不再派发。
+        # viewer失去写授权：其queued target-http任务不再派发。
         assert app.sessions._dispatch_block(turn_view("viewer")) == "permission_denied"
         # 入队前实时复核：托管校验拒绝的主体不能再排队。
         session = await app.sessions.create(
-            alice, "alpha", SessionCreate(request_key="blocked", target_key="demo")
+            alice, "alpha", SessionCreate(request_key="blocked", target_key="target-http")
         )
         stub.validate_failure = True
         with pytest.raises(ServiceError, match="permission_denied"):
@@ -627,7 +468,7 @@ async def test_managed_dispatch_validates_queue_owner(tmp_path, wire):
             TurnRequest(request_key="blocked-3", text="/add 2 3", expected_revision=0),
         )
         bob_session = await app.sessions.create(
-            bob, "alpha", SessionCreate(request_key="bob", target_key="demo")
+            bob, "alpha", SessionCreate(request_key="bob", target_key="target-http")
         )
         bob_turn = await app.sessions.submit(
             bob,
@@ -647,7 +488,7 @@ async def test_rotation_keeps_accepted_runs_and_invalidates_old_key(tmp_path, wi
         app.identities = stub
         alice = stub.directory["alice"]
         session = await app.sessions.create(
-            alice, "alpha", SessionCreate(request_key="rotate", target_key="demo")
+            alice, "alpha", SessionCreate(request_key="rotate", target_key="target-http")
         )
         turn = await app.sessions.submit(
             alice,
@@ -690,7 +531,7 @@ async def test_revoke_principal_cancels_only_target(tmp_path, wire):
         app.sessions.identities = stub
         alice, bob = stub.directory["alice"], stub.directory["bob"]
         alice_session = await app.sessions.create(
-            alice, "alpha", SessionCreate(request_key="alice", target_key="demo")
+            alice, "alpha", SessionCreate(request_key="alice", target_key="target-http")
         )
         running = await app.sessions.submit(
             alice,
@@ -712,7 +553,7 @@ async def test_revoke_principal_cancels_only_target(tmp_path, wire):
             ),
         )
         bob_session = await app.sessions.create(
-            bob, "alpha", SessionCreate(request_key="bob", target_key="demo")
+            bob, "alpha", SessionCreate(request_key="bob", target_key="target-http")
         )
         bob_turn = await app.sessions.submit(
             bob,

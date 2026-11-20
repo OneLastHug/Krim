@@ -1,18 +1,12 @@
-"""v3工作区薄路由；对象权限及业务沿原Session/Artifact服务。"""
+"""Read-only routes for historical workspace records and artifacts."""
 
 from fastapi import APIRouter, FastAPI, Query, Request
 from pydantic import JsonValue
 
-from krim_agent.contracts import ServiceError, parse_json
+from krim_agent.contracts import ServiceError
 from krim_agent.sdk.workspace import WorkspaceSDK
 from krim_agent.sessions.types import TurnView
-from krim_agent.workspace.types import (
-    ArtifactChunk,
-    ArtifactRevision,
-    InputSnapshotRequest,
-    WorkspaceTurnRequest,
-    WorkView,
-)
+from krim_agent.workspace.types import ArtifactChunk, ArtifactRevision, WorkView
 
 from .sessions import application, principal
 
@@ -25,17 +19,8 @@ def mount_workspace(app: FastAPI) -> None:
         return WorkspaceSDK(application(request), principal=principal(request), workspace=workspace)
 
     @router.get("/v3/workspace/capabilities")
-    async def capabilities(request: Request) -> dict[str, JsonValue]:
-        actor = principal(request)
-        active = application(request)
-        # 认证由原LocalBoundary完成；仅投影该主体受权的有限可用性。
-        allowed = bool(actor.memberships)
-        available = allowed and active.work is not None and active.runner is not None
-        return {
-            "schema_version": 1,
-            "available": available,
-            "profile": {"name": "python-unittest/1"} if available else None,
-        }
+    async def capabilities() -> dict[str, JsonValue]:
+        return {"schema_version": 1, "available": False, "profile": None}
 
     @router.get(base + "/work")
     async def current(workspace_id: str, session_id: str, request: Request) -> WorkView:
@@ -48,16 +33,8 @@ def mount_workspace(app: FastAPI) -> None:
         return await sdk(request, workspace_id).get(session_id, turn_id)
 
     @router.post(base + "/turns", status_code=202)
-    async def submit(workspace_id: str, session_id: str, request: Request) -> TurnView:
-        try:
-            raw = await request.body()
-            value = parse_json(raw.decode("utf-8"))
-            if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
-                raise ValueError("schema_version必须是严格整数")
-            body = WorkspaceTurnRequest.model_validate_json(raw)
-        except ValueError:
-            raise ServiceError("invalid_input", 422) from None
-        return await sdk(request, workspace_id).start(session_id, body)
+    async def submit(workspace_id: str, session_id: str) -> TurnView:
+        raise ServiceError("workspace_unavailable", 422)
 
     @router.get(base + "/turns/by-key/{key}")
     async def turn_by_key(
@@ -66,16 +43,8 @@ def mount_workspace(app: FastAPI) -> None:
         return await sdk(request, workspace_id).by_key(session_id, key)
 
     @router.post(base + "/inputs")
-    async def upload(workspace_id: str, session_id: str, request: Request) -> ArtifactRevision:
-        try:
-            raw = await request.body()
-            value = parse_json(raw.decode("utf-8"))
-            if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
-                raise ValueError("schema_version必须是严格整数")
-            body = InputSnapshotRequest.model_validate_json(raw)
-        except ValueError:
-            raise ServiceError("invalid_input", 422) from None
-        return await sdk(request, workspace_id).input(session_id, body)
+    async def upload(workspace_id: str, session_id: str) -> ArtifactRevision:
+        raise ServiceError("workspace_unavailable", 422)
 
     @router.get(base + "/inputs/by-key/{key}")
     async def input_by_key(

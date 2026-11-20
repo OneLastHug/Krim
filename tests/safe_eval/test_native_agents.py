@@ -1128,7 +1128,7 @@ async def test_krim_neutral_uses_real_run_and_borrowed_close(tmp_path, monkeypat
     from krim_agent.contracts import RunRequest, parse_json
     from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
     from krim_agent.evaluation.ports import AdapterLease
-    from krim_agent.evaluation.targets import make_eval_bindings
+    from tests.support.evaluation import make_eval_bindings
     from krim_agent.runtime.service import RunBinding, RunService
     from krim_agent.storage.sqlite import SQLiteStore
 
@@ -1715,7 +1715,7 @@ async def test_pn2_repair_krim_snapshot_failure(tmp_path, monkeypatch):
     from krim_agent.contracts import RunRequest, parse_json
     from krim_agent.evaluation.adapters.krim import NeutralKrimAdapter
     from krim_agent.evaluation.ports import AdapterLease
-    from krim_agent.evaluation.targets import make_eval_bindings
+    from tests.support.evaluation import make_eval_bindings
     from krim_agent.runtime.service import RunBinding, RunService
     from krim_agent.storage.sqlite import SQLiteStore
 

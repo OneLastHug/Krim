@@ -26,7 +26,14 @@ from .continuous_types import (
     FreezeConfirmed,
     ImportRequest,
 )
-from .domain import DatasetRef, DatasetSpec, TaskSpec, neutral_encoded, neutral_fingerprint
+from .domain import (
+    DatasetRef,
+    DatasetSpec,
+    SessionExecutionContext,
+    TaskSpec,
+    neutral_encoded,
+    neutral_fingerprint,
+)
 from .product_types import (
     DisplayName,
     FreezeConfirmedRequest,
@@ -110,14 +117,59 @@ class EvaluationProduct:
         return {"name": name, "version": ref.version, "fingerprint": ref.fingerprint}
 
     def _target_descriptor(self, key: str) -> dict[str, Any]:
+        if key.startswith("krim-script-"):
+            raise ServiceError("target_retired", 410)
         adapter = self.evaluation.repository.registry.get(key)
         if adapter is None:
+            if key.startswith("krim-script-"):
+                raise ServiceError("target_retired", 410)
+            if key == "krim-session":
+                raise ServiceError("provider_not_configured", 503)
             raise ServiceError("invalid_input", 422)
         descriptor = adapter.descriptor()
         current = getattr(adapter, "assert_current", None)
         if current is not None:
             current(descriptor)
         return descriptor
+
+    def _session_execution_context(
+        self,
+        principal: PrincipalContext,
+        workspace_id: str,
+        target_key: str,
+    ) -> SessionExecutionContext | None:
+        descriptor = self._target_descriptor(target_key)
+        if descriptor.get("kind") != "krim-run":
+            return None
+        if self.sessions is None:
+            raise ServiceError("workspace_unavailable", 503)
+        conditions = descriptor.get("execution_conditions")
+        run_target = conditions.get("run_target_key") if isinstance(conditions, dict) else None
+        if run_target != "target-http":
+            raise ServiceError("workspace_unavailable", 409)
+        actor = self.sessions._live_principal(principal)
+        actor.member(workspace_id, write=True)
+        return SessionExecutionContext(
+            principal_id=actor.principal_id,
+            principal_generation=actor.generation,
+            workspace_id=workspace_id,
+            target_key="target-http",
+            binding_fingerprint=neutral_fingerprint(descriptor),
+        )
+
+    async def _validate_session_dataset(
+        self, dataset_ref: DatasetRef, context: SessionExecutionContext | None
+    ) -> None:
+        if context is None:
+            return
+        dataset = await self.evaluation.repository.dataset(
+            dataset_ref.name, dataset_ref.version
+        )
+        for item in dataset.cases:
+            if item.verifier in {"krim-script/1", "agent-bench/1"}:
+                raise ServiceError("target_retired", 410)
+            if item.files:
+                raise ServiceError("workspace_unavailable", 409)
 
     @staticmethod
     def _metric_group(descriptor: dict[str, Any]) -> str:
@@ -498,13 +550,35 @@ class EvaluationProduct:
                     raise ServiceError("invalid_input", 422)
                 dataset = await self._dataset_ref(workspace_id, original.dataset)
                 self._target(original.target_key)
-                frozen = original.model_copy(update={"scope": scope, "dataset": dataset})
+                context = (
+                    self._session_execution_context(principal, workspace_id, original.target_key)
+                    if original.mode == "execute"
+                    else None
+                )
+                await self._validate_session_dataset(dataset, context)
+                frozen = original.model_copy(
+                    update={
+                        "scope": scope,
+                        "dataset": dataset,
+                        "execution_context": context,
+                    }
+                )
                 result = await self._continuous(principal, workspace_id).submit(frozen)
             else:
                 original_task = TaskSpec.model_validate(request)
                 dataset = await self._dataset_ref(workspace_id, original_task.dataset)
                 self._target(original_task.target_key)
-                frozen_task = original_task.model_copy(update={"scope": scope, "dataset": dataset})
+                context = self._session_execution_context(
+                    principal, workspace_id, original_task.target_key
+                )
+                await self._validate_session_dataset(dataset, context)
+                frozen_task = original_task.model_copy(
+                    update={
+                        "scope": scope,
+                        "dataset": dataset,
+                        "execution_context": context,
+                    }
+                )
                 result = await self.evaluation.run(frozen_task)
         except ValidationError:
             raise ServiceError("invalid_input", 422) from None

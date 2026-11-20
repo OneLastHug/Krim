@@ -14,9 +14,9 @@ import pytest_asyncio
 from krim_agent.contracts import RunRequest, ServiceError, encoded
 from krim_agent.execution.linux import fds
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import ToolContext, ToolExecutor
+from tests.support.builtins import builtin_registry
 
 
 @pytest_asyncio.fixture
@@ -68,8 +68,7 @@ async def data_case(tmp_path, request):
         import krim_agent.runtime.service as service
         import krim_agent.tools.executor as executor
         import krim_agent.tools.pipeline as pipeline
-        import krim_agent.workspace.operations as operations
-        for module in [executor, pipeline, service, engine, operations, composition]:
+        for module in [executor, pipeline, service, engine, composition]:
             file = Path(module.__file__)
             assert file.is_relative_to(root / "source/src")
             consumers[module.__name__] = {"path": str(file),

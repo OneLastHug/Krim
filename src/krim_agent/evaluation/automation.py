@@ -733,6 +733,7 @@ class EvaluationAutomation:
         public_spec = spec.model_dump(mode="json")
         public_spec.pop("scope", None)
         public_spec["template"].pop("scope", None)
+        public_spec["template"].pop("execution_context", None)
         public_spec["template"]["dataset"] = dataset
         return _schedule_view(row) | {
             "dataset": dataset,
@@ -760,7 +761,19 @@ class EvaluationAutomation:
         public_ref = DatasetRef.model_validate(template.dataset.model_dump(mode="json"))
         dataset = await self.product._dataset_ref(workspace_id, public_ref)
         self.product._target(template.target_key)
-        safe_template = template.model_copy(update={"scope": scope, "dataset": dataset})
+        context = (
+            self.product._session_execution_context(actor, workspace_id, template.target_key)
+            if template.mode == "execute"
+            else None
+        )
+        await self.product._validate_session_dataset(dataset, context)
+        safe_template = template.model_copy(
+            update={
+                "scope": scope,
+                "dataset": dataset,
+                "execution_context": context,
+            }
+        )
         frozen = ScheduleSpec.model_validate(
             submitted.model_copy(update={"scope": scope, "template": safe_template})
             .model_dump(mode="json")

@@ -6,10 +6,12 @@ from .continuation import (
     PERMANENT_FAILURE_CODES,
     RESUME_TURN_PREFIX,
     ContinuationDecision,
+    ContinuationPolicy,
     ContinuationQueue,
     ContinuationRequest,
     TurnFinishedContext,
     continuation_text,
+    recovery_text,
 )
 from .contracts import (
     EvidenceRef,
@@ -30,6 +32,7 @@ __all__ = [
     "PERMANENT_FAILURE_CODES",
     "RESUME_TURN_PREFIX",
     "ContinuationDecision",
+    "ContinuationPolicy",
     "ContinuationQueue",
     "ContinuationRequest",
     "EvidenceRef",
@@ -45,4 +48,5 @@ __all__ = [
     "Service",
     "TurnFinishedContext",
     "continuation_text",
+    "recovery_text",
 ]

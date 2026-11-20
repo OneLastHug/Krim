@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from krim_agent.contracts import ServiceError
@@ -46,14 +47,30 @@ def partition(
         }
         optional = {
             "workspace_profile", "workspace_implementation", "workspace_verification", "agent_loop",
+            "execution_kernel", "development", "development_history_compaction", "sandbox",
         }
+        loop_version = binding.get("agent_loop")
         if (
             not required <= set(binding)
             or set(binding) - required - optional
             or binding["schema_version"] != 2
-            or "agent_loop" in binding
-            and binding["agent_loop"] != "ai-python/0.9.0-host-v2"
+            or loop_version is not None and loop_version not in {
+                "ai-python/0.9.0-host-v1", "ai-python/0.9.0-host-v2",
+                "ai-python/0.9.0-shared-host/1",
+            }
         ):
+            raise ServiceError("facts_corrupt")
+        kernel = binding.get("execution_kernel")
+        if loop_version == "ai-python/0.9.0-shared-host/1":
+            if (
+                not isinstance(kernel, dict)
+                or set(kernel) != {"version", "digest"}
+                or kernel["version"] != "sdk-execution/1"
+                or not isinstance(kernel["digest"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", kernel["digest"]) is None
+            ):
+                raise ServiceError("facts_corrupt")
+        elif "execution_kernel" in binding:
             raise ServiceError("facts_corrupt")
         axis = {
             k: binding[k]

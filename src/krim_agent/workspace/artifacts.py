@@ -17,13 +17,13 @@ from krim_agent.execution.types import Receipt
 from krim_agent.runtime.contracts import settled
 from krim_agent.storage import work
 from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.validation.files import directory_fd, path_parts
 from krim_agent.workspace.types import (
     ArtifactChunk,
     ArtifactFile,
     ArtifactRevision,
     ExecutionAccess,
     InputSnapshotRequest,
-    path_parts,
 )
 
 
@@ -51,50 +51,23 @@ def manifest_for(files: dict[str, bytes]) -> list[dict[str, Any]]:
     return result
 
 
-def directory_fd(path: Path, *, create: bool = False) -> int:
-    """从根dirfd逐段打开；任何父段替换为链接均失败关闭。"""
-    if not path.is_absolute():
-        raise ServiceError("artifact_invalid")
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        for part in path.parts[1:]:
-            if create:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
-            info = os.stat(part, dir_fd=fd, follow_symlinks=False)
-            if not stat.S_ISDIR(info.st_mode):
-                raise ServiceError("artifact_invalid")
-            child = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd
-            )
-            actual = os.fstat(child)
-            if (actual.st_ino, actual.st_dev) != (info.st_ino, info.st_dev):
-                os.close(child)
-                raise ServiceError("artifact_invalid")
-            os.close(fd)
-            fd = child
-        result, fd = fd, -1
-        return result
-    except OSError:
-        raise ServiceError("artifact_invalid") from None
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
 class ArtifactStore:
     def __init__(
-        self, store: SQLiteStore, root: Path, *, hook: Callable[..., Awaitable[None]] | None = None
+        self,
+        store: SQLiteStore,
+        root: Path,
+        *,
+        read_only: bool = False,
+        hook: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         work.require(store)
         self.store, self.root, self.hook = store, root.absolute(), hook
+        self.read_only = read_only or store.readonly
         self.closed = False
         self.closing = False
         self.jobs: set[asyncio.Task[Any]] = set()
         self._close_task: asyncio.Task[None] | None = None
-        self.fd = directory_fd(self.root, create=not store.readonly)
+        self.fd = directory_fd(self.root, create=not self.read_only)
         self.identity = os.fstat(self.fd)
 
     def _current(self) -> None:
@@ -236,6 +209,8 @@ class ArtifactStore:
     async def input(
         self, access: ExecutionAccess, request: InputSnapshotRequest
     ) -> ArtifactRevision:
+        if self.read_only:
+            raise ServiceError("readonly")
         self._current()
 
         async def owned() -> ArtifactRevision:
@@ -284,6 +259,8 @@ class ArtifactStore:
         call_id: str,
         receipt: Receipt,
     ) -> ArtifactRevision:
+        if self.read_only:
+            raise ServiceError("readonly")
         self._current()
         if (
             receipt.output_complete is not True

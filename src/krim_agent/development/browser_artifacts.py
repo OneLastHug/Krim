@@ -14,7 +14,7 @@ from uuid import uuid4
 from krim_agent.browser.protocol import validate_png
 from krim_agent.contracts import ServiceError
 from krim_agent.development.contracts import EnvironmentHandle, RunOwnership
-from krim_agent.workspace.artifacts import directory_fd
+from krim_agent.validation.files import directory_fd
 
 _ID = re.compile(r"image-[0-9a-f]{32}\Z")
 _LIMIT = 1024 * 1024

@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 
-from krim_agent.tools.builtins import EchoInput
+from tests.support.builtins import EchoInput
 from krim_agent.tools.core import ToolSpec
 from krim_agent.tools.registry import ToolRegistry
 

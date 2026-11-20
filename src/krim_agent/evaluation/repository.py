@@ -688,6 +688,7 @@ class Repository:
                         item["repetition"],
                         case,
                         snapshot["target"],
+                        request.execution_context,
                     )
                 )
                 inputs[(item["case_id"], item["repetition"])] = {
@@ -704,7 +705,8 @@ class Repository:
                 scoring_inputs=inputs,
             )
         cases = {c["case_id"]: c for c in snapshot["dataset"]["cases"]}
-        budget = TaskSpec.model_validate(snapshot["request_json"]).execution
+        request_spec = TaskSpec.model_validate(snapshot["request_json"])
+        budget = request_spec.execution
         return BatchPlan(
             [
                 TrialSpec(
@@ -713,6 +715,7 @@ class Repository:
                     i["repetition"],
                     cases[i["case_id"]],
                     snapshot["target"],
+                    request_spec.execution_context,
                 )
                 for i in snapshot["items"]
             ],
@@ -2192,6 +2195,17 @@ class Repository:
             if set(checked_cases) != case_ids:
                 raise ServiceError("facts_corrupt")
             lineage = None
+            request_json = value.get("request_json")
+            if not isinstance(request_json, dict):
+                raise ServiceError("facts_corrupt")
+            if request_json.get("schema_version") == "continuous-task/1":
+                from .continuous_types import ContinuousRequest
+
+                execution_context = ContinuousRequest.model_validate(
+                    request_json
+                ).execution_context
+            else:
+                execution_context = TaskSpec.model_validate(request_json).execution_context
             if value.get("continuous", {}).get("mode") == "execute":
                 lineage = await checked_lineage(conn, value, guard)
             result = []
@@ -2208,7 +2222,14 @@ class Repository:
                         )
                         case["_continuous"] = actual["_continuous"]
                 result.append(
-                    TrialSpec(task_id, item["case_id"], item["repetition"], case, value["target"])
+                    TrialSpec(
+                        task_id,
+                        item["case_id"],
+                        item["repetition"],
+                        case,
+                        value["target"],
+                        execution_context,
+                    )
                 )
             neutral_encoded([x.case for x in result], max_bytes=2097152)
             return ExecutionPage(result, page.next_cursor, value["plan_fingerprint"])

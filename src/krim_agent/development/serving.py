@@ -16,10 +16,9 @@ import uvicorn
 
 from krim_agent.api.server import create_app
 from krim_agent.composition import Application, open_application
-from krim_agent.config import Settings
+from krim_agent.configuration import ServiceConfiguration
 from krim_agent.contracts import ServiceError
 from krim_agent.development.configuration import DevelopmentListenerConfiguration
-from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.runtime.contracts import settled
 
 
@@ -167,8 +166,8 @@ async def serve_development(application: Application, *, stop: asyncio.Event | N
                 await asyncio.gather(waiter, return_exceptions=True)
 
 
-async def run_development(settings: Settings, http_config: OpenAICompatibleConfig) -> None:
+async def run_development(configuration: ServiceConfiguration) -> None:
     async with await open_application(
-        settings.database, settings=settings, http_config=http_config,
+        configuration.settings.database, configuration=configuration,
     ) as application:
         await serve_development(application)

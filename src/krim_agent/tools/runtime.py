@@ -25,7 +25,6 @@ from krim_agent.runtime.contracts import settled
 from krim_agent.web_access import TavilyWebAccess, WebAccessConfig
 
 from .bindings import resolve_tool_overrides
-from .builtins import demo_policy
 from .catalog_search import scope_key
 from .core import Decision, Invocation, Policy, ToolSpec
 from .mcp import mcp_tools
@@ -533,17 +532,7 @@ class ToolRuntime:
                 tuple(specs), config.tool_overrides, config.public_tools,
                 dependencies=(base,),
             )
-            effective = policy
-            if policy is demo_policy:
-                external = frozenset(item.name for item in specs if item.source is not None)
-
-                async def external_policy(invocation: Invocation) -> Decision:
-                    if invocation.name in external:
-                        return "ask"
-                    return await demo_policy(invocation)
-
-                effective = external_policy
-            return cls(registry, effective, tuple(connections), web)
+            return cls(registry, policy, tuple(connections), web)
         except BaseException:
             await settled(
                 asyncio.gather(*(item.close() for item in connections), return_exceptions=True)

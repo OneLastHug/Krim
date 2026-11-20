@@ -23,7 +23,7 @@ from krim_agent.config import Settings
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.security import AccessPolicy, Credential, Membership
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry, demo_policy
 from krim_agent.tools.registry import ToolRegistry
 
 
@@ -237,6 +237,7 @@ class WireFixture:
                 database,
                 provider=provider,
                 registry=self.registry(),
+                policy=demo_policy,
                 settings=settings or Settings(),
                 access_policy=access_policy,
             )

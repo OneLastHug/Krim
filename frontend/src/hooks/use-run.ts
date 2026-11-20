@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { object, parseRun, request, isUnadmittedCreate, type RunData } from "../api";
-import { createOrFind, CURRENT, initialIntent, INTENT, replyApproval } from "../lib/run-requests";
+import { createOrFind, CURRENT, initialIntent, INTENT, replyApproval, type FormalTarget } from "../lib/run-requests";
 import { codeOf, reason, ui } from "../lib/copy";
 export interface Notice {
     text: string;
@@ -9,7 +9,7 @@ export interface Notice {
 }
 const terminal = (status: string) => !["queued", "running"].includes(status);
 function pause(signal: AbortSignal) { return new Promise<void>(resolve => { const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); }; const timer = setTimeout(finish, 100); signal.addEventListener("abort", finish, { once: true }); }); }
-export function useRun(key: string, active: boolean, accessScope: string | null) {
+export function useRun(key: string, active: boolean, accessScope: string | null, target: FormalTarget | null) {
     const enabled = active && accessScope !== null;
     const scope = accessScope === null ? null : JSON.stringify([key, accessScope]);
     const liveScope = useRef(scope), activeRef = useRef(active);
@@ -123,7 +123,7 @@ export function useRun(key: string, active: boolean, accessScope: string | null)
         setNotice(null);
         const token = epoch.current, current = () => available() && token === epoch.current;
         try {
-            const run = await createOrFind(localStorage, draft, key, current);
+            const run = await createOrFind(localStorage, draft, key, current, target);
             if (current()) {
                 setPending(false);
                 select(run.id);
@@ -133,7 +133,8 @@ export function useRun(key: string, active: boolean, accessScope: string | null)
             if (current()) {
                 const unknown = localStorage.getItem(INTENT) !== null;
                 setPending(unknown);
-                setNotice({ area: "composer", text: !unknown && isUnadmittedCreate(error) ? reason(error) : ui.unknownCreate, code: codeOf(error) });
+                const unavailable = !unknown && error instanceof Error && error.message === "target_unavailable";
+                setNotice({ area: "composer", text: unavailable ? "当前身份未配置正式运行目标，无法创建任务。" : !unknown && isUnadmittedCreate(error) ? reason(error) : ui.unknownCreate, code: unavailable ? null : codeOf(error) });
             }
         }
         finally {

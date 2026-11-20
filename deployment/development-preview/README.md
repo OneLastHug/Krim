@@ -4,13 +4,13 @@
 
 ## 启动与控制入口
 
-开发配置中新增可选 `preview`：`control_origin`、`control_cookie_domain`、`preview_domain`，必须是独立站点。未配置时不注册预览工具，旧开发配置保持可用。独立启动还需 `preview.listener`，包含 `control_host/control_port`、`preview_host/preview_port`、`control_certificate/control_private_key` 和 `preview_certificate/preview_private_key`；证书与私钥使用绝对路径，属于进程用户且不可被 group/other 写入，私钥不可被 group/other 读取。
+主配置的 `environment.development.preview` 可选配置 `control_origin`、`control_cookie_domain` 和 `preview_domain`，并使用独立站点。未配置时不注册预览工具。独立 TLS listener 在同一 `environment.development.preview.listener` 中设置，包含 `control_host/control_port`、`preview_host/preview_port`、`control_certificate/control_private_key` 和 `preview_certificate/preview_private_key`；证书与私钥路径相对主配置文件定位，文件属于进程用户且不可被 group/other 写入，私钥不可被 group/other 读取。
 
-`krim serve-development --database <database> --development-config <trusted-config>` 复用现有 `KRIM_AGENT_SANDBOX_CONFIG_FILE` 和模型配置。它只打开一个 Application，控制 API 与预览分别使用 TLS listener；绑定只允许 loopback，默认端口8765/8766，禁用 forwarded-header 信任和访问日志，控制 listener 不接受 WebSocket。公共 HTTPS 域名须由部署方通过 TLS 透传连接对应 listener，或为本地测试配置对应独立 loopback 地址/443；代理不能通过添加 forwarded headers 伪造 HTTPS。此命令不会安装证书、配置 DNS 或发布外网服务。
+用 `krim serve-development --config <krim.yaml>` 启动开发服务。它只打开一个 Application，控制 API 与预览分别使用 TLS listener；绑定只允许 loopback，默认端口8765/8766，禁用 forwarded-header 信任和访问日志，控制 listener 不接受 WebSocket。公共 HTTPS 域名须由部署方通过 TLS 透传连接对应 listener，或为本地测试配置对应独立 loopback 地址/443；代理不能通过添加 forwarded headers 伪造 HTTPS。此命令不会安装证书、配置 DNS 或发布外网服务。
 
-模型图片配置使用已有 `model_images: true`，并显式设置 `KRIM_AGENT_HTTP_ALLOW_IMAGES=true`。`KRIM_AGENT_HTTP_MAX_REQUEST_BYTES`（256–1048576）与 `KRIM_AGENT_MAX_REQUEST_BYTES` 共同限制请求，取较小值；PNG转base64、工具schema和历史都计入真实请求大小。`KRIM_AGENT_HTTP_MAX_TOOL_CALLS` 为每次模型响应上限（1–4），仍受宿主每步和每run总预算约束。图片开关只接受 `true`/`false`；未设置时仍关闭图片、请求默认32768字节。真实模型运行需显式 `KRIM_AGENT_PROVIDER=http` 和 `KRIM_AGENT_HTTP_MODE=agent`。
+模型图片通过主配置 `model.allow_images: true` 开启；模型请求上限设置于 `model.max_request_bytes`，通用运行输入预算设置于 `execution.max_request_bytes`，两者均有值时取较小值。`model.max_tool_calls` 限制单次响应的工具调用数，`execution.max_tools_per_step` 和 `execution.max_tool_calls` 分别配置每步与整轮预算。模型或执行预算未配置时不施加对应的应用层限额。
 
-启动前可运行 `scripts/check_development_startup.py`，传入 `--project-root`、`--development-config`、`--sandbox-config`、`--provider-bounds`、`--host-max-request-bytes` 和 `--prompt`。配置路径必须符合现有宿主loader的权限要求。provider-bounds文件仅含 `allow_images`、`max_output_tokens`、`max_request_bytes`、`max_tool_calls` 四个非秘密字段，不接受供应商地址、模型名或Key。该工具核对TLS证书加载、browser CA hash/seccomp文件、媒体开关与有效请求预算，只输出状态码、预算和提示词SHA；不会启动应用、连接Broker或模型。`static_ready` 表示静态检查通过，真实服务、网络和应用流程另验收。
+`scripts/check_development_startup.py` 是组件级静态预检，不启动服务也不覆盖主配置。服务运行时只用 `serve-development --config` 指定的主文件；预检脚本仍接受 `--project-root`、`--development-config`、`--sandbox-config`、`--provider-bounds`、`--host-max-request-bytes` 和 `--prompt`，用于核对 TLS 证书加载、browser CA hash/seccomp 文件、媒体开关与请求预算。provider-bounds文件仅含 `allow_images`、`max_output_tokens`、`max_request_bytes`、`max_tool_calls` 四个非秘密字段，不接受供应商地址、模型名或Key。该工具只输出状态码、预算和提示词SHA，不会启动应用、连接Broker或模型。`static_ready` 表示静态检查通过，真实服务、网络和应用流程另验收。
 
 认证控制接口：
 

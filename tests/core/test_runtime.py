@@ -132,19 +132,108 @@ async def test_cancel_during_tool_and_repeated_close_wait_for_cleanup(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_timeout_and_cancel_close_stream_before_return(tmp_path):
+    class SleeperProvider:
+        def __init__(self):
+            self.calls = 0
+            self.active = 0
+            self.streams_closed = 0
+            self.entered = asyncio.Event()
+
+        async def stream(self, messages, tools):
+            self.calls += 1
+            self.active += 1
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+                yield ModelText(text="unreachable")
+            finally:
+                self.active -= 1
+                self.streams_closed += 1
+
+        async def close(self):
+            assert self.active == 0
+
+    provider = SleeperProvider()
     async with await open_application(
-        tmp_path / "timeout.db", settings=Settings(run_timeout=0.06)
+        tmp_path / "timeout.db", settings=Settings(run_timeout=0.06), provider=provider
     ) as app:
-        run = await app.service.start(RunRequest(text="/slow", request_key="timeout"))
+        run = await app.service.start(RunRequest(text="fixture", request_key="timeout"))
         await app.service.wait(run.id)
         assert (await app.service.get(run.id)).code == "run_timeout"
-        assert app.provider.active == 0 and app.provider.streams_closed == app.provider.calls
-    async with await open_application(tmp_path / "cancel-provider.db") as app:
-        run = await app.service.start(RunRequest(text="/slow", request_key="cancel"))
+        assert provider.active == 0 and provider.streams_closed == provider.calls
+
+    provider = SleeperProvider()
+    async with await open_application(
+        tmp_path / "cancel-provider.db", provider=provider
+    ) as app:
+        run = await app.service.start(RunRequest(text="fixture", request_key="cancel"))
         async with asyncio.timeout(2):
-            await app.provider.entered.wait()
+            await provider.entered.wait()
         await app.service.cancel(run.id)
-        assert app.provider.active == 0 and app.provider.streams_closed == 1
+        assert provider.active == 0 and provider.streams_closed == 1
+
+
+@pytest.mark.asyncio
+async def test_unattributed_timeout_is_not_misreported_as_run_timeout(tmp_path):
+    class RaisesTimeout:
+        async def stream(self, messages, tools):
+            if False:
+                yield ModelText(text="unreachable")
+            raise TimeoutError
+
+    async with await open_application(
+        tmp_path / "inner-timeout.db",
+        settings=Settings(run_timeout=2),
+        provider=RaisesTimeout(),
+    ) as app:
+        run = await app.service.start(RunRequest(text="fixture", request_key="inner-timeout"))
+        await app.service.wait(run.id)
+        finished = await app.service.get(run.id)
+        assert finished.status == "failed" and finished.code == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_retired_targets_reject_new_runs_but_preserve_existing_key_reads(tmp_path):
+    async with await open_application(tmp_path / "retired-targets.db") as app:
+        request = RunRequest(text="legacy history", request_key="existing-legacy", target="demo")
+        saved, _ = await app.store.begin(request, {"key": "demo"})
+        assert (await app.service.start(request)).id == saved.id
+        with pytest.raises(ServiceError) as error:
+            await app.service.start(
+                RunRequest(text="new", request_key="retired-new", target="target-v2")
+            )
+        assert error.value.code == "target_retired" and error.value.status == 410
+        assert await app.store.by_key("retired-new") is None
+
+
+@pytest.mark.asyncio
+async def test_target_http_without_binding_reports_unconfigured_provider(tmp_path):
+    from krim_agent.runtime.service import RunService
+
+    async with await open_application(tmp_path / "unconfigured-target.db") as app:
+        service = RunService(app.store, app.service.loop, app.settings, {}, bindings={})
+        request = RunRequest(text="no provider", request_key="no-provider", target="target-http")
+        with pytest.raises(ServiceError) as error:
+            await service.start(request)
+        assert error.value.code == "provider_not_configured" and error.value.status == 503
+        assert await app.store.by_key(request.request_key) is None
+
+
+@pytest.mark.asyncio
+async def test_default_binding_and_descriptor_use_generic_provider_metadata(tmp_path):
+    from tests.support.fake_provider import FakeProvider
+    from krim_agent.runtime.service import RunBinding, RunService
+
+    async with await open_application(
+        tmp_path / "default-binding.db", provider=FakeProvider()
+    ) as app:
+        service = RunService(app.store, app.service.loop, app.settings, {})
+        assert set(service.bindings) == {"target-http"}
+        descriptor = RunBinding.describe("target-http", app.service.loop, app.settings)
+        assert "allowed_names" not in descriptor["policy"]
+        provider = descriptor["provider"]
+        assert "demo" not in provider["behavior_version"]
+        assert "mode" not in provider["config"] and "delay" not in provider["config"]
 
 
 @pytest.mark.asyncio

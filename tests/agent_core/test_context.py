@@ -212,18 +212,202 @@ def test_tool_groups_final_answer_and_failed_history_are_truthful(kind):
         builder.prepare("可信系统", history, [], "当前用户", [], ContextPolicy(), 262144)
 
 
+def test_failed_transcript_preserves_known_results_and_pairs_unknown_calls():
+    from krim_agent.context import builder
+    from krim_agent.contracts import RunEvent, RunView, parse_json
+    from krim_agent.runtime.contracts import RunSnapshot
+    from krim_agent.storage.sessions import task_transcript
+
+    run_id = "failed-history-run"
+    calls = [
+        {
+            "kind": "tool_call",
+            "id": "provider-known",
+            "name": "lookup",
+            "arguments": {"k": 1},
+        },
+        {
+            "kind": "tool_call",
+            "id": "provider-unknown",
+            "name": "write",
+            "arguments": {"k": 2},
+        },
+    ]
+    raw = [
+        ("model_end", {"step_index": 0, "tool_calls": [calls[0]]}),
+        (
+            "tool_start",
+            {
+                "step_index": 0,
+                "provider_call_id": "provider-known",
+                "call_id": "host-known",
+                "name": "lookup",
+                "status": "unknown",
+                "executor_started": False,
+                "result_available": False,
+            },
+        ),
+        ("tool_intent", {"call_id": "host-known", "step_index": 0}),
+        (
+            "tool_end",
+            {
+                "step_index": 0,
+                "provider_call_id": "provider-known",
+                "call_id": "host-known",
+                "name": "lookup",
+                "status": "ok",
+                "executor_started": True,
+                "result_available": True,
+                "decision": "allow",
+                "value": {"found": "saved"},
+            },
+        ),
+        ("model_end", {"step_index": 1, "tool_calls": [calls[1]]}),
+        (
+            "tool_start",
+            {
+                "step_index": 1,
+                "provider_call_id": "provider-unknown",
+                "call_id": "host-unknown",
+                "name": "write",
+                "status": "unknown",
+                "executor_started": False,
+                "result_available": False,
+            },
+        ),
+        ("tool_intent", {"call_id": "host-unknown", "step_index": 1}),
+    ]
+    events = tuple(
+        RunEvent(run_id=run_id, seq=index, event_id=f"e{index}", kind=kind, data=data)
+        for index, (kind, data) in enumerate(raw)
+    )
+    snapshot = RunSnapshot(
+        run=RunView(
+            id=run_id, request_key="failed-history", status="failed", trace_id="t" * 32,
+            root_span_id="r" * 16, created_at=1.0, finished_at=2.0, code="run_timeout",
+        ),
+        request=RunRequest(text="do work", request_key="failed-history"),
+        target={},
+        events=events,
+    )
+
+    transcript = task_transcript(snapshot)
+    assert [message.role for message in transcript] == [
+        "user", "assistant", "tool", "assistant", "tool", "user"
+    ]
+    assert transcript[2].call_id == "provider-known"
+    assert parse_json(transcript[2].content) == {"found": "saved"}
+    assert transcript[4].call_id == "provider-unknown"
+    unknown = parse_json(transcript[4].content)
+    assert unknown["status"] == "unknown"
+    assert unknown["source"] == "persisted_tool_start_without_tool_end"
+    assert unknown["host_call_id"] == "host-unknown"
+    assert unknown["tool_intent_recorded"] is True
+    assert unknown["result_available"] is None
+    assert "重放" in unknown["note"]
+    assert "run_timeout" in transcript[-1].content
+    builder.validate_groups(transcript)
+
+
+def test_completed_history_with_missing_tool_end_is_corrupt():
+    from krim_agent.contracts import RunEvent, RunView
+    from krim_agent.runtime.contracts import RunSnapshot
+    from krim_agent.storage.sessions import task_transcript
+
+    run_id = "incomplete-completed-run"
+    events = (
+        RunEvent(
+            run_id=run_id,
+            seq=0,
+            event_id="model",
+            kind="model_end",
+            data={"step_index": 0, "tool_calls": [
+                {"kind": "tool_call", "id": "provider-call", "name": "lookup", "arguments": {}}
+            ]},
+        ),
+        RunEvent(
+            run_id=run_id,
+            seq=1,
+            event_id="start",
+            kind="tool_start",
+            data={"step_index": 0, "provider_call_id": "provider-call", "call_id": "host-call",
+                  "name": "lookup", "status": "unknown", "executor_started": False,
+                  "result_available": False},
+        ),
+    )
+    snapshot = RunSnapshot(
+        run=RunView(
+            id=run_id, request_key="k", status="completed", trace_id="t" * 32,
+            root_span_id="r" * 16, created_at=1.0, finished_at=2.0,
+        ),
+        request=RunRequest(text="x", request_key="k"),
+        target={},
+        events=events,
+    )
+    with pytest.raises(ServiceError, match="facts_corrupt"):
+        task_transcript(snapshot)
+
+
+def test_new_history_missing_provider_call_id_is_corrupt():
+    from krim_agent.contracts import RunEvent, RunView
+    from krim_agent.runtime.contracts import RunSnapshot
+    from krim_agent.storage.sessions import task_transcript
+
+    run_id = "missing-call-id-run"
+    snapshot = RunSnapshot(
+        run=RunView(
+            id=run_id, request_key="k", status="failed", trace_id="t" * 32,
+            root_span_id="r" * 16, created_at=1.0, finished_at=2.0,
+        ),
+        request=RunRequest(text="x", request_key="k"),
+        target={},
+        events=(RunEvent(
+            run_id=run_id,
+            seq=0,
+            event_id="model",
+            kind="model_end",
+            data={"step_index": 0, "tool_calls": [{"name": "lookup", "arguments": {}}]},
+        ),),
+    )
+    with pytest.raises(ServiceError, match="facts_corrupt"):
+        task_transcript(snapshot)
+
+
 def test_context_budget_counts_wire_tools_and_output_reserve():
     from krim_agent.context import builder
     from krim_agent.context.types import ContextPolicy
+    from krim_agent.contracts import Message
 
     text = "汉字🙂" * 50
-    policy = ContextPolicy(max_bytes=4096, reserved_output_tokens=1024)
+    legacy_policy = ContextPolicy(
+        max_bytes=4096,
+        reserved_output_tokens=1024,
+        counter_version="approx-utf8/1",
+    )
     with pytest.raises(ServiceError, match="context_budget"):
-        builder.prepare("system", [], [], text, [], policy, 32768)
+        builder.prepare("system", [], [], text, [], legacy_policy, 32768)
     value = builder.prepare(
-        "system", [], [], text, [], ContextPolicy(max_bytes=4096, reserved_output_tokens=32), 32768
+        "system",
+        [],
+        [],
+        text,
+        [],
+        ContextPolicy(max_bytes=4096, reserved_output_tokens=32, counter_version="approx-utf8/1"),
+        32768,
     )
     assert value.messages[-1].content == text and value.input_bytes > len(text)
+    request_messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content=text),
+    ]
+    input_tokens = builder.count_request_tokens(request_messages, [])
+    token_policy = ContextPolicy(
+        max_tokens=input_tokens + 3,
+        reserved_output_tokens=4,
+        compaction_trigger_tokens=1,
+    )
+    with pytest.raises(ServiceError, match="context_budget"):
+        builder.prepare("system", [], [], text, [], token_policy, 32768)
     large = [{"description": "工具Schema" * 300}]
     with pytest.raises(ServiceError, match="context_budget"):
         builder.prepare(
@@ -232,7 +416,8 @@ def test_context_budget_counts_wire_tools_and_output_reserve():
             [],
             text,
             large,
-            ContextPolicy(max_bytes=4096, reserved_output_tokens=32),
+            ContextPolicy(max_bytes=4096, reserved_output_tokens=32,
+                          counter_version="approx-utf8/1"),
             32768,
         )
 
@@ -242,10 +427,10 @@ async def test_legacy_descriptor_and_session_context_identity(tmp_path, wire, mo
     from krim_agent.runtime.service import RunBinding, TurnBinding
 
     async with wire.application(tmp_path / "fingerprint.sqlite") as app:
-        binding = app.service.bindings["demo"]
-        original = RunBinding.describe("demo", binding.loop, binding.settings)
+        binding = app.service.bindings["target-http"]
+        original = RunBinding.describe("target-http", binding.loop, binding.settings)
         changed = RunBinding.describe(
-            "demo",
+            "target-http",
             binding.loop,
             binding.settings.model_copy(
                 update={

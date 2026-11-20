@@ -339,7 +339,13 @@ async def test_budget_inserted_system_does_not_shift_frozen_user_source():
 
 @pytest.mark.asyncio
 async def test_actual_tool_result_manifest_joins_provider_id_not_internal_id(tmp_path):
-    async with await open_application(tmp_path / "tool-source.db") as app:
+    from tests.support.builtins import builtin_registry, demo_policy
+    from tests.support.fake_provider import FakeProvider
+
+    async with await open_application(
+        tmp_path / "tool-source.db", provider=FakeProvider(),
+        registry=builtin_registry(), policy=demo_policy,
+    ) as app:
         run = await app.service.start(RunRequest(text="/add 2 3", request_key="tool-source"))
         await app.service.wait(run.id)
         facts = await app.service.result(run.id)

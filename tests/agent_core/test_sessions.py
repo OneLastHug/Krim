@@ -13,7 +13,7 @@ from krim_agent.evaluation.types import EvalRequest, FreezeRequest, rule
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import ControlRequest, SessionCreate, TurnRequest
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import EchoInput
+from tests.support.builtins import EchoInput
 from krim_agent.tools.core import ToolSpec
 from krim_agent.tools.registry import ToolRegistry
 

@@ -24,7 +24,9 @@ from krim_agent.storage.sandbox_models import (
     sandbox_projects,
     sandbox_quota_state,
 )
-from krim_agent.workspace.types import CompletionCondition, path_parts
+from krim_agent.validation.completion import CompletionCondition
+from krim_agent.validation.completion import condition as evaluate_condition
+from krim_agent.validation.files import path_parts
 
 if TYPE_CHECKING:
     from krim_agent.sandbox.operations import SessionCommandScope
@@ -776,12 +778,10 @@ async def verify_completion(
         for path in contract.required_paths:
             if path in contents:
                 condition_results.append({"path": path, "state": "passed"})
-        from krim_agent.workspace.verification import _condition
-
         for condition in contract.conditions:
             check()
             try:
-                passed = _condition(
+                passed = evaluate_condition(
                     condition.kind,
                     contents[condition.path],
                     pointer=condition.pointer,

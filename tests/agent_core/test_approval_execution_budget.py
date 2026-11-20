@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import math
-import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -14,7 +13,7 @@ import pytest
 
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
-from krim_agent.contracts import ApprovalReply, ServiceError, encoded, fingerprint
+from krim_agent.contracts import ApprovalReply, ServiceError, encoded
 from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
@@ -22,12 +21,12 @@ from krim_agent.providers.openai_compatible import (
 from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
-from krim_agent.tools.builtins import builtin_registry
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import ToolContext, ToolExecutor
+from krim_agent.tools.pipeline import Scope
 from krim_agent.tools.registry import ToolRegistry
-from krim_agent.workspace.operations import WorkspaceOperations
 from krim_agent.workspace.types import ExecutionAccess
+from tests.support.builtins import builtin_registry
 
 
 @asynccontextmanager
@@ -84,7 +83,7 @@ async def start_echo_session(app, text):
         session.id,
         TurnRequest(text=text, request_key="approval-budget-turn", expected_revision=0),
     )
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while True:
             current = await app.sessions.turn(LOCAL, "local", session.id, turn.id)
             if current.run_id:
@@ -123,8 +122,9 @@ def approval_reply(request, *, allow):
 def test_approval_window_defaults_and_explicit_short_values():
     from krim_agent.workspace.types import WorkLimits
 
-    assert Settings().approval_timeout == 300
+    assert Settings().approval_timeout is None
     assert Settings(approval_timeout=17).approval_timeout == 17
+    # Historical DTO defaults remain readable; they are not the live policy.
     assert WorkLimits().approval_timeout_seconds == 300
     assert WorkLimits(approval_timeout_seconds=11).approval_timeout_seconds == 11
 
@@ -173,23 +173,15 @@ async def test_workspace_scope_moves_while_another_tool_keeps_its_timer():
     budget = ExecutionBudget(deadline)
     run_timeout = asyncio.timeout_at(deadline)
     budget.bind(run_timeout)
-    profile_data = {"fixture": "approval-budget"}
     access = ExecutionAccess(LOCAL, "local", "scope-session")
     frame = SimpleNamespace(
         actor_id="local", grant=access.grant(), session_id="scope-session"
     )
-    operations = object.__new__(WorkspaceOperations)
-    operations.identities = None
-    operations.profile = SimpleNamespace(model_dump=lambda mode: profile_data)
-    operations._profile_hash = fingerprint(profile_data)
-    operations.closed = False
-    operations.principal = lambda _frame: LOCAL
 
     async def observe(_invocation):
         return None
 
-    operations.observe = observe
-    scope = operations.scope(frame, lambda: None, deadline, budget)
+    scope = Scope(frame, access, SimpleNamespace(observe=observe), lambda: None, deadline, budget)
     registry = builtin_registry()
     slow_spec = registry.get("add")
     original = slow_spec.executor
@@ -273,7 +265,7 @@ async def test_workspace_scope_moves_while_another_tool_keeps_its_timer():
 @pytest.mark.asyncio
 async def test_workspace_terminal_handoff_keeps_finite_deadline_after_timer_exit():
     from krim_agent.tools.pipeline import _producing
-    from krim_agent.workspace.verification import (
+    from krim_agent.workspace.terminal import (
         VerificationIdentity,
         VerificationResult,
         _TerminalAttempt,
@@ -287,18 +279,11 @@ async def test_workspace_terminal_handoff_keeps_finite_deadline_after_timer_exit
     budget = ExecutionBudget(deadline)
     timeout = asyncio.timeout_at(deadline)
     budget.bind(timeout)
-    profile_data = {"fixture": "terminal-handoff"}
     access = ExecutionAccess(LOCAL, "local", "handoff-session")
     frame = SimpleNamespace(
         actor_id="local", grant=access.grant(), session_id="handoff-session"
     )
-    operations = object.__new__(WorkspaceOperations)
-    operations.identities = None
-    operations.profile = SimpleNamespace(model_dump=lambda mode: profile_data)
-    operations._profile_hash = fingerprint(profile_data)
-    operations.closed = False
-    operations.principal = lambda _frame: LOCAL
-    scope = operations.scope(frame, lambda: None, deadline, budget)
+    scope = Scope(frame, access, SimpleNamespace(), lambda: None, deadline, budget)
     run_id = str(uuid.uuid4())
     result = VerificationResult(
         run_id=run_id,
@@ -360,8 +345,8 @@ async def test_workspace_terminal_handoff_keeps_finite_deadline_after_timer_exit
 @pytest.mark.parametrize(
     ("run_timeout", "tool_timeout", "tool_delay", "wait_seconds", "expected_status", "code"),
     [
-        (3.0, 1.0, 0.0, 4.2, "completed", None),
-        (5.0, 1.0, 1.5, 1.2, "failed", "tool_timeout"),
+        (15.0, 1.0, 0.0, 15.5, "completed", None),
+        (15.0, 1.0, 1.5, 1.2, "failed", "tool_timeout"),
     ],
     ids=["park-outlasts-run-budget", "tool-still-times-out-after-resume"],
 )
@@ -375,15 +360,18 @@ async def test_real_session_park_does_not_consume_execution_budget(
     expected_status,
     code,
 ):
+    # Integration budgets include real file-backed binding checks on mounted
+    # worktrees. Keep an ample active budget and wait even longer while parked;
+    # the deterministic small-budget mechanics are tested separately above.
     # ADR-0015：停靠不占并发名额、不挂协程、等待不消耗执行预算——
     # 等待超过 run_timeout 后批准仍能完成；恢复后的执行仍受工具超时约束。
     settings = Settings(run_timeout=run_timeout, tool_timeout=tool_timeout)
     async with approval_application(
         wire, tmp_path, settings=settings, tool_delay=tool_delay
     ) as (app, entered):
-        assert app.settings.approval_timeout == 300
+        assert app.settings.approval_timeout is None
         _session, _turn, run_id, request = await start_echo_session(app, "/echo wait for approval")
-        assert request["expires_at"] > time.time()
+        assert request["expires_at"] is None
         await asyncio.sleep(wait_seconds)
         assert (await app.service.get(run_id)).status == "awaiting"  # 停靠持久状态
         assert run_id not in app.service._execution_budgets  # 等待期无活预算
@@ -402,7 +390,7 @@ async def test_real_session_park_does_not_consume_execution_budget(
 
 @pytest.mark.asyncio
 async def test_real_session_approval_replay_and_conflict_do_not_repeat_tool(wire, tmp_path):
-    settings = Settings(run_timeout=3, tool_timeout=1)
+    settings = Settings(run_timeout=15, tool_timeout=1)
     async with approval_application(wire, tmp_path, settings=settings) as (app, _entered):
         _session, _turn, run_id, request = await start_echo_session(app, "/echo replay approval")
         approved = approval_reply(request, allow=True)
@@ -424,7 +412,7 @@ async def test_real_session_unapproved_call_has_no_execution_or_timer_leak(
     wire, tmp_path, action, monkeypatch
 ):
     settings = Settings(
-        run_timeout=3,
+        run_timeout=15,
         tool_timeout=1,
         approval_timeout=0.04 if action in {"expire", "late"} else 300,
     )

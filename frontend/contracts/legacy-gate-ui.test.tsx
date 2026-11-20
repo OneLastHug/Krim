@@ -9,7 +9,7 @@ let handler: (path: string, options: RequestInit) => Response | Promise<Response
 const calls: { path: string; method: string; key: string }[] = [];
 const releases: (() => void)[] = [];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const actor = (legacy: boolean) => ({ principal_id: "operator", generation: 1, legacy, workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+const actor = (legacy: boolean) => ({ principal_id: "operator", generation: 1, legacy, target_keys: legacy ? ["target-http"] : [], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
 const run = { id: "saved-run", request_key: "saved-key", status: "completed", trace_id: "saved-trace", root_span_id: "saved-span", created_at: 1, finished_at: 2, code: null, stop_requested: false };
 // 账号接入后的新身份链路：App 还会读 /v2/me/profile 与 /v2/targets/.../connection-profile。
 // legacy 服务器对 profile 返回 account_management_unavailable（409）；托管身份按真实 JSON 契约返回资料。
