@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import traceback
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
@@ -25,7 +24,7 @@ from ai.providers.openai.protocol import OpenAIResponsesProtocol
 from ai.types.messages import FilePart, TextPart, ToolCallPart, ToolResultPart
 from ai.types.messages import Message as SDKMessage
 from ai.types.tools import Tool, ToolSpec
-from pydantic import Field, JsonValue, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import Field, JsonValue, SecretStr, field_validator, model_validator
 
 from krim_agent.agent_sdk.host_media import HostImageMessage, validate_host_images
 from krim_agent.contracts import (
@@ -39,7 +38,15 @@ from krim_agent.contracts import (
 from krim_agent.runtime.contracts import settled
 from krim_agent.usage import TokenUsage
 
-from .types import ModelEvent, ModelRequestBudget, ModelText, ModelToolCall, ModelUsage
+from .types import (
+    ModelEvent,
+    ModelProgress,
+    ModelRequestBudget,
+    ModelStreamEvent,
+    ModelText,
+    ModelToolCall,
+    ModelUsage,
+)
 
 
 class ProviderError(ServiceError):
@@ -128,75 +135,6 @@ class OpenAICompatibleConfig(StrictModel):
                 and self.max_event_bytes > self.max_response_bytes):
             raise ValueError("Provider容量关系无效")
         return self
-
-    @classmethod
-    def from_env(cls) -> Self | None:
-        names = (
-            "BASE_URL",
-            "MODEL",
-            "WIRE_API",
-            "API_KEY",
-            "MAX_OUTPUT_TOKENS",
-            "REASONING_EFFORT",
-            "THINKING",
-            "CONNECT_TIMEOUT_SECONDS",
-            "READ_TIMEOUT_SECONDS",
-            "WRITE_TIMEOUT_SECONDS",
-            "POOL_TIMEOUT_SECONDS",
-            "MAX_REQUEST_BYTES",
-            "MAX_RESPONSE_BYTES",
-            "MAX_EVENT_BYTES",
-            "MAX_EVENTS",
-            "MAX_ARGUMENTS_BYTES",
-            "MAX_TOOL_CALLS",
-            "ALLOW_IMAGES",
-        )
-        values = {
-            name.lower(): os.environ["KRIM_AGENT_HTTP_" + name]
-            for name in names
-            if "KRIM_AGENT_HTTP_" + name in os.environ
-        }
-        if not values:
-            return None
-        try:
-            arguments: dict[str, Any] = dict(values)
-            for name in (
-                "max_output_tokens",
-                "max_request_bytes",
-                "max_response_bytes",
-                "max_event_bytes",
-                "max_events",
-                "max_arguments_bytes",
-                "max_tool_calls",
-            ):
-                if name in values:
-                    if values[name].lower() in {"none", "unlimited"}:
-                        arguments[name] = None
-                        continue
-                    if re.fullmatch(r"[0-9]+", values[name]) is None:
-                        raise ValueError
-                    arguments[name] = int(values[name])
-            if "allow_images" in values:
-                if values["allow_images"] not in {"true", "false"}:
-                    raise ValueError
-                arguments["allow_images"] = values["allow_images"] == "true"
-            for name in (
-                "connect_timeout_seconds",
-                "read_timeout_seconds",
-                "write_timeout_seconds",
-                "pool_timeout_seconds",
-            ):
-                if name in values:
-                    if values[name].lower() in {"none", "unlimited"}:
-                        arguments[name] = None
-                        continue
-                    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", values[name]) is None:
-                        raise ValueError
-                    arguments[name] = float(values[name])
-            return cls.model_validate(arguments)
-        except (ValueError, ValidationError):
-            raise ProviderError("provider_config", 422) from None
-
 
 async def _sse_data(response: httpx.Response, config: OpenAICompatibleConfig) -> AsyncIterator[str]:
     """按真实字节计帧；延迟CR分派以完整计入跨TCP块的CRLF，不分发残帧。"""
@@ -993,12 +931,27 @@ class OpenAICompatibleProvider:
         finally:
             await settled(source.aclose())
 
+    async def stream_with_diagnostics(
+        self,
+        messages: Sequence[Message],
+        tools: list[dict[str, JsonValue]],
+        budget: ModelRequestBudget | None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        source = self.stream_with_budget(messages, tools, budget, include_progress=True)
+        try:
+            async for event in source:
+                yield event
+        finally:
+            await settled(source.aclose())
+
     async def stream_with_budget(
         self,
         messages: Sequence[Message],
         tools: list[dict[str, JsonValue]],
         budget: ModelRequestBudget | None,
-    ) -> AsyncGenerator[ModelEvent, None]:
+        *,
+        include_progress: bool = False,
+    ) -> AsyncGenerator[ModelStreamEvent, None]:
         if self.closed:
             raise ProviderError("closed", 503)
         if self.binding_token() != self._sealed:
@@ -1060,6 +1013,8 @@ class OpenAICompatibleProvider:
         projected = _sdk_messages(messages, allow_images=self.config.allow_images)
         self.calls += 1
         self.active += 1
+        argument_bytes = 0
+        streamed_arguments: dict[str, int] = {}
         try:
             async with ai.stream(
                 self._sdk_model,
@@ -1082,7 +1037,39 @@ class OpenAICompatibleProvider:
                         yield ModelUsage(usage=boundary.snapshots.pop(0), final=False)
                     if isinstance(event, ai.events.TextDelta):
                         for part in _texts(event.chunk):
+                            if include_progress:
+                                yield ModelProgress(phase="text", argument_bytes=argument_bytes)
                             yield ModelText(text=part)
+                    elif isinstance(event, ai.events.ToolStart):
+                        if include_progress:
+                            yield ModelProgress(phase="tool_start", argument_bytes=argument_bytes)
+                    elif isinstance(event, ai.events.ToolDelta):
+                        call_id = event.tool_call_id
+                        delta_bytes = len(event.chunk.encode("utf-8"))
+                        streamed_arguments[call_id] = (
+                            streamed_arguments.get(call_id, 0) + delta_bytes
+                        )
+                        argument_bytes += delta_bytes
+                        if include_progress:
+                            yield ModelProgress(
+                                phase="tool_arguments", argument_bytes=argument_bytes,
+                            )
+                    elif isinstance(event, ai.events.ToolEnd):
+                        call = event.tool_call
+                        call_id = call.tool_call_id
+                        complete_bytes = len(call.tool_args.encode("utf-8"))
+                        streamed_bytes = streamed_arguments.get(call_id, 0)
+                        if complete_bytes > streamed_bytes:
+                            argument_bytes += complete_bytes - streamed_bytes
+                            streamed_arguments[call_id] = complete_bytes
+                        if include_progress:
+                            yield ModelProgress(
+                                phase="tool_complete", argument_bytes=argument_bytes,
+                            )
+                    elif include_progress:
+                        # Includes provider-only/reasoning activity without retaining
+                        # its payload, IDs, names, or any other content.
+                        yield ModelProgress(phase="response", argument_bytes=argument_bytes)
                 complete = boundary.complete()
                 sdk_calls = {call.tool_call_id: call for call in stream.tool_calls}
                 if len(sdk_calls) != len(complete):

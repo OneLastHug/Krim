@@ -363,6 +363,8 @@ class MemoryToolService:
                     if name in {"memory_write", "memory_delete"}
                     else "session_read",
                     risk="write" if name in {"memory_write", "memory_delete"} else "read",
+                    concurrency=("parallel" if name in {"memory_search", "memory_read"}
+                                 else "exclusive"),
                     description=description,
                 )
                 for name, (model, description) in definitions.items()

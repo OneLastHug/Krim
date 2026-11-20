@@ -96,6 +96,55 @@ async def new_turn(store: SQLiteStore, session_id: str, key: str, text: str, *, 
     return turn, run.id
 
 
+async def append_observed_tool(store: SQLiteStore, run_id: str, value: dict) -> None:
+    host_call_id = "host-call-" + run_id
+    provider_call_id = "provider-call"
+    await store.append(
+        run_id,
+        "model_end",
+        {
+            "step_index": 0,
+            "tool_calls": [{
+                "kind": "tool_call",
+                "id": provider_call_id,
+                "name": "lookup",
+                "arguments": {"key": "status"},
+            }],
+        },
+    )
+    await store.append(
+        run_id,
+        "tool_start",
+        {
+            "step_index": 0,
+            "provider_call_id": provider_call_id,
+            "call_id": host_call_id,
+            "name": "lookup",
+            "status": "unknown",
+            "executor_started": False,
+            "result_available": False,
+        },
+    )
+    await store.append(
+        run_id, "tool_intent", {"step_index": 0, "call_id": host_call_id}
+    )
+    await store.append(
+        run_id,
+        "tool_end",
+        {
+            "step_index": 0,
+            "provider_call_id": provider_call_id,
+            "call_id": host_call_id,
+            "name": "lookup",
+            "status": "ok",
+            "executor_started": True,
+            "result_available": True,
+            "decision": "allow",
+            "value": value,
+        },
+    )
+
+
 async def create_goal(store, owner, session, turn, run_id, *, criteria=("全部测试通过",)):
     return await GoalService(store).create(
         owner,
@@ -366,7 +415,12 @@ async def test_internal_turn_is_settled_and_keeps_user_binding(tmp_path):
         # The internal turn does not create or replace any goal through its own text.
         progressed = await service.update_from_tool(
             SessionToolScope(owner, WORKSPACE, session.id, internal_turn.id, internal_run),
-            GoalUpdate(request_key="progress-internal", expected_revision=1, action="progress"),
+            GoalUpdate(
+                request_key="progress-internal",
+                expected_revision=1,
+                action="progress",
+                evidence_refs=({"kind": "test", "ref": "pytest:smoke"},),
+            ),
         )
         assert progressed.origin_turn_id == turn.id
         with pytest.raises(ServiceError, match="invalid_input"):
@@ -442,6 +496,63 @@ async def test_repeated_failure_without_progress_becomes_blocked(tmp_path):
             ),
         )
         assert adjusted.status == "active" and adjusted.objective == "调整后的目标"
+
+
+@pytest.mark.asyncio
+async def test_repeated_completed_no_progress_gets_one_targeted_recovery(tmp_path):
+    async with goal_world(tmp_path / "repeated-completion.sqlite") as (store, world):
+        owner, session, (turn, run_id) = world["owner"], world["session"], world["turn"]
+        await create_goal(store, owner, session, turn, run_id)
+        queue = FakeQueue()
+        service = GoalService(store, queue=queue)
+        decision = await service.on_turn_finished(finished(turn, run_id))
+
+        async def completed_cycle(request, key: str):
+            internal_turn, internal_run = await new_turn(
+                store, session.id, request.turn_request_key, key, status="completed"
+            )
+            await append_observed_tool(store, internal_run, {"state": "unchanged"})
+            return await service.on_turn_finished(finished(internal_turn, internal_run))
+
+        first = await completed_cycle(decision.request, "repeat-1")
+        assert first.action == "continue" and first.request.reason == "goal_active"
+        second = await completed_cycle(first.request, "repeat-2")
+        assert second.action == "continue"
+        assert second.request.reason == "repeated_no_progress_recovery"
+        assert second.request.recovery_attempt == 1
+        assert len(second.request.progress_signature) == 64
+        assert "改用不同" in second.request.text
+
+        exhausted = await completed_cycle(second.request, "repeat-3")
+        assert exhausted.action == "stop" and exhausted.reason == "repeated_no_progress"
+        snapshot = await service.snapshot(owner, WORKSPACE, session.id)
+        assert snapshot.status == "blocked"
+        assert "定向纠偏次数已用尽" in (snapshot.blocked_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_waiting_processes_do_not_trigger_stall_recovery(tmp_path):
+    async with goal_world(tmp_path / "waiting-process.sqlite") as (store, world):
+        owner, session, (turn, run_id) = world["owner"], world["session"], world["turn"]
+        await create_goal(store, owner, session, turn, run_id)
+        service = GoalService(store, queue=FakeQueue())
+        decision = await service.on_turn_finished(finished(turn, run_id))
+
+        async def waiting_cycle(request, key: str):
+            internal_turn, internal_run = await new_turn(
+                store, session.id, request.turn_request_key, key, status="completed"
+            )
+            await append_observed_tool(
+                store, internal_run, {"background": True, "status": "running"}
+            )
+            return await service.on_turn_finished(finished(internal_turn, internal_run))
+
+        first = await waiting_cycle(decision.request, "waiting-1")
+        assert first.action == "continue" and first.request.reason == "goal_active"
+        second = await waiting_cycle(first.request, "waiting-2")
+        assert second.action == "continue" and second.request.reason == "goal_active"
+        assert second.request.recovery_attempt == 0
+        assert (await service.snapshot(owner, WORKSPACE, session.id)).status == "active"
 
 
 @pytest.mark.asyncio
@@ -586,6 +697,47 @@ async def test_long_goal_is_referenced_not_copied_or_truncated(tmp_path):
         assert len(items) == 1
         assert items[0]["source_refs"][0]["content_hash"] == snapshot.content_hash
         assert len(items[0]["content"]) > 60_000
+
+
+@pytest.mark.asyncio
+async def test_retire_queued_old_target_turns_and_resume_controls(tmp_path):
+    async with goal_world(tmp_path / "retire-target.sqlite") as (store, world):
+        owner = world["owner"]
+        old_session = await session_sql.create_session(
+            store,
+            WORKSPACE,
+            owner.principal_id,
+            SessionCreate(request_key="retired-session", target_key="demo"),
+            {"key": "demo"},
+            ContextPolicy(),
+            Settings(),
+        )
+        turn = await session_sql.submit(
+            store,
+            old_session.id,
+            TurnRequest(request_key="queued-old", text="保留这条输入", expected_revision=0),
+            Settings(),
+        )
+        await session_sql.begin_control(
+            store,
+            old_session.id,
+            "resume-old",
+            "resume",
+            owner.principal_id,
+            revision=1,
+            payload={},
+        )
+
+        assert await session_sql.retire_queued_targets(store) == 1
+        retired = await session_sql.get_turn(store, turn.id)
+        assert retired.status == "interrupted" and retired.code == "target_retired"
+        assert retired.run_id is None and retired.text == "保留这条输入"
+        assert retired.transcript is None
+        control = await session_sql.control_by_key(store, old_session.id, "resume-old")
+        assert control.status == "completed"
+        assert control.result == {"status": "interrupted", "code": "target_retired"}
+        assert (await session_sql.get_session(store, old_session.id)).dispatch_paused is True
+        assert await session_sql.retire_queued_targets(store) == 0
 
 
 @pytest.mark.asyncio

@@ -1155,8 +1155,10 @@ class DevelopmentService:
             request = await self._command(scope, values, identity, approval)
             await self.repositories.operations.bind_command(identity, request)
             if isinstance(parameters, ShellInput):
+                from krim_agent.development.output import shell_receipt
+
                 command_handle = await self.terminal.submit(request)
-                return cast(JsonValue, command_handle.model_dump(mode="json"))
+                return await shell_receipt(command_handle, self.terminal.read_output)
             # Terminal admission owns the once-only stdin send. An existing or
             # uncertain process is inspected, never given the body a second time.
             command_handle = await self.terminal.submit(

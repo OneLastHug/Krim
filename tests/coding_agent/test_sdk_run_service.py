@@ -44,11 +44,12 @@ async def application(path: Path, *, approval: bool):
     loop = DevelopmentSDKLoop(store, provider, executor, settings,
                               resolve_scope=scope, repositories=repositories,
                               cleanup_run=close_run, descriptor={'version': 'development-test/1'})
-    binding = RunBinding.freeze('demo', loop, settings)
+    binding = RunBinding.freeze('target-development', loop, settings)
     target = parse_json(binding.descriptor_json)
-    service = RunService(store, loop, settings, target, {'demo': binding})
+    service = RunService(store, loop, settings, target, {'target-development': binding})
     session = await session_sql.create_session(
-        store, workspace, record.environment.owner_id, SessionCreate(request_key='sdk-session'),
+        store, workspace, record.environment.owner_id,
+        SessionCreate(request_key='sdk-session', target_key='target-development'),
         target, ContextPolicy(), settings,
     )
     turn = await session_sql.submit(

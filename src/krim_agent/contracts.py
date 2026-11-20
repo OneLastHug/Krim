@@ -105,6 +105,7 @@ ERROR_CODES = frozenset(
         "tool_binding_changed",
         "provider_event",
         "provider_config",
+        "provider_not_configured",
         "provider_request_limit",
         "provider_response_limit",
         "provider_event_limit",
@@ -125,6 +126,8 @@ ERROR_CODES = frozenset(
         "event_limit",
         "no_output",
         "run_timeout",
+        "model_timeout",
+        "timeout",
         "cancelled",
         "interrupted",
         "execution_error",
@@ -170,6 +173,8 @@ ERROR_CODES = frozenset(
         "private_memory_workspace",
         "snapshot_changed",
         "target_binding_changed",
+        "target_retired",
+        "execution_retired",
         "facts_corrupt",
     }
 )
@@ -247,13 +252,16 @@ def fingerprint(value: object) -> str:
     return hashlib.sha256(encoded(value).encode()).hexdigest()
 
 
+RETIRED_TARGETS = frozenset({"demo", "target-v1", "target-v2", "target-bad", "target-workspace"})
+
+
 class RunRequest(StrictModel):
     text: str = Field(min_length=1)
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target: Literal[
         "demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace",
         "target-development"
-    ] = "demo"
+    ] = "target-http"
 
     @field_validator("text")
     @classmethod

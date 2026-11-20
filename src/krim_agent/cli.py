@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,14 +16,13 @@ from krim_agent import __version__
 from krim_agent.account_cli import add_account_parser, execute_account
 from krim_agent.client import AsyncRunClient
 from krim_agent.composition import Application, open_application
-from krim_agent.config import Settings
+from krim_agent.configuration import ConfigurationError, ServiceConfiguration, load_configuration
 from krim_agent.contracts import TERMINAL, RunRequest, ServiceError, parse_json
 from krim_agent.evaluation.regression import gate_reports, make_report, validate_report
 from krim_agent.evaluation.service import eval_view
 from krim_agent.evaluation.trace_cases import collect_candidate
 from krim_agent.evaluation.types import EvalRequest, FreezeRequest, RuleName, rule
 from krim_agent.observability import project_trace
-from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.runtime.facts import project_facts
 from krim_agent.sdk.sessions import SessionSDK
 from krim_agent.sessions.types import ControlRequest, SessionCreate, TurnRequest
@@ -85,12 +85,7 @@ def eval_request(args: argparse.Namespace) -> EvalRequest:
 
 
 @asynccontextmanager
-async def owned_eval(
-    path: Path,
-    http_config: OpenAICompatibleConfig | None = None,
-    *,
-    settings: Settings | None = None,
-) -> AsyncIterator[Application]:
+async def owned_eval(configuration: ServiceConfiguration) -> AsyncIterator[Application]:
     task = asyncio.current_task()
     assert task is not None
     loop = asyncio.get_running_loop()
@@ -99,12 +94,7 @@ async def owned_eval(
         previous[signum] = signal.getsignal(signum)
         loop.add_signal_handler(signum, task.cancel)
     try:
-        opened = (
-            await open_application(path, settings=settings, http_config=http_config)
-            if http_config is not None or settings is not None
-            else await open_application(path)
-        )
-        async with opened as application:
+        async with await open_application(configuration=configuration) as application:
             yield application
     finally:
         for signum, handler in previous.items():
@@ -112,14 +102,43 @@ async def owned_eval(
             signal.signal(signum, handler)
 
 
-async def execute_m2(args: argparse.Namespace) -> Any:
+def _database(configuration: ServiceConfiguration | None) -> Path:
+    if configuration is None:
+        raise ServiceError("invalid_input", 422)
+    return configuration.settings.database
+
+
+def _client(args: argparse.Namespace) -> AsyncRunClient:
+    name = getattr(args, "api_key_env", None)
+    if name is None:
+        key = ""
+    else:
+        import re
+
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise ServiceError("invalid_input", 422)
+        key = os.environ.get(name, "")
+        if not key:
+            raise ServiceError("invalid_input", 422)
+    return AsyncRunClient(args.url, key)
+
+
+def _require_configuration(configuration: ServiceConfiguration | None) -> ServiceConfiguration:
+    if configuration is None:
+        raise ServiceError("invalid_input", 422)
+    return configuration
+
+
+async def execute_m2(
+    args: argparse.Namespace, configuration: ServiceConfiguration | None = None
+) -> Any:
     operation = getattr(args, "operation", "")
     if not args.url and args.command == "eval" and operation in {"wait", "cancel"}:
         raise ServiceError("readonly")
     frozen = freeze_request(args) if args.command == "dataset" and operation == "freeze" else None
     requested = eval_request(args) if args.command == "eval" and operation == "start" else None
     if args.url:
-        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        client = _client(args)
         try:
             if args.command == "candidate":
                 return (await client.candidate(args.id, args.include_input)).model_dump(mode="json")
@@ -145,24 +164,21 @@ async def execute_m2(args: argparse.Namespace) -> Any:
             return (await client.eval_cancel(args.id)).model_dump(mode="json")
         finally:
             await client.close()
+    active_configuration = _require_configuration(configuration)
     if frozen is not None:
-        async with await open_application(Path(args.database)) as app:
+        async with await open_application(configuration=active_configuration) as app:
             assert app.evaluations is not None
             return (await app.evaluations.freeze(frozen)).model_dump(mode="json")
     if requested is not None:
-        http_config = (
-            OpenAICompatibleConfig.from_env() if requested.target_key == "target-http" else None
-        )
-        settings = Settings.from_env() if requested.target_key == "target-http" else None
-        async with owned_eval(
-            Path(args.database), http_config=http_config, settings=settings
-        ) as app:
+        active_configuration = _require_configuration(configuration)
+        async with owned_eval(active_configuration) as app:
             service = app.evaluations
             assert service is not None
             view = await service.start(requested)
             await service.wait(view.id)
             return await service.report(view.id)
-    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    active_configuration = _require_configuration(configuration)
+    store = await SQLiteStore.open(active_configuration.settings.database, readonly=True)
     try:
         if args.command == "candidate":
             return collect_candidate(await store.snapshot(args.id), args.include_input).model_dump(
@@ -194,7 +210,9 @@ async def execute_m2(args: argparse.Namespace) -> Any:
         await store.close()
 
 
-async def execute_sessions(args: argparse.Namespace) -> Any:
+async def execute_sessions(
+    args: argparse.Namespace, configuration: ServiceConfiguration | None = None
+) -> Any:
     operation = args.operation
     if not args.url and operation in {"close", "resume", "cancel", "wait"}:
         raise ServiceError("readonly")
@@ -259,41 +277,27 @@ async def execute_sessions(args: argparse.Namespace) -> Any:
         ).model_dump(mode="json")
 
     if args.url:
-        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        client = _client(args)
         try:
             return await perform(SessionSDK(client, workspace=args.workspace))
         finally:
             await client.close()
+    active_configuration = _require_configuration(configuration)
     writing = operation in {"create", "start"}
     if writing:
-        settings = Settings.from_env()
-        target = getattr(args, "target", "demo")
-        if operation == "start" and settings.provider != "http":
-            source = await SQLiteStore.open(Path(args.database), readonly=True)
-            try:
-                target = (
-                    await SessionSDK(source, workspace=args.workspace).get(args.session)
-                ).target_key
-            finally:
-                await source.close()
-        http = (
-            OpenAICompatibleConfig.from_env()
-            if settings.provider == "http" or target == "target-http"
-            else None
-        )
-        if target == "target-http" and http is None:
-            raise ServiceError("provider_config", 422)
-        async with owned_eval(Path(args.database), http_config=http, settings=settings) as app:
+        async with owned_eval(active_configuration) as app:
             assert app.sessions is not None
             return await perform(SessionSDK(app.sessions, workspace=args.workspace))
-    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    store = await SQLiteStore.open(active_configuration.settings.database, readonly=True)
     try:
         return await perform(SessionSDK(store, workspace=args.workspace))
     finally:
         await store.close()
 
 
-async def execute_workspace(args: argparse.Namespace) -> Any:
+async def execute_workspace(
+    args: argparse.Namespace, configuration: ServiceConfiguration | None = None
+) -> Any:
     from krim_agent.sdk.workspace import WorkspaceSDK
     from krim_agent.workspace.types import InputSnapshotRequest, WorkspaceTurnRequest
 
@@ -342,35 +346,41 @@ async def execute_workspace(args: argparse.Namespace) -> Any:
         return value.model_dump(mode="json") if value is not None else None
 
     if args.url:
-        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        client = _client(args)
         try:
             return await perform(WorkspaceSDK(client, workspace=args.workspace))
         finally:
             await client.close()
-    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    active_configuration = _require_configuration(configuration)
+    store = await SQLiteStore.open(active_configuration.settings.database, readonly=True)
     try:
-        return await perform(WorkspaceSDK(store, workspace=args.workspace,
-            artifact_root=Path(args.artifact_root) if args.artifact_root else None))
+        return await perform(WorkspaceSDK(
+            store, workspace=args.workspace, artifact_root=active_configuration.legacy_artifact_root
+        ))
     finally:
         await store.close()
 
 
-async def execute(args: argparse.Namespace) -> Any:
+async def execute(
+    args: argparse.Namespace, configuration: ServiceConfiguration | None = None
+) -> Any:
     if args.command == "account":
         return await execute_account(args)
     if args.command == "workspace":
-        return await execute_workspace(args)
+        return await execute_workspace(args, configuration)
     if args.command in {"session", "turn"}:
-        return await execute_sessions(args)
+        return await execute_sessions(args, configuration)
     if args.command in {"candidate", "dataset", "eval", "report", "compare"}:
-        return await execute_m2(args)
+        return await execute_m2(args, configuration)
     if args.url:
-        client = AsyncRunClient(args.url, os.environ.get("KRIM_AGENT_API_KEY", ""))
+        client = _client(args)
         try:
             if args.command == "run":
                 run = await client.start(
                     RunRequest(
-                        text=args.text, request_key=args.key, target=getattr(args, "target", "demo")
+                        text=args.text,
+                        request_key=args.key,
+                        target=getattr(args, "target", "target-http"),
                     )
                 )
                 await client.wait(run.id)
@@ -382,28 +392,21 @@ async def execute(args: argparse.Namespace) -> Any:
         finally:
             await client.close()
     if args.command == "run":
-        settings = Settings.from_env()
-        http_config = (
-            OpenAICompatibleConfig.from_env()
-            if getattr(args, "target", "demo") == "target-http" or settings.provider == "http"
-            else None
-        )
-        owner = (
-            owned_eval(Path(args.database), http_config=http_config, settings=settings)
-            if getattr(args, "target", "demo") == "target-http" or settings.provider == "http"
-            else await open_application(Path(args.database), settings=settings)
-        )
-        async with owner as app:
+        active_configuration = _require_configuration(configuration)
+        async with owned_eval(active_configuration) as app:
             run = await app.service.start(
                 RunRequest(
-                    text=args.text, request_key=args.key, target=getattr(args, "target", "demo")
+                    text=args.text,
+                    request_key=args.key,
+                    target=getattr(args, "target", "target-http"),
                 )
             )
             await app.service.wait(run.id)
             return (await app.service.result(run.id)).model_dump(mode="json")
     if args.command == "cancel":
         raise ServiceError("readonly")
-    store = await SQLiteStore.open(Path(args.database), readonly=True)
+    active_configuration = _require_configuration(configuration)
+    store = await SQLiteStore.open(active_configuration.settings.database, readonly=True)
     try:
         snapshot = await store.snapshot(args.id)
         if args.command == "result" and snapshot.run.status not in TERMINAL:
@@ -425,33 +428,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Krim Agent")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
-    serve = sub.add_parser("serve")
-    serve.add_argument("--database", required=True)
-    serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--tool-config", type=Path)
-    development = sub.add_parser("serve-development")
-    development.add_argument("--database", required=True)
-    development.add_argument("--development-config", type=Path, required=True)
-    development.add_argument("--tool-config", type=Path)
-    for command in ("run", "get", "result", "trace", "events", "cancel"):
-        child = sub.add_parser(command)
-        child.add_argument("--database", default=".data/krim-agent.db")
-        child.add_argument("--url")
-        if command == "run":
-            child.add_argument("--text", required=True)
-            child.add_argument("--key", required=True)
-            child.add_argument(
-                "--target",
-                default="demo",
-                choices=["demo", "target-v1", "target-v2", "target-bad", "target-http"],
-            )
-        else:
-            child.add_argument("--id", required=True)
 
     def mode(child: argparse.ArgumentParser) -> None:
         group = child.add_mutually_exclusive_group(required=True)
         group.add_argument("--url")
-        group.add_argument("--database")
+        group.add_argument("--config", type=Path)
+        child.add_argument("--api-key-env")
+
+    serve = sub.add_parser("serve")
+    serve.add_argument("--config", type=Path, required=True)
+    development = sub.add_parser("serve-development")
+    development.add_argument("--config", type=Path, required=True)
+    for command in ("run", "get", "result", "trace", "events", "cancel"):
+        child = sub.add_parser(command)
+        mode(child)
+        if command == "run":
+            child.add_argument("--text", required=True)
+            child.add_argument("--key", required=True)
+            child.add_argument("--target", default="target-http", choices=["target-http"])
+        else:
+            child.add_argument("--id", required=True)
 
     for command, operations in (
         ("session", ["create", "list", "get", "by-key", "close", "resume"]),
@@ -473,9 +469,7 @@ def main() -> None:
             if operation == "create":
                 child.add_argument("--title", default="新对话")
                 child.add_argument(
-                    "--target",
-                    default="demo",
-                    choices=["demo", "target-v1", "target-v2", "target-bad", "target-http"],
+                    "--target", default="target-http", choices=["target-http"]
                 )
             if operation == "start":
                 child.add_argument("--text", required=True)
@@ -526,7 +520,6 @@ def main() -> None:
         mode(child)
         child.add_argument("--workspace", default="local")
         child.add_argument("--session", required=True)
-        child.add_argument("--artifact-root")
         if workop in {"start", "input"}:
             child.add_argument("--request", required=True)
         elif workop == "artifact":
@@ -541,38 +534,50 @@ def main() -> None:
     add_account_parser(sub)
     args = parser.parse_args()
     try:
+        configuration = (
+            load_configuration(args.config) if getattr(args, "config", None) is not None else None
+        )
+        if configuration is not None:
+            for name in configuration.legacy_environment_variables:
+                print(f"ignored legacy configuration variable: {name}", file=sys.stderr)
+        if getattr(args, "api_key_env", None) is not None and not args.url:
+            raise ServiceError("invalid_input", 422)
         if args.command == "serve-development":
             from krim_agent.development.serving import run_development
 
-            changes: dict[str, Any] = {
-                "database": Path(args.database),
-                "development_config_file": args.development_config,
-            }
-            if args.tool_config is not None:
-                changes["tool_config_file"] = args.tool_config
-            settings = Settings.from_env().model_copy(update=changes)
-            asyncio.run(run_development(settings, OpenAICompatibleConfig.from_env()))
+            active_configuration = _require_configuration(configuration)
+            if active_configuration.development is None:
+                raise ServiceError("invalid_input", 422)
+            asyncio.run(run_development(configuration=active_configuration))
             return
         if args.command == "serve":
             import uvicorn
 
             from krim_agent.api import create_app
 
-            changes: dict[str, Any] = {"database": Path(args.database)}
-            if args.tool_config is not None:
-                changes["tool_config_file"] = args.tool_config
-            settings = Settings.from_env().model_copy(update=changes)
+            active_configuration = _require_configuration(configuration)
             uvicorn.run(
-                create_app(settings, http_config=OpenAICompatibleConfig.from_env()),
-                host="127.0.0.1",
-                port=args.port,
+                create_app(configuration=active_configuration),
+                host=active_configuration.server.host,
+                port=active_configuration.server.port,
+                ssl_certfile=(str(active_configuration.server.tls_certificate)
+                              if active_configuration.server.tls_certificate else None),
+                ssl_keyfile=(str(active_configuration.server.tls_private_key)
+                             if active_configuration.server.tls_private_key else None),
                 access_log=False,
                 log_level="warning",
             )
             return
-        print(json.dumps(asyncio.run(execute(args)), ensure_ascii=False, allow_nan=False))
+        print(
+            json.dumps(
+                asyncio.run(execute(args, configuration)), ensure_ascii=False, allow_nan=False
+            )
+        )
     except ServiceError as error:
-        print(json.dumps({"error": {"code": error.code}}, ensure_ascii=False))
+        detail = {"code": error.code}
+        if isinstance(error, ConfigurationError):
+            detail["diagnostic"] = error.diagnostic
+        print(json.dumps({"error": detail}, ensure_ascii=False))
         raise SystemExit(1) from None
     except (ValueError, KeyError):
         print(json.dumps({"error": {"code": "invalid_input"}}))

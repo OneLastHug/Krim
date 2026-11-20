@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any, cast
 
 from pydantic import JsonValue
 
-from krim_agent import contracts as public_contracts
 from krim_agent.contracts import ServiceError, fingerprint, parse_json
 from krim_agent.runtime.service import RunService
+from krim_agent.security import PrincipalContext
+from krim_agent.sessions.service import SessionService
+from krim_agent.sessions.types import ControlRequest, SessionCreate, TurnRequest
 from krim_agent.storage.sqlite import SQLiteStore
 
 from .. import scorers
-from ..domain import BatchPlan, CleanupResult, ExecutionRef, PreparedTrial, TrialSpec
+from ..domain import (
+    BatchPlan,
+    CleanupResult,
+    ExecutionRef,
+    PreparedTrial,
+    SessionExecutionContext,
+    TrialSpec,
+    neutral_fingerprint,
+)
 from ..kernel import EvalKernel
 from ..ports import AgentAdapter, MetricPort
 from ..regression import gate_reports, make_report, validate_report
-from ..targets import RunTarget
 from ..trace_cases import collect_candidate, observe_snapshot
 from ..types import (
     RULE_CONFIGS,
@@ -37,42 +45,6 @@ def eval_view(snapshot: dict[str, Any]) -> EvalView:
     values = {k: snapshot[k] for k in EvalView.model_fields if k != "finished_count"}
     values["finished_count"] = sum(i["status"] == "finished" for i in snapshot["items"])
     return EvalView.model_validate(values)
-
-
-class KrimAdapter:
-    def __init__(self, store: SQLiteStore, runs: RunService, key: str) -> None:
-        self.store, self.runs, self.key = store, runs, key
-
-    def descriptor(self) -> dict[str, Any]:
-        binding = self.runs.bindings.get(self.key)
-        if binding is None:
-            raise ServiceError("invalid_input", 422)
-        binding.assert_current()
-        return cast(dict[str, Any], parse_json(binding.descriptor_json))
-
-    def assert_current(self, frozen: dict[str, Any]) -> None:
-        if fingerprint(self.descriptor()) != fingerprint(frozen):
-            raise ServiceError("target_binding_changed")
-
-    async def prepare(self, trial: TrialSpec) -> PreparedTrial:
-        return PreparedTrial(trial)
-
-    async def execute(self, prepared: PreparedTrial) -> ExecutionRef:
-        trial = prepared.spec
-        run = await RunTarget(self.runs).start(trial.task_id, trial.case_id, trial.repetition)
-        return ExecutionRef(run.id)
-
-    async def collect(self, ref: ExecutionRef) -> dict[str, Any]:
-        await self.runs.wait(ref.id)
-        return observe_snapshot(await self.store.snapshot(ref.id)).model_dump(mode="json")
-
-    async def cancel(self, ref: ExecutionRef) -> CleanupResult:
-        await self.runs.cancel(ref.id)
-        return CleanupResult(True)
-
-    async def close(self) -> CleanupResult:
-        # 此adapter没有借用资源的关闭权。
-        return CleanupResult(True)
 
 
 class LegacyMetrics:
@@ -108,7 +80,6 @@ class LegacyMetrics:
 class LegacyRepository:
     def __init__(self, store: SQLiteStore, runs: RunService) -> None:
         self.store, self.runs = store, runs
-        self._adapters: dict[str, KrimAdapter] = {}
 
     @property
     def healthy(self) -> bool:
@@ -118,43 +89,13 @@ class LegacyRepository:
         return await self.store.eval_by_key(request["request_key"])
 
     def adapter(self, request: dict[str, Any]) -> AgentAdapter:
-        key = request["target_key"]
-        if key not in self._adapters:
-            self._adapters[key] = KrimAdapter(self.store, self.runs, key)
-        return self._adapters[key]
+        raise ServiceError("execution_retired", 410)
 
     def metrics(self) -> MetricPort:
         return LegacyMetrics()
 
     async def begin(self, value: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        request = EvalRequest.model_validate(value)
-        binding = self.runs.bindings.get(request.target_key)
-        if binding is None:
-            raise ServiceError("invalid_input", 422)
-        binding.assert_current()
-        target = cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
-        execution = request.execution.model_dump(mode="json") | {
-            k: target[k] for k in ["limits", "policy", "pre", "post"]
-        }
-        try:
-            if request.target_key == "target-http" and binding.settings.provider == "http":
-                dataset = await self.store.dataset(request.dataset.name, request.dataset.version)
-                if (
-                    dataset.fingerprint != request.dataset.fingerprint
-                    or len(dataset.cases) * request.execution.repetitions > 2
-                ):
-                    raise ServiceError("invalid_input", 422)
-                execution["effective_timeouts"] = {
-                    "schema_version": 1,
-                    "source": "trusted-http-host/1",
-                    "item_timeout_seconds": (binding.settings.run_timeout or 570) + 30,
-                    "batch_timeout_seconds": 600,
-                }
-            return await self.store.begin_eval(request, target, execution)
-        except ServiceError as error:
-            if error.code == "not_found":
-                raise ServiceError("invalid_input", 422) from None
-            raise
+        raise ServiceError("execution_retired", 410)
 
     async def snapshot(self, task_id: str) -> dict[str, Any]:
         return await self.store.eval_snapshot(task_id)
@@ -198,11 +139,10 @@ class LegacyRepository:
         )
 
     async def intent(self, trial: TrialSpec) -> None:
-        # 原child_request/start_child已负责Run意图；不双写或伪造新Run。
-        return None
+        raise ServiceError("execution_retired", 410)
 
     async def attach(self, trial: TrialSpec, ref: ExecutionRef) -> None:
-        await self.store.attach_child(trial.task_id, trial.case_id, trial.repetition, ref.id)
+        raise ServiceError("execution_retired", 410)
 
     async def record(
         self,
@@ -242,11 +182,7 @@ class EvaluationService:
         self.kernel._external()
 
     def targets(self) -> list[dict[str, JsonValue]]:
-        return [
-            cast(dict[str, JsonValue], parse_json(b.descriptor_json))
-            for key, b in self.runs.bindings.items()
-            if key in {"target-v1", "target-v2", "target-bad", "target-http"}
-        ]
+        return []
 
     def rules(self) -> list[dict[str, JsonValue]]:
         return [
@@ -261,7 +197,7 @@ class EvaluationService:
         return await self.store.freeze_dataset(request)
 
     async def start(self, request: EvalRequest) -> EvalView:
-        return eval_view(await self.kernel.submit(request.model_dump(mode="json")))
+        raise ServiceError("execution_retired", 410)
 
     async def get(self, eval_id: str) -> EvalView:
         return eval_view(await self.store.eval_snapshot(eval_id))
@@ -325,39 +261,54 @@ class EvaluationService:
 
 
 class NeutralKrimAdapter:
-    """中立Task借用真实RunService；不制造旧Eval FK，不关闭借用资源。"""
+    """Run plain cases through the host's authorized session service."""
 
-    def __init__(
-        self,
-        store: SQLiteStore,
-        runs: RunService,
-        key: str = "target-v2",
-        *,
-        neutral_key: str = "krim-script-v2",
-        root: Path | None = None,
-    ) -> None:
-        self.store, self.runs, self.key = store, runs, key
-        self.neutral_key, self.root = neutral_key, root
-        self.jobs: dict[str, ExecutionRef] = {}
+    def __init__(self, store: SQLiteStore, runs: RunService, sessions: SessionService,
+                 key: str = "target-http", *, neutral_key: str = "krim-session") -> None:
+        self.store, self.runs, self.sessions, self.key = store, runs, sessions, key
+        self.neutral_key = neutral_key
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.active: set[str] = set()
+        self.observations: dict[str, dict[str, Any]] = {}
         self.closed = False
         self.execute_calls = 0
 
     def descriptor(self) -> dict[str, Any]:
+        if self.key != "target-http":
+            raise ServiceError("workspace_unavailable", 409)
         binding = self.runs.bindings.get(self.key)
         if binding is None:
-            raise ServiceError("invalid_input")
+            raise ServiceError("provider_not_configured", 503)
         binding.assert_current()
-        original = parse_json(binding.descriptor_json)
+        provider_type = type(binding.loop.provider)
+        if (provider_type.__name__ == "UnconfiguredProvider"
+                or provider_type.__module__ in {
+                    "krim_agent.providers.fake", "krim_agent.providers.eval_script"
+                }):
+            raise ServiceError("provider_not_configured", 503)
+        original = cast(dict[str, Any], parse_json(binding.descriptor_json))
+        original_fingerprint = fingerprint(original)
+        compact = dict(original)
+        schemas = compact.get("tools")
+        if isinstance(schemas, list):
+            compact["tools"] = {
+                "count": len(schemas),
+                "fingerprint": fingerprint(schemas),
+                "names": sorted(
+                    item["name"] for item in schemas
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                ),
+            }
         return {
-            "key": self.neutral_key,
-            "version": "neutral-krim/1",
-            "kind": "krim-run",
+            "key": self.neutral_key, "version": "krim-session/1", "kind": "krim-run",
+            "max_concurrency": 1,
             "execution_conditions": {
-                "schema_version": "krim-run/1",
-                "run_target_key": self.key,
-                "binding_descriptor": original,
-                "binding_fingerprint": fingerprint(original),
-                "public_runtime_conditions": {"run_timeout": binding.settings.run_timeout},
+                "schema_version": "krim-run/1", "run_target_key": self.key,
+                "binding_descriptor": compact, "binding_fingerprint": original_fingerprint,
+                "public_runtime_conditions": {
+                    "run_timeout": binding.settings.run_timeout,
+                    "submission": "SessionService.create-submit/1",
+                },
                 "budget": {"item": 20, "task": 120},
             },
         }
@@ -366,110 +317,228 @@ class NeutralKrimAdapter:
         if self.closed or fingerprint(self.descriptor()) != fingerprint(frozen):
             raise ServiceError("target_binding_changed")
 
+    def _principal(self, context: SessionExecutionContext) -> PrincipalContext:
+        principal = self.sessions._owner_principal(context.principal_id)
+        if principal.generation != context.principal_generation:
+            raise ServiceError("permission_denied", 403)
+        principal = self.sessions._live_principal(principal)
+        principal.member(context.workspace_id, write=True)
+        return principal
+
+    @staticmethod
+    def _keys(trial: TrialSpec) -> tuple[str, str]:
+        base = f"eval.{trial.task_id}.{trial.case_id}.{trial.repetition}"
+        return base + ".session", base + ".turn"
+
     async def prepare(self, trial: TrialSpec) -> PreparedTrial:
         self.assert_current(trial.target)
-        if self.root is None:
-            return PreparedTrial(trial)
-        from ..evidence import initial_files
+        context = trial.execution_context
+        if (context is None or context.target_key != self.key
+                or context.binding_fingerprint != neutral_fingerprint(trial.target)):
+            raise ServiceError("permission_denied", 403)
+        self._principal(context)
+        if trial.case.get("files"):
+            raise ServiceError("workspace_unavailable", 409)
+        if trial.case.get("verifier") in {"krim-script/1", "agent-bench/1"}:
+            raise ServiceError("target_retired", 410)
+        return PreparedTrial(trial)
 
-        directory = self.root / trial.task_id / f"{trial.case_id}-{trial.repetition}"
-        directory.mkdir(parents=True, exist_ok=False)
-        initial = initial_files(directory, {"INPUT.txt": trial.case["instruction"]})
-        return PreparedTrial(trial, str(directory), initial)
+    async def _session(self, principal: PrincipalContext, context: SessionExecutionContext,
+                       key: str) -> Any:
+        try:
+            return await self.sessions.by_key(principal, context.workspace_id, key)
+        except ServiceError as error:
+            if error.code != "not_found":
+                raise
+        try:
+            return await self.sessions.create(
+                principal, context.workspace_id,
+                SessionCreate(request_key=key, title="Krim evaluation",
+                              target_key=context.target_key),
+            )
+        except Exception as error:
+            try:
+                return await self.sessions.by_key(principal, context.workspace_id, key)
+            except Exception as lookup_error:
+                if isinstance(error, ServiceError):
+                    raise error from None
+                raise ServiceError("execution_unknown") from lookup_error
 
     async def execute(self, prepared: PreparedTrial) -> ExecutionRef:
-        self.assert_current(prepared.spec.target)
         trial = prepared.spec
-        key = f"pn2.krim.{trial.task_id}.{trial.case_id}.{trial.repetition}"
-        request = public_contracts.RunRequest.model_validate(
-            {"text": trial.case["instruction"], "request_key": key, "target": self.key}
-        )
-        old = await self.store.by_key(key)
         self.assert_current(trial.target)
-        admitted = False
-        if old is None:
+        context = trial.execution_context
+        if context is None:
+            raise ServiceError("permission_denied", 403)
+        principal = self._principal(context)
+        session_key, turn_key = self._keys(trial)
+        session = await self._session(principal, context, session_key)
+        if (session.owner_id != context.principal_id or session.workspace_id != context.workspace_id
+                or session.target_key != self.key):
+            raise ServiceError("facts_corrupt")
+        try:
+            turn = await self.sessions.turn_by_key(
+                principal, context.workspace_id, session.id, turn_key
+            )
+        except ServiceError as error:
+            if error.code != "not_found":
+                raise
+            if session.revision != 0:
+                raise ServiceError("key_conflict") from None
             self.execute_calls += 1
             try:
-                old = await self.runs.start(request)
-                # 真实start已校验完整request；在任何后续await之前接管其返回的身份。
-                admitted = old.request_key == key
+                turn = await self.sessions.submit(
+                    principal, context.workspace_id, session.id,
+                    TurnRequest(request_key=turn_key, text=trial.case["instruction"],
+                                expected_revision=session.revision),
+                )
             except Exception as error:
                 try:
-                    old = await self.store.by_key(key)
+                    turn = await self.sessions.turn_by_key(
+                        principal, context.workspace_id, session.id, turn_key
+                    )
                 except Exception as lookup_error:
-                    self.closed = True
-                    vars(self).setdefault("_unresolved_starts", {})[key] = request
-                    raise ServiceError("execution_unknown") from lookup_error
-                if old is None:
                     if isinstance(error, ServiceError):
-                        raise error
-                    self.closed = True
-                    vars(self).setdefault("_unresolved_starts", {})[key] = request
-                    raise ServiceError("execution_unknown") from error
-        ref = ExecutionRef(old.id)
-        if admitted:
-            self.jobs[ref.id] = ref
-        try:
-            snapshot = await self.store.snapshot(old.id)
-            if snapshot.request != request:
-                raise ServiceError("key_conflict")
-            self.assert_current(trial.target)
-        except BaseException:
-            if admitted:
-                # 借用服务保持开放；只取消本次可信start交回的Run，join在异常回程之前完成。
-                from ..lifecycle import settled
+                        raise error from None
+                    raise ServiceError("execution_unknown") from lookup_error
+        if turn.text != trial.case["instruction"] or turn.owner_id != context.principal_id:
+            raise ServiceError("key_conflict")
+        self.jobs[turn.id] = {
+            "context": context, "session_id": session.id, "turn_id": turn.id,
+            "task_id": trial.task_id, "case_id": trial.case_id,
+            "repetition": trial.repetition,
+        }
+        self.active.add(turn.id)
+        return ExecutionRef(turn.id)
 
-                try:
-                    await settled(self.runs.cancel(ref.id))
-                except Exception as error:
-                    self.closed = True
-                    raise ServiceError("execution_unknown") from error
-            else:
-                self.closed = True
-                vars(self).setdefault("_unresolved_starts", {})[key] = request
-            raise
-        self.jobs[ref.id] = ref
-        return ref
+    async def _close_session(self, principal: PrincipalContext,
+                             context: SessionExecutionContext, record: dict[str, Any]) -> Any:
+        session = await self.sessions.get(
+            principal, context.workspace_id, record["session_id"], write=True
+        )
+        if session.status == "open":
+            await self.sessions.control(
+                principal, context.workspace_id, session.id, "close",
+                ControlRequest(
+                    request_key=(f"eval-close.{record['task_id']}.{record['case_id']}."
+                                 f"{record['repetition']}"),
+                    expected_revision=session.revision,
+                ),
+            )
+            session = await self.sessions.get(
+                principal, context.workspace_id, record["session_id"], write=True
+            )
+        return session
 
     async def collect(self, ref: ExecutionRef) -> dict[str, Any]:
-        if self.jobs.get(ref.id) is not ref:
-            raise ServiceError("permission_denied")
-        await self.runs.wait(ref.id)
-        from krim_agent.runtime.facts import project_facts
+        cached = self.observations.get(ref.id)
+        if cached is not None:
+            return cached
+        record = self.jobs.get(ref.id)
+        if record is None:
+            raise ServiceError("permission_denied", 403)
+        context = cast(SessionExecutionContext, record["context"])
+        principal = self._principal(context)
+        turn = await self.sessions.wait(
+            principal, context.workspace_id, record["session_id"], record["turn_id"]
+        )
+        snapshot = None if turn.run_id is None else await self.store.snapshot(turn.run_id)
+        observed = facts = None
+        tools = None
+        artifacts: dict[str, Any] = {}
+        if snapshot is not None:
+            linked = snapshot.session_context
+            if (linked is None or linked.session_id != record["session_id"]
+                    or linked.turn_id != record["turn_id"]
+                    or linked.workspace_id != context.workspace_id
+                    or snapshot.run.id != turn.run_id):
+                raise ServiceError("facts_corrupt")
+            observed = observe_snapshot(snapshot)
+            from krim_agent.runtime.facts import project_facts
+            facts = project_facts(snapshot)
+            tools = [
+                {"seq": event.seq, "event_id": event.event_id,
+                 "kind": event.kind, "receipt": event.data}
+                for event in snapshot.events if event.kind in {"tool_start", "tool_end"}
+            ] or None
+            if snapshot.work is not None:
+                artifacts["work"] = {
+                    "input_revision": snapshot.work.input_revision.model_dump(mode="json"),
+                    "source_refs": list(snapshot.work.source_refs),
+                    "verification": snapshot.work.verification,
+                }
+            refs = [
+                {"event_id": event.event_id, "field": field, "id": event.data[field]}
+                for event in snapshot.events
+                for field in ("artifact_revision_id", "revision_id", "artifact_id")
+                if isinstance(event.data.get(field), str)
+            ]
+            if refs:
+                artifacts["references"] = refs
 
+        cleanup, session_status = "unknown", "unknown"
+        try:
+            final_session = await self._close_session(principal, context, record)
+            session_status = final_session.status
+            cleanup = "closed" if session_status == "closed" else "unknown"
+        except ServiceError:
+            pass
+        run = None if snapshot is None else snapshot.run
+        target_result = {
+            "schema_version": "krim-session/1", "session_id": record["session_id"],
+            "session_status": session_status, "session_record_retained": True,
+            "turn_id": turn.id, "turn_status": turn.status, "turn_code": turn.code,
+            "context_fingerprint": turn.context_fingerprint,
+            "run_id": None if run is None else run.id,
+            "trace_id": None if run is None else run.trace_id,
+            "status": turn.status if run is None else run.status,
+            "code": turn.code if run is None else run.code,
+            "text": None if observed is None else observed.text,
+            "model_steps": None if observed is None else observed.model_steps,
+            "tools": tools, "host_runtime": {"ownership": "borrowed", "retained": True},
+        }
         from ..domain import Observation
-
-        facts = project_facts(await self.store.snapshot(ref.id))
-        return Observation(
-            execution_ref=ref.id,
-            exit_code=None,
-            stdout=None,
-            stderr=None,
-            artifacts={},
-            process=None,
-            cleanup="closed",
-            token_usage=facts.token_usage,
-            usage_complete=facts.usage_complete,
-            target_result={
-                "run_id": ref.id,
-                "status": facts.run.status,
-                "code": facts.run.code,
-                "text": facts.text,
-                "model_steps": facts.model_steps,
-                "tools": [t.model_dump(mode="json") for t in facts.tools],
-            },
+        output = Observation(
+            execution_ref=ref.id, exit_code=None, stdout=None, stderr=None,
+            artifacts=artifacts, process=None, cleanup=cleanup,
+            token_usage=None if facts is None else facts.token_usage,
+            usage_complete=False if facts is None else facts.usage_complete,
+            target_result=target_result,
         ).model_dump(mode="json")
+        self.active.discard(ref.id)
+        self.observations[ref.id] = output
+        return output
 
     async def cancel(self, ref: ExecutionRef) -> CleanupResult:
-        if self.jobs.get(ref.id) is not ref:
-            raise ServiceError("permission_denied")
-        await self.runs.cancel(ref.id)
-        return CleanupResult(True, observation=await self.collect(ref))
+        record = self.jobs.get(ref.id)
+        if record is None:
+            raise ServiceError("permission_denied", 403)
+        context = cast(SessionExecutionContext, record["context"])
+        principal = self._principal(context)
+        session = await self.sessions.get(
+            principal, context.workspace_id, record["session_id"], write=True
+        )
+        turn = await self.sessions.turn(
+            principal, context.workspace_id, record["session_id"], record["turn_id"]
+        )
+        if turn.status in {"queued", "running"}:
+            await self.sessions.control(
+                principal, context.workspace_id, session.id, "cancel_turn",
+                ControlRequest(
+                    request_key=(f"eval-cancel.{record['task_id']}.{record['case_id']}."
+                                 f"{record['repetition']}"),
+                    expected_revision=session.revision,
+                ), turn_id=turn.id,
+            )
+        observation = await self.collect(ref)
+        closed = observation["cleanup"] == "closed"
+        return CleanupResult(closed, None if closed else "cleanup_unknown", observation=observation)
 
     async def close(self) -> CleanupResult:
-        values = await asyncio.gather(
-            *(self.cancel(ref) for ref in self.jobs.values()),
+        outcomes = await asyncio.gather(
+            *(self.cancel(ExecutionRef(identity)) for identity in tuple(self.active)),
             return_exceptions=True,
         )
-        self.closed = all(isinstance(v, CleanupResult) and v.closed for v in values)
-        return CleanupResult(self.closed, None if self.closed else "cleanup_unknown")
+        closed = all(isinstance(value, CleanupResult) and value.closed for value in outcomes)
+        self.closed = True
+        return CleanupResult(closed, None if closed else "cleanup_unknown")

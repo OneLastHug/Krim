@@ -19,6 +19,7 @@ from .project_names import LEGACY_PROJECT_NAMES, PROJECT_CAPABILITIES
 from .session import SESSION_CAPABILITIES, SESSION_RISKS
 
 type Decision = Literal["allow", "deny", "ask"]
+type Concurrency = Literal["exclusive", "parallel"]
 
 
 @dataclass(frozen=True)
@@ -81,12 +82,16 @@ class ToolSpec:
     external_executor: ExternalExecutor | None = None
     overridable: bool = False
     binding_target: ToolSpec | None = None
+    # Host-reviewed execution eligibility; risk is not a concurrency grant.
+    concurrency: Concurrency = "exclusive"
 
     def __post_init__(self) -> None:
         if re.fullmatch(
             r"[a-z][a-z0-9_]{0,63}", self.name
         ) is None or not inspect.iscoroutinefunction(self.executor):
             raise ValueError("仅接受显式可信异步工具")
+        if self.concurrency not in {"exclusive", "parallel"}:
+            raise ValueError("invalid tool concurrency declaration")
         external = self.external_executor is not None
         if external:
             if self.name in {
@@ -189,6 +194,7 @@ class ToolSpec:
                 or self.external_executor is not target.external_executor
                 or self.source is not target.source
                 or self.risk != target.risk
+                or self.concurrency != target.concurrency
                 or fingerprint(self.output_schema) != fingerprint(target.output_schema)
             ):
                 raise ValueError("覆盖须绑定原始MCP定义，不能串联或换参数")
@@ -202,6 +208,7 @@ class ToolSpec:
             "name": self.name,
             "version": self.version,
             "implementation_digest": self.implementation_digest,
+            "concurrency": self.concurrency,
             "input_schema": self.parameters.model_json_schema(),
             # __post_init__ validates the declaration. Copy its current value so
             # registry fingerprints still detect mutation without re-running

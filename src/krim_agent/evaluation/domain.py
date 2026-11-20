@@ -113,7 +113,7 @@ class CaseSpec(StrictModel):
 
     @model_validator(mode="after")
     def bounded(self) -> Self:
-        if not 1 <= len(self.files) <= 16:
+        if len(self.files) > 16:
             raise ValueError("初态文件数无效")
         for path, text in self.files.items():
             relative_file(path)
@@ -170,6 +170,17 @@ class MetricSpec(StrictModel):
     hard: bool = True
 
 
+class SessionExecutionContext(StrictModel):
+    """可信产品入口冻结的主体、工作区与正式Session目标。"""
+
+    schema_version: Literal["session-execution/1"] = "session-execution/1"
+    principal_id: str = Field(min_length=1, max_length=128)
+    principal_generation: int = Field(ge=1)
+    workspace_id: str = Field(min_length=1, max_length=128)
+    target_key: Literal["target-http"]
+    binding_fingerprint: Digest
+
+
 class TaskSpec(StrictModel):
     scope: Identity = "local"
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
@@ -177,6 +188,7 @@ class TaskSpec(StrictModel):
     target_key: Identity = "reconcile-reference"
     metrics: list[MetricSpec] = Field(min_length=1, max_length=6)
     execution: Budget = Field(default_factory=Budget)
+    execution_context: SessionExecutionContext | None = None
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
@@ -199,6 +211,7 @@ class TrialSpec:
     repetition: int
     case: dict[str, Any]
     target: dict[str, Any]
+    execution_context: SessionExecutionContext | None = None
 
 
 @dataclass(frozen=True)
@@ -246,7 +259,7 @@ class Observation(StrictModel):
     stderr: str | None
     artifacts: dict[str, JsonValue]
     process: dict[str, JsonValue] | None
-    cleanup: Literal["closed", "unknown"]
+    cleanup: Literal["closed", "persistent", "unknown"]
     token_usage: dict[str, JsonValue] | None = None
     cost: float | None = None
     usage_complete: bool = False

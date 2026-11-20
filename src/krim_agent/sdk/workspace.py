@@ -1,4 +1,4 @@
-"""工作区薄SDK；执行借原Application，冷读只借readonly Store。"""
+"""Legacy workspace-history SDK: authorized reads only; writes are retired."""
 
 from __future__ import annotations
 
@@ -85,46 +85,11 @@ class WorkspaceSDK:
             raise ServiceError("schema_upgrade_required")
         return SessionSDK(self.backend.sessions, principal=self.principal, workspace=self.workspace)
 
-    def _writer(self) -> Any:
-        if isinstance(self.backend, (SQLiteStore, AsyncRunClient)):
-            raise ServiceError("readonly")
-        if self.backend.work is None or self.backend.artifacts is None:
-            raise ServiceError("workspace_unavailable")
-        return self.backend
-
     async def start(self, session_id: str, request: WorkspaceTurnRequest) -> TurnView:
-        frozen = WorkspaceTurnRequest.model_validate_json(request.model_dump_json())
-        if isinstance(self.backend, AsyncRunClient):
-            return TurnView.model_validate_json(
-                encoded(
-                    await self.backend.request(
-                        "POST", self.path(session_id) + "/turns", frozen.model_dump(mode="json")
-                    )
-                )
-            )
-        app = self._writer()
-        return cast(
-            TurnView, await app.sessions.submit(self.principal, self.workspace, session_id, frozen)
-        )
+        raise ServiceError("workspace_unavailable", 422)
 
     async def input(self, session_id: str, request: InputSnapshotRequest) -> ArtifactRevision:
-        frozen = InputSnapshotRequest.model_validate_json(request.model_dump_json())
-        if isinstance(self.backend, AsyncRunClient):
-            return ArtifactRevision.model_validate_json(
-                encoded(
-                    await self.backend.request(
-                        "POST", self.path(session_id) + "/inputs", frozen.model_dump(mode="json")
-                    )
-                )
-            )
-        app = self._writer()
-        await app.sessions.get(self.principal, self.workspace, session_id, write=True)
-        return cast(
-            ArtifactRevision,
-            await app.artifacts.input(
-                ExecutionAccess(self.principal, self.workspace, session_id), frozen
-            ),
-        )
+        raise ServiceError("workspace_unavailable", 422)
 
     async def by_key(self, session_id: str, key: str) -> WorkView:
         async def read() -> WorkView:

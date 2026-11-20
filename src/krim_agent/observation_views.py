@@ -16,7 +16,8 @@ from pydantic import Field, JsonValue
 from krim_agent.contracts import RunEvent, RunStatus, ServiceError, StrictModel
 from krim_agent.observability import TraceView, project_trace
 from krim_agent.runtime.contracts import RunSnapshot
-from krim_agent.workspace.types import ArtifactChunk, path_parts
+from krim_agent.validation.files import path_parts
+from krim_agent.workspace.types import ArtifactChunk
 
 UsageFieldName = Literal[
     "input_tokens",

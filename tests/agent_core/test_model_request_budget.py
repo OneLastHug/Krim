@@ -452,7 +452,7 @@ async def run_http_session(
     from krim_agent.config import Settings
     from krim_agent.sdk import SessionSDK
     from krim_agent.sessions.types import SessionCreate, TurnRequest
-    from krim_agent.tools.builtins import builtin_registry
+    from tests.support.builtins import builtin_registry, demo_policy
 
     def responder(index):
         if not 1 <= index <= len(responses):
@@ -464,13 +464,12 @@ async def run_http_session(
     settings = Settings(
         database=path,
         provider="http",
-        http_mode="agent",
         max_steps=max_steps,
         max_tools_per_step=max_tools_per_step,
         max_tool_calls=max_tool_calls,
     )
     async with await open_application(
-        path, settings=settings, provider=provider, registry=builtin_registry()
+        path, settings=settings, provider=provider, registry=builtin_registry(), policy=demo_policy,
     ) as app:
         sdk = SessionSDK(app.sessions)
         session = await sdk.create(SessionCreate(request_key=name, target_key="target-http"))

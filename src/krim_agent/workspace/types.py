@@ -11,18 +11,9 @@ from pydantic import Field, JsonValue, field_validator, model_validator
 
 from krim_agent.context.types import CompactionPolicy
 from krim_agent.contracts import ServiceError, StrictModel, check_json, encoded, fingerprint
-from krim_agent.execution.types import path_parts as os_path_parts
 from krim_agent.security import PrincipalContext
-
-
-def path_parts(name: str) -> tuple[str, ...]:
-    parts = os_path_parts(name)
-    if any(
-        p.startswith(".env.") or p.lower() in {"credentials", "id_rsa", "id_ed25519"} for p in parts
-    ):
-        raise ServiceError("artifact_invalid")
-    return parts
-
+from krim_agent.validation.completion import CompletionCondition
+from krim_agent.validation.files import path_parts
 
 Key = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -67,27 +58,6 @@ class InputSelector(StrictModel):
         if (self.mode == "revision") != (self.revision_id is not None):
             raise ValueError("输入选择器不一致")
         return self
-
-
-class CompletionCondition(StrictModel):
-    id: Key
-    kind: Literal["json_equal", "ast_symbols"]
-    path: str
-    pointer: str = ""
-    expected: JsonValue = None
-    symbols: tuple[str, ...] = Field(default=(), max_length=16)
-
-    @field_validator("path")
-    @classmethod
-    def path_valid(cls, value: str) -> str:
-        path_parts(value)
-        return value
-
-    @field_validator("expected")
-    @classmethod
-    def expected_valid(cls, value: JsonValue) -> JsonValue:
-        check_json(value, max_bytes=4096)
-        return value
 
 
 class Completion(StrictModel):

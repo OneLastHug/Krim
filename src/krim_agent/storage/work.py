@@ -570,7 +570,7 @@ async def dispatch(conn: AsyncConnection, call_id: str, access: ExecutionAccess)
 
 
 async def finish(conn: AsyncConnection, run_id: str, *, interrupted: bool = False) -> None:
-    from krim_agent.workspace import verification
+    from krim_agent.workspace import terminal
 
     frame = await load(conn, run_id)
     if frame is None:
@@ -613,9 +613,9 @@ async def finish(conn: AsyncConnection, run_id: str, *, interrupted: bool = Fals
     verification_contract = frame.conditions.get("verification")
     if (
         isinstance(verification_contract, dict)
-        and verification_contract.get("schema") == "completion-verification/1"
+        and verification_contract.get("schema") == terminal.SCHEMA
     ):
-        await verification._TERMINAL_HELPERS[5](conn, run_id, interrupted=interrupted)
+        await terminal._TERMINAL_HELPERS[5](conn, run_id, interrupted=interrupted)
 
 
 async def effect(

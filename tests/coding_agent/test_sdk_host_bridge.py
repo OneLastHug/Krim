@@ -80,6 +80,8 @@ async def test_sdk_continues_using_host_model_events_and_tool_results() -> None:
     assert len(model_events) == 2 and len(starts) == 1
     assert starts[0].data['step_index'] == model_events[0].data['step_index'] == 0
     assert starts[0].data['provider_call_id'] == 'wire-1'
+    assert starts[0].data['decision'] == 'allow'
+    assert starts[0].data['executor_started'] is False
 
 
 async def test_unlimited_group_keeps_the_full_returned_batch_in_one_step() -> None:

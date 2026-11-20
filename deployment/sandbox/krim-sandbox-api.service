@@ -11,7 +11,9 @@ Type=simple
 User=@KRIM_CONTROL_USER@
 Group=@KRIM_CONTROL_GROUP@
 UMask=0077
-ExecStart=@KRIM_INSTALL_ROOT@/bin/krim serve --database @KRIM_DB_PATH@ --port @KRIM_API_PORT@
+# Only inject secret variables named by explicit `env:` references in krim.yaml.
+EnvironmentFile=-@KRIM_SECRET_ENV_FILE@
+ExecStart=@KRIM_INSTALL_ROOT@/bin/krim serve --config @KRIM_CONFIG_PATH@
 NoNewPrivileges=yes
 PrivateTmp=yes
 CapabilityBoundingSet=

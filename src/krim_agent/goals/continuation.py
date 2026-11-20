@@ -46,12 +46,24 @@ StopReason = Literal[
     "continuation_pending",
     "run_interrupted",
     "repeated_failure",
+    "repeated_no_progress",
+    "operation_unknown",
     "approval_expired",
     "queue_unavailable",
     "enqueue_failed",
     "already_finished",
     "superseded",
 ]
+
+
+class ContinuationPolicy(StrictModel):
+    """Explicit, bounded policy for deterministic no-progress recovery."""
+
+    version: Literal["goal-continuation-policy/1"] = "goal-continuation-policy/1"
+    identical_no_progress_limit: int = Field(default=2, ge=2)
+    max_targeted_recovery_attempts: int = Field(default=1, ge=0)
+    repeated_failure_limit: int = Field(default=2, ge=1)
+
 
 FAILURE_OUTCOMES = frozenset({"failed"})
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -84,7 +96,9 @@ class ContinuationRequest(StrictModel):
     source_turn_id: str | None = None
     source_run_id: str | None = None
     internal: Literal[True] = True
-    reason: str
+    reason: Literal["goal_active", "goal_resumed", "repeated_no_progress_recovery"]
+    recovery_attempt: int = Field(default=0, ge=0)
+    progress_signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     text: str
 
 
@@ -127,6 +141,20 @@ class ContinuationQueue(Protocol):
     """Host-owned single-slot enqueue; must be idempotent by ``turn_request_key``."""
 
     async def enqueue(self, request: ContinuationRequest) -> None: ...
+
+
+def recovery_text(goal: GoalSnapshot) -> str:
+    """Targeted correction after a repeated, fully observed no-progress trace."""
+    return "\n".join(
+        [
+            "内部纠偏续跑：前几轮正常结束，但没有为目标增加新证据，且已观测到相同执行轨迹。",
+            "先检查已有工具结果和证据，不要重复已成功的写入，也不要重放结果未知的操作。",
+            "改用不同且有依据的方法推进目标；如果缺少前置条件或无法确认副作用状态，停止并说明具体阻塞。",
+            f"当前目标：goal_id={goal.goal_id} revision={goal.revision}",
+            "目标全文、完成条件与证据引用以会话目标快照为准；实际进展用 "
+            "goal_update action=progress 记录证据，满足全部条件后再 complete。",
+        ]
+    )
 
 
 def continuation_text(goal: GoalSnapshot) -> str:

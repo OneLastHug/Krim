@@ -220,7 +220,6 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 {"key": "reconcile-reference", "kind": "non-model-reference"},
                 {"key": "codex-cli", "status": "requires_M0_profile"},
                 {"key": "claude-code", "status": "requires_M0_profile"},
-                {"key": "krim-script-v2", "status": "library_host_required"},
             ]
         }
     profiles = []

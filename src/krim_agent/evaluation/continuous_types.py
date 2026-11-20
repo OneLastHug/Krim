@@ -15,6 +15,7 @@ from .domain import (
     Digest,
     Identity,
     MetricSpec,
+    SessionExecutionContext,
     neutral_encoded,
     neutral_fingerprint,
 )
@@ -185,6 +186,7 @@ class ContinuousRequest(StrictModel):
     target_key: Identity = "reconcile-reference"
     metrics: list[MetricSpec] = Field(min_length=1, max_length=6)
     execution: Budget = Field(default_factory=Budget)
+    execution_context: SessionExecutionContext | None = None
     parent_task_id: str | None = None
     parent_report_hash: Digest | None = None
     observations: list[ScoreSource] = Field(default_factory=list, max_length=300)

@@ -14,7 +14,7 @@ if os.environ.get("KRIM_GUIDE_SOURCE"):
 from krim_agent import composition
 from krim_agent.contracts import RunRequest
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 

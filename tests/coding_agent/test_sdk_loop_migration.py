@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 
-import ai
 import pytest
 
 from krim_agent.composition import open_application
@@ -51,55 +49,6 @@ class MigrationProvider:
         pass
 
 
-@pytest.mark.parametrize("target", ["demo", "target-v1", "target-v2", "target-bad"])
-async def test_old_targets_use_the_single_native_sdk_loop(tmp_path, monkeypatch, target):
-    native = ai.Agent.loop
-    owners = []
-
-    async def observed(self, context):
-        owners.append(id(self))
-        async for event in native(self, context):
-            yield event
-
-    monkeypatch.setattr(ai.Agent, "loop", observed)
-    async with await open_application(tmp_path / f"{target}.db") as app:
-        run = await app.service.start(RunRequest(text="/add 2 3", request_key="one", target=target))
-        finished = await app.service.wait(run.id)
-        assert finished.status == "completed"
-        assert len(owners) == 1
-        facts = await app.service.result(run.id)
-        assert facts.model_steps == 2 and len(facts.tools) == 1
-        assert facts.tools[0].executor_started is True
-        assert app.service.bindings[target].descriptor_json.find("ai-python/0.9.0-host-v2") >= 0
-
-
-async def test_report_partition_keeps_sdk_loop_version_in_conditions(tmp_path):
-    from krim_agent.evaluation.continuous_reports import partition
-
-    async with await open_application(tmp_path / "descriptor.db") as app:
-        binding = json.loads(app.service.bindings["target-v2"].descriptor_json)
-    conditions = {
-        "schema_version": "krim-run/1", "run_target_key": "target-v2",
-        "binding_descriptor": binding, "binding_fingerprint": fingerprint(binding),
-        "public_runtime_conditions": {}, "budget": {},
-    }
-    target = {"key": "fixture", "execution_conditions": conditions}
-    environment = {"execution_conditions": conditions}
-    _, current = partition(target, environment)
-    assert current["execution_conditions"]["constraints"]["agent_loop"] == (
-        "ai-python/0.9.0-host-v2"
-    )
-    legacy = {key: value for key, value in binding.items() if key != "agent_loop"}
-    conditions["binding_descriptor"] = legacy
-    _, old = partition(target, environment)
-    assert "agent_loop" not in old["execution_conditions"]["constraints"]
-    assert fingerprint(current) != fingerprint(old)
-    for unsupported in ("future-loop", None, 1):
-        conditions["binding_descriptor"] = {**binding, "agent_loop": unsupported}
-        with pytest.raises(ServiceError, match="facts_corrupt"):
-            partition(target, environment)
-
-
 async def test_read_groups_are_bounded_writes_wait_and_results_keep_declaration_order(tmp_path):
     entered, release = asyncio.Event(), asyncio.Event()
     active = 0
@@ -131,7 +80,7 @@ async def test_read_groups_are_bounded_writes_wait_and_results_keep_declaration_
 
     schema = {"type": "integer"}
     registry = ToolRegistry((
-        ToolSpec("read", Args, read, schema, "1", "a" * 64),
+        ToolSpec("read", Args, read, schema, "1", "a" * 64, concurrency="parallel"),
         write_spec("write", write),
     ))
     provider = MigrationProvider((

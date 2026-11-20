@@ -20,11 +20,11 @@ from krim_agent.api.server import create_app
 from krim_agent.composition import Application, open_application
 from krim_agent.config import Settings
 from krim_agent.contracts import Message, ServiceError
-from krim_agent.providers.fake import FakeProvider
+from tests.support.fake_provider import FakeProvider
 from krim_agent.providers.types import ModelEvent, ModelText, ModelToolCall
 from krim_agent.security import AccessPolicy, Credential, Membership, PrincipalContext
 from krim_agent.sessions.types import SessionCreate
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 ADMIN_KEY = "formal-workbench-admin-browser-key"

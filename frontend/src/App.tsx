@@ -18,6 +18,7 @@ import { WorkbenchLayout } from "./components/WorkbenchLayout";
 import { WorkbenchInspector } from "./components/WorkbenchInspector";
 import { parseActor, type Actor } from "./lib/session-contracts";
 import { readWorkbenchView, type WorkbenchView } from "./lib/workbench-route";
+import { defaultFormalTarget } from "./lib/run-requests";
 import { useDisplayTheme } from "./lib/use-display-theme";
 import { useReadingSize } from "./hooks/use-reading-size";
 import { chatReason } from "./lib/copy";
@@ -65,7 +66,7 @@ export function App() {
   const { theme, selectTheme } = useDisplayTheme();
   const { readingSize, selectReadingSize } = useReadingSize();
   const isLegacyRouteAvailable = !!identity?.legacy && !identityLoading;
-  const run = useRun(key, mode === "run", isLegacyRouteAvailable ? JSON.stringify([identity!.principal_id, identity!.generation]) : null);
+  const run = useRun(key, mode === "run", isLegacyRouteAvailable ? JSON.stringify([identity!.principal_id, identity!.generation]) : null, defaultFormalTarget(identity?.target_keys));
 
   useEffect(() => {
     const url = new URL(location.href);
@@ -316,7 +317,7 @@ export function App() {
   const chatTitle = sidebarChat?.session?.title ?? sidebarChat?.list.find(value => value.id === sidebarChat?.id)?.title ?? "";
   // 切换会话时不提前使用另一个目标的接入标签；会话加载后核对完整指纹。
   const connectionTarget = sidebarChat?.session?.target_key
-    ?? (selectedChatId || sidebarChat?.id ? null : httpEnabled ? "target-http" : "demo");
+    ?? (selectedChatId || sidebarChat?.id ? null : defaultFormalTarget(identity?.target_keys));
   const accountIdentity = useAccountIdentity({
     apiKey: key, identity: loggedOut ? null : identity,
     targetKey: connectionTarget, targetFingerprint: sidebarChat?.session?.target_fingerprint,

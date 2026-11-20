@@ -8,12 +8,11 @@ from typing import cast
 from pydantic import BaseModel, JsonValue
 
 from krim_agent.config import Settings
-from krim_agent.contracts import RunView
-from krim_agent.providers.eval_script import EvalScriptProvider
+from tests.support.eval_script import EvalScriptProvider
 from krim_agent.runtime.contracts import RunStore
 from krim_agent.runtime.engine import AgentLoop
-from krim_agent.runtime.service import RunBinding, RunService
-from krim_agent.tools.builtins import AddInput, builtin_registry
+from krim_agent.runtime.service import RunBinding
+from tests.support.builtins import AddInput, builtin_registry
 from krim_agent.tools.core import Decision, Invocation
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.registry import ToolRegistry
@@ -70,11 +69,3 @@ def make_eval_bindings(store: RunStore, settings: Settings) -> dict[str, RunBind
         loop = AgentLoop(store, provider, ToolExecutor(registry, controlled_policy), config)
         result[key] = RunBinding.freeze(key, loop, config)
     return result
-
-
-class RunTarget:
-    def __init__(self, service: RunService) -> None:
-        self.service = service
-
-    async def start(self, eval_id: str, case_id: str, repetition: int) -> RunView:
-        return await self.service.start_child(eval_id, case_id, repetition)

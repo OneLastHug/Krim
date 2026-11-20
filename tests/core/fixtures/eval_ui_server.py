@@ -28,9 +28,9 @@ async def main(args):
     from krim_agent.composition import open_application
     from krim_agent.config import Settings
     from krim_agent.evaluation import scorers, targets
-    from krim_agent.providers.eval_script import EvalScriptProvider
-    from krim_agent.providers.fake import FakeProvider
-    from krim_agent.tools.builtins import builtin_registry
+    from tests.support.eval_script import EvalScriptProvider
+    from tests.support.fake_provider import FakeProvider
+    from tests.support.builtins import builtin_registry
     from krim_agent.tools.registry import ToolRegistry
 
     root = Path(args.evidence)

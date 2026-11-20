@@ -8,7 +8,7 @@ from pydantic import JsonValue
 
 from krim_agent.contracts import Message, parse_json
 
-from .types import ModelEvent, ModelText, ModelToolCall
+from krim_agent.providers.types import ModelEvent, ModelText, ModelToolCall
 
 
 class FakeProvider:

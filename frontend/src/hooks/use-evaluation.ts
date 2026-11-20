@@ -13,7 +13,7 @@ export function useEvaluation(key: string, active: boolean) {
         }
     });
     const [id, setId] = useState(() => new URL(location.href).searchParams.get("eval_id") ?? localStorage.getItem(EVAL_CURRENT) ?? ""), [view, setView] = useState<EvalData | null>(null), [report, setReport] = useState<Report | null>(null);
-    const [targets, setTargets] = useState<Record<string, unknown>[]>([]), [rules, setRules] = useState<Rule[]>([]), [target, setTarget] = useState(initial.intent?.target_key ?? "target-v2"), [selected, setSelected] = useState<string[]>(initial.intent?.rules.map(r => r.name) ?? ["status_code", "exact_match"]), [repetitions, setRepetitions] = useState(initial.intent?.execution.repetitions ?? 1);
+    const [targets, setTargets] = useState<Record<string, unknown>[]>([]), [rules, setRules] = useState<Rule[]>([]), [target, setTarget] = useState(""), [selected, setSelected] = useState<string[]>(initial.intent?.rules.map(r => r.name) ?? ["status_code", "exact_match"]), [repetitions, setRepetitions] = useState(initial.intent?.execution.repetitions ?? 1);
     const [pending, setPending] = useState(Boolean(initial.intent) || initial.invalid), [busy, setBusy] = useState(false), [stopping, setStopping] = useState(false), [notice, setNotice] = useState(initial.invalid ? "原评测请求记录无效" : ""), [version, setVersion] = useState(0);
     const [pair, setPair] = useState({ baseline: "", candidate: "" }), [gate, setGate] = useState<Record<string, unknown> | null>(null), [comparing, setComparing] = useState(false);
     const [catalogueNotice, setCatalogueNotice] = useState("");
@@ -22,6 +22,10 @@ export function useEvaluation(key: string, active: boolean) {
     activeRef.current = active;
     const epoch = useRef(0), compareEpoch = useRef(0), mounted = useRef(false), flight = useRef(false), stopFlight = useRef(false), compareFlight = useRef<number | null>(null), reader = useRef<AbortController | null>(null), compareReader = useRef<AbortController | null>(null), keyRef = useRef(key);
     keyRef.current = key;
+    useEffect(() => {
+        if (!pending && !target && targets.some(value => value.key === "target-http"))
+            setTarget("target-http");
+    }, [pending, target, targets]);
     function available() { return mounted.current && activeRef.current && keyRef.current === key; }
     function invalidate() { epoch.current++; reader.current?.abort(); }
     function refresh() { invalidate(); setVersion(v => v + 1); }
@@ -41,9 +45,10 @@ export function useEvaluation(key: string, active: boolean) {
                     return;
                 if (!Array.isArray(a) || !Array.isArray(b))
                     throw new Error("目录无效");
-                setTargets(a.map(object));
+                const formalTargets = a.map(object).filter(value => value.key === "target-http");
+                setTargets(formalTargets);
                 setRules(b.map(r => object(r) as unknown as Rule));
-                setCatalogueNotice("");
+                setCatalogueNotice(formalTargets.length ? "" : "当前没有已配置的正式评测目标");
             }
             catch (error) {
                 if (live && available())
@@ -106,6 +111,8 @@ export function useEvaluation(key: string, active: boolean) {
             const saved = loadEval(localStorage);
             if (!saved && !dataset)
                 throw new Error("请先选择修订");
+            if (!saved && target !== "target-http")
+                throw new Error("target_unavailable");
             const body: EvalBody = saved ?? { request_key: crypto.randomUUID(), dataset: { name: dataset!.name, version: dataset!.version, fingerprint: dataset!.fingerprint }, target_key: target, rules: selected.map(name => {
                     const value = rules.find(r => r.name === name);
                     if (!value)
@@ -121,7 +128,7 @@ export function useEvaluation(key: string, active: boolean) {
         }
         catch (error) {
             if (mounted.current && activeRef.current && token === epoch.current && keyRef.current === capturedKey)
-                setNotice(localStorage.getItem(EVAL_INTENT) ? "评测创建结果未确认" : reason(error, error instanceof Error ? error.message : "评测未创建"));
+                setNotice(localStorage.getItem(EVAL_INTENT) ? "评测创建结果未确认" : error instanceof Error && error.message === "target_unavailable" ? "当前没有已配置的正式评测目标" : reason(error, error instanceof Error ? error.message : "评测未创建"));
         }
         finally {
             flight.current = false;

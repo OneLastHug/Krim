@@ -23,7 +23,7 @@ from krim_agent.providers.openai_compatible import (
 )
 from krim_agent.providers.types import ModelText
 from krim_agent.runtime.model_step import ModelStep
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 
 
 def _chunk(kind: bytes, payload: bytes) -> bytes:

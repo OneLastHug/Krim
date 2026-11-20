@@ -515,7 +515,7 @@ async def seed_schema2(database: Path):
     from krim_agent.composition import open_application
     from krim_agent.contracts import RunRequest
     from krim_agent.evaluation.trace_cases import collect_candidate
-    from krim_agent.providers.fake import FakeProvider
+    from tests.support.fake_provider import FakeProvider
 
     provider = FakeProvider()
     app = await open_application(database, provider=provider)
@@ -583,7 +583,7 @@ async def repair_observe(tmp_path, node, monkeypatch):
     from test_session_read_sides import Connections
 
     from krim_agent.execution.linux import fds
-    from krim_agent.providers.fake import FakeProvider
+    from tests.support.fake_provider import FakeProvider
     from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 
     def consumer_files():

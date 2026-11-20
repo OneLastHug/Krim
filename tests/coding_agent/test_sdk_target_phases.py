@@ -18,7 +18,6 @@ from krim_agent.runtime import engine
 from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.sandbox import tasks
 from tests.coding_agent.sdk_fixtures import setup
-from tests.coding_agent.test_sdk_context_compaction import FixtureCompactor
 from tests.coding_agent.test_sdk_loop_migration import MigrationProvider
 
 
@@ -30,68 +29,6 @@ def snapshot(store, *, context=None, target=None):
             target=target or {"provider": {"name": "local-fixture"}}, events=store.events,
         )
     store.snapshot = read
-
-
-@pytest.mark.parametrize("verdict", ["passed", "failed"])
-async def test_workspace_keeps_preparation_compaction_and_producer_completion(monkeypatch, verdict):
-    harness = setup(approval=False)
-    snapshot(harness.store)
-    phases = []
-    producer = asyncio.current_task()
-
-    class Verifier:
-        def __init__(self, store, artifacts):
-            pass
-
-        def assert_current(self):
-            pass
-
-        async def verify(self, run_id, frame, access, **kwargs):
-            assert asyncio.current_task() is producer
-            phases.append("verify")
-            return SimpleNamespace(state=verdict)
-
-    def stage(result, **kwargs):
-        assert kwargs["producer"] is producer and asyncio.current_task() is producer
-        phases.append("stage")
-
-    class Work:
-        artifacts = object()
-
-        async def prepare(self, run_id):
-            phases.append("prepare")
-            return SimpleNamespace(conditions={"runtime": {
-                "model_steps": 3, "max_tools_per_step": 2, "tool_calls": 4,
-                "tool_timeout_seconds": 2, "approval_timeout_seconds": 10,
-                "read_parallelism": 2,
-            }})
-
-        def scope(self, frame, check, deadline, budget):
-            phases.append("scope")
-            return SimpleNamespace(access=None, check=check, deadline=deadline)
-
-    def compactor(store, frame, access, step, check, system, request_limit, provider, **kwargs):
-        phases.append("compactor")
-        result = FixtureCompactor(step, history=[])
-        result.system, result.request_limit, result.check = system, request_limit, check
-        return result
-
-    monkeypatch.setattr(engine, "Verifier", Verifier)
-    monkeypatch.setattr(engine, "stage_result", stage)
-    monkeypatch.setattr(engine, "compaction", SimpleNamespace(
-        Compactor=compactor, binding_token=engine.compaction.binding_token,
-    ))
-    loop = engine.AgentLoop(
-        harness.store, MigrationProvider(), harness.adapter().executor, Settings(), work=Work(),
-    )
-    budget = ExecutionBudget(asyncio.get_running_loop().time() + 10)
-    if verdict == "failed":
-        with pytest.raises(ServiceError, match="completion_unverified"):
-            await loop.run("run", harness.adapter().approval_request, execution_budget=budget)
-    else:
-        await loop.run("run", harness.adapter().approval_request, execution_budget=budget)
-    assert phases == ["prepare", "scope", "compactor", "verify", "stage"]
-    assert [event.kind for event in harness.store.events].count("model_start") == 1
 
 
 @pytest.mark.parametrize("completion", [None, "passed", "failed", "changed-contract"])

@@ -28,12 +28,12 @@ from krim_agent.composition import open_application
 from krim_agent.config import Settings
 from krim_agent.contracts import RunEvent, RunRequest, RunView, ServiceError
 from krim_agent.evaluation.types import EvalRequest, FreezeRequest, rule
-from krim_agent.providers.fake import FakeProvider
+from tests.support.fake_provider import FakeProvider
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.runtime.facts import project_facts
 from krim_agent.sdk import EvaluationSDK
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 ROOT = Path(__file__).resolve().parents[2]

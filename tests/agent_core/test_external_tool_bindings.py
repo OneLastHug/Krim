@@ -11,7 +11,7 @@ from krim_agent.composition import open_application
 from krim_agent.contracts import RunEvent, ServiceError, encoded
 from krim_agent.mcp import MCPServerConfig, MCPTool
 from krim_agent.tools.bindings import resolve_tool_overrides
-from krim_agent.tools.builtins import builtin_registry, demo_policy
+from tests.support.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import ToolContext, ToolExecutor
 from krim_agent.tools.mcp import arguments_model, mcp_tools

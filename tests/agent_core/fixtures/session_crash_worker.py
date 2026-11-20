@@ -12,7 +12,7 @@ from krim_agent.composition import open_application
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.registry import ToolRegistry
 
 

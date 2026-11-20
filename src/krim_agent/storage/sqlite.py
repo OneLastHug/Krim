@@ -526,9 +526,9 @@ class SQLiteStore:
             if row["status"] in TERMINAL:
                 status, code = row["status"], row["code"]
                 return self._view(row)
-            from krim_agent.workspace import verification
+            from krim_agent.workspace import terminal
 
-            helpers = verification._TERMINAL_HELPERS
+            helpers = terminal._TERMINAL_HELPERS
 
             async def attempt_body() -> RunView:
                 from . import observation_outbox as hot_sql
@@ -568,7 +568,7 @@ class SQLiteStore:
                     )
                 return self._view(await self._row(conn, run_id))
 
-            handoff = verification.private_handoff_for_same_owner_and_run(run_id)
+            handoff = terminal.private_handoff_for_same_owner_and_run(run_id)
             attempt = await helpers[0](conn, self, run_id, handoff)
             if attempt is None:
                 return await attempt_body()
@@ -580,7 +580,7 @@ class SQLiteStore:
                     helpers[1](attempt, selected_status=status, selected_code=code)
                 else:
                     helpers[3](attempt, selected_status=status, selected_code=code)
-            except verification.VerificationCommitRejected as rejected:
+            except terminal.VerificationCommitRejected as rejected:
                 if status != "completed" or not rejected.issued_for(attempt):
                     raise
                 await conn.exec_driver_sql("ROLLBACK TO krim_d4_terminal")

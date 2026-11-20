@@ -11,17 +11,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-import ai
 from pydantic import JsonValue
 
-from krim_agent.agent_sdk.adapter import ProbeStopped, SDKAdapter
 from krim_agent.agent_sdk.context import CompactorHistory
-from krim_agent.agent_sdk.host import HostExecution
-from krim_agent.agent_sdk.model import HostModelProvider, agent_tools, sdk_messages
 from krim_agent.config import Settings
 from krim_agent.context.compaction import Compactor
 from krim_agent.context.types import DevelopmentSessionContext, SessionContext
-from krim_agent.contracts import Message, RunEvent, ServiceError, ToolObservation, fingerprint
+from krim_agent.contracts import Message, RunEvent, ServiceError, ToolObservation
 from krim_agent.development.contracts import EnvironmentHandle, OperationReceipt, RunOwnership
 from krim_agent.providers.types import ModelProvider
 from krim_agent.storage.development import DevelopmentStore
@@ -32,9 +28,9 @@ from krim_agent.tools.pipeline import Scope
 from krim_agent.tools.session import SessionToolScope
 
 from .contracts import ExecutionBudget
-from .engine import AgentLoop, ApprovalRequest, Parked, _no_inprocess_wait
-from .model_step import ModelStep
+from .engine import AgentLoop, ApprovalRequest, _no_inprocess_wait
 from .recovery import SDKResume as SDKResume
+from .sdk_execution import SDKExecutionPlan, SDKExecutionPolicy, SDKHistory, execute_sdk
 
 
 @dataclass(frozen=True)
@@ -133,78 +129,54 @@ class DevelopmentSDKLoop(AgentLoop):
                 await verify_source()
             return event
 
+        policy = SDKExecutionPolicy.from_settings(self.settings)
         context = ToolContext(
             emit,
             _no_inprocess_wait,
-            self.settings.tool_timeout,
+            policy.tool_timeout,
             assert_target_current,
             scope.tools,
-            self.settings.approval_timeout,
+            policy.approval_timeout,
         )
-        stepper = ModelStep(
-            self.provider,
-            emit,
-            assert_target_current,
-            max_steps=self.settings.max_steps,
-            max_output=self.settings.max_output_bytes,
-            model_timeout=self.settings.model_timeout,
-            deadline=execution_budget.deadline,
-            workspace=development_context is not None,
-            execution_budget=execution_budget,
-        )
-        request_limit = self.settings.request_capacity(self.provider)
-        history = None
         legacy_context = (snapshot.session_context
                           if isinstance(snapshot.session_context, SessionContext) else None)
         context_policy = (development_context.frozen.policy if development_context is not None
                           else cast(SessionContext, legacy_context).context.policy)
-        if development_context is not None:
-            provider_identity = snapshot.target.get("provider")
-            if not isinstance(provider_identity, dict):
-                raise ServiceError("facts_corrupt")
-            assert source is not None
-            compactor = Compactor.from_source(
-                cast(SQLiteStore, self.store),
-                source,
-                stepper,
-                assert_target_current,
-                development_context.frozen.system_prompt,
-                request_limit,
-                provider_identity,
-            )
-            boundary = None
-            if self.context_service is not None:
-                if session_scope is None and self.session_tool_host is not None:
-                    session_scope = await self.session_tool_host.by_run(
-                        run_id, assert_target_current,
-                    )
-                if session_scope is not None:
-                    boundary = self.context_service.boundary(
-                        session_scope.actor, session_scope.workspace_id,
-                        session_scope.session_id, run_id, scope=session_scope,
-                    )
-            history = CompactorHistory(
-                compactor, run_id, boundary=boundary,
-                live_memory=(boundary is not None and self.context_service is not None
-                             and self.context_service.snapshots is not None),
-            )
-        provider = HostModelProvider(
-            stepper,
-            active.registry,
-            max_group=self.settings.max_tools_per_step,
-            max_calls=self.settings.max_tool_calls,
-            request_bytes=request_limit,
-            context_policy=context_policy,
-            history=history,
-            run_tools=run_tools,
-            host_media=(
-                self.session_media.for_run(run_id, assert_target_current)
-                if self.session_media is not None else
-                self.development_media_for_run(run_id)
-                if self.development_media_for_run is not None
-                else None
-            ),
-        )
+
+        async def build_history(stepper: Any, request_limit: int | None) -> SDKHistory:
+            nonlocal session_scope
+            history = None
+            if development_context is not None:
+                provider_identity = snapshot.target.get("provider")
+                if not isinstance(provider_identity, dict):
+                    raise ServiceError("facts_corrupt")
+                assert source is not None
+                compactor = Compactor.from_source(
+                    cast(SQLiteStore, self.store),
+                    source,
+                    stepper,
+                    assert_target_current,
+                    development_context.frozen.system_prompt,
+                    request_limit,
+                    provider_identity,
+                )
+                boundary = None
+                if self.context_service is not None:
+                    if session_scope is None and self.session_tool_host is not None:
+                        session_scope = await self.session_tool_host.by_run(
+                            run_id, assert_target_current,
+                        )
+                    if session_scope is not None:
+                        boundary = self.context_service.boundary(
+                            session_scope.actor, session_scope.workspace_id,
+                            session_scope.session_id, run_id, scope=session_scope,
+                        )
+                history = CompactorHistory(
+                    compactor, run_id, boundary=boundary,
+                    live_memory=(boundary is not None and self.context_service is not None
+                                 and self.context_service.snapshots is not None),
+                )
+            return SDKHistory(history, context_policy)
 
         async def read_receipt(receipt: OperationReceipt) -> JsonValue:
             if (
@@ -240,32 +212,6 @@ class DevelopmentSDKLoop(AgentLoop):
         async def unused_result(_ref: str) -> JsonValue:
             raise ServiceError("facts_corrupt")
 
-        host = HostExecution(
-            context,
-            execution_budget,
-            read_receipt,
-            provider.step_index,
-            provider.checkpoint,
-            provider.restore,
-        )
-        adapter = SDKAdapter(
-            store=self.store,
-            operations=self.development_store.operations,
-            executor=active,
-            tools=agent_tools(active.registry),
-            environment=scope.environment,
-            ownership=scope.ownership,
-            read_result=unused_result,
-            approval_request=cast(ApprovalRequest, approval_request),
-            host=host,
-            startup_gate=startup_gate,
-        )
-        if resume is not None and not isinstance(resume, SDKResume):
-            raise ServiceError("facts_corrupt")
-        if isinstance(resume, SDKResume):
-            # Validate the service's exact checkpoint before SDK.run loads it.
-            if fingerprint(resume.checkpoint) != resume.fingerprint:
-                raise ServiceError("facts_corrupt")
         initial_messages = (
             [development_context.frozen.current]
             if development_context is not None
@@ -274,25 +220,37 @@ class DevelopmentSDKLoop(AgentLoop):
         # SDK resume may replay a pending approved tool before another model call.
         # Recheck the frozen source's live authorization before entering that path.
         await verify_source()
-        try:
-            result = await adapter.run(
-                ai.Model(id="krim-development", provider=provider),
-                sdk_messages(initial_messages),
-                resume=resume is not None,
-                replies=resume.replies if resume else None,
-            )
-        except ProbeStopped:
-            raise ServiceError("cancelled") from None
-        except BaseExceptionGroup as group:
-
-            def first(error: BaseException) -> BaseException:
-                if isinstance(error, BaseExceptionGroup):
-                    return first(error.exceptions[0])
-                return error
-
-            cause = first(group)
-            if isinstance(cause, (ServiceError, asyncio.CancelledError, TimeoutError)):
-                raise cause from None
-            raise ServiceError("execution_error") from None
-        if result.status == "awaiting":
-            raise Parked()
+        host_media = (
+            self.session_media.for_run(run_id, assert_target_current)
+            if self.session_media is not None else
+            self.development_media_for_run(run_id)
+            if self.development_media_for_run is not None
+            else None
+        )
+        await execute_sdk(SDKExecutionPlan(
+            store=self.store,
+            provider=self.provider,
+            executor=active,
+            settings=self.settings,
+            run_id=run_id,
+            model_id="krim-development",
+            initial_history=initial_messages,
+            policy=policy,
+            execution_budget=execution_budget,
+            tool_context=context,
+            emit=emit,
+            check=assert_target_current,
+            approval_request=approval_request,
+            read_result=unused_result,
+            read_receipt=read_receipt,
+            build_history=build_history,
+            operations=self.development_store.operations,
+            environment=scope.environment,
+            ownership=scope.ownership,
+            run_tools=run_tools,
+            host_media=host_media,
+            startup_gate=startup_gate,
+            resume=resume,
+            workspace=development_context is not None,
+            on_completed=verify_source,
+        ))

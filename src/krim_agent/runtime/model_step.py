@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from krim_agent.context.counter import UsageCalibratedCounter, counter_for_model
 from krim_agent.context.manifest import ItemMetadata, build_context_manifest
 from krim_agent.contracts import Message, RunEvent, ServiceError
 from krim_agent.providers.types import (
+    ModelProgress,
     ModelProvider,
     ModelRequestBudget,
     ModelText,
@@ -35,6 +37,29 @@ class StepResult:
     text: str
     calls: tuple[ModelToolCall, ...]
     index: int
+
+
+@asynccontextmanager
+async def _attributed_model_timeout(
+    deadline: float | None,
+    *,
+    model_deadline: float | None,
+    run_deadline: float | None,
+) -> AsyncIterator[None]:
+    timeout = asyncio.timeout_at(deadline)
+    try:
+        async with timeout:
+            yield
+    except TimeoutError:
+        now = asyncio.get_running_loop().time()
+        if (
+            timeout.expired()
+            and model_deadline is not None
+            and (run_deadline is None or model_deadline < run_deadline)
+            and (run_deadline is None or now < run_deadline)
+        ):
+            raise ServiceError("model_timeout") from None
+        raise
 
 
 class ModelStep:
@@ -148,15 +173,25 @@ class ModelStep:
         )
         if compaction_changes:
             context_manifest["compaction_changes"] = list(compaction_changes)
+        started_at = clock()
         first_content_at: float | None = None
         first_text_at: float | None = None
-        started_at = clock()
-        async with asyncio.timeout_at(end):
+        last_activity_at: float | None = None
+        last_activity_phase: str | None = None
+        last_activity_emit_at = started_at
+        activity_sequence = 0
+        argument_bytes = 0
+        async with _attributed_model_timeout(
+            end, model_deadline=model_deadline, run_deadline=run_deadline,
+        ):
             await self.emit("model_start", {"span_id": span, "step_index": index,
                 "context_manifest": context_manifest, **extra})
             self.check()
+            stream_with_diagnostics = getattr(self.provider, "stream_with_diagnostics", None)
             stream_with_budget = getattr(self.provider, "stream_with_budget", None)
-            if callable(stream_with_budget):
+            if callable(stream_with_diagnostics):
+                stream = stream_with_diagnostics(request_messages, request_tools, budget)
+            elif callable(stream_with_budget):
                 stream = stream_with_budget(request_messages, request_tools, budget)
             else:
                 stream = self.provider.stream(request_messages, request_tools)
@@ -169,6 +204,7 @@ class ModelStep:
                         if type(delta) is ModelText:
                             item = ModelText.model_validate(delta.model_dump(mode="json"))
                             received_at = clock()
+                            last_activity_at = received_at
                             if item.text:
                                 if first_content_at is None:
                                     first_content_at = received_at
@@ -194,8 +230,9 @@ class ModelStep:
                             if (budget.max_tool_calls_this_step is not None
                                     and len(calls) > budget.max_tool_calls_this_step):
                                 raise ServiceError("tool_limit")
+                            last_activity_at = clock()
                             if first_content_at is None:
-                                first_content_at = clock()
+                                first_content_at = last_activity_at
                         elif type(delta) is ModelUsage:
                             measured = ModelUsage.model_validate(delta.model_dump(mode="json"))
                             if (usage is not None and not measured.usage.follows(usage)
@@ -203,9 +240,32 @@ class ModelStep:
                         or measured.usage != usage)):
                                 raise ServiceError("provider_event")
                             usage, final_usage = measured.usage, measured.final
+                            last_activity_at = clock()
                             await self.emit("usage", {"step_index": index,
                                 "usage": usage.model_dump(mode="json"), "final": final_usage,
                                 **extra})
+                        elif type(delta) is ModelProgress:
+                            item = ModelProgress.model_validate(delta.model_dump(mode="json"))
+                            if item.argument_bytes < argument_bytes:
+                                raise ServiceError("provider_event")
+                            argument_bytes = item.argument_bytes
+                            received_at = clock()
+                            last_activity_at = received_at
+                            activity_sequence += 1
+                            if item.phase != "response" and first_content_at is None:
+                                first_content_at = received_at
+                            if (item.phase != last_activity_phase
+                                    or received_at - last_activity_emit_at >= 1.0):
+                                await self.emit("model_activity", {
+                                    "span_id": span,
+                                    "step_index": index,
+                                    "phase": item.phase,
+                                    "activity_index": activity_sequence,
+                                    "elapsed_ms": max(0.0, (received_at - started_at) * 1000),
+                                    "argument_bytes": argument_bytes,
+                                })
+                                last_activity_phase = item.phase
+                                last_activity_emit_at = received_at
                         else:
                             raise ServiceError("provider_event")
                     except (ValidationError, ValueError):
@@ -224,6 +284,12 @@ class ModelStep:
                 "tool_calls": [call.model_dump(mode="json") for call in calls],
                 "timing_origin": "provider_event",
                 "elapsed_ms": max(0.0, (clock() - started_at) * 1000),
+                "last_activity_ms": (
+                    max(0.0, (last_activity_at - started_at) * 1000)
+                    if last_activity_at is not None else None
+                ),
+                "tool_argument_bytes": argument_bytes,
+                "activity_count": activity_sequence,
                 "first_content_ms": (max(0.0, (first_content_at - started_at) * 1000)
                                       if first_content_at is not None else None),
                 "first_text_ms": (max(0.0, (first_text_at - started_at) * 1000)

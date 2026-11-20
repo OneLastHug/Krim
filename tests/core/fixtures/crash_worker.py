@@ -10,8 +10,8 @@ if os.environ.get("KRIM_GUIDE_SOURCE"):
     sys.path.insert(0, os.environ["KRIM_GUIDE_SOURCE"])
 from krim_agent.composition import open_application
 from krim_agent.contracts import RunRequest
-from krim_agent.providers.fake import FakeProvider
-from krim_agent.tools.builtins import EchoInput
+from tests.support.fake_provider import FakeProvider
+from tests.support.builtins import EchoInput
 from krim_agent.tools.core import ToolSpec
 from krim_agent.tools.registry import ToolRegistry
 

@@ -60,6 +60,16 @@ async function openAccountMenu() {
   await until(() => expect(document.querySelector(".popover-menu[aria-label='账号菜单']")).toBeTruthy());
 }
 
+test("new chat without a formal target uses the existing status path and sends nothing", async () => {
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect(createButton().disabled).toBe(false));
+  await act(async () => createButton().click());
+  await type("chat-prompt", "new request without a configured target");
+  await act(async () => button("发送").click());
+  await until(() => expect(container.textContent).toContain("当前账号未配置正式运行目标"));
+  expect(calls.filter(item => item.method === "POST")).toEqual([]);
+});
+
 test("workspace_unavailable_is_truthful_and_zero_effect", async () => {
   await act(async () => root.render(<StrictMode><App /></StrictMode>));
   await until(() => expect(createButton().disabled).toBe(false));

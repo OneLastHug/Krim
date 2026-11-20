@@ -24,7 +24,7 @@ from krim_agent.interaction.contracts import Answer, AnswerRequest, CancelReques
 from krim_agent.providers.types import ModelEvent, ModelText, ModelToolCall
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import ControlRequest, SessionCreate, TurnRequest
-from krim_agent.tools.builtins import builtin_registry, demo_policy
+from tests.support.builtins import builtin_registry, demo_policy
 from krim_agent.tools.core import Invocation
 
 

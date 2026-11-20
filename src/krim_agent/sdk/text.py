@@ -18,12 +18,12 @@ class RunSDK:
     def __init__(self, service: RunService) -> None:
         self.service = service
 
-    async def start(self, text: str, request_key: str, *, target: str = "demo") -> RunView:
+    async def start(self, text: str, request_key: str, *, target: str = "target-http") -> RunView:
         return await self.service.start(
             RunRequest.model_validate({"text": text, "request_key": request_key, "target": target})
         )
 
-    def tools(self, target: str = "demo") -> list[dict[str, Any]]:
+    def tools(self, target: str = "target-http") -> list[dict[str, Any]]:
         from krim_agent.contracts import ServiceError
         binding = self.service.bindings.get(target)
         if binding is None:

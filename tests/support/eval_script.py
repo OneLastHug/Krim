@@ -8,8 +8,8 @@ from pydantic import JsonValue
 
 from krim_agent.contracts import Message
 
-from .fake import FakeProvider
-from .types import ModelEvent
+from tests.support.fake_provider import FakeProvider
+from krim_agent.providers.types import ModelEvent
 
 
 class EvalScriptProvider(FakeProvider):

@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field, JsonValue
 
 from krim_agent.contracts import StrictModel
 
-from .core import Decision, Invocation, ToolSpec
-from .registry import ToolRegistry
+from krim_agent.tools.core import Decision, Invocation, ToolSpec
+from krim_agent.tools.registry import ToolRegistry
 
 
 class AddInput(StrictModel):

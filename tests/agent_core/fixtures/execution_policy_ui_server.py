@@ -21,12 +21,12 @@ from krim_agent.composition import open_application
 from krim_agent.config import Settings
 from krim_agent.contracts import StrictModel
 from krim_agent.project_access.policy import initialize_project_access, set_project_access
-from krim_agent.providers.fake import FakeProvider
+from tests.support.fake_provider import FakeProvider
 from krim_agent.providers.types import ModelText, ModelToolCall
 from krim_agent.sessions.types import SessionCreate
 from krim_agent.storage.sandbox_models import sandbox_projects, sandbox_session_bindings
 from krim_agent.storage.sqlite import SQLiteStore
-from krim_agent.tools.builtins import builtin_registry
+from tests.support.builtins import builtin_registry
 from krim_agent.tools.core import ToolSource, ToolSpec
 from krim_agent.tools.registry import ToolRegistry
 

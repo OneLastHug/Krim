@@ -145,14 +145,37 @@ class KrimSourceReader:
         limits = snapshot.target.get("limits")
         if not isinstance(limits, dict):
             raise ServiceError("facts_corrupt")
+        run_target = snapshot.request.target
+        legacy_keys = {
+            "target-v1": "krim-script-v1",
+            "target-v2": "krim-script-v2",
+            "target-bad": "krim-script-bad",
+        }
+        if run_target in legacy_keys:
+            target_key, target_version = legacy_keys[run_target], "neutral-krim/1"
+        elif run_target in {"target-http", "target-development"}:
+            target_key, target_version = "krim-session", "krim-session/1"
+        else:
+            target_key, target_version = "krim-run-" + run_target, "krim-run-source/1"
+        binding = clone(snapshot.target)
+        schemas = binding.get("tools")
+        if isinstance(schemas, list):
+            binding["tools"] = {
+                "count": len(schemas),
+                "fingerprint": neutral_fingerprint(schemas),
+                "names": sorted(
+                    item["name"] for item in schemas
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                ),
+            }
         descriptor = {
-            "key": "krim-script-v2",
-            "version": "neutral-krim/1",
+            "key": target_key,
+            "version": target_version,
             "kind": "krim-run",
             "execution_conditions": {
                 "schema_version": "krim-run/1",
-                "run_target_key": snapshot.request.target,
-                "binding_descriptor": snapshot.target,
+                "run_target_key": run_target,
+                "binding_descriptor": binding,
                 "binding_fingerprint": neutral_fingerprint(snapshot.target),
                 "public_runtime_conditions": {"run_timeout": limits["run_timeout"]},
                 "budget": {"item": 20, "task": 120},

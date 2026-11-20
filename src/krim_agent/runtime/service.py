@@ -18,6 +18,7 @@ from sqlalchemy import select, update
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.context import builder
 from krim_agent.contracts import (
+    RETIRED_TARGETS,
     TERMINAL,
     ApprovalReply,
     RunEvent,
@@ -32,6 +33,7 @@ from krim_agent.contracts import (
 )
 from krim_agent.observability import TraceView, project_trace
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
+from krim_agent.providers.unconfigured import UnconfiguredProvider
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.storage.sandbox_models import sandbox_operations
 from krim_agent.tools.core import Decision, Invocation, ToolSpec
@@ -40,6 +42,7 @@ from krim_agent.tools.pipeline import _owns, _producing
 from krim_agent.tools.registry import ToolRegistry
 
 from . import model_step as model_step_module
+from . import sdk_execution as sdk_execution_module
 from .contracts import ExecutionBudget, RunSnapshot, RunStore, settled
 from .engine import AgentLoop, Parked
 from .facts import project_facts
@@ -96,6 +99,8 @@ class RunBinding:
                 (
                     loop.provider,
                     function(loop.provider.stream),
+                    function(getattr(loop.provider, "stream_with_diagnostics", None)),
+                    function(loop.run),
                     # close归Application资源所有权；宿主可包装清理观察，不改变执行绑定。
                     loop.executor.registry,
                     loop.executor.policy,
@@ -105,34 +110,8 @@ class RunBinding:
                 ),
             )
         )
-        if loop.executor.middleware or loop.executor.wrap is not None or loop.work is not None:
-            result += tuple(map(id, (*loop.executor.middleware, loop.executor.wrap, loop.work)))
-        if loop.work is not None:
-            # identities是稳定服务引用：改名/轮换/成员变更不替换对象，绑定不漂移。
-            result += tuple(map(id, (loop.work.profile, loop.work.artifacts, loop.work.runner,
-                loop.work.access_policy, loop.work.identities)))
-            if loop.work.runner is not None:
-                result += (id(loop.work.runner.profile), id(loop.work.runner.fence),
-                    id(loop.work.runner.hook), hash(repr(loop.work.runner.profile)),
-                    id(function(loop.work.runner.run)))
-            result += (loop.work.artifacts.fd, hash(repr(loop.work.artifacts.root)))
-            result += tuple(id(getattr(getattr(loop.work.artifacts, name), "__func__",
-                getattr(loop.work.artifacts, name))) for name in ["_blob", "_stage", "input",
-                "publish", "_owned"])
-            result += (id(getattr(loop.executor.execute, "__func__", loop.executor.execute)),
-                       id(getattr(loop.work.execute, "__func__", loop.work.execute)))
-            from krim_agent.workspace import verification
-
-            verifier = loop._verifier
-            result += (id(verification), id(verifier), id(type(verifier)))
-            # 在describe/Verifier方法被调用前，直接核对实际函数及其代码对象。
-            result += tuple(
-                token
-                for name in ("verify", "descriptor", "binding_token", "assert_current")
-                for method in (function(getattr(verifier, name)),)
-                for token in (id(method), id(getattr(method, "__code__", None)))
-            )
-            result += tuple(id(getattr(verification, name)) for name in verification._NAMES)
+        if loop.executor.middleware or loop.executor.wrap is not None:
+            result += tuple(map(id, (*loop.executor.middleware, loop.executor.wrap)))
         from krim_agent.agent_sdk import adapter as sdk_adapter
         from krim_agent.agent_sdk import context as sdk_context
         from krim_agent.agent_sdk import host as sdk_host
@@ -140,8 +119,16 @@ class RunBinding:
         from krim_agent.agent_sdk import response as sdk_response
 
         result += tuple(source_digest(cast(str, module.__file__)) for module in (
-            sdk_adapter, sdk_context, sdk_host, sdk_model, sdk_response,
+            sdk_adapter, sdk_context, sdk_host, sdk_model, sdk_response, sdk_execution_module,
         ))
+        execution_globals = getattr(function(loop.run), "__globals__", {})
+        result += tuple(map(id, (
+            sdk_execution_module.execute_sdk,
+            execution_globals.get("execute_sdk"),
+            execution_globals.get("SDKExecutionPlan"),
+            execution_globals.get("SDKExecutionPolicy"),
+            function(sdk_execution_module.SDKExecutionPolicy.from_settings),
+        )))
         result += tuple(map(id, (
             loop.context_service, loop.session_tool_host, loop.session_media,
         )))
@@ -205,8 +192,6 @@ class RunBinding:
         from krim_agent import config as config_module
         from krim_agent.tools import executor as executor_module
         from krim_agent.tools import pipeline as pipeline_module
-        from krim_agent.workspace import operations as operations_module
-        from krim_agent.workspace import types as workspace_types
 
         from . import contracts as contracts_module
         from . import engine as engine_module
@@ -222,7 +207,6 @@ class RunBinding:
             model_step_module.ModelStep.call,
             executor_module.ToolExecutor.execute,
             cast(property, pipeline_module.Scope.deadline).fget,
-            operations_module.WorkspaceOperations.scope,
             RunService._drive,
             RunService._approval_request,
         )))
@@ -233,8 +217,6 @@ class RunBinding:
             model_step_module,
             executor_module,
             pipeline_module,
-            operations_module,
-            workspace_types,
         )) + (source_digest(__file__),)
         return result
 
@@ -268,31 +250,20 @@ class RunBinding:
     @staticmethod
     def describe(key: str, loop: AgentLoop, settings: Settings) -> dict[str, JsonValue]:
         provider = implementation(loop.provider)
+        provider_identity = getattr(loop.provider, "identity", None)
+        provider_config = provider_identity() if callable(provider_identity) else {}
         provider.update(
             name=provider["id"],
-            behavior_version=str(getattr(loop.provider, "mode", "demo")) + "-parser/1",
+            behavior_version=str(getattr(loop.provider, "behavior_version", "model-provider/1")),
             implementation_digest=provider["digest"],
-            config={
-                "mode": str(getattr(loop.provider, "mode", "demo")),
-                "delay": getattr(loop.provider, "delay", None),
-            },
+            config=cast(JsonValue, provider_config),
         )
         if isinstance(loop.provider, OpenAICompatibleProvider):
             provider.update(behavior_version="http-sse/1", config=loop.provider.identity())
         policy_callable = (getattr(loop.executor.policy, "__func__", loop.executor.policy)
-                           if loop.work is not None or loop.sandbox is not None
-                           or isinstance(loop, DevelopmentSDKLoop)
+                           if loop.sandbox is not None or isinstance(loop, DevelopmentSDKLoop)
                            else loop.executor.policy)
         policy = implementation(policy_callable)
-        policy["allowed_names"] = (
-            ["add", "echo"]
-            if policy["id"]
-            in {
-                "krim_agent.tools.builtins.demo_policy",
-                "krim_agent.evaluation.targets.controlled_policy",
-            }
-            else None
-        )
         limits = settings.model_dump(
             mode="json",
             exclude={
@@ -319,20 +290,14 @@ class RunBinding:
             "post": implementation(loop.executor.post),
             "limits": limits,
             "limits_fingerprint": fingerprint(limits),
-            "agent_loop": "ai-python/0.9.0-host-v2",
+            "agent_loop": "ai-python/0.9.0-shared-host/1",
+            "execution_kernel": {
+                "version": "sdk-execution/1",
+                "digest": source_digest(cast(str, sdk_execution_module.__file__)),
+            },
         }
-        if loop.work is not None:
-            descriptor["workspace_profile"] = loop.work.profile.model_dump(mode="json")
-            descriptor["workspace_implementation"] = {
-                "operations": implementation(loop.work), "executor": implementation(loop.executor),
-                "middleware": [implementation(value) for value in loop.executor.middleware],
-                "wrap": implementation(loop.executor.wrap),
-            }
-            assert loop._verifier is not None
-            descriptor["workspace_verification"] = loop._verifier.descriptor()
         if isinstance(loop, DevelopmentSDKLoop):
             descriptor["development"] = loop.development_descriptor
-            descriptor["agent_loop"] = "ai-python/0.9.0-host-v1"
             if settings.development_history_compaction:
                 descriptor["development_history_compaction"] = True
         if loop.sandbox is not None:
@@ -414,11 +379,15 @@ class RunService:
         self._target_json = encoded(target)
         self.execution_policy_recheck = execution_policy_recheck
         self._policy_unsubscribe: Callable[[], None] | None = None
-        self.bindings = MappingProxyType(
-            bindings
-            if bindings is not None
-            else {"demo": RunBinding.freeze("demo", loop, settings)}
-        )
+        if bindings is None:
+            selected_bindings = (
+                {}
+                if isinstance(loop.provider, UnconfiguredProvider)
+                else {"target-http": RunBinding.freeze("target-http", loop, settings)}
+            )
+        else:
+            selected_bindings = bindings
+        self.bindings = MappingProxyType(selected_bindings)
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
@@ -506,9 +475,6 @@ class RunService:
             raise ServiceError("closed", 503)
         if not self.store.healthy:
             raise ServiceError("storage_unavailable", 503)
-        if (self.settings.max_input_bytes is not None
-                and len(request.text.encode()) > self.settings.max_input_bytes):
-            raise ServiceError("input_limit", 422)
         existing = await self.store.by_key(request.request_key)
         if existing is not None:
             snapshot = await self.store.snapshot(existing.id)
@@ -519,13 +485,20 @@ class RunService:
             ):
                 raise ServiceError("key_conflict")
             return existing
+        if (self.settings.max_input_bytes is not None
+                and len(request.text.encode()) > self.settings.max_input_bytes):
+            raise ServiceError("input_limit", 422)
         if request.request_key.startswith(("lc-eval.", "ac-turn.")) and not internal:
             raise ServiceError("invalid_input", 422)
-        if request.target == "target-workspace" and turn_id is None:
-            raise ServiceError("workspace_contract_required")
+        if request.target in RETIRED_TARGETS:
+            raise ServiceError("target_retired", 410)
         binding = self.bindings.get(request.target)
         if binding is None:
+            if request.target == "target-http":
+                raise ServiceError("provider_not_configured", 503)
             raise ServiceError("invalid_input", 422)
+        if isinstance(binding.loop.provider, UnconfiguredProvider):
+            raise ServiceError("provider_not_configured", 503)
         binding.assert_current()
         if (binding.loop.sandbox is not None or isinstance(binding.loop, DevelopmentSDKLoop)) \
                 and turn_id is None:
@@ -617,6 +590,7 @@ class RunService:
             budget: ExecutionBudget | None = None
             parked = False
             recovery_checkpoint = None
+            timeout_context: asyncio.Timeout | None = None
             run_tools = None
             session_scope = None
             executing: RunBinding | TurnBinding = binding
@@ -626,7 +600,7 @@ class RunService:
             )
 
             def startup_gate() -> asyncio.Lock | None:
-                # 非会话运行（demo/eval/workspace）没有会话执行模式，不设闸门。
+                # 非会话运行不进入会话执行策略闸门。
                 return self.execution_gate(gate_session) if gate_session is not None else None
 
             try:
@@ -641,10 +615,7 @@ class RunService:
                                 else asyncio.get_running_loop().time()
                                 + max(0.0, float(remaining)))
                 else:
-                    timeout = (
-                        binding.loop.work.profile.runtime.run_timeout_seconds
-                        if binding.loop.work is not None else binding.settings.run_timeout
-                    )
+                    timeout = binding.settings.run_timeout
                     deadline = (None if timeout is None else
                                 asyncio.get_running_loop().time() + max(
                                     0, run.created_at + timeout - time.time()))
@@ -756,7 +727,12 @@ class RunService:
             except asyncio.CancelledError:
                 status, code = "aborted", "cancelled"
             except TimeoutError:
-                status, code = "failed", "run_timeout"
+                status = "failed"
+                code = (
+                    "run_timeout"
+                    if timeout_context is not None and timeout_context.expired()
+                    else "timeout"
+                )
             except ServiceError as error:
                 status = "aborted" if error.code == "cancelled" else "failed"
                 code = error.code
@@ -950,9 +926,8 @@ class RunService:
     ) -> dict[str, JsonValue]:
         """构造 approval_request 事件内容（ADR-0015 停靠回调，不再进程内等待）。
 
-        溯源与 workspace WorkLimits 校验沿用 ADR-0014 语义；expires_at 由
-        引擎按整批同刻原则收紧（取 min）。budget_remaining 为停靠时刻的
-        执行预算剩余，随事件落库供恢复核对。
+        expires_at 由引擎按整批同刻原则收紧（取 min）；budget_remaining
+        为停靠时刻的执行预算剩余，随事件落库供恢复核对。
         """
         snapshot = await self.store.snapshot(invocation.run_id)
         provenance: dict[str, JsonValue] = {}
@@ -968,35 +943,12 @@ class RunService:
                 if isinstance(spec.get("source"), dict):
                     provenance["source"] = spec["source"]
                 break
-        expires: float | None
-        if snapshot.request.target == "target-workspace":
-            binding = self.bindings.get("target-workspace")
-            if snapshot.work is None or binding is None or binding.loop.work is None:
-                raise ServiceError("workspace_contract_required")
-            binding.assert_current()
-            if encoded({key: value for key,
-                value in snapshot.target.items() if key != "context"}) != binding.descriptor_json:
-                raise ServiceError("target_binding_changed")
-            frozen = cast(dict[str, JsonValue], snapshot.work.conditions["runtime"])
-            expected = binding.loop.work.profile.runtime.model_dump(mode="json")
-            from krim_agent.workspace.types import WorkLimits
-            try:
-                selected = WorkLimits.model_validate_json(
-                    encoded({key: frozen.get(key) for key in expected}))
-                reference = WorkLimits.model_validate_json(
-                    binding.loop.work.profile.runtime.model_dump_json())
-            except ValueError:
-                raise ServiceError("target_binding_changed") from None
-            if selected != reference:
-                raise ServiceError("target_binding_changed")
-            expires = time.time() + selected.approval_timeout_seconds
-        else:
-            binding = self.bindings.get(snapshot.request.target)
-            if binding is None:
-                raise ServiceError("target_binding_changed")
-            timeout: float | None = binding.settings.approval_timeout
-            # timeout=None 表示取消产品审批倒计时；批复与取消仍是唯一定稿路径。
-            expires = None if timeout is None else time.time() + timeout
+        binding = self.bindings.get(snapshot.request.target)
+        if binding is None:
+            raise ServiceError("target_binding_changed")
+        timeout = binding.settings.approval_timeout
+        # timeout=None 表示取消产品审批倒计时；批复与取消仍是唯一定稿路径。
+        expires = None if timeout is None else time.time() + timeout
         data: dict[str, JsonValue] = {
             "request_id": secrets.token_hex(16),
             "run_id": invocation.run_id,
@@ -1130,12 +1082,12 @@ class RunService:
         if (snapshot.run.status != "awaiting" or snapshot.run.stop_requested
                 or getattr(snapshot.session_context, "session_id", None) != session_id):
             return 0
-        # 目标绑定loop持有运行的真实工具集（shell/write等在development绑定上）；
-        # base loop registry通常只有普通工具，查不到会让热切换永不唤醒。
-        registry = self.loop.executor.registry
+        # Retired or changed targets stay parked: never evaluate old approval
+        # requests against the base loop's unrelated tool registry.
         binding = self.bindings.get(snapshot.request.target)
-        if binding is not None:
-            registry = binding.loop.executor.registry
+        if binding is None or snapshot.request.target in RETIRED_TARGETS:
+            return 0
+        registry = binding.loop.executor.registry
         for request in self._unanswered_requests(snapshot):
             if not await self._policy_allow_request(
                 session_id, run_id, request, registry,
@@ -1309,7 +1261,10 @@ class RunService:
         task = self.tasks.get(run_id)
         if task is not None and not task.done():
             return False
-        binding = self.bindings.get(snapshot.request.target)
+        target = snapshot.request.target
+        if target in RETIRED_TARGETS:
+            return False
+        binding = self.bindings.get(target)
         if binding is None:
             return False  # 存储的目标键已不存在：留给 recover 定稿，不猜着续跑
         resumed = asyncio.create_task(
@@ -1399,6 +1354,9 @@ class RunService:
                     # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
                     self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
+            if (snapshot.request.target in RETIRED_TARGETS
+                    or snapshot.request.target not in self.bindings):
+                raise ServiceError("approval_unavailable")
             if snapshot.run.status in TERMINAL or snapshot.run.stop_requested:
                 raise ServiceError("approval_unavailable")
             if snapshot.run.status != "awaiting":

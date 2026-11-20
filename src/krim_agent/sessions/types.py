@@ -18,7 +18,7 @@ Key = str
 class SessionCreate(StrictModel):
     request_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     title: str = Field(default="新对话", min_length=1, max_length=128)
-    target_key: TargetKey = "demo"
+    target_key: TargetKey = "target-http"
     context_policy: ContextPolicy | None = None
     project_id: str | None = Field(default=None, min_length=1, max_length=128)
 
