@@ -29,10 +29,10 @@ export interface TraceDetail { run_id: string; trace_id: string; complete: boole
 export const traceStatuses: Record<TraceStatus, string> = {
   queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", aborted: "已停止", interrupted: "已中断",
 };
-const targetKeys = ["demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace"];
+const targetKeys = ["demo", "target-v1", "target-v2", "target-bad", "target-http", "target-workspace", "target-development"];
 export const traceTargets: Record<string, string> = {
   demo: "演示目标", "target-v1": "规则目标 v1", "target-v2": "规则目标 v2", "target-bad": "异常目标",
-  "target-http": "已配置模型", "target-workspace": "文件任务",
+  "target-http": "已配置模型", "target-workspace": "文件任务", "target-development": "开发目标",
 };
 function exact(value: Record<string, unknown>, fields: string[]) {
   if (fields.some(key => !(key in value)) || Object.keys(value).some(key => !fields.includes(key))) throw new Error("Trace 响应结构无效");

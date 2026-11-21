@@ -16,6 +16,7 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--installed-root", required=True, type=Path)
+    parser.add_argument("--console", type=Path)
     args = parser.parse_args()
     installed = args.installed_root.resolve(strict=True)
     sys.path.insert(0, str(installed))
@@ -48,8 +49,8 @@ def main() -> None:
     entries = {entry.name: entry.value for entry in distribution.entry_points}
     assert entries["krim"] == "krim_agent.cli:main"
     assert entries["krim-eval"] == "krim_agent.evaluation.cli:main"
-    console = installed / "bin" / "krim"
-    assert console.is_file(), "Linux pip installation must generate the console entry point"
+    console = args.console or installed / "bin" / "krim"
+    assert console.is_file(), "Installation must provide the native console entry point"
     cli = subprocess.run(
         [sys.executable, str(console), "--version"],
         env={**os.environ, "PYTHONPATH": str(installed)},
