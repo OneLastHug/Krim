@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import secrets
 import stat
 import time
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -83,6 +85,26 @@ MEMORY_SCOPE_COLUMNS = {
     "workspace_id", "project_id", "source_kind", "memory_kind", "authorization_turn_id",
 }
 T = TypeVar("T")
+
+
+def _log_write_failure(error: BaseException) -> None:
+    """Report bounded code locations, never exception text, SQL, or parameter values."""
+    frames: list[tuple[str, str, int]] = []
+    kinds: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(kinds) < 4:
+        seen.add(id(current))
+        kinds.append(type(current).__name__)
+        frames.extend([
+            (Path(frame.f_code.co_filename).name, frame.f_code.co_name, line)
+            for frame, line in traceback.walk_tb(current.__traceback__)
+            if "krim_agent" in Path(frame.f_code.co_filename).parts
+        ][-12:])
+        current = current.__cause__ or current.__context__
+    logging.getLogger(__name__).error(
+        "Storage write failed: exception_types=%s frames=%s", kinds, frames,
+    )
 
 
 class SQLiteStore:
@@ -357,7 +379,8 @@ class SQLiteStore:
             raise
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            _log_write_failure(error)
             self.healthy = False
             raise ServiceError("storage_unavailable", 503) from None
 
@@ -844,6 +867,7 @@ class SQLiteStore:
                     return found
             except Exception:
                 pass
+            _log_write_failure(error)
             self.healthy = False
             raise ServiceError("storage_unavailable", 503) from None
 

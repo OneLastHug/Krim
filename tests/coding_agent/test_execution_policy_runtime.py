@@ -155,14 +155,14 @@ async def application(
         resolve_scope=scope, repositories=repositories,
         cleanup_run=close_run, descriptor={"version": "policy-hotswitch/1"},
     )
-    binding = RunBinding.freeze("demo", loop, settings)
+    binding = RunBinding.freeze("target-development", loop, settings)
     target = parse_json(binding.descriptor_json)
     # prepare()的会话已有排队turn，不能改绑；热切换用全新绑定会话承载。
     session = await session_sql.create_session(
         store,
         workspace,
         actor.principal_id,
-        SessionCreate(request_key="policy-session"),
+        SessionCreate(request_key="policy-session", target_key="target-development"),
         target,
         ContextPolicy(),
         settings,
@@ -187,7 +187,8 @@ async def application(
         return "allow" if current == "bypass" else "ask"
 
     service = RunService(
-        store, loop, settings, target, {"demo": binding}, execution_policy_recheck=recheck,
+        store, loop, settings, target, {"target-development": binding},
+        execution_policy_recheck=recheck,
     )
     submitted = await session_sql.submit(
         store,
