@@ -5,6 +5,9 @@ import type { Actor } from "../lib/session-contracts";
 import type { SandboxProject } from "../lib/development-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { useSession } from "../hooks/use-session";
+import { useSubagents } from "../hooks/use-subagents";
+import { SubagentApprovals, SubagentSummary } from "./SubagentPanel";
+import { subagentState } from "../lib/subagent-contracts";
 import { useSessionContext } from "../hooks/use-session-context";
 import { fetchProjectsPage, useDevelopment } from "../hooks/use-development";
 import { openDevelopmentPanel } from "../lib/workbench-events";
@@ -28,6 +31,7 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
   const chat = useSession(apiKey, active, fence, onLegacy);
   const context = useSessionContext(chat, apiKey, active);
   const development = useDevelopment(chat, apiKey, active, fence);
+  const subagents = useSubagents({ chat, apiKey, active, fence });
   const navigationSessions = chat.ready ? chat.list : EMPTY_SESSION_LIST;
   const navigationControls = chat.pendingControls.map(value => `${value.body.request_key}:${value.rejected}`).join("|");
   useEffect(() => { if (active) onIdentity?.(chat.actor, chat.actor ? "" : chat.notice ?? "", apiKey); }, [active, apiKey, chat.actor, chat.notice, onIdentity]);
@@ -103,16 +107,18 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
     </div>
     <div className="empty-quick-prompts">{[["排查深色主题对比度", "检查 frontend/src 下深色主题对比度不足的状态徽标并给出修复补丁"], ["运行前端契约测试", "运行前端契约测试并汇总失败用例原因"], ["梳理 Trace 返回路由", "梳理 Observability 模块深链返回对话的路由参数"]].map(([label, text]) => <button type="button" className="empty-prompt-pill" key={label} disabled={!chat.canWrite} onClick={() => { chat.edit(text!); document.getElementById("chat-prompt")?.focus(); }}>{label}</button>)}</div>
   </div> : undefined;
-  return <section hidden={!active} className="chat-workbench" aria-label="对话工作台">
+  return <section hidden={!active} className="chat-workbench chat-subagents" aria-label="对话工作台">
     <section className={`chat-main${workMaximized ? " is-hidden-by-max" : ""}`} aria-label="对话">
       {(chat.notice || startNotice || chat.pending.length > 0 || chat.pendingControls.length > 0) && <div className="chat-feedback-region">
         {(chat.notice || startNotice) && <div className="chat-notice"><p role="status">{chat.notice || startNotice}</p>{!chat.session && <Button variant="outline" aria-label="刷新对话" onClick={chat.refresh}><RefreshCw aria-hidden="true" />刷新</Button>}{chat.notice?.includes("连接") && <Button variant="outline" onClick={onConnect}>连接</Button>}</div>}
         {chat.pending.length > 0 && <div className="chat-pending" role="status"><strong>{chat.pending.every(chat.posting) ? "提交中" : c.unknown}</strong>{chat.pending.map(intent => <div key={intent.id}><span data-ui-data>{intent.kind === "session" ? intent.body.title : chat.list.find(value => value.id === intent.session_id)?.title ?? (intent.session_id ?? "").slice(0, 8)}</span><Button variant="outline" disabled={chat.posting(intent)} onClick={() => void chat.recover(intent)}>{c.find}</Button></div>)}</div>}
         {chat.pendingControls.map(value => <div className="chat-pending" key={String(value.body.request_key)}><span>操作结果未确认</span><Button variant="outline" disabled={value.rejected && (value.target.includes("/approvals/") ? !chat.canApprove : !chat.canWrite)} onClick={() => void chat.recoverControl(value)}>{value.rejected ? "重试原操作" : "查找操作结果"}</Button></div>)}
       </div>}
-      <ChatHistory chat={chat} onTrace={turnId => { if (active && chat.session?.id) onTrace?.(chat.workspace, chat.session.id, turnId); }} empty={emptyGuide}>
-        <SessionFeatures key={JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} />
+      <ChatHistory chat={chat} onOpenSubagent={agentId => openDevelopmentPanel(chat, "subagents", agentId)} onTrace={turnId => { if (active && chat.session?.id) onTrace?.(chat.workspace, chat.session.id, turnId); }} empty={emptyGuide}>
+        <SubagentApprovals state={subagents} chat={chat}/>
+        <SessionFeatures key={JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} backgroundRunning={subagents.members.some(member => ["running", "approval"].includes(subagentState(member)))} />
       </ChatHistory>
+      <SubagentSummary state={subagents} chat={chat}/>
       {workspaceMode ? <details className="workspace-task-area"><summary><strong>工作区任务</strong><span>输入文件、工作请求与完成条件</span></summary><WorkspacePanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} /></details> : <ChatComposer chat={chat} busy={!!starting} onStart={starting ? undefined : () => { void start(); }} />}
       <footer className="chat-controls" aria-label="会话控制栏">
         <div className="chat-controls-left"><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => openDevelopmentPanel(chat, "environment")}><Terminal aria-hidden="true"/>Linux 环境</button><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => chat.session ? openDevelopmentPanel(chat, "project") : setProjectPickerOpen(true)}><Folder aria-hidden="true"/>{development.project?.title ?? projects.find(project => project.project_id === newProject)?.title ?? "选择项目"}</button></div>
@@ -129,6 +135,6 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
       </PopoverMenu>
       <Dialog open={projectPickerOpen} onOpenChange={setProjectPickerOpen}><DialogContent className="new-session-project-dialog" aria-label="选择新会话项目" aria-describedby={undefined}><ProjectDialogBody key={accountScope} dev={development} apiKey={apiKey} projectId={newProject || null} workspace={chat.workspace} canCreate={chat.canWrite} onClose={() => setProjectPickerOpen(false)} onChoose={id => { setNewProject(id); void fetchProjectsPage(apiKey).then(value => { if (liveScope.current === accountScope) setProjects(value.items.filter(project => project.workspace_id === chat.workspace)); }).catch(error => { if (liveScope.current === accountScope) setStartNotice(chatReason(error)); }); }}/></DialogContent></Dialog>
     </section>
-    <DevelopmentPanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} development={development} onMaximizedChange={setWorkMaximized} dark={theme === "dark"} context={context} onContextTrace={() => { if (context.turnId && chat.id) onTrace?.(chat.workspace, chat.id, context.turnId, "context"); }}/>
+    <DevelopmentPanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} development={development} subagents={subagents} onMaximizedChange={setWorkMaximized} dark={theme === "dark"} context={context} onContextTrace={() => { if (context.turnId && chat.id) onTrace?.(chat.workspace, chat.id, context.turnId, "context"); }}/>
   </section>;
 }

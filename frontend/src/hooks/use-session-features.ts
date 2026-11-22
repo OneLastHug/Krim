@@ -117,11 +117,14 @@ export function useSessionFeatures(scope: SessionFeatureScope, onChanged?: () =>
       if (document.visibilityState !== "hidden") { clearTimeout(timer); void load(); }
     };
     void load();
+    const subagentsChanged = () => focus();
+    window.addEventListener("krim:subagents-changed", subagentsChanged);
     window.addEventListener("focus", focus);
     document.addEventListener("visibilitychange", focus);
     return () => {
       controller.abort();
       clearTimeout(timer);
+      window.removeEventListener("krim:subagents-changed", subagentsChanged);
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", focus);
     };

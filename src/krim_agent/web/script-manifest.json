@@ -3,13 +3,13 @@
   "scripts": [
     {
       "path": "assets/app.js",
-      "size_bytes": 1204651,
-      "sha256": "5315c2b96999c26741045dc52e2a04486c9d49bfc3e1fba0bfd18f0bb2e07161"
+      "size_bytes": 1234845,
+      "sha256": "9c9631c5fe15f2a7f8cad3beeacb5523daf567c5ac29c75edeebe70031eced4f"
     },
     {
       "path": "assets/observability.js",
       "size_bytes": 67624,
-      "sha256": "04da40708bbf633b421540aec5dfeff6a92c71bb18290a53692515841e49f810"
+      "sha256": "02fa2f99f0d94b3ad48f89a5879a22b44ae0c35080c9876fab96d6cb187bf769"
     },
     {
       "path": "assets/quality.js",

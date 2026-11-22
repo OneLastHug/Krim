@@ -179,6 +179,9 @@ class SubagentService:
         if root_id is None:
             raise ServiceError("facts_corrupt")
         root = await self.store.snapshot(root_id)
+        if (root.run.status == "completed" and not root.run.stop_requested
+                and tree.get("close_reason") == "host-followup"):
+            return
         if root.run.stop_requested or root.run.status not in {"queued", "running", "awaiting"}:
             raise SubagentError(
                 "subagent_tree_closed", accepted=False, action="The root task is no longer active."
@@ -554,6 +557,8 @@ class SubagentService:
         activation: dict[str, Any],
         registration: ProviderRegistration,
         tree: dict[str, Any],
+        *,
+        require_live_root: bool = True,
     ) -> asyncio.Task[Any]:
         existing = self._launches.get(task["task_id"])
         if existing is not None:
@@ -561,7 +566,10 @@ class SubagentService:
 
         async def launch() -> Any:
             try:
-                await self._root_live(await self.repository.tree(tree["tree_id"]))
+                await self._root_live_or_closed(
+                    await self.repository.tree(tree["tree_id"]),
+                    allow_closed_root=not require_live_root,
+                )
                 current = await self.repository.get_agent(agent_id)
                 active = current.get("activation")
                 if active is None or active["activation_id"] != activation["activation_id"]:
@@ -813,7 +821,124 @@ class SubagentService:
         self, invocation: Invocation, request: SendAgentMessage
     ) -> dict[str, Any]:
         caller = await self._caller(invocation)
-        target = await self._target(caller, request.target)
+        return await self._deliver(
+            caller,
+            SendAgentMessage(
+                target=request.target,
+                text=request.text,
+                wake=request.wake,
+                new_task=request.new_task,
+                task_id=request.task_id,
+                send_key=request.send_key or (invocation.run_id + ":" + invocation.call_id),
+            ),
+            parent_run_id=invocation.run_id,
+            host_intent=fingerprint(request.model_dump(mode="json")),
+        )
+
+    async def _authorize_host_input(
+        self, actor: Any, workspace_id: str, session_id: str,
+    ) -> None:
+        from krim_agent.project_access.policy import resolve_project_access
+        from krim_agent.storage import sessions as session_sql
+        from krim_agent.storage.sandbox_models import sandbox_session_bindings
+
+        if self.authorize_session is None:
+            raise ServiceError("permission_denied")
+        await self.authorize_session(actor, workspace_id, session_id, write=True)
+        session = await session_sql.get_session(self.store, session_id)
+        if (session.status != "open" or session.archived_at is not None
+                or session.deleted_at is not None):
+            raise ServiceError("session_closed", 409)
+
+        async def check_project(conn: Any) -> None:
+            project_id = await conn.scalar(select(sandbox_session_bindings.c.project_id).where(
+                sandbox_session_bindings.c.session_id == session_id,
+            ))
+            if project_id is not None:
+                access = await resolve_project_access(conn, actor, project_id)
+                access.require()
+
+        await self.store.work_read(check_project)
+
+    async def host_send_message(
+        self,
+        actor: Any,
+        workspace_id: str,
+        session_id: str,
+        agent_id: str,
+        *,
+        text: str,
+        wake: str = "auto",
+        new_task: bool = False,
+        task_id: str | None = None,
+        request_key: str,
+    ) -> dict[str, Any]:
+        """UI host入口：真实用户principal，不伪造Invocation/_PRODUCER。
+
+        授权与control同口径（session write，域内提交前重验）；幂等键域为
+        actor/generation/request_key/agent（用户发件 sender_id=None），同键重放
+        返回原回执不重复唤醒；root离线时续派复用既有派发/预算/activation
+        绑定，不赋予伪root运行权限。
+        """
+        self._enabled()
+        if self.authorize_session is None:
+            raise ServiceError("permission_denied")
+        await self._authorize_host_input(actor, workspace_id, session_id)
+        member = await self.repository.get_agent(agent_id)
+        tree = await self.repository.tree(member["tree_id"])
+        if (
+            tree["session_id"] != session_id
+            or tree["workspace_id"] != workspace_id
+            or tree["owner_id"] != actor.principal_id
+        ):
+            raise ServiceError("not_found", 404)
+        if member["role"] == "root":
+            raise SubagentError(
+                "invalid_input",
+                accepted=False,
+                action="Send information to the active root through the session, not here.",
+            )
+        current = member.get("task")
+        followup = new_task or current is None or current["status"] not in ACTIVE_TASK_STATUS
+        if current is not None and current.get("input_closed"):
+            followup = True
+        caller = Caller(member, tree, None)
+        receipt = await self._deliver(
+            caller,
+            SendAgentMessage(
+                target=member["agent_id"],
+                text=text,
+                wake=cast(Any, wake),
+                new_task=followup,
+                task_id=task_id,
+                send_key="host:" + str(actor.generation) + ":" + request_key,
+            ),
+            parent_run_id=tree.get("root_run_id"),
+            actor=actor,
+            host_intent=fingerprint({"text": text, "wake": wake,
+                                     "new_task": new_task, "task_id": task_id}),
+        )
+        return {"agent_id": agent_id, "message_id": receipt["message_id"],
+                "seq": receipt["seq"], "accepted": True,
+                "started": bool(receipt.get("started")),
+                "delivery": receipt.get("delivery", "queued")}
+
+    async def _deliver(
+        self,
+        caller: Caller,
+        request: SendAgentMessage,
+        *,
+        parent_run_id: str | None,
+        actor: Any | None = None,
+        host_intent: str | None = None,
+    ) -> dict[str, Any]:
+        """模型入口与host入口共享的派发逻辑；scope为None表示host入口。
+
+        host入口无run级scope可查，session write授权在入口与提交前各验一次；
+        模型入口维持原scope.check与_root_live语义。root离线仅host入口放行，
+        且树准入必须仍open。
+        """
+        target = await self._target_host(caller, request.target)
         if target["role"] == "root" and request.new_task:
             raise SubagentError(
                 "invalid_input",
@@ -822,22 +947,22 @@ class SubagentService:
             )
         if len(request.text.encode("utf-8")) > self.configuration.max_message_bytes:
             raise SubagentError("input_limit", accepted=False)
+        registration = None
         if target["role"] != "root":
             registration = self._registration(target, cold=not target["resident"])
             if not registration.capabilities.continuable:
                 raise SubagentError("subagent_not_continuable", accepted=False)
+        sender_id = caller.member["agent_id"] if actor is None else None
         send_key = "message:" + fingerprint(
-            {
-                "sender": caller.member["agent_id"],
-                "key": request.send_key or (invocation.run_id + ":" + invocation.call_id),
-            }
+            {"sender": caller.member["agent_id"] if actor is None else actor.principal_id,
+             "key": request.send_key}
         )
-        intent = fingerprint(request.model_dump(mode="json"))
+        intent = host_intent or fingerprint(request.model_dump(mode="json"))
         replay = await self.repository.message_by_key(target["agent_id"], send_key)
         if replay is not None:
             if (
                 replay["body"].get("request_fingerprint") != intent
-                or replay["sender_id"] != caller.member["agent_id"]
+                or replay["sender_id"] != sender_id
             ):
                 raise ServiceError("key_conflict")
             return {
@@ -848,21 +973,37 @@ class SubagentService:
                 "created": False,
                 "wake": replay["wake"],
                 "scheduled": (target.get("task") or {}).get("status") in ACTIVE_TASK_STATUS,
+                "started": False,
+                "delivery": ("queued" if replay["wake"] == "queue_only" else
+                             "next_input_boundary"),
             }
         body: dict[str, Any] = {
             "text": request.text,
             "request_fingerprint": intent,
-            "parent_run_id": invocation.run_id,
+            "parent_run_id": parent_run_id,
         }
+        if actor is not None:
+            body.update(sender_kind="user", principal_id=actor.principal_id,
+                        generation=actor.generation)
         if request.new_task:
             saved = await self.repository.history(target["agent_id"])
             profile = self._profiles[target["profile"]]
             previous = saved["payload"].get("messages", []) if saved is not None else []
+            source_run_id = (target.get("task") or {}).get("run_id") or parent_run_id
+            if not source_run_id:
+                # 无任何真实执行可续：不伪造fork来源，也不编造run身份。
+                raise SubagentError(
+                    "subagent_task_closed",
+                    accepted=False,
+                    action="No completed execution to continue; start the worker first.",
+                )
             snapshot = fork_context(
                 [Message.model_validate(item) for item in previous],
                 request.text,
-                source_run_id=(target.get("task") or {}).get("run_id") or invocation.run_id,
-                system_prompt=str(registration.provider.descriptor.get("system_prompt", "")),
+                source_run_id=source_run_id,
+                system_prompt=str(registration.provider.descriptor.get("system_prompt", ""))
+                if registration is not None
+                else "",
                 max_bytes=profile.context_max_bytes,
                 max_messages=profile.context_max_messages,
             )
@@ -876,7 +1017,7 @@ class SubagentService:
         budget_reserved = False
         if request.new_task:
             parent_key = None
-            if caller.member.get("current_task_id") is not None:
+            if actor is None and caller.member.get("current_task_id") is not None:
                 parent_task = await self.repository.task(caller.member["current_task_id"])
                 parent_key = parent_task["input"].get("budget_key")
             await self.budgets.reserve(
@@ -887,10 +1028,25 @@ class SubagentService:
         accepted = False
         launch = None
         scheduled = False
+        host = actor is not None
         try:
             async with self._lock(caller.tree["tree_id"]):
-                caller.scope.check()
-                await self._root_live(await self.repository.tree(caller.tree["tree_id"]))
+                if host:
+                    await self._authorize_host_input(
+                        actor, caller.tree["workspace_id"], caller.tree["session_id"],
+                    )
+                else:
+                    caller.scope.check()
+                current_tree = await self.repository.tree(caller.tree["tree_id"])
+                if host and current_tree["status"] != "open":
+                    current_tree = await self.repository.reopen_for_host(
+                        current_tree["tree_id"], session_id=current_tree["session_id"],
+                        workspace_id=current_tree["workspace_id"],
+                        owner_id=actor.principal_id,
+                        expected_input_version=current_tree["input_version"],
+                    )
+                    caller = Caller(caller.member, current_tree, caller.scope)
+                await self._root_live_or_closed(current_tree, allow_closed_root=host)
                 target = await self.repository.get_agent(target["agent_id"])
                 if (
                     await self._message_count(target["agent_id"])
@@ -917,7 +1073,7 @@ class SubagentService:
                     SendMessage(
                         tree_id=caller.tree["tree_id"],
                         target_id=target["agent_id"],
-                        sender_id=caller.member["agent_id"],
+                        sender_id=sender_id,
                         kind="task" if request.new_task else "message",
                         wake=request.wake,
                         body=cast(dict[str, JsonValue], body),
@@ -935,6 +1091,7 @@ class SubagentService:
                             target["activation"],
                             self._registration(target),
                             caller.tree,
+                            require_live_root=not host,
                         )
                         scheduled = True
                     else:
@@ -953,6 +1110,9 @@ class SubagentService:
             "accepted": True,
             **receipt,
             "scheduled": scheduled,
+            "started": launch is not None,
+            "delivery": "started" if launch is not None else "queued"
+                        if request.wake == "queue_only" else "next_input_boundary",
             "wake": request.wake,
             "action": (
                 "Queued only; no idle worker was started."
@@ -960,6 +1120,27 @@ class SubagentService:
                 else "Accepted for the next safe boundary."
             ),
         }
+
+    async def _root_live_or_closed(self, tree: dict[str, Any], *, allow_closed_root: bool) -> None:
+        """提交前tree准入：host入口在root离线时仍可续派活跃成员。
+
+        两种入口都要求树准入open；区别仅在root run存活检查：host续派不依赖
+        root运行，也不恢复root的执行权（root重启走既有会话resume）。
+        """
+        if tree["status"] != "open":
+            raise SubagentError(
+                "subagent_tree_closed", accepted=False,
+                action="Tree admission is closed; new work is not accepted.",
+            )
+        await self._root_live(tree)
+
+    async def _target_host(self, caller: Caller, target: str) -> dict[str, Any]:
+        if caller.scope is None:
+            # host入口只允许发给详情确认的成员本身；不做名字/前缀寻址。
+            if target != caller.member["agent_id"]:
+                raise ServiceError("invalid_input", 422)
+            return await self.repository.get_agent(target)
+        return await self._target(caller, target)
 
     async def wait_agent(self, invocation: Invocation, request: WaitAgent) -> dict[str, Any]:
         caller = await self._caller(invocation)
@@ -1590,6 +1771,71 @@ class SubagentService:
         if task is not None and task["status"] in ACTIVE_TASK_STATUS and task["run_id"] is not None:
             await self.runtime.cancel_delegate(task["run_id"])
         return {"agent_id": agent_id, "interrupted": True}
+
+    async def approval_reply(
+        self,
+        actor: Any,
+        workspace_id: str,
+        session_id: str,
+        agent_id: str,
+        request_id: str,
+        reply: Any,
+    ) -> dict[str, JsonValue]:
+        """UI host入口批准/拒绝子代理child run的挂起审批。
+
+        只答复真实approval_request事件：先核对请求确实挂在该成员自身的child
+        run上，再复用既有RunService.reply_approval完成停靠批校验与恢复驱动。
+        不伪造Invocation，不产生新授权面。
+        """
+        from krim_agent.contracts import ApprovalReply
+
+        self._enabled()
+        if self.session_tools is None:
+            raise ServiceError("permission_denied")
+        actor.member(workspace_id, approve=True)
+        from krim_agent.storage import sessions as session_sql
+        session = await session_sql.get_session(self.store, session_id)
+        if session.workspace_id != workspace_id or session.status != "open":
+            raise ServiceError("session_closed", 409)
+        actor.owns(workspace_id, session.owner_id, approve=True)
+        if self.authorize_session is None:
+            raise ServiceError("permission_denied")
+        await self.authorize_session(actor, workspace_id, session_id, write=False)
+        member = await self.repository.get_agent(agent_id)
+        tree = await self.repository.tree(member["tree_id"])
+        if (
+            tree["session_id"] != session_id
+            or tree["workspace_id"] != workspace_id
+            or tree["owner_id"] != actor.principal_id
+        ):
+            raise ServiceError("not_found", 404)
+        if not isinstance(reply, ApprovalReply):
+            reply = ApprovalReply.model_validate(reply)
+
+        async def read(conn: Any) -> list[str]:
+            return list(
+                (
+                    await conn.execute(
+                        select(subagent_child_runs.c.run_id).where(
+                            subagent_child_runs.c.agent_id == agent_id,
+                        )
+                    )
+                ).scalars()
+            )
+
+        run_ids = await self.store.work_read(read)
+        for run_id in run_ids:
+            pending = await self.runtime.approvals(run_id)
+            recorded = any(
+                event.kind == "approval_request" and event.data.get("request_id") == request_id
+                for event in (await self.store.snapshot(run_id)).events
+            )
+            if recorded or any(record.get("request_id") == request_id for record in pending):
+                return cast(
+                    dict[str, JsonValue],
+                    await self.runtime.reply_approval(run_id, request_id, reply),
+                )
+        raise ServiceError("not_found", 404)
 
     async def _descendant_ids(self, agent_id: str) -> list[str]:
         async def read(conn: Any) -> list[str]:

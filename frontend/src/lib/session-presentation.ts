@@ -39,6 +39,8 @@ export interface ToolPresentation {
 }
 
 export type TurnPresentation = AssistantPresentation | ToolPresentation;
+export type ExecutionPresentationSource = Pick<Turn, "run_id" | "status" | "transcript">;
+
 export interface PresentationDetail {
   facts?: Record<string, unknown> | null;
   events?: Record<string, unknown>[];
@@ -89,7 +91,7 @@ function parseJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
   try { return JSON.parse(value) as unknown; } catch { return value; }
 }
-function eventRecords(turn: Turn, events: unknown[], detail?: PresentationDetail): EventRecord[] {
+function eventRecords(turn: ExecutionPresentationSource, events: unknown[], detail?: PresentationDetail): EventRecord[] {
   if (!turn.run_id) return [];
   const source = [...events, ...(detail?.events ?? []), ...(Array.isArray(detail?.facts?.events) ? detail!.facts!.events as unknown[] : [])];
   const bySequence = new Map<number, EventRecord>();
@@ -140,7 +142,7 @@ function stateFromFact(value: unknown): ToolState {
  * 这里只读投影，不把历史审批事件变成新的审批能力，也不重放工具。
  */
 export function projectTurn(
-  turn: Turn,
+  turn: ExecutionPresentationSource,
   events: unknown[],
   pendingApprovals: unknown[],
   detail?: PresentationDetail,

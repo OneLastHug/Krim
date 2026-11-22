@@ -27,6 +27,7 @@ import { useCopyFeedback } from "../hooks/use-copy-feedback";
 import { CopyFeedback } from "./messages/CopyFeedback";
 import { ContextSummary } from "./ContextSummary";
 import type { SessionContextState } from "../hooks/use-session-context";
+import { SubagentPanel, type SubagentsState } from "./SubagentPanel";
 import type { DevelopmentActionDetail } from "../lib/workbench-events";
 import { projectTurn } from "../lib/session-presentation";
 
@@ -45,7 +46,8 @@ function workWidthLimit(element: HTMLElement | null): number {
 type WorkTab =
   | { id: string; type: "browser"; title: string }
   | { id: string; type: "document"; title: string; path: string | null; rawMarkdown?: boolean }
-  | { id: string; type: "aux"; title: string; sessionId: string };
+  | { id: string; type: "aux"; title: string; sessionId: string }
+  | { id: string; type: "subagents"; title: string };
 
 type PanelDialog =
   | { kind: "coming"; label: string }
@@ -78,15 +80,16 @@ const lastSegment = (path: string) => path.split("/").at(-1) ?? path;
 
 const EMPTY_TABS: WorkTab[] = [];
 
-export function DevelopmentPanel({ chat, apiKey, active, fence, development, dark, context, onContextTrace, onMaximizedChange }: {
+export function DevelopmentPanel({ chat, apiKey, active, fence, development, dark, context, subagents, onContextTrace, onMaximizedChange }: {
   chat: SessionState; apiKey: string; active: boolean; fence: { current: number };
+  subagents?: SubagentsState;
   development?: DevelopmentState; dark?: boolean; context?: SessionContextState; onContextTrace?: () => void; onMaximizedChange?: (maximized: boolean) => void;
 }) {
   const fallbackDev = useDevelopment(chat, apiKey, active && !development, fence);
   const dev = development ?? fallbackDev;
   const compaction = useSessionCompaction(chat, apiKey, active, fence);
   const narrow = useMediaQuery("(max-width: 1200px)", 1200);
-  const workInline = useMediaQuery("(min-width: 1521px)", 1520);
+  const wideWorkInline = useMediaQuery("(min-width: 1521px)", 1520);
   const [desktopInfoOpen, setDesktopInfoOpen] = useState(true);
   const [drawerInfoOpen, setDrawerInfoOpen] = useState(false);
   const infoOpen = narrow ? drawerInfoOpen : desktopInfoOpen;
@@ -96,6 +99,11 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
   const [workOpen, setWorkOpen] = useState(false);
   const [split, setSplit] = useState(false);
   const [maximized, setMaximized] = useState(false), [workWidth, setWorkWidth] = useState(460), [showAllFiles, setShowAllFiles] = useState(false);
+  const [activeSlot, setActiveSlot] = useState(0);
+  const [slots, setSlots] = useState<WorkTab[][]>([EMPTY_TABS, EMPTY_TABS]);
+  const [activeTabs, setActiveTabs] = useState<(string | null)[]>([null, null]);
+  const subagentWork = slots.some((tabs, slot) => (split || slot === 0) && tabs.some(tab => tab.id === activeTabs[slot] && tab.type === "subagents"));
+  const workInline = wideWorkInline || (subagentWork && !narrow);
   const [workLimit, setWorkLimit] = useState(() => workWidthLimit(null));
   const workElement = useRef<HTMLElement>(null);
   const resizeStart = useRef<{ x: number; width: number; pointer: number } | null>(null);
@@ -118,9 +126,6 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
     if (root) observer?.observe(root);
     return () => { window.removeEventListener("resize", fit); observer?.disconnect(); };
   }, [infoOpen, workInline, workOpen]);
-  const [activeSlot, setActiveSlot] = useState(0);
-  const [slots, setSlots] = useState<WorkTab[][]>([EMPTY_TABS, EMPTY_TABS]);
-  const [activeTabs, setActiveTabs] = useState<(string | null)[]>([null, null]);
   const [dialog, setDialog] = useState<PanelDialog | null>(null);
   const [addMenuSlot, setAddMenuSlot] = useState<{ slot: number; anchor: HTMLButtonElement } | null>(null);
   const identity = `${chat.actor?.principal_id ?? ""}:${chat.actor?.generation ?? ""}:${chat.workspace}:${chat.id}`;
@@ -138,6 +143,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
 
   const filesTab = useCallback((): WorkTab => ({ id: "project-files", type: "document", title: "项目文件", path: null }), []);
   function addTab(tab: WorkTab, slot = activeSlot) {
+    if (tab.type === "subagents" && !slots.flat().some(item => item.type === "subagents")) setWorkWidth(440);
     setSlots(previous => previous.map((list, index) => index === slot && !list.some(item => item.id === tab.id) ? [...list, tab] : list));
     setActiveTabs(previous => previous.map((value, index) => index === slot ? tab.id : value));
     setActiveSlot(slot);
@@ -218,10 +224,14 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
       else if (source.action === "context") { setMaximized(false); setInfoOpen(true); }
       else if (source.action === "project") setDialog({ kind: "project" });
       else if (source.action === "environment") setDialog({ kind: "environment" });
+      else if (source.action === "subagents" && subagents?.available) {
+        if (source.agentId) subagents.select(source.agentId);
+        addTab({ id: "subagents", type: "subagents", title: "后台任务" }, 0);
+      }
     };
     window.addEventListener("krim:development-action", onAction);
     return () => window.removeEventListener("krim:development-action", onAction);
-  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, activeSlot, workOpen, maximized, slots, activeTabs, setInfoOpen]);
+  }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, activeSlot, workOpen, maximized, slots, activeTabs, setInfoOpen, subagents]);
   useEffect(() => {
     onMaximizedChange?.(workOpen && maximized);
     return () => onMaximizedChange?.(false);
@@ -260,7 +270,7 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
   const policy = chat.session?.context_policy ?? null;
   const drawerInfo = infoOpen && narrow;
 
-  return <div className={`dev-panel-root${workOpen && maximized ? " is-work-maximized" : ""}`} data-info={infoOpen && !(workOpen && maximized) ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline || maximized ? "inline" : "overlay") : "false"}>
+  return <div className={`dev-panel-root${workOpen && subagentWork ? " has-subagent-work" : ""}${workOpen && maximized ? " is-work-maximized" : ""}`} data-info={infoOpen && !(workOpen && maximized) ? (drawerInfo ? "drawer" : "true") : "false"} data-work={workOpen ? (workInline || maximized ? "inline" : "overlay") : "false"}>
     {infoOpen && !(workOpen && maximized) && <section className="g-info" aria-label="开发信息栏">
       {(dev.notice || compaction.notice || dev.writes.length > 0) && <div className="dev-panel-status">
         {compaction.notice && <div className="dev-panel-notice" role="status"><p>{compaction.notice}</p><Button variant="ghost" size="icon-sm" aria-label="关闭整理提示" onClick={compaction.dismiss}><X aria-hidden="true" /></Button></div>}
@@ -351,7 +361,8 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
           onAdd={anchor => setAddMenuSlot({ slot, anchor })}
           onCloseSplit={toggleSplit}
           onComing={comingSoon}
-          chat={chat} apiKey={apiKey} projectId={projectId} environmentState={environmentState}
+          chat={chat} apiKey={apiKey} projectId={projectId} environmentState={environmentState} subagents={subagents}
+          onShowApproval={() => { setWorkOpen(false); requestAnimationFrame(() => document.querySelector(".sa-pending-approval")?.scrollIntoView({ block: "center", behavior: "smooth" })); }}
           onOpenEnvironment={() => setDialog({ kind: "environment" })}
           onBrowseFiles={() => addTab(filesTab(), slot)}
           onSetDocumentMode={(id, rawMarkdown) => setSlots(previous => previous.map((items, index) => index === slot ? items.map(tab => tab.id === id && tab.type === "document" ? { ...tab, rawMarkdown } : tab) : items))}
@@ -387,11 +398,12 @@ function EnvRow({ icon: Icon, label, value, state, onClick, title }: {
   </button>;
 }
 
-function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAdd, onCloseSplit, onComing, chat, apiKey, projectId, environmentState, onOpenEnvironment, onOpenFile, onBrowseFiles, onSetDocumentMode }: {
+function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAdd, onCloseSplit, onComing, chat, apiKey, projectId, environmentState, subagents, onShowApproval, onOpenEnvironment, onOpenFile, onBrowseFiles, onSetDocumentMode }: {
   slot: number; label: string; tabs: WorkTab[]; activeTab: string | null; split: boolean;
   onSelect: (id: string) => void; onClose: (id: string) => void; onAdd: (anchor: HTMLButtonElement) => void;
   onCloseSplit: () => void; onComing: (label: string) => void;
   chat: SessionState; apiKey: string; projectId: string | null; environmentState: EnvironmentState | null;
+  subagents?: SubagentsState; onShowApproval: () => void;
   onOpenEnvironment: () => void;
   onOpenFile: (path: string, title: string) => void;
   onBrowseFiles: () => void; onSetDocumentMode: (id: string, rawMarkdown: boolean) => void;
@@ -417,7 +429,7 @@ function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAd
           <button type="button" role="tab" id={`dev-tab-${slot}-${tab.id.replace(/[^a-zA-Z0-9-]/g, "-")}`}
             aria-selected={current?.id === tab.id} aria-controls={`dev-work-content-${slot}`}
             tabIndex={current?.id === tab.id ? 0 : -1} data-tab={tab.id} title={tab.title}
-            onClick={() => onSelect(tab.id)}>{tab.type === "browser" ? <Globe aria-hidden="true"/> : tab.type === "aux" ? <GitFork aria-hidden="true"/> : tab.path ? <FileCode aria-hidden="true"/> : <Folder aria-hidden="true"/>}<span>{tab.title}</span></button>
+            onClick={() => onSelect(tab.id)}>{tab.type === "browser" ? <Globe aria-hidden="true"/> : (tab.type === "aux" || tab.type === "subagents") ? <GitFork aria-hidden="true"/> : tab.path ? <FileCode aria-hidden="true"/> : <Folder aria-hidden="true"/>}<span>{tab.title}</span></button>
           <button type="button" aria-label={`关闭 ${tab.title}`} onClick={() => onClose(tab.id)}><X aria-hidden="true" /></button>
         </div>)}
       </div>
@@ -431,6 +443,7 @@ function WorkSlot({ slot, label, tabs, activeTab, split, onSelect, onClose, onAd
       {current?.type === "document" && (current.path === null
         ? <FileBrowser apiKey={apiKey} projectId={projectId} onOpenFile={onOpenFile} />
         : <FileView apiKey={apiKey} projectId={projectId} path={current.path} rawMarkdown={current.rawMarkdown ?? false} onToggleMarkdown={() => onSetDocumentMode(current.id, !current.rawMarkdown)} onBrowseFiles={onBrowseFiles} />)}
+      {current?.type === "subagents" && subagents && <SubagentPanel state={subagents} chat={chat} onOpenFile={onOpenFile} onShowApproval={onShowApproval}/>}
       {current?.type === "aux" && <AuxView chat={chat} apiKey={apiKey} sessionId={current.sessionId} onComing={onComing} />}
     </div>
   </section>;

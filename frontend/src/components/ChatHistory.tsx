@@ -12,7 +12,7 @@ import { ToolCallCard } from "./ToolCallCard";
 
 const EMPTY_EVENTS: Record<string, unknown>[] = [];
 
-export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionState; onTrace?: (turnId: string) => void; children?: ReactNode; empty?: ReactNode }) {
+export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: { chat: SessionState; onTrace?: (turnId: string) => void; onOpenSubagent?: (agentId: string) => void; children?: ReactNode; empty?: ReactNode }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showJump, setShowJump] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
@@ -128,7 +128,7 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
               const approval = item.approval;
               const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";
               const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
-              return <ToolCallCard key={item.key} tool={item} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
+              return <ToolCallCard key={item.key} tool={item} onOpenSubagent={onOpenSubagent} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
             })}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">

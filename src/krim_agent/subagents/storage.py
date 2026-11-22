@@ -611,6 +611,51 @@ class SubagentStore:
 
         return await self._submit(operation, confirm)
 
+    async def reopen_for_host(
+        self, tree_id: str, *, session_id: str, workspace_id: str, owner_id: str,
+        expected_input_version: int,
+    ) -> dict[str, Any]:
+        """Reopen natural completion for explicit owner input, without rebinding a run."""
+        from krim_agent.storage.models import sessions
+
+        async def operation(conn: AsyncConnection) -> dict[str, Any]:
+            tree = await _tree_row(conn, tree_id)
+            if (tree["session_id"], tree["workspace_id"], tree["owner_id"]) != (
+                session_id, workspace_id, owner_id,
+            ):
+                raise ServiceError("not_found", 404)
+            session = (await conn.execute(select(sessions).where(
+                sessions.c.id == session_id,
+            ))).mappings().first()
+            if session is None or session["status"] != "open":
+                raise ServiceError("session_closed", 409)
+            if tree["input_version"] != expected_input_version:
+                raise ServiceError("revision_conflict")
+            if tree["status"] == TREE_OPEN:
+                return _tree_view(tree)
+            if tree["close_reason"] != "root-input-closed" or tree["root_run_id"] is None:
+                raise SubagentError("subagent_tree_closed", accepted=False)
+            root = (await conn.execute(select(runs).where(
+                runs.c.id == tree["root_run_id"],
+            ))).mappings().first()
+            if root is None or root["status"] != "completed" or root["stop_requested"]:
+                raise SubagentError("subagent_tree_closed", accepted=False)
+            await conn.execute(update(subagent_trees).where(
+                subagent_trees.c.id == tree_id,
+                subagent_trees.c.input_version == expected_input_version,
+            ).values(status=TREE_OPEN, close_reason="host-followup", closed_at=None,
+                     input_version=subagent_trees.c.input_version + 1,
+                     revision=subagent_trees.c.revision + 1))
+            return _tree_view(await _tree_row(conn, tree_id))
+
+        async def confirm() -> dict[str, Any] | None:
+            found = await self.tree(tree_id)
+            return found if (found["status"] == TREE_OPEN
+                             and found["input_version"] == expected_input_version + 1
+                             and found["close_reason"] == "host-followup") else None
+
+        return await self._submit(operation, confirm)
+
     async def bind_root(
         self, scope: TreeScope, tree_id: str, *, expected_input_version: int
     ) -> dict[str, Any]:
