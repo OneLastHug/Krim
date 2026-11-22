@@ -12,9 +12,11 @@ from krim_agent.storage import sessions as session_sql
 from krim_agent.storage import work as work_sql
 from krim_agent.storage.account_models import ACCOUNT_TABLE_NAMES
 from krim_agent.storage.development_models import DEVELOPMENT_TABLES
+from krim_agent.storage.execution_policy_models import EXECUTION_POLICY_TABLE_NAMES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
 from krim_agent.storage.models import metadata
 from krim_agent.storage.preview_models import PREVIEW_TABLES
+from krim_agent.storage.project_membership_models import PROJECT_MEMBERSHIP_TABLE_NAMES
 from krim_agent.storage.sandbox_models import SANDBOX_TABLE_NAMES
 from krim_agent.storage.session_lifecycle_models import SESSION_LIFECYCLE_TABLES
 from krim_agent.storage.sidebar_models import SIDEBAR_TABLES
@@ -24,6 +26,12 @@ from krim_agent.storage.sqlite import (
     SCHEMA_VERSION,
     SQLiteStore,
 )
+from krim_agent.storage.subagent_budget_models import BUDGET_TABLE_NAMES
+from krim_agent.storage.subagent_models import SUBAGENT_TABLE_NAMES
+from krim_agent.storage.subagent_team_models import TEAM_TABLE_NAMES
+
+# schema20 增量（subagent + team + budget）；任何 <=19 的目标版本都必须删除。
+SCHEMA20_TABLE_NAMES = SUBAGENT_TABLE_NAMES | TEAM_TABLE_NAMES | BUDGET_TABLE_NAMES
 
 
 def raw(path, names):
@@ -46,6 +54,17 @@ def downgrade(path, version):
     """从当前完整表集逐层删除到目标版本的白名单集合；只读门与升级测试共用。"""
     conn = sqlite3.connect(path)
     try:
+        schema20_tables = sort_tables([
+            metadata.tables[name] for name in SCHEMA20_TABLE_NAMES
+        ])
+        for table in reversed(schema20_tables):
+            conn.execute(f'DROP TABLE "{table.name}"')
+        schema19_tables = sort_tables([
+            metadata.tables[name]
+            for name in PROJECT_MEMBERSHIP_TABLE_NAMES | EXECUTION_POLICY_TABLE_NAMES
+        ])
+        for table in reversed(schema19_tables):
+            conn.execute(f'DROP TABLE "{table.name}"')
         general_tables = sort_tables([
             metadata.tables[name] for name in GENERAL_TABLE_NAMES | MEDIA_TABLE_NAMES
         ])
@@ -106,7 +125,7 @@ async def test_fresh_store_has_current_schema_with_sandbox_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 18
+        assert SCHEMA_VERSION == 20
         assert store.schema_version == SCHEMA_VERSION
         assert SANDBOX_TABLE_NAMES <= set(metadata.tables)
         assert SANDBOX_TABLE_NAMES <= table_names(database)
@@ -402,6 +421,17 @@ async def test_schema9_readonly_and_quota_upgrade_preserve_binding(tmp_path):
     store = await SQLiteStore.open(database)
     await store.close()
     with sqlite3.connect(database) as conn:
+        schema20_tables = sort_tables([
+            metadata.tables[name] for name in SCHEMA20_TABLE_NAMES
+        ])
+        for table in reversed(schema20_tables):
+            conn.execute(f'DROP TABLE "{table.name}"')
+        schema19_tables = sort_tables([
+            metadata.tables[name]
+            for name in PROJECT_MEMBERSHIP_TABLE_NAMES | EXECUTION_POLICY_TABLE_NAMES
+        ])
+        for table in reversed(schema19_tables):
+            conn.execute(f'DROP TABLE "{table.name}"')
         general_tables = sort_tables([
             metadata.tables[name] for name in GENERAL_TABLE_NAMES | MEDIA_TABLE_NAMES
         ])

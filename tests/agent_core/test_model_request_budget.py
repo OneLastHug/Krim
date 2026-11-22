@@ -534,9 +534,13 @@ async def test_open_application_session_carries_budgets_across_real_tool_steps(
         assert f"Remaining model steps including this request: {steps}" in budget
         assert f"remaining tool calls for this run: {remaining}" in budget
         assert "tool calls allowed in this request: 4" in budget
-    from krim_agent.tools.session import SESSION_CAPABILITIES
+    from krim_agent.tools.session import SESSION_CAPABILITIES, SUBAGENT_CAPABILITIES
 
-    expected_tools = {"add", "echo", "lookup_note"} | set(SESSION_CAPABILITIES)
+    # The fixture deliberately uses the legacy single-agent configuration.
+    # Reserved delegation names must remain absent while the switch is off.
+    expected_tools = {"add", "echo", "lookup_note"} | (
+        set(SESSION_CAPABILITIES) - SUBAGENT_CAPABILITIES
+    )
     for request in requests:
         assert {item["function"]["name"] for item in request["tools"]} == expected_tools
     assert any(message.get("tool_call_id") == "echo-first" for message in requests[1]["messages"])

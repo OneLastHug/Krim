@@ -10,14 +10,17 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any, cast
 from uuid import uuid4
 
 import ai
 from ai import events, messages
-from ai.agents import HookDeferredException, HookRegistry, deferred_tool_result
+from ai import experimental_telemetry as telemetry
+from ai.agents import Context as SDKContext
+from ai.agents import HookDeferredException, HookRegistry, ToolRunner, deferred_tool_result
 from ai.types.tools import ToolApproval
 from ai.types.tools import ToolSpec as SDKToolSpec
 from pydantic import JsonValue
@@ -59,6 +62,51 @@ class ProbeResult:
     status: str
     messages: list[messages.Message]
     events: list[events.AgentEvent]
+
+
+@dataclass(frozen=True)
+class StepBoundary:
+    """Read-only host view at a safe SDK step boundary.
+
+    Delivered after a completed step's assistant and tool-result messages are
+    closed in the agent history and before the next model sampling. Never
+    delivered for the initial input of a ``run()`` (the host already decided
+    it), for a finished response, or while the run parks on a deferred hook;
+    on resume, the replayed batch closes first. The host may checkpoint its
+    own state here and return already-accepted inbox messages (in order) to
+    append before the next request; raising from the callback vetoes the
+    next sampling.
+    """
+
+    run_id: str
+    step: int
+    messages: tuple[messages.Message, ...]
+
+
+StepBoundaryCallback = Callable[
+    [StepBoundary], Awaitable[Sequence[messages.Message] | messages.Message | None]
+]
+StepCommitCallback = Callable[["StepCommit"], Awaitable[None]]
+EventCallback = Callable[[events.AgentEvent], Awaitable[None]]
+RecoverToolCallback = Callable[[Invocation], Awaitable[JsonValue | None]]
+
+
+@dataclass(frozen=True)
+class StepCommit:
+    """A complete model response that passed admission and was committed.
+
+    Delivered once per successful sampling, after the complete-response checks
+    and the tool-call checkpoint (if any), before the step's events reach the
+    consumer. ``messages`` is the request history the response was formed
+    from (including any boundary injections); ``response`` is the accepted
+    complete assistant message. Replay iterations never emit it. The host can
+    mark notifications attached to these inputs as parent-step committed.
+    """
+
+    run_id: str
+    step: int
+    messages: tuple[messages.Message, ...]
+    response: messages.Message
 
 
 @dataclass
@@ -260,6 +308,67 @@ class _OrderedAgent(ai.Agent):
         ordered.id = part.tool_call_id  # type: ignore[attr-defined]
         return ordered
 
+    async def loop(self, context: SDKContext) -> AsyncGenerator[events.AgentEvent]:
+        """ai 0.9.0's native step loop plus the host boundary between steps.
+
+        The body mirrors ``Agent.loop`` exactly; the only addition runs after
+        the previous step's assistant and tool-result messages are closed in
+        the context and before the next sampling. ``keep_running`` is
+        evaluated first, so a finished response or a deferred-hook park never
+        consumes the boundary, and a resumed run's replay iteration closes its
+        interrupted batch before this invocation's first boundary. The
+        callback runs inside the SDK loop task: it may checkpoint, inject
+        accepted inbox messages, or raise to veto the next sampling. Messages
+        being sampled are never modified: the injection happens strictly
+        outside the ``models.stream`` block, at a structural boundary rather
+        than a consumer-timing one.
+        """
+        owner = self.owner
+        boundary = owner.step_boundary
+        step_closed = False
+        while True:
+            if not context.keep_running():
+                return
+            if step_closed:
+                step_closed = False
+                if boundary is not None:
+                    injected = await boundary(StepBoundary(
+                        run_id=owner.run_id, step=owner.step,
+                        messages=tuple(context.messages),
+                    ))
+                    if injected is not None:
+                        # A bare Message is accepted for convenience; a pydantic
+                        # Message would otherwise iterate into its parts.
+                        batch = (
+                            [injected] if isinstance(injected, messages.Message)
+                            else list(injected)
+                        )
+                        for message in batch:
+                            if not isinstance(message, messages.Message) or message.replay:
+                                raise ValueError(
+                                    "step boundary may only inject non-replay SDK messages",
+                                )
+                        context.add(batch)
+            async with (
+                telemetry.span(telemetry.LoopTurnSpanData()),
+                ai.models.stream(context=context) as stream,
+                ToolRunner() as tr,
+                ai.util.merge(stream, tr.events()) as merged,
+            ):
+                async for event in merged:
+                    yield event
+
+                    if isinstance(event, events.ToolEnd):
+                        tool = self.resolve(event.tool_call)
+                        tr.schedule(tool)
+
+                context.add(stream.message)
+                # This adds the tool message to the history, which
+                # also has the effect of causing another turn through
+                # the loop.
+                context.add(tr.get_tool_message())
+                step_closed = True
+
 
 class SDKAdapter:
     """One host run bridged to the pinned SDK's native loop and ToolRunner.
@@ -290,6 +399,11 @@ class SDKAdapter:
         authorize_media: Callable[[messages.FilePart], Awaitable[None]] | None = None,
         media_limits: MediaLimits = DEFAULT_MEDIA_LIMITS,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        step_boundary: StepBoundaryCallback | None = None,
+        on_step_commit: StepCommitCallback | None = None,
+        on_event: EventCallback | None = None,
+        max_events: int | None = None,
+        recover_tool: RecoverToolCallback | None = None,
     ) -> None:
         if operations is not None:
             if (environment is None or ownership is None
@@ -302,6 +416,8 @@ class SDKAdapter:
             raise ValueError("generic SDK runs require a host and no development identity")
         if not run_id or read_parallelism < 1:
             raise ValueError("missing run or invalid read parallelism")
+        if max_events is not None and (type(max_events) is not int or max_events < 1):
+            raise ValueError("invalid event retention")
         self._run_id = run_id
         self.read_parallelism = read_parallelism
         self.batch_approvals = batch_approvals
@@ -313,6 +429,19 @@ class SDKAdapter:
         self.approval_request = approval_request
         self.host = host
         self.startup_gate = startup_gate
+        # Host-safe seams between complete steps: the boundary callback runs
+        # before the next sampling (never for the initial input), on_step_commit
+        # reports each accepted complete response, on_event mirrors every
+        # delivered event in real time, and max_events bounds only the events
+        # retained in ProbeResult. All default to the previous single-agent
+        # behavior.
+        self.step_boundary, self.on_step_commit = step_boundary, on_step_commit
+        self.on_event, self.max_events = on_event, max_events
+        # 失联恢复缝：generic event ledger 围栏命中（intent/失败 tool_end 且无旧
+        # ok）时，先问宿主的持久接受回执（domain 只查 spawn/send/Team 已接受
+        # 记录、不执行）。有回执回填真实 ok 观测并补 tool_end；None 维持
+        # facts_corrupt。默认 None 保持原行为；restore 同步方法不联网。
+        self.recover_tool = recover_tool
         self.authorize_media, self.media_limits = authorize_media, media_limits
         self.entries: dict[str, _Entry] = {}
         self._slots: _ExecutionSlots | None = None
@@ -575,6 +704,11 @@ class SDKAdapter:
                     if observed.status == "ok" and observed.result_available is True:
                         return observed.model_dump(mode="json")
                 if entry.invocation.name not in INPUT_TOOLS:
+                    # 已 started（intent/失败 tool_end）且拿不回旧 ok：先查宿主
+                    # 持久回执；不重派副作用，不白名单普通工具。
+                    recovered = await self._recover_started(entry, prior)
+                    if recovered is not None:
+                        return recovered
                     raise ServiceError("facts_corrupt")
         if self.operations is None and entry.admission.decision == "deny":
             # A denied legacy batch item never entered execute/wrap. Preserve
@@ -636,6 +770,41 @@ class SDKAdapter:
             raise ServiceError(observation.code or "tool_error")
         return observation.model_dump(mode="json")
 
+    async def _recover_started(
+        self, entry: _Entry, prior: list[Any],
+    ) -> dict[str, JsonValue] | None:
+        """Backfill a started-but-resultless call from the host's receipts.
+
+        Only reached on the event-ledger fence when the old ok result cannot be
+        replayed. The host answers from accepted control records only (never by
+        executing anything); a receipt becomes a real ok observation plus the
+        missing tool_end without re-dispatching the tool. None keeps the
+        facts_corrupt fence. Denials and complete ok results are never rewritten.
+        """
+        if self.recover_tool is None:
+            return None
+        if prior and prior[-1].kind == "tool_end":
+            observed = ToolObservation.model_validate(prior[-1].data)
+            if observed.status == "denied" or (
+                observed.status == "ok" and observed.result_available is True
+            ):
+                return None
+        receipt = await self.recover_tool(entry.invocation)
+        if receipt is None:
+            return None
+        observation = ToolObservation(
+            call_id=entry.invocation.call_id,
+            provider_call_id=entry.invocation.provider_call_id,
+            span_id=entry.invocation.span_id, step_index=entry.invocation.step_index,
+            name=entry.invocation.name,
+            arguments=cast(dict[str, JsonValue], parse_json(entry.invocation.arguments_json)),
+            status="ok", executor_started=True, result_available=True,
+            value=receipt, code=None, decision=entry.admission.decision,
+        )
+        await self.context().emit("tool_end", observation.model_dump(mode="json"))
+        await self.check_stop()
+        return observation.model_dump(mode="json")
+
     async def prepare_input(self, history: Sequence[messages.Message]) -> list[messages.Message]:
         await self.check_stop()
         prepared = await authorize_history(history, self.authorize_media, self.media_limits)
@@ -653,6 +822,13 @@ class SDKAdapter:
                 self.run_id, checkpoint,
                 fingerprint(checkpoint) if self.host is not None else self.tool_fingerprint,
             )
+        if self.on_step_commit is not None:
+            # Only reached for a validated complete response; replay iterations
+            # bypass the provider and therefore never re-emit a commit.
+            await self.on_step_commit(StepCommit(
+                run_id=self.run_id, step=self.step,
+                messages=tuple(history), response=complete,
+            ))
         await self.check_stop()
 
     def checkpoint(self, history: Sequence[messages.Message]) -> dict[str, Any]:
@@ -895,10 +1071,17 @@ class SDKAdapter:
                 prepare_input=self.prepare_input,
             ),
         )
-        collected: list[events.AgentEvent] = []
+        # The outlet is real time and independent of retention: on_event sees
+        # every delivered event in order, while max_events only bounds how
+        # many of them ProbeResult keeps (most recent; None keeps all).
+        retained: list[events.AgentEvent] | deque[events.AgentEvent] = (
+            deque(maxlen=self.max_events) if self.max_events is not None else []
+        )
         async with sdk_lifetime(), self.agent.run(model, history, hook_registry=registry) as stream:
             async for event in stream:
-                collected.append(event)
+                if self.on_event is not None:
+                    await self.on_event(event)
+                retained.append(event)
                 if isinstance(event, events.HookEvent) and event.hook.status == "pending":
                     if event.hook.metadata.get("interaction_request_id"):
                         await self.append_input_request(event.hook)
@@ -906,6 +1089,7 @@ class SDKAdapter:
                         await self.append_approval_request(event.hook)
                     ai.defer_hook(event.hook, registry=registry)
             current = list(stream.messages)
+        collected = list(retained)
         await self.check_stop()
         if self.deferred is not None:
             checkpoint = self.checkpoint(current)

@@ -21,7 +21,7 @@ from krim_agent.mcp import MCPConnection
 from krim_agent.runtime.contracts import settled
 from krim_agent.tools.bundles import ModeGuard, compose_executor
 from krim_agent.tools.catalog_search import ToolCatalogService, scope_key
-from krim_agent.tools.core import ToolSpec
+from krim_agent.tools.core import Decision, Invocation, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
 from krim_agent.tools.mcp_resources import (
     MCPResourceBinding,
@@ -92,6 +92,7 @@ class RunTools:
         catalog: ToolCatalogService, resources: MCPResourceService,
         *, account: AccountMCPBundle | None = None, web: WebResultState | None = None,
         connections: Iterable[MCPConnection] = (),
+        visible: frozenset[str] | None = None,
     ) -> None:
         self.executor = executor
         self.scope = scope
@@ -99,6 +100,9 @@ class RunTools:
         self.resources = resources
         self.account = account
         self.web = web
+        # 子代理profile工具收窄：None保持完整模型可见集合（旧行为）；执行
+        # 权限不被缩减——schemas只是选择，executor权威仍走完整pipeline。
+        self.visible = visible
         self._connections = tuple(connections)
         self._scope_key = scope_key(scope)
         self._registry_hash = fingerprint(executor.registry.schemas())
@@ -125,6 +129,8 @@ class RunTools:
         self._check()
         active = {spec.name for spec in self.catalog.active_specs(self.scope)}
         active.add("tool_search")
+        if self.visible is not None:
+            active &= self.visible
         return [descriptor for descriptor in self.executor.registry.schemas()
                 if descriptor["name"] in active]
 
@@ -200,6 +206,8 @@ async def open_run_tools(
     bundles: Iterable[ToolBundle] = (),
     guard: ModeGuard | None = None,
     media_sink: ResourceMediaSink | None = None,
+    visible: frozenset[str] | None = None,
+    deny: Iterable[str] = (),
 ) -> RunTools:
     """Compose one executor, preserving base hooks and guarding every tool.
 
@@ -211,6 +219,17 @@ async def open_run_tools(
     """
     scope_key(scope)
     base.registry.assert_current()
+    denied = frozenset(deny)
+    if denied:
+        # 子代理profile排除集（如ask_user）：deny只收敛，绝不放行既有ask。
+        inner = guard
+
+        async def deny_guard(invocation: Invocation) -> Decision:
+            if invocation.name in denied:
+                return "deny"
+            return await inner(invocation) if inner is not None else "allow"
+
+        guard = deny_guard
     account: AccountMCPBundle | None = None
     selected = list(bundles)
     bindings: list[MCPResourceBinding] = []
@@ -263,6 +282,7 @@ async def open_run_tools(
             connections=(binding.connection for binding in bindings),
             web=(cast(WebResultState, host.web)
                  if host is not None and host.web is not None else None),
+            visible=visible,
         )
     except BaseException:
         if account is not None:

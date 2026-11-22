@@ -10,7 +10,13 @@ from typing import Any, cast
 import ai
 from pydantic import JsonValue
 
-from krim_agent.agent_sdk.adapter import ProbeResult, ProbeStopped, SDKAdapter
+from krim_agent.agent_sdk.adapter import (
+    ProbeResult,
+    ProbeStopped,
+    SDKAdapter,
+    StepBoundary,
+    StepCommit,
+)
 from krim_agent.agent_sdk.context import CompactorHistory
 from krim_agent.agent_sdk.host import HostExecution
 from krim_agent.agent_sdk.model import HostModelProvider, agent_tools, sdk_messages
@@ -123,6 +129,7 @@ class SDKExecutionPlan:
     resume: SDKResume | None = None
     workspace: bool = False
     on_completed: CompletionHook | None = None
+    subagents: Any | None = None
 
 
 async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
@@ -144,6 +151,10 @@ async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
         deadline=plan.execution_budget.deadline,
         workspace=plan.workspace,
         execution_budget=plan.execution_budget,
+        request_slot=(
+            (lambda index: plan.subagents.request_slot(plan.run_id, index, plan.check))
+            if plan.subagents is not None else None
+        ),
     )
     request_limit = plan.settings.request_capacity(plan.provider)
     history = await plan.build_history(stepper, request_limit)
@@ -170,6 +181,19 @@ async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
         model_provider.checkpoint,
         model_provider.restore,
     )
+    async def input_boundary(boundary: StepBoundary) -> Any:
+        return await plan.subagents.prepare_input(
+            plan.run_id, list(boundary.messages), adapter.checkpoint, initial=False,
+        )
+
+    async def step_committed(commit: StepCommit) -> None:
+        await plan.subagents.commit_step(
+            plan.run_id, [*commit.messages, commit.response], adapter.checkpoint,
+        )
+
+    async def sdk_event(event: Any) -> None:
+        await plan.subagents.on_event(plan.run_id, event)
+
     adapter = SDKAdapter(
         store=plan.store,
         operations=plan.operations,
@@ -186,15 +210,40 @@ async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
         host=host,
         authorize_media=cast(Any, plan.authorize_media),
         startup_gate=plan.startup_gate,
+        step_boundary=input_boundary if plan.subagents is not None else None,
+        on_step_commit=step_committed if plan.subagents is not None else None,
+        on_event=sdk_event if plan.subagents is not None else None,
+        recover_tool=plan.subagents.recover_tool if plan.subagents is not None else None,
+        max_events=(plan.subagents.configuration.max_cached_events
+                    if plan.subagents is not None else None),
     )
 
     try:
-        result = await adapter.run(
-            ai.Model(id=plan.model_id, provider=model_provider),
-            sdk_messages(plan.initial_history),
-            resume=plan.resume is not None,
-            replies=plan.resume.replies if plan.resume is not None else None,
-        )
+        initial = sdk_messages(plan.initial_history)
+        resuming = plan.resume is not None
+        replies = plan.resume.replies if plan.resume is not None else None
+        if plan.subagents is not None and not resuming:
+            initial.extend(await plan.subagents.prepare_input(
+                plan.run_id, initial, adapter.checkpoint, initial=True,
+            ))
+        while True:
+            result = await adapter.run(
+                ai.Model(id=plan.model_id, provider=model_provider),
+                initial,
+                resume=resuming,
+                replies=replies,
+            )
+            if result.status != "completed" or plan.subagents is None:
+                break
+            # A final response is not root-task completion while accepted
+            # descendants or inputs remain. Waiting here owns no model permit.
+            extra = await plan.subagents.finish_or_continue(
+                plan.run_id, list(result.messages), adapter.checkpoint, plan.check,
+            )
+            if not extra:
+                break
+            initial = [*result.messages, *extra]
+            resuming, replies = False, None
     except ProbeStopped:
         raise ServiceError("cancelled") from None
     except BaseExceptionGroup as group:

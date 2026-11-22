@@ -71,13 +71,18 @@ from .session_lifecycle_models import (
     SESSION_LIFECYCLE_TABLES,
 )
 from .sidebar_models import SIDEBAR_TABLE_NAMES, SIDEBAR_TABLES
+from .subagent_budget_models import BUDGET_TABLE_NAMES, BUDGET_TABLES
+from .subagent_models import SUBAGENT_TABLE_NAMES, SUBAGENT_TABLES
+from .subagent_team_models import TEAM_TABLE_NAMES, TEAM_TABLES
 
 APPLICATION_ID = 0x4B4C4331
 # 16：开发预览绑定与浏览器凭据；15：开发环境、统一操作回执与进程；14：会话归档；
 # 13：长任务；12：账号MCP；17：会话侧栏呈现
 # 18：会话计划、用户提问、压缩请求与项目记忆作用域。
 # 19: project capability ceilings and independent session execution policies.
-SCHEMA_VERSION = 19
+# 20: 子代理树/成员/驻留/任务/消息/结果/通知、child_run ownership 映射、
+#     Team 任务板与持久请求预算。
+SCHEMA_VERSION = 20
 GENERAL_TABLE_NAMES = (
     PLANNING_TABLE_NAMES | INTERACTION_TABLE_NAMES | CONTEXT_TABLE_NAMES | GOAL_TABLE_NAMES
 )
@@ -201,6 +206,9 @@ class SQLiteStore:
                     *MEDIA_TABLES,
                     *PROJECT_MEMBERSHIP_TABLES,
                     *EXECUTION_POLICY_TABLES,
+                    *SUBAGENT_TABLES,
+                    *TEAM_TABLES,
+                    *BUDGET_TABLES,
                 ],
             )
         )
@@ -296,7 +304,13 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
                     current_tables = set(metadata.tables) | set(TABLES)
-                    schema19 = current_tables
+                    schema20 = current_tables
+                    schema19 = (
+                        schema20
+                        - SUBAGENT_TABLE_NAMES
+                        - TEAM_TABLE_NAMES
+                        - BUDGET_TABLE_NAMES
+                    )
                     schema18 = (
                         schema19 - PROJECT_MEMBERSHIP_TABLE_NAMES - EXECUTION_POLICY_TABLE_NAMES
                     )
@@ -346,11 +360,12 @@ class SQLiteStore:
                         17: schema17,
                         18: schema18,
                         19: schema19,
+                        20: schema20,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
                         or version not in
-                        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+                        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")

@@ -77,6 +77,30 @@ for version, additions in (
 ):
     HISTORICAL_TABLES[version] = HISTORICAL_TABLES[version - 1] | additions
 
+# schema20 增量：子代理树/驻留/消息/结果/通知、Team 任务板与请求预算。
+SCHEMA20_ADDITIONS = frozenset(
+    {
+        "subagent_activations",
+        "subagent_budget_charges",
+        "subagent_budget_leases",
+        "subagent_budgets",
+        "subagent_child_runs",
+        "subagent_history",
+        "subagent_input_checkpoints",
+        "subagent_members",
+        "subagent_messages",
+        "subagent_notifications",
+        "subagent_results",
+        "subagent_tasks",
+        "subagent_team_task_deps",
+        "subagent_team_task_evidence",
+        "subagent_team_tasks",
+        "subagent_trees",
+    }
+)
+
+HISTORICAL_TABLES[20] = HISTORICAL_TABLES[19] | SCHEMA20_ADDITIONS
+
 
 def downgrade_to_version(path, version):
     with sqlite3.connect(path) as conn:
@@ -114,8 +138,8 @@ async def test_fresh_schema18_registers_all_feature_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 19
-        assert table_names(database) == HISTORICAL_TABLES[19]
+        assert store.schema_version == SCHEMA_VERSION == 20
+        assert table_names(database) == HISTORICAL_TABLES[20]
         assert EXTENSION_TABLE_NAMES <= table_names(database)
     finally:
         await store.close()
@@ -131,8 +155,8 @@ async def test_feature_upgrade_preserves_data(tmp_path, version):
     assert table_names(database) == HISTORICAL_TABLES[version]
     store = await SQLiteStore.open(database)
     try:
-        assert store.schema_version == SCHEMA_VERSION == 19
-        assert table_names(database) == HISTORICAL_TABLES[19]
+        assert store.schema_version == SCHEMA_VERSION == 20
+        assert table_names(database) == HISTORICAL_TABLES[20]
         assert rows(database, "runs") == before
         assert (await store.snapshot(run.id)).request.text == "保留的运行"
     finally:
@@ -140,7 +164,7 @@ async def test_feature_upgrade_preserves_data(tmp_path, version):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", range(1, 19))
+@pytest.mark.parametrize("version", range(1, 21))
 async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
     database = tmp_path / f"historical-v{version}.sqlite"
     run = await seed_run(database)
@@ -163,8 +187,8 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     writer = await SQLiteStore.open(database)
     try:
-        assert writer.schema_version == SCHEMA_VERSION == 19
-        assert table_names(database) == HISTORICAL_TABLES[19]
+        assert writer.schema_version == SCHEMA_VERSION == 20
+        assert table_names(database) == HISTORICAL_TABLES[20]
         assert (await writer.snapshot(run.id)).request.text == "保留的运行"
         for name in expected:
             assert rows(database, name) == before_rows[name]
@@ -181,7 +205,7 @@ async def test_all_historical_versions_readonly_then_upgrade(tmp_path, version):
 
     reader = await SQLiteStore.open(database, readonly=True)
     try:
-        assert reader.schema_version == 19
+        assert reader.schema_version == 20
         assert (await reader.snapshot(run.id)).run.id == run.id
     finally:
         await reader.close()
