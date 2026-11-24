@@ -51,6 +51,19 @@ class Bootstrap:
     action: str
     ticket: str = field(repr=False)
     expires_at: float
+    allow_embedding: bool = False
+
+
+@dataclass
+class _Checks:
+    """Coalesce stream-driven full rechecks with the watch cadence.
+
+    Every chunk/message still verifies the in-memory browser grant. The full
+    DB/authority/route recheck runs at most once per poll interval from the
+    data path; the watch loop still runs one unconditionally each interval.
+    """
+
+    last_full: float = field(default_factory=time.monotonic)
 
 
 async def race(*awaitables: Awaitable[None]) -> None:
@@ -104,7 +117,10 @@ class PreviewApp:
         await self.credentials.put_ticket(
             digest(ticket), BrowserGrant(preview_id, principal, expires)
         )
-        return Bootstrap(self.origins.origin(preview_id) + BOOTSTRAP_PATH, ticket, expires)
+        return Bootstrap(
+            self.origins.origin(preview_id) + BOOTSTRAP_PATH, ticket, expires,
+            allow_embedding=self.origins.allow_same_site_subdomains,
+        )
 
     async def _resolve_host(self, scope: Scope) -> PreviewRecord:
         headers = scope["headers"]
@@ -113,9 +129,10 @@ class PreviewApp:
             raise PreviewError("preview_host_denied", 421)
         host = hosts[0]
         suffix = "." + self.origins.preview_domain
-        if not host.startswith("p-") or not host.endswith(suffix):
+        prefix = self.origins.hostname_prefix + "-"
+        if not host.startswith(prefix) or not host.endswith(suffix):
             raise PreviewError("preview_host_denied", 421)
-        key = host[2 : -len(suffix)]
+        key = host[len(prefix) : -len(suffix)]
         if not re.fullmatch("[0-9a-f]{40}", key):
             raise PreviewError("preview_host_denied", 421)
         record = await self.service.repository.get_by_host_key(key)
@@ -149,6 +166,22 @@ class PreviewApp:
     def _valid_grant(self, grant: BrowserGrant, preview_id: str) -> None:
         if grant.preview_id != preview_id or grant.expires_at <= self.clock():
             raise PreviewError("preview_unauthorized", 401)
+
+    async def _recheck(
+        self,
+        record: PreviewRecord,
+        grant: BrowserGrant,
+        lease: RouteLease,
+        checks: _Checks,
+        *,
+        force: bool = False,
+    ) -> None:
+        # Exceptions never update last_full: a failed recheck is retried rather
+        # than cached, matching the service's fail-closed behavior.
+        if not force and time.monotonic() - checks.last_full < self.poll_seconds:
+            return
+        await self.service.recheck(record, grant.principal, lease)
+        checks.last_full = time.monotonic()
 
     async def _bootstrap(self, scope: Scope, receive: Receive, send: Send, preview_id: str) -> None:
         if scope["method"] != "POST" or scope.get("query_string"):
@@ -185,7 +218,11 @@ class PreviewApp:
             headers={
                 "cache-control": "no-store",
                 "referrer-policy": "no-referrer",
-                "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+                "content-security-policy": (
+                    "default-src 'none'; frame-ancestors "
+                    + (self.origins.control_origin
+                       if self.origins.allow_same_site_subdomains else "'none'")
+                ),
             },
         )
         response.set_cookie(
@@ -199,12 +236,14 @@ class PreviewApp:
         )
         await response(scope, receive, send)
 
-    async def _watch(self, record: PreviewRecord, grant: BrowserGrant, lease: RouteLease) -> None:
+    async def _watch(
+        self, record: PreviewRecord, grant: BrowserGrant, lease: RouteLease, checks: _Checks,
+    ) -> None:
         while True:
             self._valid_grant(grant, record.handle.preview_id)
             # Loss of the control plane must close idle streams too.
             async with asyncio.timeout(5):
-                await self.service.recheck(record, grant.principal, lease)
+                await self._recheck(record, grant, lease, checks, force=True)
             await asyncio.sleep(self.poll_seconds)
 
     async def _http(
@@ -228,6 +267,7 @@ class PreviewApp:
         )
         headers = request_headers(scope["headers"], self.origins.host(preview_id), origin)
         async with self.service.route(preview_id, grant.principal) as (current, lease):
+            checks = _Checks()
 
             async def forward() -> None:
                 # One client per downstream request: no shared auth defaults,
@@ -263,12 +303,13 @@ class PreviewApp:
                         headers=headers,
                         content=body() if first else None,
                     ) as upstream:
-                        await self.service.recheck(current, grant.principal, lease)
+                        await self._recheck(current, grant, lease, checks, force=True)
                         out_headers = response_headers(
                             upstream.headers.raw,
                             origin=origin,
                             upstream="http://" + host,
                             control_origin=self.origins.control_origin,
+                            allow_embedding=self.origins.allow_same_site_subdomains,
                         )
                         await send(
                             {
@@ -281,7 +322,7 @@ class PreviewApp:
                         async def drain() -> None:
                             async for chunk in upstream.aiter_raw():
                                 self._valid_grant(grant, preview_id)
-                                await self.service.recheck(current, grant.principal, lease)
+                                await self._recheck(current, grant, lease, checks)
                                 await send(
                                     {"type": "http.response.body", "body": chunk, "more_body": True}
                                 )
@@ -296,7 +337,7 @@ class PreviewApp:
 
                         await race(drain(), disconnect())
 
-            await race(forward(), self._watch(current, grant, lease))
+            await race(forward(), self._watch(current, grant, lease, checks))
 
     async def _websocket(
         self,
@@ -329,6 +370,7 @@ class PreviewApp:
             raise PreviewError("preview_protocol_denied", 400)
         websocket = WebSocket(scope, receive, send)
         async with self.service.route(preview_id, grant.principal) as (current, lease):
+            checks = _Checks()
 
             async def forward() -> None:
                 async with self.sockets.connect(
@@ -343,7 +385,7 @@ class PreviewApp:
                         and upstream.subprotocol not in subprotocols
                     ):
                         raise PreviewError("preview_protocol_denied", 502)
-                    await self.service.recheck(current, grant.principal, lease)
+                    await self._recheck(current, grant, lease, checks, force=True)
                     await websocket.accept(subprotocol=upstream.subprotocol)
 
                     async def inbound() -> None:
@@ -360,7 +402,7 @@ class PreviewApp:
                             if size > 1_048_576:
                                 raise PreviewError("preview_message_too_large", 413)
                             self._valid_grant(grant, preview_id)
-                            await self.service.recheck(current, grant.principal, lease)
+                            await self._recheck(current, grant, lease, checks)
                             await upstream.send(value)
 
                     async def outbound() -> None:
@@ -371,7 +413,7 @@ class PreviewApp:
                             if size > 1_048_576:
                                 raise PreviewError("preview_message_too_large", 413)
                             self._valid_grant(grant, preview_id)
-                            await self.service.recheck(current, grant.principal, lease)
+                            await self._recheck(current, grant, lease, checks)
                             if isinstance(value, bytes):
                                 await websocket.send_bytes(value)
                             else:
@@ -380,7 +422,7 @@ class PreviewApp:
                     await race(inbound(), outbound())
                     await websocket.close(code=1000)
 
-            await race(forward(), self._watch(current, grant, lease))
+            await race(forward(), self._watch(current, grant, lease, checks))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":

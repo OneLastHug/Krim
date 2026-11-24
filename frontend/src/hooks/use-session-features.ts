@@ -13,6 +13,7 @@ export interface SessionFeatureScope {
   sessionId: string;
   enabled: boolean;
   running: boolean;
+  refreshKey?: string;
   fence: { current: number };
 }
 
@@ -35,7 +36,7 @@ const inaccessible = (error: unknown) => unavailable(error)
 
 /** Read state outside compacted transcripts, and fence every response to its session. */
 export function useSessionFeatures(scope: SessionFeatureScope, onChanged?: () => void) {
-  const { apiKey, principalId, generation, workspaceId, sessionId, enabled, running, fence } = scope;
+  const { apiKey, principalId, generation, workspaceId, sessionId, enabled, running, refreshKey, fence } = scope;
   const fenceGeneration = fence.current;
   const identity = JSON.stringify([apiKey, principalId, generation, workspaceId, sessionId, fenceGeneration, enabled]);
   const identityRef = useRef(identity);
@@ -128,7 +129,7 @@ export function useSessionFeatures(scope: SessionFeatureScope, onChanged?: () =>
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", focus);
     };
-  }, [identity, enabled, running, refresh, revisionHint, capture]);
+  }, [identity, enabled, running, refreshKey, refresh, revisionHint, capture]);
 
   const reload = useCallback(() => setRefresh(value => value + 1), []);
 

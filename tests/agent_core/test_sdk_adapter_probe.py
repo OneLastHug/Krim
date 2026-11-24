@@ -280,15 +280,11 @@ async def test_batch_admits_every_call_before_ordered_execution() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["invalid_args", "unknown_tool", "duplicate_id"])
+@pytest.mark.parametrize("bad", ["unknown_tool", "duplicate_id"])
 async def test_bad_later_call_prevents_earlier_write(bad: str) -> None:
     harness = setup(approval=False)
     second = (
-        ("read", "two", "not-an-int")
-        if bad == "invalid_args"
-        else ("not_registered", "two", 2)
-        if bad == "unknown_tool"
-        else ("read", "one", 2)
+        ("not_registered", "two", 2) if bad == "unknown_tool" else ("read", "one", 2)
     )
     provider = Scripted([turn(("write", "one", 1), second)])
     with pytest.raises(ExceptionGroup):

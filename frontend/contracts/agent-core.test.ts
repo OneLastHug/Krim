@@ -30,6 +30,13 @@ try {
   await performIntent(store, found.intent, "", false, () => true);
   assert.equal(readIntents(store).length, 0); assert.match(store.getItem(KNOWN)!, /"turn_id":"T"/);
   assert.equal(calls.filter(v => v.body !== null).length, 1); assert.match(calls[1]!.path, /by-key/); checks++;
+  const sessionIntent = prepareIntent(store, { ...scope, session_id: null }, "session", { title: "新开发会话", target_key: "target-development", project_id: "P1" });
+  assert.equal(sessionIntent.first, true); assert.equal(sessionIntent.intent.body.project_id, "P1");
+  assert.equal(readIntents(store).at(-1)!.body.project_id, "P1"); checks++;
+  const malformed = JSON.parse(JSON.stringify(sessionIntent.intent)) as { id: string; body: { project_id: unknown } };
+  malformed.id = "other"; malformed.body.project_id = 7;
+  store.setItem(INTENTS, JSON.stringify([malformed]));
+  assert.throws(() => readIntents(store)); checks++;
   for (const [status, code, clears] of [[401, "unauthorized", true], [429, "capacity", true], [422, "invalid_input", true], [422, "input_limit", true], [422, "provider_http_error", false], [409, "revision_conflict", false], [503, "execution_error", false]] as const) {
     const memory = new Memory(), p = prepareIntent(memory, scope, "turn", { text: "原始输入", expected_revision: 0 });
     globalThis.fetch = async () => response({ error: { code } }, status);

@@ -133,6 +133,76 @@ async def test_scope_check_after_execution_is_enforced():
 
 
 @pytest.mark.asyncio
+async def test_goal_revision_conflict_returns_current_state_without_retrying_update():
+    class ConflictingGoals(FakeGoals):
+        async def update_from_tool(self, scope, body):
+            self.calls.append(("update", scope, body))
+            raise ServiceError("revision_conflict", 409)
+
+    service = ConflictingGoals()
+
+    async def resolve(_call):
+        return scope()
+
+    spec = next(spec for spec in GoalService.bundle(service, resolve).specs
+                if spec.name == "goal_update")
+    result = await spec.scoped_executor(
+        invocation("goal_update"),
+        GoalUpdate(request_key="stale", expected_revision=4, action="progress"), None,
+    )
+    assert result["ok"] is False and result["code"] == "revision_conflict"
+    assert result["current_goal"] == empty().model_dump(mode="json")
+    assert "not updated" in result["next_action"]
+    assert [call[0] for call in service.calls] == ["update", "read"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [
+    "permission_denied", "storage_unavailable", "tool_binding_changed", "cancelled",
+    "facts_corrupt", "key_conflict", "execution_unknown",
+])
+async def test_goal_update_authority_and_uncertain_errors_remain_fatal(code):
+    class FailedGoals(FakeGoals):
+        async def update_from_tool(self, scope, body):
+            raise ServiceError(code)
+
+    service = FailedGoals()
+
+    async def resolve(_call):
+        return scope()
+
+    spec = next(spec for spec in GoalService.bundle(service, resolve).specs
+                if spec.name == "goal_update")
+    with pytest.raises(ServiceError, match=code):
+        await spec.scoped_executor(
+            invocation("goal_update"),
+            GoalUpdate(request_key="failed", expected_revision=0, action="progress"), None,
+        )
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_goal_conflict_readback_still_requires_authorization():
+    class RevokedGoals(FakeGoals):
+        async def update_from_tool(self, scope, body):
+            raise ServiceError("revision_conflict", 409)
+
+        async def read(self, *args, **kwargs):
+            raise ServiceError("permission_denied")
+
+    async def resolve(_call):
+        return scope()
+
+    spec = next(spec for spec in GoalService.bundle(RevokedGoals(), resolve).specs
+                if spec.name == "goal_update")
+    with pytest.raises(ServiceError, match="permission_denied"):
+        await spec.scoped_executor(
+            invocation("goal_update"),
+            GoalUpdate(request_key="revoked", expected_revision=0, action="progress"), None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_invalid_tool_input_shapes_are_rejected_before_execution():
     service = FakeGoals()
 

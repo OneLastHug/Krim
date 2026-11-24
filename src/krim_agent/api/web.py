@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 
 from krim_agent.font_assets import load_font_assets
@@ -31,13 +31,32 @@ def mount_browser_ui(app: FastAPI, *, root: Path | None = None) -> None:
     script_paths = frozenset("/ui/" + asset.path for asset in scripts)
     app.state.public_ui_paths = PUBLIC_UI_PATHS | font_paths | script_paths
 
-    @app.get("/", include_in_schema=False)
-    async def home() -> RedirectResponse:
-        return RedirectResponse("/ui/", headers=HEADERS)
+    def headers(request: Request) -> dict[str, str]:
+        application = getattr(request.app.state, "application", None)
+        development = getattr(application, "development", None)
+        preview_app = getattr(development, "preview_app", None)
+        if preview_app is None:
+            return HEADERS
+        # no-referrer makes cross-origin form POSTs carry Origin:null in real
+        # browsers. The one-use bootstrap requires the exact control Origin.
+        # strict-origin exposes no path/query and suppresses downgrade referrers.
+        result = {**HEADERS, "Referrer-Policy": "strict-origin"}
+        origins = getattr(preview_app, "origins", None)
+        if origins is not None and origins.allow_same_site_subdomains:
+            result["Content-Security-Policy"] += (
+                "; frame-src https://*." + origins.preview_domain
+            )
+        return result
 
-    def endpoint(name: str, media_type: str | None = None) -> Callable[[], Awaitable[FileResponse]]:
-        async def serve() -> FileResponse:
-            return FileResponse(root / name, headers=HEADERS, media_type=media_type)
+    @app.get("/", include_in_schema=False)
+    async def home(request: Request) -> RedirectResponse:
+        return RedirectResponse("/ui/", headers=headers(request))
+
+    def endpoint(
+        name: str, media_type: str | None = None,
+    ) -> Callable[[Request], Awaitable[FileResponse]]:
+        async def serve(request: Request) -> FileResponse:
+            return FileResponse(root / name, headers=headers(request), media_type=media_type)
 
         return serve
 

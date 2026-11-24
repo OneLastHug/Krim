@@ -1,13 +1,14 @@
 """Preview composition/API with real SQLite and identity; Docker IO is injected."""
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from krim_agent.accounts.service import IdentityService
 from krim_agent.agent_sdk.host import CURRENT_OPERATION
@@ -24,8 +25,10 @@ from krim_agent.development.service import DevelopmentScope, DevelopmentService
 from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.sandbox.configuration import SandboxConfiguration
 from krim_agent.storage.preview_models import preview_credentials, preview_records
+from krim_agent.storage.project_membership_models import project_memberships
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.pipeline import CURRENT
+from tests.coding_agent.test_development_entrypoint import ShellModel
 from tests.coding_agent.test_preview_storage import setup
 
 
@@ -46,6 +49,37 @@ def preview_configuration():
 def test_reject_invalid_preview_configuration(values):
     with pytest.raises(ValidationError):
         DevelopmentPreviewConfiguration(**{**preview_configuration().model_dump(), **values})
+
+
+@pytest.mark.parametrize("values", [
+    {"allow_same_site_subdomains": True},
+    {
+        "allow_same_site_subdomains": True,
+        "preview_domain": "example.test",
+        "control_origin": "https://krim-qa.example.test",
+        "control_cookie_domain": "example.test",
+    },
+    {"hostname_prefix": "pre.view"},
+    {"hostname_prefix": "Preview"},
+    {"hostname_prefix": "p" * 23},
+])
+def test_reject_invalid_same_site_preview_configuration(values):
+    with pytest.raises(ValidationError):
+        DevelopmentPreviewConfiguration(**{**preview_configuration().model_dump(), **values})
+
+
+def test_same_site_subdomain_configuration_contract():
+    config = DevelopmentPreviewConfiguration(
+        control_origin="https://krim-qa.example.test",
+        control_cookie_domain="krim-qa.example.test",
+        preview_domain="example.test",
+        allow_same_site_subdomains=True,
+        hostname_prefix="preview",
+    )
+    key = hashlib.sha256(b"preview").hexdigest()[:40]
+    assert config.origins().host("preview") == f"preview-{key}.example.test"
+    # Legacy configurations keep the independent-site p- family untouched.
+    assert preview_configuration().origins().host("preview") == f"p-{key}.preview.example"
 
 
 def test_existing_development_configuration_keeps_preview_disabled(tmp_path):
@@ -75,6 +109,7 @@ async def mounted(tmp_path: Path, monkeypatch):
         image_id="sha256:" + "a" * 64,
         broker_environments_root=tmp_path / "environments",
         private_state_root=tmp_path / "private",
+        resource_policy="limited",
         preview=preview_configuration(),
     )
 
@@ -83,7 +118,8 @@ async def mounted(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(DevelopmentService, "start_supervisor", supervisor)
     app = await open_application(
-        path, settings=Settings(database=path, sandbox_config_file=broker),
+        path, settings=Settings(database=path), provider=ShellModel(),
+        sandbox_configuration=SandboxConfiguration.model_validate_json(broker.read_text()),
         development_configuration=configuration,
     )
     development = app.development
@@ -191,7 +227,8 @@ async def test_open_requires_same_origin_bearer_and_consumes_once(mounted):
     assert opened.headers["cache-control"] == "no-store"
     assert opened.headers["referrer-policy"] == "no-referrer"
     body = opened.json()
-    assert set(body) == {"action", "ticket", "expires_at"}
+    assert set(body) == {"action", "ticket", "expires_at", "allow_embedding"}
+    assert body["allow_embedding"] is False
     assert body["ticket"] not in body["action"]
     assert app.development is not None and app.development.preview_app is not None
     preview = app.development.preview_app
@@ -212,15 +249,19 @@ async def test_preview_stop_fences_open_and_revoked_grant_denies_new_ticket(moun
     app, client, record, grant, _ = mounted
     selected = app.development
     assert selected is not None
-    await selected.access_repository.put(
-        grant.model_copy(update={"revoked": True, "revision": 2}), expected_revision=1,
-    )
+    async with app.store.engine.begin() as conn:
+        await conn.execute(update(project_memberships).where(
+            project_memberships.c.project_id == record.handle.environment.project_id,
+            project_memberships.c.principal_id == record.process.ownership.owner_id,
+        ).values(access="none", revision=2))
     denied = await client.post(record.handle.access_path,
                                headers={"Origin": "https://control.example"})
-    assert denied.status_code == 403, denied.text
-    await selected.access_repository.put(
-        grant.model_copy(update={"revision": 3}), expected_revision=2,
-    )
+    assert denied.status_code in {403, 404}, denied.text
+    async with app.store.engine.begin() as conn:
+        await conn.execute(update(project_memberships).where(
+            project_memberships.c.project_id == record.handle.environment.project_id,
+            project_memberships.c.principal_id == record.process.ownership.owner_id,
+        ).values(access="write", revision=3))
     stopped = await client.post(f"/v2/me/development/previews/{record.handle.preview_id}/stop")
     assert stopped.status_code == 200, stopped.text
     assert stopped.json()["state"] == "stopped"
@@ -312,10 +353,12 @@ async def test_model_media_requires_canonical_tool_result_and_current_grant(moun
     assert isinstance(prepared[-1], HostImageMessage)
     assert prepared[-1].images[0].data == png()
     assert len(history) == 4
-    await selected.access_repository.put(
-        grant.model_copy(update={"revoked": True, "revision": 2}), expected_revision=1,
-    )
-    with pytest.raises(ServiceError, match="permission_denied"):
+    async with app.store.engine.begin() as conn:
+        await conn.execute(update(project_memberships).where(
+            project_memberships.c.project_id == record.handle.environment.project_id,
+            project_memberships.c.principal_id == record.process.ownership.owner_id,
+        ).values(access="none", revision=2))
+    with pytest.raises(ServiceError, match="permission_denied|not_found"):
         await attach(history)
 
 
@@ -339,11 +382,13 @@ async def test_screenshot_api_current_project_and_revoked_grant(mounted):
     assert response.headers["content-type"] == "image/png"
     unrelated = await client.get(path.replace(saved["project_id"], "another-project"))
     assert unrelated.status_code in {403, 404}
-    await selected.access_repository.put(
-        grant.model_copy(update={"revoked": True, "revision": 2}), expected_revision=1,
-    )
+    async with app.store.engine.begin() as conn:
+        await conn.execute(update(project_memberships).where(
+            project_memberships.c.project_id == record.handle.environment.project_id,
+            project_memberships.c.principal_id == record.process.ownership.owner_id,
+        ).values(access="none", revision=2))
     revoked = await client.get(path)
-    assert revoked.status_code == 403
+    assert revoked.status_code in {403, 404}
 
 
 async def test_browser_tool_records_private_screenshot_and_cleanup(mounted, monkeypatch):

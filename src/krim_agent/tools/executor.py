@@ -21,6 +21,7 @@ from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import ExecutionBudget, settled
 
 from .core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
+from .input_errors import ToolInputError
 from .mcp_schema import MCPContract
 from .output import OutputContract
 from .pipeline import CURRENT, Middleware, Scope, Wrap, _calling
@@ -64,7 +65,7 @@ class Admission:
     """
 
     spec: ToolSpec
-    parsed: BaseModel
+    parsed: BaseModel | None
     decision: Decision
     code: str | None = None
     start_emitted: bool = False
@@ -149,7 +150,9 @@ class ToolExecutor:
                     try:
                         parsed = spec.parameters.model_validate(
                             parse_json(invocation.arguments_json), strict=True)
-                    except (ValidationError, ValueError):
+                    except ValidationError as error:
+                        raise ToolInputError(error, spec.parameters.model_json_schema()) from None
+                    except ValueError:
                         raise ServiceError("invalid_input") from None
 
                     async def inspected(hook: PreHook, *, middleware: bool = False) -> str | None:
@@ -251,6 +254,8 @@ class ToolExecutor:
                         check()
                         if decision == "deny":
                             raise ServiceError(admission.code or "permission_denied")
+                        if parsed is None:
+                            raise ServiceError("invalid_input")
                         if decision == "ask" and not admission.approved:
                             assert tool_budget is not None
                             with tool_budget.pause():

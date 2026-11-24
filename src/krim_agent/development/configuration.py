@@ -81,11 +81,21 @@ class DevelopmentPreviewConfiguration(StrictModel):
     control_origin: str
     control_cookie_domain: str
     preview_domain: str
+    # Default: previews live on an independent registrable site as
+    # p-<40hex>.preview_domain. Same-site deployments instead set this flag,
+    # keep the control cookie domain host-only, and name the sibling label
+    # family with hostname_prefix (for example preview-<40hex>.example.test).
+    allow_same_site_subdomains: bool = False
+    hostname_prefix: str = "p"
     listener: DevelopmentListenerConfiguration | None = None
 
     def origins(self) -> PreviewOrigins:
         return PreviewOrigins(
-            self.control_origin, self.control_cookie_domain, self.preview_domain,
+            self.control_origin,
+            self.control_cookie_domain,
+            self.preview_domain,
+            allow_same_site_subdomains=self.allow_same_site_subdomains,
+            hostname_prefix=self.hostname_prefix,
         )
 
     @model_validator(mode="after")

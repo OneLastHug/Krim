@@ -263,14 +263,27 @@ class PreviewAuthority:
         workspace = project["workspace_id"]
         if creator is None or creator.generation != ref.actor_generation:
             raise ServiceError("permission_denied", 403)
-        creator.owns(workspace, owner, write=True)
-        grant = await self.db.access._record(
-            conn, owner, project["project_id"], "grant", ref.actor_id,
-        )
-        if (not isinstance(grant, ProjectGrant) or grant.revoked
-                or grant.expires_at <= time.time() or grant.actor_generation != creator.generation
-                or grant.workspace_id != workspace or "shell.execute" not in grant.actions):
-            raise ServiceError("permission_denied", 403)
+        if self.db.store.schema_version >= 19:
+            from krim_agent.project_access.policy import resolve_project_access
+
+            # Command admission uses current project ACLs from schema 19 onward.
+            # A legacy grant must neither veto that authority nor restore revoked
+            # access. The service creator must remain a writer on every use.
+            creator.member(workspace, write=True)
+            access = await resolve_project_access(conn, creator, project["project_id"])
+            access.require()
+            if access.access != "write":
+                raise ServiceError("permission_denied", 403)
+        else:
+            creator.owns(workspace, owner, write=True)
+            grant = await self.db.access._record(
+                conn, owner, project["project_id"], "grant", ref.actor_id,
+            )
+            if (not isinstance(grant, ProjectGrant) or grant.revoked
+                    or grant.expires_at is not None and grant.expires_at <= time.time()
+                    or grant.actor_generation != creator.generation
+                    or grant.workspace_id != workspace or "shell.execute" not in grant.actions):
+                raise ServiceError("permission_denied", 403)
         intent = command_intent(row.request, workspace_id=workspace)
         if intent.digest(ref) != ref.arguments_digest:
             raise ServiceError("tool_binding_changed")
@@ -280,7 +293,14 @@ class PreviewAuthority:
             actor = await self.db.access._actor(conn, principal.principal_id)
             if actor is None or actor.generation != principal.generation:
                 raise ServiceError("permission_denied", 403)
-            actor.owns(workspace, owner, write=write)
+            if self.db.store.schema_version >= 19:
+                actor.member(workspace, write=write)
+                access = await resolve_project_access(conn, actor, project["project_id"])
+                access.require()
+                if write and access.access != "write":
+                    raise ServiceError("permission_denied", 403)
+            else:
+                actor.owns(workspace, owner, write=write)
 
     async def check(
         self, record: PreviewRecord, principal: PrincipalContext | None,

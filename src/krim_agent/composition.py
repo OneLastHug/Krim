@@ -553,7 +553,7 @@ async def open_application(
 
             async def guard(invocation: Invocation) -> Decision:
                 current_scope = await session_tools.resolve(invocation)
-                spec = policy_spec(state["runtime"].executor.registry, invocation)
+                spec = policy_spec(policy_registry, invocation)
                 from krim_agent.subagents.providers.process import is_internal_process_invocation
 
                 internal_process = process_child and is_internal_process_invocation(invocation)
@@ -579,6 +579,9 @@ async def open_application(
                 media_sink=media.media_sink, deny=excluded,
             )
             state["runtime"] = runtime
+            # Isolated executors project calls back to their original policy identity.
+            # Keep that registry even when the SDK derives the execution surface.
+            policy_registry = runtime.executor.registry
             if child_profile is not None:
                 readonly = runtime.trusted_readonly_names
                 runtime.visible = frozenset(

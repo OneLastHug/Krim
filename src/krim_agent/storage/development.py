@@ -132,6 +132,19 @@ class DevelopmentStore:
         turn = (await conn.execute(select(turns).where(
             turns.c.run_id == ownership.run_id,
         ))).mappings().first()
+        if turn is None:
+            from .sessions import child_run_owner
+
+            child = await child_run_owner(conn, ownership.run_id)
+            if (child is None or child["owner_turn_id"] is None
+                    or child["session_id"] != ownership.session_id
+                    or child["owner_id"] != ownership.owner_id):
+                raise ServiceError("permission_denied")
+            turn = (await conn.execute(select(turns).where(
+                turns.c.id == child["owner_turn_id"],
+            ))).mappings().first()
+            if child["tree_status"] != "open" or child["root_stop_requested"]:
+                raise ServiceError("cancelled")
         if (turn is None or turn["session_id"] != ownership.session_id
                 or turn["owner_id"] != ownership.owner_id):
             raise ServiceError("permission_denied")
@@ -140,6 +153,8 @@ class DevelopmentStore:
                 or session is None or session["owner_id"] != ownership.owner_id
                 or session["workspace_id"] != project["workspace_id"] or run is None):
             raise ServiceError("permission_denied")
+        if session["status"] != "open":
+            raise ServiceError("session_closed", 409)
         if run["stop_requested"] or run["status"] != "running":
             raise ServiceError("cancelled" if run["stop_requested"] else "run_closed")
 

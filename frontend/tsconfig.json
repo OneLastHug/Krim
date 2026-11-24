@@ -56,6 +56,8 @@
     "contracts/session-ui.test.tsx",
     "contracts/session-selection-ui.test.tsx",
     "contracts/session-adapter-ui.test.tsx",
+    "contracts/session-stream.test.ts",
+    "contracts/session-stream-ui.test.tsx",
     "contracts/session-lifecycle-ui.test.tsx",
     "contracts/session-presentation.test.ts",
     "contracts/message-ui.test.tsx",

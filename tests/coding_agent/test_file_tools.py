@@ -76,6 +76,24 @@ def test_forbidden_path_rejected_in_host_and_worker(tmp_path, path):
         mutate(tmp_path, write(path=path))
 
 
+@pytest.mark.parametrize("path", ["/tmp/probe.txt", "../outside", "a//b", "a\\\\b"])
+def test_invalid_path_is_a_field_error_for_model_recovery(path):
+    from krim_agent.tools.input_errors import ToolInputError
+
+    with pytest.raises(ValidationError) as raised:
+        WriteInput.model_validate({"path": path, "content": "probe"}, strict=True)
+    detail = ToolInputError(raised.value, WriteInput.model_json_schema()).details
+    assert detail["code"] == "invalid_input" and detail["executor_started"] is False
+    assert detail["errors"][0]["field"] == ["path"]
+    assert path not in str(detail)
+
+
+def test_protected_project_path_stays_a_permission_error():
+    with pytest.raises(ServiceError) as raised:
+        WriteInput(path=".env", content="probe")
+    assert raised.value.code == "permission_denied"
+
+
 @pytest.mark.parametrize("kind", ["symlink", "parent_symlink", "hardlink", "fifo"])
 def test_links_and_nonregular_files_never_mutated(tmp_path, kind):
     outside = tmp_path / "outside"

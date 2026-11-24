@@ -7,6 +7,7 @@ import pytest
 from krim_agent.contracts import ServiceError
 from krim_agent.subagents.workspace_tools import (
     ApprovedIntegrationPort,
+    WorkspaceDiff,
     WorkspaceIntegrate,
     bundle,
 )
@@ -55,3 +56,37 @@ async def test_workspace_tool_denies_unbound_session() -> None:
 
     tools = bundle(SimpleNamespace(), resolve)
     assert await tools.policy(invocation()) == "deny"
+
+
+@pytest.mark.parametrize(
+    "code", ["not_found", "storage_unavailable", "permission_denied", "cancelled"]
+)
+async def test_missing_workspace_patch_is_recoverable_without_hiding_other_errors(code) -> None:
+    checks = []
+    caller = SimpleNamespace(scope=SimpleNamespace(check=lambda: checks.append(True)))
+
+    async def resolve(call):
+        return SimpleNamespace(run_id=call.run_id, project_id="project", check=lambda: None)
+
+    async def get_caller(call):
+        return caller
+
+    async def diff(selected, task_id):
+        assert selected is caller and task_id == "read-only-task"
+        raise ServiceError(code)
+
+    tools = bundle(SimpleNamespace(_caller=get_caller, workspace_diff=diff), resolve)
+    spec = next(item for item in tools.specs if item.name == "workspace_diff")
+    from dataclasses import replace
+
+    call = replace(invocation(), name="workspace_diff")
+    if code == "not_found":
+        result = await spec.scoped_executor(call, WorkspaceDiff(task_id="read-only-task"), None)
+        assert result["ok"] is False and result["code"] == "not_found"
+        assert "shared read-only" in result["action"]
+        assert checks == [True]
+    else:
+        with pytest.raises(ServiceError) as error:
+            await spec.scoped_executor(call, WorkspaceDiff(task_id="read-only-task"), None)
+        assert error.value.code == code
+        assert checks == []

@@ -158,7 +158,21 @@ def bundle(service: Any, resolve: SessionScopeResolver) -> ToolBundle:
     async def execute(invocation: Invocation, parsed: BaseModel, context: object) -> JsonValue:
         caller = await service._caller(invocation)
         if invocation.name == "workspace_diff" and isinstance(parsed, WorkspaceDiff):
-            result = await service.workspace_diff(caller, parsed.task_id)
+            try:
+                result = await service.workspace_diff(caller, parsed.task_id)
+            except ServiceError as error:
+                if error.code != "not_found":
+                    raise
+                # A missing read-only lookup has no unknown write outcome.
+                # Keep hidden tasks indistinguishable from unavailable patches.
+                caller.scope.check()
+                return {
+                    "ok": False,
+                    "code": "not_found",
+                    "action": "No isolated patch is available for this task. "
+                    "Use list_agents to check the task and workspace mode. "
+                    "A shared read-only worker produces a report, not a patch.",
+                }
             return cast(JsonValue, result)
         if invocation.name != "workspace_integrate" or not isinstance(parsed, WorkspaceIntegrate):
             raise ServiceError("invalid_input", 422)

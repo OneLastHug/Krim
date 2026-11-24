@@ -391,6 +391,21 @@ async def test_bad_stream_vectors_zero_release(chunks, code):
             await provider.close()
 
 
+@pytest.mark.parametrize(("delta", "safe_shape"), [
+    ({"content": "SYNTHETIC_REMOTE_SECRET", "role": None}, "role=null refusal=False"),
+    ({"SYNTHETIC_REMOTE_SECRET": "hidden"}, "unknown_fields=1 role=absent"),
+    ({"refusal": "SYNTHETIC_REMOTE_SECRET"}, "role=absent refusal=True"),
+    ({"reasoning": "SYNTHETIC_REMOTE_SECRET", "annotations": None},
+     "metadata={'reasoning': 'str', 'annotations': 'null'}"),
+])
+async def test_rejected_delta_logs_only_structure(delta, safe_shape, caplog):
+    async with HTTPFixture(chunks=[frame(choice(delta))]) as fixture:
+        with pytest.raises(ProviderError, match="provider_protocol"):
+            await collect(fixture)
+    assert safe_shape in caplog.text
+    assert "SYNTHETIC_REMOTE_SECRET" not in caplog.text
+
+
 async def test_usage_snapshots_preserve_unknowns_and_reject_conflicts():
     chunks = [
         frame(choice({"content": "x"}, usage={"prompt_tokens": 3})),
@@ -486,7 +501,7 @@ def test_unsafe_url_is_rejected_without_client(url):
         OpenAICompatibleConfig(base_url=url, model="fixture")
 
 
-async def test_url_credentials_redirect_http_and_transport_failures():
+async def test_url_credentials_redirect_http_and_transport_failures(instant_sleep):
     secure = OpenAICompatibleConfig(base_url="https://example.invalid/v1", model="fixture")
     assert secure.base_url.startswith("https://")  # 纯配置，无网络。
     async with HTTPFixture() as destination:
@@ -497,7 +512,8 @@ async def test_url_credentials_redirect_http_and_transport_failures():
                 code = "provider_redirect" if status < 400 else "provider_http_error"
                 with pytest.raises(ProviderError, match=code):
                     await collect(fixture)
-                assert len(fixture.requests) == 1 and destination.requests == []
+                attempts = 3 if status in (429, 500) else 1
+                assert len(fixture.requests) == attempts and destination.requests == []
     for headers in [{"Content-Type": "application/json"}, {"Content-Encoding": "gzip"}]:
         async with HTTPFixture(headers=headers) as fixture:
             with pytest.raises(ProviderError, match="provider_protocol"):
@@ -901,3 +917,324 @@ async def test_single_call_default_and_sealed_cap(case, request):
             if replacement is not None:
                 await replacement.aclose()
                 assert replacement.is_closed
+
+
+@pytest.fixture
+def instant_sleep(monkeypatch):
+    """记录重试等待时长并瞬时放行，避免真实退避拖慢套件。"""
+    real_sleep = asyncio.sleep
+    waits: list[float] = []
+
+    async def record(delay, *args, **kwargs):
+        waits.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    return waits
+
+
+class AbortServer:
+    """测试内合成socket：指定次连接在响应前或首个事件后中断，其余正常完成。"""
+
+    def __init__(self, abort_at=1, *, after_first_frame=False):
+        self.abort_at = abort_at
+        self.after_first_frame = after_first_frame
+        self.connections = 0
+        self.server = None
+        self.url = ""
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+        port = self.server.sockets[0].getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}/v1"
+        return self
+
+    async def __aexit__(self, *args):
+        self.server.close()
+        await self.server.wait_closed()
+
+    @staticmethod
+    def _chunk(payload):
+        return f"{len(payload):x}\r\n".encode() + payload + b"\r\n"
+
+    async def handle(self, reader, writer):
+        self.connections += 1
+        abort = self.connections == self.abort_at
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            lines = head.decode("ascii").split("\r\n")
+            length = int(next(
+                part.split(":", 1)[1] for part in lines[1:]
+                if part.lower().startswith("content-length")
+            ))
+            await reader.readexactly(length)
+            if abort and not self.after_first_frame:
+                return  # 首字节前断开：连接失败。
+            if abort:
+                # 首个事件已转发后截断chunked流：确定性传输错误。
+                writer.write(
+                    b"HTTP/1.1 200 Test\r\nContent-Type: text/event-stream\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                    + self._chunk(frame(choice({"content": "部分"})))
+                )
+                await writer.drain()
+                return
+            writer.write(
+                b"HTTP/1.1 200 Test\r\nContent-Type: text/event-stream\r\n"
+                b"Connection: close\r\n\r\n"
+                + frame(choice({"content": "重试成功"}))
+                + frame(choice(finish="stop"))
+                + frame("[DONE]")
+            )
+            await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+
+@pytest.mark.parametrize("code", ["server_error", "rate_limit_exceeded"])
+async def test_explicit_transient_stream_error_retries_before_content(instant_sleep, code, caplog):
+    async with HTTPFixture() as fixture:
+        original = fixture.script
+
+        def script(body):
+            if len(fixture.requests) == 1:
+                return [frame({"error": {"code": code, "message": "SYNTHETIC_REMOTE_SECRET"}})]
+            return original(body)
+
+        fixture.script = script
+        received = await collect(fixture)
+        assert "".join(event.text for event in received if isinstance(event, ModelText)) == "你好🙂"
+        assert len(fixture.requests) == 2
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5]
+    assert "SYNTHETIC_REMOTE_SECRET" not in caplog.text
+
+
+@pytest.mark.parametrize(("code", "local_code"), [
+    ("invalid_api_key", "provider_http_error"),
+    ("invalid_request_error", "provider_http_error"),
+    ("insufficient_quota", "provider_http_error"),
+    ("unknown_remote_error", "provider_protocol"),
+])
+async def test_explicit_stream_errors_do_not_retry_nontransient_failures(
+    instant_sleep, code, local_code, caplog,
+):
+    async with HTTPFixture(chunks=[frame({"error": {
+        "code": code, "message": "SYNTHETIC_REMOTE_SECRET",
+    }})]) as fixture:
+        with pytest.raises(ProviderError, match=local_code):
+            await collect(fixture)
+        assert len(fixture.requests) == 1
+    assert [wait for wait in instant_sleep if wait > 0] == []
+    assert "SYNTHETIC_REMOTE_SECRET" not in caplog.text
+
+
+async def test_transient_stream_error_after_content_never_retries(instant_sleep):
+    chunks = [frame(choice({"content": "partial"})),
+              frame({"error": {"type": "server_error"}})]
+    async with HTTPFixture(chunks=chunks) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture"),
+        )
+        received = []
+        try:
+            with pytest.raises(ProviderError, match="provider_http_error"):
+                async for event in provider.stream([Message(role="user", content="test")], []):
+                    received.append(event)
+            assert any(isinstance(event, ModelText) for event in received)
+            assert not any(isinstance(event, ModelToolCall) for event in received)
+            assert len(fixture.requests) == 1
+        finally:
+            await provider.close()
+    assert [wait for wait in instant_sleep if wait > 0] == []
+
+
+async def test_transient_http_status_retries_then_succeeds(instant_sleep):
+    async with HTTPFixture(fail_request=1) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+        )
+        try:
+            events = [
+                event
+                async for event in provider.stream([Message(role="user", content="你好")], [])
+            ]
+            assert "".join(e.text for e in events if isinstance(e, ModelText)) == "你好🙂"
+            assert len(fixture.requests) == 2
+            assert provider.calls == 1 and provider.streams_closed == 1 and provider.active == 0
+        finally:
+            await provider.close()
+    assert fixture.active == 0
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+async def test_non_retryable_http_status_fails_fast(instant_sleep, status):
+    async with HTTPFixture(status=status) as fixture:
+        with pytest.raises(ProviderError, match="provider_http_error"):
+            await collect(fixture)
+        assert len(fixture.requests) == 1
+    assert [wait for wait in instant_sleep if wait > 0] == []
+
+
+async def test_retry_exhaustion_backoff_and_sanitized_logs(instant_sleep, caplog):
+    import logging
+
+    async with HTTPFixture(status=429) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+        )
+        received = []
+        try:
+            with caplog.at_level(
+                logging.WARNING, logger="krim_agent.providers.openai_compatible"
+            ):
+                with pytest.raises(ProviderError) as error:
+                    async for event in provider.stream(
+                        [Message(role="user", content="你好")], []
+                    ):
+                        received.append(event)
+            assert error.value.code == "provider_http_error"
+            assert received == []  # 全程未向调用者转发任何事件
+            assert len(fixture.requests) == 3
+        finally:
+            await provider.close()
+    assert fixture.active == 0
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5, 1.0]
+    records = [record for record in caplog.records if "Provider retry" in record.getMessage()]
+    assert sum("wait_ms" in record.getMessage() for record in records) == 2
+    assert sum("exhausted" in record.getMessage() for record in records) == 1
+    joined = "\n".join(record.getMessage() for record in records)
+    assert "attempt=1/3" in joined and "attempt=2/3" in joined
+    assert "code=provider_http_error" in joined and "status=429" in joined
+    assert "wait_ms=500" in joined and "wait_ms=1000" in joined
+    assert "127.0.0.1" not in joined and "Bearer" not in joined
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0.05", [0.05, 0.05]),  # 合法数值：优先于指数退避
+        ("60", [10.0, 10.0]),  # 有界夹取：等待不超过上限
+        ("1e400", [10.0, 10.0]),  # 超大数值解析为inf：同样钳制不溢出
+        ("Wed, 21 Oct 2026 07:28:00 GMT", [0.5, 1.0]),  # HTTP-date：退回指数退避
+        ("-3", [0.5, 1.0]),  # 非法负值：退回指数退避
+    ],
+    ids=["honored", "clamped", "overflow", "http-date", "negative"],
+)
+async def test_retry_after_header_is_honored_and_bounded(instant_sleep, value, expected):
+    async with HTTPFixture(status=429, headers={"Retry-After": value}) as fixture:
+        with pytest.raises(ProviderError, match="provider_http_error"):
+            await collect(fixture)
+        assert len(fixture.requests) == 3
+    assert [wait for wait in instant_sleep if wait > 0] == expected
+
+
+async def test_pre_event_network_failure_retries_then_succeeds(instant_sleep):
+    async with AbortServer(abort_at=1) as server:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=server.url, model="fixture")
+        )
+        try:
+            events = [
+                event
+                async for event in provider.stream([Message(role="user", content="你好")], [])
+            ]
+            assert "".join(e.text for e in events if isinstance(e, ModelText)) == "重试成功"
+            assert server.connections == 2
+            assert provider.calls == 1 and provider.active == 0
+        finally:
+            await provider.close()
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5]
+
+
+async def test_diagnostics_stream_retries_transient_http_before_first_content(instant_sleep):
+    async with HTTPFixture(fail_request=1) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+        )
+        try:
+            events = [
+                event
+                async for event in provider.stream_with_diagnostics(
+                    [Message(role="user", content="你好")], [], None
+                )
+            ]
+            assert "".join(e.text for e in events if isinstance(e, ModelText)) == "你好🙂"
+            assert len(fixture.requests) == 2
+            assert provider.calls == 1 and provider.active == 0
+        finally:
+            await provider.close()
+    assert fixture.active == 0
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5]
+
+
+async def test_diagnostics_stream_retries_network_failure_before_first_content(instant_sleep):
+    async with AbortServer(abort_at=1) as server:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=server.url, model="fixture")
+        )
+        try:
+            events = [
+                event
+                async for event in provider.stream_with_diagnostics(
+                    [Message(role="user", content="你好")], [], None
+                )
+            ]
+            assert "".join(e.text for e in events if isinstance(e, ModelText)) == "重试成功"
+            assert server.connections == 2
+        finally:
+            await provider.close()
+    assert [wait for wait in instant_sleep if wait > 0] == [0.5]
+
+
+async def test_failure_after_first_event_never_retries():
+    async with AbortServer(abort_at=1, after_first_frame=True) as server:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=server.url, model="fixture")
+        )
+        events = []
+        try:
+            with pytest.raises(ProviderError) as error:
+                async for event in provider.stream([Message(role="user", content="你好")], []):
+                    events.append(event)
+            assert error.value.code == "provider_network"
+            assert any(isinstance(e, ModelText) for e in events)  # 首个事件已转发
+            assert server.connections == 1  # 已有事件后不再重试
+        finally:
+            await provider.close()
+        assert provider.active == 0 and provider.streams_closed == 1
+
+
+async def test_cancellation_during_retry_wait_propagates_immediately():
+    async with HTTPFixture(status=429, headers={"Retry-After": "10"}) as fixture:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
+        )
+
+        async def consume():
+            async for _event in provider.stream([Message(role="user", content="你好")], []):
+                pass
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(fixture.entered.wait(), 3)
+            await asyncio.sleep(0.3)  # 稳定进入首个重试等待
+            started = asyncio.get_running_loop().time()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert asyncio.get_running_loop().time() - started < 5  # 不等满10s
+            assert len(fixture.requests) == 1
+            assert provider.active == 0 and provider.streams_closed == 1
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await provider.close()
+    assert fixture.active == 0

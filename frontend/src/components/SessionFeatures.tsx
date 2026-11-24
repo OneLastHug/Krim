@@ -9,12 +9,17 @@ import "./session-features.css";
 export function SessionFeatures({ chat, apiKey, active, fence, backgroundRunning = false }: {
   chat: SessionState; apiKey: string; active: boolean; fence: { current: number }; backgroundRunning?: boolean;
 }) {
+  const stateResult = [...(chat.events ?? [])].reverse().find(event => {
+    const data = event.data as Record<string, unknown> | undefined;
+    return event.kind === "tool_end" && data && ["plan_update", "ask_user", "enter_plan_mode", "exit_plan_mode"].includes(String(data.name));
+  });
+  const refreshKey = JSON.stringify([chat.currentTurn?.id, chat.currentTurn?.status, stateResult?.run_id, stateResult?.seq]);
   const features = useSessionFeatures({
     apiKey, principalId: chat.actor?.principal_id ?? "", generation: chat.actor?.generation ?? 0,
     workspaceId: chat.workspace, sessionId: chat.id,
     enabled: active && chat.ready && !!chat.session && !chat.session.deleted_at,
     running: backgroundRunning || chat.history.some(turn => turn.status === "running" || turn.status === "queued"),
-    fence,
+    refreshKey, fence,
   }, chat.refresh);
   const canRespond = chat.canWrite && chat.session?.owner_id === chat.actor?.principal_id
     && chat.session?.status === "open" && !chat.session.archived_at && !chat.session.deleted_at;

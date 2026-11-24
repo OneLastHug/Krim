@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import socket
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +16,7 @@ import httpx
 import pytest
 
 from krim_agent.contracts import ServiceError
-from krim_agent.dev_preview.app import PreviewApp
+from krim_agent.dev_preview.app import PreviewApp, _Checks
 from krim_agent.dev_preview.boundary import (
     BOOTSTRAP_PATH,
     SESSION_COOKIE,
@@ -23,6 +24,7 @@ from krim_agent.dev_preview.boundary import (
     request_target,
     response_headers,
 )
+from krim_agent.dev_preview.repository import BrowserGrant
 from krim_agent.dev_preview.service import PreviewError, PreviewService
 from krim_agent.development.contracts import (
     AuthorizationRef,
@@ -262,8 +264,7 @@ class Sockets:
         await self.queue.put(value)
 
 
-@pytest.fixture
-async def rig():
+async def build_rig(origins):
     env = EnvironmentHandle(
         owner_id="owner", project_id="project", environment_id="env", generation=1, state="ready"
     )
@@ -300,13 +301,29 @@ async def rig():
     environments = Environments(env)
     service = PreviewService(repo, process, environments, process, authority, routes)
     principal = PrincipalContext("owner", 1, ())
-    origins = PreviewOrigins("https://krim.example.com", "example.com", "preview.example.net")
     clock = [100.0]
     app = PreviewApp(
         service, credentials, origins, sockets, poll_seconds=0.01, clock=lambda: clock[0]
     )
     await service.register("preview", handle, 3000, principal)
     return SimpleNamespace(**locals())
+
+
+@pytest.fixture
+async def rig():
+    return await build_rig(
+        PreviewOrigins("https://krim.example.com", "example.com", "preview.example.net")
+    )
+
+
+@pytest.fixture
+async def same_site_rig():
+    return await build_rig(
+        PreviewOrigins(
+            "https://krim-qa.example.test", "krim-qa.example.test", "example.test",
+            allow_same_site_subdomains=True, hostname_prefix="preview",
+        )
+    )
 
 
 async def login(rig, client):
@@ -427,6 +444,11 @@ async def test_http_headers_upload_cookies_and_redirects(rig):
                 "authorization": "Bearer control-secret",
                 "x-forwarded-host": "169.254.169.254",
                 "x-krim-key": "secret",
+                "x-application-request": "1",
+                "x-csrf-token": "app-owned-token",
+                "x-xsrf-token": "app-owned-xsrf",
+                "x-real-ip": "169.254.169.254",
+                "x-original-url": "http://169.254.169.254/",
                 "connection": "x-secret",
                 "x-secret": "value",
                 "content-type": "image/png",
@@ -437,8 +459,14 @@ async def test_http_headers_upload_cookies_and_redirects(rig):
         assert body == b"raw bytes" and request.url.raw_path == b"/upload?q=1"
         assert request.headers["host"] == rig.origins.host("preview")
         assert request.headers["cookie"] == "app=own"
-        for header in ("authorization", "x-forwarded-host", "x-krim-key", "x-secret"):
+        for header in (
+            "authorization", "x-forwarded-host", "x-krim-key", "x-secret",
+            "x-real-ip", "x-original-url",
+        ):
             assert header not in request.headers
+        assert request.headers["x-application-request"] == "1"
+        assert request.headers["x-csrf-token"] == "app-owned-token"
+        assert request.headers["x-xsrf-token"] == "app-owned-xsrf"
         assert response.headers["location"] == rig.origins.origin("preview") + "/done"
         assert "x-private" not in response.headers
         assert response.headers.get_list("set-cookie") == ["app=yes; Path=/; Secure"]
@@ -899,3 +927,363 @@ async def test_shared_route_errors_close_websocket(rig, code, close_code):
     await rig.app(scope, receive, send)
     assert output == [{"type": "websocket.close", "code": close_code}]
     assert rig.sockets.connect_args is None
+
+
+def test_same_site_sibling_contract():
+    same_site = PreviewOrigins(
+        "https://krim-qa.example.test", "krim-qa.example.test", "example.test",
+        allow_same_site_subdomains=True, hostname_prefix="preview",
+    )
+    key = hashlib.sha256(b"preview").hexdigest()[:40]
+    assert same_site.host("preview") == f"preview-{key}.example.test"
+    assert same_site.origin("preview") == f"https://preview-{key}.example.test"
+    # The legacy independent mode keeps its exact p- label family by default.
+    legacy = PreviewOrigins("https://krim.example.com", "example.com", "preview.example.net")
+    assert legacy.host("preview") == f"p-{key}.preview.example.net"
+    # A 22-character prefix still composes a valid 63-character preview label.
+    assert PreviewOrigins(
+        "https://krim.example.com", "example.com", "preview.example.net",
+        hostname_prefix="p" * 22,
+    ).host("preview").startswith("p" * 22 + "-")
+    # A sibling layout must never accept the parent cookie domain: it would
+    # carry control credentials into every sibling preview host.
+    with pytest.raises(ValueError):
+        PreviewOrigins(
+            "https://krim-qa.example.test", "example.test", "example.test",
+            allow_same_site_subdomains=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        # Control cookies scoped to the shared parent would flow into previews.
+        lambda: PreviewOrigins(
+            "https://krim-qa.example.test", "example.test", "example.test",
+            allow_same_site_subdomains=True,
+        ),
+        # Without the explicit flag the sibling layout stays rejected.
+        lambda: PreviewOrigins(
+            "https://krim-qa.example.test", "krim-qa.example.test", "example.test",
+        ),
+        # The control host must sit inside preview_domain for siblings.
+        lambda: PreviewOrigins(
+            "https://control.example", "control.example", "other.example",
+            allow_same_site_subdomains=True,
+        ),
+        # A control host inside the preview label family could impersonate one.
+        lambda: PreviewOrigins(
+            "https://preview-" + "a" * 40 + ".example.test",
+            "preview-" + "a" * 40 + ".example.test",
+            "example.test",
+            allow_same_site_subdomains=True, hostname_prefix="preview",
+        ),
+        # hostname_prefix must stay one lowercase DNS label of a bounded length.
+        lambda: PreviewOrigins(
+            "https://krim-qa.example.test", "krim-qa.example.test", "example.test",
+            allow_same_site_subdomains=True, hostname_prefix="Preview",
+        ),
+        lambda: PreviewOrigins(
+            "https://krim-qa.example.test", "krim-qa.example.test", "example.test",
+            allow_same_site_subdomains=True, hostname_prefix="pre.view",
+        ),
+        # The composed preview label is prefix + "-" + 40 hex, at most 63 characters.
+        lambda: PreviewOrigins(
+            "https://krim.example.com", "example.com", "preview.example.net",
+            hostname_prefix="p" * 23,
+        ),
+        # Generated preview hosts must remain valid full DNS names.
+        lambda: PreviewOrigins(
+            "https://krim.example.com", "example.com",
+            "b" * 63 + "." + "c" * 63 + "." + "d" * 63,
+            hostname_prefix="a" * 22,
+        ),
+        # Domain labels must be clean DNS labels too.
+        lambda: PreviewOrigins(
+            "https://krim.example.com", "example.com", "bad-.example.test",
+        ),
+        # The control host sits deeper than one label under preview_domain.
+        lambda: PreviewOrigins(
+            "https://core.krim-qa.example.test", "core.krim-qa.example.test", "example.test",
+            allow_same_site_subdomains=True, hostname_prefix="preview",
+        ),
+    ],
+)
+def test_reject_same_site_misconfiguration(make):
+    with pytest.raises(ValueError):
+        make()
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+def test_preview_frame_policy_replaces_upstream_only_for_control_embedding(embedded):
+    headers = dict(response_headers(
+        [(b"x-frame-options", b"DENY"),
+         (b"content-security-policy", b"frame-ancestors *")],
+        origin="https://preview.example.net", upstream="http://preview.example.net",
+        control_origin="https://control.example.net", allow_embedding=embedded,
+    ))
+    assert headers[b"content-security-policy"] == (
+        (b"frame-ancestors https://control.example.net" if embedded
+         else b"frame-ancestors 'none'")
+        + b"; base-uri 'self'; form-action 'self'; worker-src 'none'"
+    )
+    if embedded:
+        assert b"x-frame-options" not in headers
+    else:
+        assert headers[b"x-frame-options"] == b"DENY"
+
+
+async def test_same_site_bootstrap_host_boundary(same_site_rig):
+    ss = same_site_rig
+    key = hashlib.sha256(b"preview").hexdigest()[:40]
+    assert ss.origins.host("preview") == f"preview-{key}.example.test"
+    async with client_for(ss) as client:
+        response = await login(ss, client)
+        cookie = response.headers["set-cookie"]
+        assert cookie.startswith(f"{SESSION_COOKIE}=")
+        assert "Domain=" not in cookie and "Secure" in cookie and "HttpOnly" in cookie
+        assert response.headers["location"] == "/"
+        assert response.headers["content-security-policy"] == (
+            "default-src 'none'; frame-ancestors " + ss.origins.control_origin
+        )
+        page = await client.get("/")
+        assert page.status_code == 204
+        assert page.headers["content-security-policy"] == (
+            "frame-ancestors " + ss.origins.control_origin
+            + "; base-uri 'self'; form-action 'self'; worker-src 'none'"
+        )
+        assert (await ss.app.issue_bootstrap("preview", ss.principal)).allow_embedding is True
+        # Sibling previews stay cross-origin adversaries: their origin never
+        # authorizes actions on this host, sessions remain host-only cookies.
+        sibling = f"preview-{hashlib.sha256(b'other').hexdigest()[:40]}.example.test"
+        session = dict(client.cookies)[SESSION_COOKIE]
+        output = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message, output=output):
+            output.append(message)
+
+        await ss.app(
+            {
+                "type": "http",
+                "scheme": "https",
+                "method": "POST",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "headers": [
+                    (b"host", ss.origins.host("preview").encode()),
+                    (b"origin", sibling.encode()),
+                    (b"cookie", f"{SESSION_COOKIE}={session}".encode()),
+                ],
+            },
+            receive,
+            send,
+        )
+        assert output[0]["status"] == 403
+    # Hosts outside the configured sibling family never resolve, and a control
+    # host inside the family was already rejected at configuration time.
+    for host in (
+        f"p-{key}.example.test",
+        f"preview-{key}.other.example",
+        "krim-qa.example.test",
+    ):
+        output = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message, output=output):
+            output.append(message)
+
+        await ss.app(
+            {
+                "type": "http",
+                "scheme": "https",
+                "method": "GET",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "headers": [(b"host", host.encode())],
+            },
+            receive,
+            send,
+        )
+        assert output[0]["status"] == 421
+
+
+class MultiChunkStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
+def count_rechecks(rig):
+    """Record every full PreviewService.recheck call from route, watch and data paths."""
+    original = rig.service.recheck
+    calls = []
+
+    async def counted(record, principal, lease):
+        calls.append(time.monotonic())
+        return await original(record, principal, lease)
+
+    rig.service.recheck = counted
+    return calls
+
+
+async def http_scope(rig):
+    return {
+        **(await socket_scope(rig)),
+        "type": "http",
+        "scheme": "https",
+        "method": "GET",
+        "http_version": "1.1",
+    }
+
+
+async def test_recheck_helper_throttles_and_does_not_cache_failures(rig):
+    rig.app.poll_seconds = 0.05
+    calls = count_rechecks(rig)
+    async with rig.service.route("preview", rig.principal) as (record, lease):
+        grant = BrowserGrant("preview", rig.principal, rig.clock[0] + 3600)
+        checks = _Checks(last_full=float("-inf"))
+        start = len(calls)
+        await rig.app._recheck(record, grant, lease, checks)
+        assert len(calls) - start == 1
+        await rig.app._recheck(record, grant, lease, checks)
+        assert len(calls) - start == 1
+
+        async def failing(record, principal, lease):
+            calls.append(time.monotonic())
+            raise PreviewError("preview_binding_drift")
+
+        rig.service.recheck = failing
+        checks.last_full = time.monotonic() - 1.0
+        stamp = checks.last_full
+        with pytest.raises(PreviewError, match="preview_binding_drift"):
+            await rig.app._recheck(record, grant, lease, checks)
+        assert checks.last_full == stamp
+        with pytest.raises(PreviewError, match="preview_binding_drift"):
+            await rig.app._recheck(record, grant, lease, checks)
+        assert len(calls) - start == 3
+
+
+async def test_http_multi_chunk_shares_full_rechecks(rig):
+    rig.app.poll_seconds = 2.0
+    stream = MultiChunkStream([b"one", b"two", b"three", b"four", b"five", b"six"])
+    rig.routes.transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+    calls = count_rechecks(rig)
+    task = asyncio.create_task(rig.app(await http_scope(rig), incoming.get, outgoing.put))
+    bodies = []
+    async with asyncio.timeout(2):
+        assert (await outgoing.get())["type"] == "http.response.start"
+        while True:
+            message = await outgoing.get()
+            assert message["type"] == "http.response.body"
+            bodies.append(message["body"])
+            if not message.get("more_body", False):
+                break
+        await task
+    assert b"".join(bodies) == b"onetwothreefourfivesix"
+    # Route entry and the first committed recheck, plus at most one watch tick:
+    # six chunks must not add six more full rechecks.
+    assert 2 <= len(calls) <= 3
+    assert stream.closed
+
+
+async def test_http_revocation_visible_within_watch_interval(rig):
+    rig.app.poll_seconds = 0.05
+    stream = ChunkStream()
+    rig.routes.transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+    task = asyncio.create_task(rig.app(await http_scope(rig), incoming.get, outgoing.put))
+    async with asyncio.timeout(2):
+        assert (await outgoing.get())["type"] == "http.response.start"
+        assert (await outgoing.get())["body"] == b"first"
+        revoked = time.monotonic()
+        rig.authority.revoked = True
+        with pytest.raises(PreviewError, match="preview_stream_closed"):
+            await task
+        assert time.monotonic() - revoked < 1.0
+    assert stream.closed
+
+
+async def test_http_chunk_verifies_session_grant_without_full_recheck(rig):
+    rig.app.poll_seconds = 3600.0
+    stream = ChunkStream()
+    rig.routes.transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+    calls = count_rechecks(rig)
+    task = asyncio.create_task(rig.app(await http_scope(rig), incoming.get, outgoing.put))
+    async with asyncio.timeout(2):
+        assert (await outgoing.get())["type"] == "http.response.start"
+        assert (await outgoing.get())["body"] == b"first"
+        await asyncio.sleep(0.01)  # let the watch's first tick settle
+        before = len(calls)
+        rig.clock[0] = 10_000.0  # session expired; only the per-chunk grant check may see it
+        stream.next_chunk.set()
+        with pytest.raises(PreviewError, match="preview_stream_closed"):
+            await task
+        assert len(calls) == before
+    assert stream.closed
+
+
+async def test_websocket_messages_share_full_rechecks(rig):
+    rig.app.poll_seconds = 2.0
+    scope = await socket_scope(rig)
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "websocket.connect"})
+    calls = count_rechecks(rig)
+    task = asyncio.create_task(rig.app(scope, incoming.get, outgoing.put))
+    async with asyncio.timeout(2):
+        assert await outgoing.get() == {
+            "type": "websocket.accept",
+            "subprotocol": "vite-hmr",
+            "headers": [],
+        }
+        for value in ("one", "two", "three", "four", "five"):
+            await incoming.put({"type": "websocket.receive", "text": value})
+            assert await outgoing.get() == {"type": "websocket.send", "text": value}
+        assert 2 <= len(calls) <= 3
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert rig.sockets.closed and rig.routes.closed
+
+
+async def test_websocket_message_verifies_session_grant_without_full_recheck(rig):
+    rig.app.poll_seconds = 3600.0
+    scope = await socket_scope(rig)
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "websocket.connect"})
+    calls = count_rechecks(rig)
+    task = asyncio.create_task(rig.app(scope, incoming.get, outgoing.put))
+    async with asyncio.timeout(2):
+        assert await outgoing.get() == {
+            "type": "websocket.accept",
+            "subprotocol": "vite-hmr",
+            "headers": [],
+        }
+        await incoming.put({"type": "websocket.receive", "text": "before"})
+        assert await outgoing.get() == {"type": "websocket.send", "text": "before"}
+        await asyncio.sleep(0.01)  # let the watch's first tick settle
+        before = len(calls)
+        rig.clock[0] = 10_000.0
+        await incoming.put({"type": "websocket.receive", "text": "after"})
+        assert await outgoing.get() == {"type": "websocket.close", "code": 1008}
+        await task
+        assert len(calls) == before
+    assert rig.sockets.closed and rig.routes.closed

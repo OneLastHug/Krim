@@ -16,6 +16,7 @@ from pydantic import JsonValue, ValidationError
 from krim_agent.agent_sdk.context import CompactorHistory
 from krim_agent.config import Settings
 from krim_agent.context.compaction import Compactor
+from krim_agent.context.compaction_source import RunGroupSource
 from krim_agent.context.types import (
     ChildRunContext,
     ContextPolicy,
@@ -105,6 +106,9 @@ class DevelopmentSDKLoop(AgentLoop):
         task = await subagents.repository.task(context.task_id)
         raw = task["input"].get("workspace")
         if raw is None:
+            profile = task["input"].get("profile_snapshot")
+            if isinstance(profile, dict) and profile.get("workspace") == "isolated_write":
+                raise ServiceError("facts_corrupt")
             return None
         try:
             assignment = WorkspaceAssignment.model_validate(raw)
@@ -297,6 +301,9 @@ class DevelopmentSDKLoop(AgentLoop):
                     compactor, run_id, boundary=boundary,
                     live_memory=(boundary is not None and self.context_service is not None
                                  and self.context_service.snapshots is not None),
+                    run_source=RunGroupSource(
+                        development_context.frozen.turn_id, source.verify,
+                    ),
                 )
             return SDKHistory(history, context_policy)
 

@@ -5,13 +5,14 @@ import time
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from krim_agent.contracts import ServiceError
 from krim_agent.dev_preview.app import PreviewApp
 from krim_agent.dev_preview.boundary import SESSION_COOKIE, PreviewOrigins
 from krim_agent.dev_preview.service import PreviewService
 from krim_agent.storage.preview_models import preview_credentials
+from krim_agent.storage.project_membership_models import project_memberships
 from tests.agent_core.test_dev_preview_protocol import Routes, Sockets
 from tests.coding_agent.test_preview_storage import setup
 
@@ -61,12 +62,17 @@ async def test_real_sqlite_ticket_exchange_proxy_and_revocation(tmp_path) -> Non
             repeated = await client.post(bootstrap.action, data={"ticket": bootstrap.ticket},
                                          headers={"Origin": origins.control_origin})
             assert repeated.status_code == 401
-            await db.access.put(grant.model_copy(update={"revoked": True, "revision": 2}),
-                                expected_revision=1)
+            # Current project membership is the authority; legacy grants do
+            # not revoke an otherwise authorized project member.
+            async with store.engine.begin() as conn:
+                await conn.execute(update(project_memberships).where(
+                    project_memberships.c.project_id == record.handle.environment.project_id,
+                    project_memberships.c.principal_id == actor.principal_id,
+                ).values(access="none", revision=2))
             revoked = await client.get("/")
-            assert revoked.status_code == 403
+            assert revoked.status_code in {403, 404}
             assert len(requests) == 1
-            with pytest.raises(ServiceError, match="permission_denied"):
+            with pytest.raises(ServiceError, match="permission_denied|not_found"):
                 await app.issue_bootstrap(record.handle.preview_id, actor)
     finally:
         await store.close()

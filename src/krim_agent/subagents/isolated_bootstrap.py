@@ -29,6 +29,8 @@ import shlex
 from dataclasses import replace
 from typing import Any, cast
 
+from sqlalchemy import select
+
 from krim_agent.agent_sdk.host import CURRENT_OPERATION
 from krim_agent.contracts import ServiceError, ToolObservation, encoded, fingerprint, parse_json
 from krim_agent.development.contracts import OperationIdentity, OperationReceipt
@@ -41,7 +43,52 @@ POLL_CAP_SECONDS = 120.0
 POLL_INTERVAL_SECONDS = 0.1
 
 
-def bootstrap_command(directory: str, limits: dict[str, int]) -> str:
+async def _prior_prepared(
+    store: Any, run_id: str, assignment: WorkspaceAssignment, ownership: Any, environment: Any,
+) -> dict[str, Any] | None:
+    """Recover legacy preparation only from the same child's durable success ledger."""
+    from krim_agent.storage.models import run_events
+    from krim_agent.storage.subagent_models import subagent_child_runs
+
+    async def read(conn: Any) -> Any:
+        return (await conn.execute(select(run_events.c.run_id, run_events.c.data).select_from(
+            run_events.join(subagent_child_runs,
+                            run_events.c.run_id == subagent_child_runs.c.run_id),
+        ).where(
+            subagent_child_runs.c.agent_id == assignment.agent_id,
+            subagent_child_runs.c.owner_session_id == ownership.session_id,
+            run_events.c.run_id != run_id,
+            run_events.c.kind == "workspace_prepared",
+            run_events.c.data["directory"].as_string() == assignment.directory,
+            run_events.c.data["baseline_fingerprint"].as_string()
+            == assignment.baseline_fingerprint,
+        ).order_by(run_events.c.at.desc()).limit(1))).mappings().first()
+
+    if not hasattr(store, "work_read"):
+        return None
+    row = await store.work_read(read)
+    if row is None:
+        return None
+    old = await store.snapshot(row["run_id"])
+    event = row["data"]
+    if (event.get("exit_code") != 0 or event.get("truncated") is True
+            or event.get("agent_id") != assignment.agent_id):
+        raise ServiceError("facts_corrupt")
+    end = next((item for item in old.events if item.kind == "tool_end"
+                and item.data.get("call_id") == event.get("call_id")), None)
+    value = end.data.get("value") if end is not None else None
+    if (end is None or end.data.get("status") != "ok"
+            or end.data.get("result_available") is not True or not isinstance(value, dict)):
+        raise ServiceError("facts_corrupt")
+    manifest = _verified_result(value)
+    if (value.get("environment") != environment.model_dump(mode="json")
+            or value.get("ownership") != ownership.model_copy(
+                update={"run_id": row["run_id"]}).model_dump(mode="json")):
+        raise ServiceError("facts_corrupt")
+    return manifest
+
+
+def bootstrap_command(directory: str, limits: dict[str, Any]) -> str:
     """Render the fixed bootstrap as one development shell command string.
 
     The script and its two arguments are plain ``shlex``-quoted words of
@@ -236,6 +283,10 @@ async def prepare_isolated_workspace(
             raise ServiceError("workspace_unavailable", 503) from None
         if probe.scoped_executor is None or probe.capability != "read":
             raise ServiceError("workspace_unavailable", 503)
+    bounds: dict[str, Any] = (limits or WorkspaceLimits()).copy_bounds()
+    prior = await _prior_prepared(store, run_id, assignment, ownership, environment)
+    if prior is not None:
+        bounds["prior_prepared"] = prior
     invocation = Invocation(
         run_id=run_id,
         call_id=f"bootstrap-{run_id}",
@@ -243,9 +294,7 @@ async def prepare_isolated_workspace(
         step_index=0,
         name="shell",
         arguments_json=encoded({
-            "command": bootstrap_command(
-                directory, (limits or WorkspaceLimits()).copy_bounds(),
-            ),
+            "command": bootstrap_command(directory, bounds),
             "wait_seconds": 20,
         }),
         tool_hash=shell_spec.fingerprint,

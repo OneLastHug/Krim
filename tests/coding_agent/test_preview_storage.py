@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, insert, select, update
 
 from krim_agent.contracts import ServiceError
 from krim_agent.dev_preview.repository import BrowserGrant, PreviewRecord
@@ -74,6 +74,98 @@ async def setup(database: Path):
     await db.authority.check(record, actor, "register")
     await db.records.create(record)
     return store, development, db, record, actor, grant
+
+
+@pytest.mark.parametrize("legacy", ["missing", "revoked", "expired"])
+async def test_current_project_acl_authorizes_without_legacy_grant(
+    tmp_path: Path, legacy: str,
+) -> None:
+    from krim_agent.storage.development_models import project_access_records
+
+    store, _, db, record, actor, grant = await setup(tmp_path / "preview.sqlite")
+    try:
+        if legacy == "missing":
+            async with store.engine.begin() as conn:
+                await conn.execute(delete(project_access_records).where(
+                    project_access_records.c.project_id == record.handle.environment.project_id,
+                    project_access_records.c.kind == "grant",
+                ))
+        else:
+            updated = grant.model_copy(update={"revision": 2,
+                **({"revoked": True} if legacy == "revoked" else {"expires_at": time.time() - 1})})
+            await db.access.put(updated, expected_revision=1)
+        await db.authority.registration(record.process, record.handle.port, actor)
+        await db.authority.check(record, actor, "open")
+        assert (await db.authority.resolve(binding(record), actor)).handle == record.process
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("access", ["none", "read"])
+async def test_service_creator_must_retain_current_project_write_access(
+    tmp_path: Path, access: str,
+) -> None:
+    from krim_agent.storage.project_membership_models import project_memberships
+
+    store, _, db, record, actor, _ = await setup(tmp_path / "preview.sqlite")
+    try:
+        async with store.engine.begin() as conn:
+            await conn.execute(update(project_memberships).where(
+                project_memberships.c.project_id == record.handle.environment.project_id,
+                project_memberships.c.principal_id == actor.principal_id,
+            ).values(access=access, revision=2))
+        with pytest.raises(ServiceError):
+            await db.authority.registration(record.process, record.handle.port, actor)
+        with pytest.raises(ServiceError):
+            await db.authority.resolve(binding(record), actor)
+        with pytest.raises(ServiceError):
+            await db.authority.resolve(binding(record), None)
+    finally:
+        await store.close()
+
+
+async def test_preview_reader_acl_cannot_register_or_stop_and_revokes_immediately(
+    tmp_path: Path,
+) -> None:
+    from krim_agent.storage.account_models import access_keys, account_workspaces
+    from krim_agent.storage.project_membership_models import project_memberships
+
+    store, _, db, record, actor, _ = await setup(tmp_path / "preview.sqlite")
+    workspace = actor.memberships[0].workspace_id
+    reader = PrincipalContext(
+        "preview-reader", 1, (Membership(workspace_id=workspace, role="member"),),
+    )
+    try:
+        async with store.engine.begin() as conn:
+            await conn.execute(insert(accounts).values(principal_id=reader.principal_id,
+                display_name="Preview reader", status="active", platform_role="member",
+                authorization_generation=1, revision=1, legacy=False,
+                created_at=time.time(), updated_at=time.time()))
+            await conn.execute(insert(access_keys).values(key_id="a" * 32,
+                principal_id=reader.principal_id, token_digest="b" * 64,
+                credential_version=1, masked="test-reader", weak=False, status="active",
+                issued_at=time.time(), request_key="test-reader-key"))
+            await conn.execute(insert(account_workspaces).values(principal_id=reader.principal_id,
+                workspace_id=workspace, role="member", approve=False))
+            await conn.execute(insert(project_memberships).values(
+                project_id=record.handle.environment.project_id, principal_id=reader.principal_id,
+                access="read", revision=1, updated_at=time.time()))
+        await db.authority.check(record, reader, "open")
+        assert (await db.authority.resolve(binding(record), reader)).handle == record.process
+        for action in ("register", "stop"):
+            with pytest.raises(ServiceError, match="permission_denied"):
+                await db.authority.check(record, reader, action)
+        with pytest.raises(ServiceError, match="permission_denied"):
+            await db.authority.registration(record.process, record.handle.port, reader)
+        async with store.engine.begin() as conn:
+            await conn.execute(update(project_memberships).where(
+                project_memberships.c.project_id == record.handle.environment.project_id,
+                project_memberships.c.principal_id == reader.principal_id,
+            ).values(access="none", revision=2))
+        with pytest.raises(ServiceError):
+            await db.authority.check(record, reader, "open")
+    finally:
+        await store.close()
 
 
 async def test_preview_reopen_and_service_outlives_run(tmp_path: Path) -> None:
@@ -175,7 +267,7 @@ async def test_ticket_consumed_once_under_concurrency_and_reopen(tmp_path: Path)
         await store.close()
 
 
-@pytest.mark.parametrize("revocation", ["grant", "generation", "account", "epoch"])
+@pytest.mark.parametrize("revocation", ["project_access", "generation", "account", "epoch"])
 async def test_browser_session_and_route_recheck_current_authority(
     tmp_path: Path, revocation: str,
 ) -> None:
@@ -187,9 +279,14 @@ async def test_browser_session_and_route_recheck_current_authority(
         ))
         assert (await db.credentials.get_session(digest, record.handle.preview_id,
                                                 time.time())).principal == actor
-        if revocation == "grant":
-            await db.access.put(grant.model_copy(update={"revoked": True, "revision": 2}),
-                                expected_revision=1)
+        if revocation == "project_access":
+            from krim_agent.storage.project_membership_models import project_memberships
+
+            async with store.engine.begin() as conn:
+                await conn.execute(update(project_memberships).where(
+                    project_memberships.c.project_id == record.handle.environment.project_id,
+                    project_memberships.c.principal_id == actor.principal_id,
+                ).values(access="none", revision=2))
         elif revocation == "epoch":
             await db.records.save(record, replace(
                 record, handle=record.handle.model_copy(update={"state": "revoked"}),

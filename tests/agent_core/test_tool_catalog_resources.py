@@ -298,6 +298,158 @@ async def test_account_resource_binding_never_leaks_sources_or_uses_other_owner(
         await service.read(owner, ReadResourceInput(server="account:remote", uri="private://file"))
 
 
+@pytest.mark.parametrize("name,body", [
+    ("list_mcp_resources", ListResourcesInput(server="missing")),
+    ("list_mcp_resource_templates", ListResourcesInput(server="missing")),
+    ("read_mcp_resource", ReadResourceInput(server="missing", uri="catalog")),
+])
+async def test_resource_missing_source_matches_invisible_source_without_remote_call(name, body):
+    owner = scope()
+    other = scope("bob")
+    connection = ResourceConnection()
+    service = MCPResourceService((MCPResourceBinding("hidden", connection, other),))
+
+    async def resolve(call):
+        return owner
+
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == name)
+    missing = await spec.scoped_executor(invocation(spec), body, None)
+    hidden = await spec.scoped_executor(invocation(spec), body.model_copy(
+        update={"server": "hidden"}), None)
+
+    assert missing == hidden
+    assert missing["ok"] is False and missing["code"] == "not_found"
+    assert "list_mcp_resources" in missing["next_action"]
+    assert "hidden" not in str(missing) and "bob" not in str(missing)
+    assert connection.calls == [] and service.sources(owner) == []
+
+
+@pytest.mark.parametrize("missing", ["unknown_ref", "other_scope", "wrong_server"])
+async def test_resource_cached_lookup_miss_recovers_without_refetch_or_media(missing):
+    owner = scope()
+    connection = ResourceConnection()
+    media = []
+
+    async def sink(*args):
+        media.append(args)
+        return None
+
+    service = MCPResourceService((MCPResourceBinding("host:remote", connection),
+                                  MCPResourceBinding("host:other", ResourceConnection("other"))),
+                                 media_sink=sink)
+    result = await service.read(owner, ReadResourceInput(server="host:remote", uri="notes://one"))
+    actual_scope = scope("bob") if missing == "other_scope" else owner
+
+    async def resolve(call):
+        return actual_scope
+
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == "read_mcp_resource")
+    recovered = await spec.scoped_executor(invocation(spec), ReadResourceInput(
+        server="host:other" if missing == "wrong_server" else "host:remote",
+        result_ref="unknown" if missing == "unknown_ref" else result["result_ref"],
+    ), None)
+
+    assert recovered["ok"] is False and recovered["code"] == "not_found"
+    assert connection.calls == [("read", "notes://one")] and media == []
+
+
+@pytest.mark.parametrize("name,method,body", [
+    ("list_mcp_resources", "list_resources", ListResourcesInput(server="host:remote")),
+    ("list_mcp_resource_templates", "list_resource_templates",
+     ListResourcesInput(server="host:remote")),
+    ("read_mcp_resource", "read_resource",
+     ReadResourceInput(server="host:remote", uri="notes://one")),
+])
+@pytest.mark.parametrize("code", ["permission_denied", "tool_binding_changed", "cancelled",
+                                      "facts_corrupt", "not_found"])
+async def test_resource_remote_service_errors_are_not_local_misses(name, method, body, code):
+    owner = scope()
+    connection = ResourceConnection()
+
+    async def read_resource(uri):
+        raise ServiceError(code)
+
+    setattr(connection, method, read_resource)
+    service = MCPResourceService((MCPResourceBinding("host:remote", connection),))
+
+    async def resolve(call):
+        return owner
+
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == name)
+    with pytest.raises(ServiceError, match=code):
+        await spec.scoped_executor(invocation(spec), body, None)
+
+
+@pytest.mark.parametrize("name,body", [
+    ("list_mcp_resources", ListResourcesInput(server="missing")),
+    ("list_mcp_resource_templates", ListResourcesInput(server="missing")),
+    ("read_mcp_resource", ReadResourceInput(server="missing", uri="catalog")),
+])
+@pytest.mark.parametrize("code", ["permission_denied", "not_found", "cancelled"])
+async def test_resource_scope_resolution_errors_are_not_recovered(name, body, code):
+    async def resolve(call):
+        raise ServiceError(code)
+
+    service = MCPResourceService(())
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == name)
+    with pytest.raises(ServiceError, match=code):
+        await spec.scoped_executor(invocation(spec), body, None)
+
+
+async def test_resource_binding_change_still_rejects_at_tool_boundary():
+    owner = scope()
+    connection = ResourceConnection()
+    service = MCPResourceService((MCPResourceBinding("host:remote", connection),))
+    connection.config = connection.config.model_copy(update={"command": "changed"})
+
+    async def resolve(call):
+        return owner
+
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == "read_mcp_resource")
+    with pytest.raises(ServiceError, match="tool_binding_changed"):
+        await spec.scoped_executor(invocation(spec), ReadResourceInput(
+            server="host:remote", uri="catalog"), None)
+    assert connection.calls == []
+
+
+async def test_resource_recovery_rechecks_scope_and_preserves_cancellation():
+    checks = []
+
+    def check():
+        checks.append(True)
+        if len(checks) == 2:
+            raise ServiceError("cancelled")
+
+    owner = replace(scope(), check=check)
+
+    async def resolve(call):
+        return owner
+
+    spec = next(spec for spec in MCPResourceService(()).bundle(resolve).specs
+                if spec.name == "read_mcp_resource")
+    with pytest.raises(ServiceError, match="cancelled"):
+        await spec.scoped_executor(invocation(spec), ReadResourceInput(
+            server="missing", uri="catalog"), None)
+    assert len(checks) == 2
+
+
+async def test_resource_media_not_found_is_not_a_lookup_recovery():
+    owner = scope()
+
+    async def resolve(call):
+        return owner
+
+    async def sink(*args):
+        raise ServiceError("not_found", 404)
+
+    service = MCPResourceService((MCPResourceBinding("host:remote", ResourceConnection()),),
+                                 media_sink=sink)
+    spec = next(spec for spec in service.bundle(resolve).specs if spec.name == "read_mcp_resource")
+    with pytest.raises(ServiceError, match="not_found"):
+        await spec.scoped_executor(invocation(spec), ReadResourceInput(
+            server="host:remote", uri="notes://one"), None)
+
+
 async def test_resource_bundle_passes_media_to_authorized_sink():
     owner = scope()
     connection = ResourceConnection()

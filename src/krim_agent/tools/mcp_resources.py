@@ -57,6 +57,13 @@ async def _unbound(arguments: BaseModel) -> JsonValue:
     raise ServiceError("workspace_contract_required")
 
 
+class _ResourceNotFound(ServiceError):
+    """A local lookup missed; not an authorization or remote execution failure."""
+
+    def __init__(self) -> None:
+        super().__init__("not_found", 404)
+
+
 class MCPResourceService:
     def __init__(
         self,
@@ -84,7 +91,7 @@ class MCPResourceService:
         key = scope_key(scope)
         connection = self._bindings.get(source_id)
         if connection is None or self._owners[source_id] not in (None, key):
-            raise ServiceError("not_found", 404)
+            raise _ResourceNotFound()
         if connection.closed:
             raise ServiceError("mcp_connection_closed", 503)
         if connection.config.configuration_digest != self._digests[source_id]:
@@ -178,7 +185,7 @@ class MCPResourceService:
             result_ref = body.result_ref
             record = self.result(scope, result_ref)
             if record["server"] != body.server:
-                raise ServiceError("not_found", 404)
+                raise _ResourceNotFound()
         remaining = body.max_chars
         skip = body.offset
         total = 0
@@ -217,7 +224,7 @@ class MCPResourceService:
         """Full content for an authorized artifact/media consumer, never a host URI fetch."""
         record = self._results.get((scope_key(scope), result_ref))
         if record is None:
-            raise ServiceError("not_found", 404)
+            raise _ResourceNotFound()
         self._connection(scope, cast(str, record["server"]))
         return copy.deepcopy(record)
 
@@ -290,24 +297,47 @@ class MCPResourceService:
                 del self._cursors[token]
 
     def bundle(self, resolve: SessionScopeResolver) -> ToolBundle:
+        def missing(scope: SessionToolScope) -> dict[str, JsonValue]:
+            # Keep unknown and invisible sources indistinguishable. Only the
+            # tool boundary recovers; storage/media consumers retain the 404.
+            scope_key(scope)
+            return {
+                "ok": False,
+                "code": "not_found",
+                "next_action": (
+                    "Call list_mcp_resources without server to discover available sources. "
+                    "Use an exact returned server identifier, then list its resources or "
+                    "templates before reading a URI. A result_ref is valid only in the "
+                    "current run and for its original server. If no sources are available, "
+                    "continue the task without MCP resources; do not invent server names."
+                ),
+            }
+
         async def listing(
             invocation: Invocation, arguments: BaseModel, context: object
         ) -> JsonValue:
-            return await self.list(await resolve(invocation), cast(ListResourcesInput, arguments))
+            scope = await resolve(invocation)
+            try:
+                return await self.list(scope, cast(ListResourcesInput, arguments))
+            except _ResourceNotFound:
+                return missing(scope)
 
         async def templates(
             invocation: Invocation, arguments: BaseModel, context: object
         ) -> JsonValue:
-            return await self.list(
-                await resolve(invocation),
-                cast(ListResourcesInput, arguments),
-                templates=True,
-            )
+            scope = await resolve(invocation)
+            try:
+                return await self.list(scope, cast(ListResourcesInput, arguments), templates=True)
+            except _ResourceNotFound:
+                return missing(scope)
 
         async def read(invocation: Invocation, arguments: BaseModel, context: object) -> JsonValue:
             scope = await resolve(invocation)
             values = cast(ReadResourceInput, arguments)
-            result = await self.read(scope, values)
+            try:
+                result = await self.read(scope, values)
+            except _ResourceNotFound:
+                return missing(scope)
             if self._media_sink is not None and values.result_ref is None:
                 record = self.result(scope, cast(str, result["result_ref"]))
                 result["media"] = await self._media_sink(scope, values.server, record)

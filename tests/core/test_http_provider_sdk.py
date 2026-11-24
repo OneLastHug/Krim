@@ -208,7 +208,7 @@ async def test_sdk_binding_cannot_change_after_sealing(mutation):
             await provider.close()
 
 
-async def test_sdk_http_error_does_not_retry_or_leak_body():
+async def test_sdk_http_error_retries_bounded_and_does_not_leak_body():
     async with HTTPFixture(status=429) as fixture:
         provider = OpenAICompatibleProvider(
             OpenAICompatibleConfig(base_url=fixture.url, model="fixture")
@@ -219,6 +219,6 @@ async def test_sdk_http_error_does_not_retry_or_leak_body():
                     event
                     async for event in provider.stream([Message(role="user", content="x")], [])
                 ]
-            assert len(fixture.requests) == 1
+            assert len(fixture.requests) == 3
         finally:
             await provider.close()
