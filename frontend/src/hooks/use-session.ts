@@ -4,6 +4,7 @@ import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
 import { DEFAULT_GROUP, includeSessions, parseSidebar } from "../lib/session-sidebar";
+import { readTurnStream, StreamProtocolError, StreamUnavailableError, type RunStreamEvent } from "../lib/session-stream";
 import { useExecutionPolicy } from "./use-execution-policy";
 import type { ApprovalScope } from "../lib/execution-policy";
 
@@ -23,7 +24,8 @@ function controls(): Record<string, ControlIntent> {
 }
 function saveControls(value: Record<string, ControlIntent>) { const raw = JSON.stringify(value); localStorage.setItem(CONTROL, raw); if (localStorage.getItem(CONTROL) !== raw) throw new Error("无法保存请求"); }
 function pending() { try { return { values: readIntents(localStorage), error: "" }; } catch { return { values: [] as Intent[], error: "无法读取未确认请求" }; } }
-function delay(signal: AbortSignal) { return new Promise<void>(resolve => { const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); }; const timer = setTimeout(finish, 300); signal.addEventListener("abort", finish, { once: true }); }); }
+function delay(signal: AbortSignal, milliseconds = 300) { return new Promise<void>(resolve => { if (signal.aborted) { resolve(); return; } const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); }; const timer = setTimeout(finish, milliseconds); signal.addEventListener("abort", finish, { once: true }); }); }
+function sameValue(left: unknown, right: unknown) { return left === right || JSON.stringify(left) === JSON.stringify(right); }
 export function useSession(apiKey: string, active: boolean, fence: { current: number }, onLegacy: (value: boolean) => void) {
   const initial = new URL(location.href);
   const [workspace, setWorkspace] = useState(initial.searchParams.get("workspace") ?? "");
@@ -41,6 +43,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
   const detailFlights = useRef(new Map<string, { status: Turn["status"]; promise: Promise<void> }>());
   const selected = useRef({ workspace, id }); selected.current = { workspace, id };
   const historyRef = useRef(history); historyRef.current = history;
+  const turnEventsRef = useRef(turnEvents); turnEventsRef.current = turnEvents;
   const keyRef = useRef(apiKey), activeRef = useRef(active), actorRef = useRef(actor); keyRef.current = apiKey; activeRef.current = active; actorRef.current = actor;
   const ready = actor !== null && actor.key === apiKey;
   const membership = ready ? actor.value.workspaces.find(w => w.workspace_id === workspace) : undefined;
@@ -119,22 +122,153 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     if (!active || !ready || !workspace) return;
     const controller = new AbortController(); reader.current = controller;
     const check = capture(), current = () => check() && !controller.signal.aborted;
+    type LiveRun = {
+      turn: Turn; cursor: number; events: Record<string, unknown>[]; published: number;
+      controller: AbortController; frame: (() => void) | null; terminal: boolean;
+      fallback: boolean; fallbackRead: Promise<number | null> | null; approvalsLoading: boolean; approvalsDirty: boolean;
+    };
+    let live: LiveRun | null = null, failure: unknown;
+    let wake: (() => void) | null = null, refreshRequested = false;
+    const clearApprovals = () => setApprovals(previous => previous.length ? [] : previous);
+    function wakeMetadata() { refreshRequested = true; wake?.(); }
+    function waitForMetadata(milliseconds: number) {
+      if (refreshRequested || !current()) { refreshRequested = false; return Promise.resolve(); }
+      return new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); controller.signal.removeEventListener("abort", finish); if (wake === finish) wake = null; refreshRequested = false; resolve(); };
+        const timer = setTimeout(finish, milliseconds);
+        wake = finish; controller.signal.addEventListener("abort", finish, { once: true });
+      });
+    }
+    function owns(run: LiveRun) { return current() && live === run && !run.controller.signal.aborted; }
+    function publish(run: LiveRun) {
+      run.frame?.(); run.frame = null;
+      if (!owns(run) || run.published === run.events.length) return;
+      const captured = [...run.events]; run.published = captured.length;
+      setEvents(captured);
+      setTurnEvents(previous => ({ ...previous, [run.turn.id]: captured }));
+    }
+    function schedulePublish(run: LiveRun) {
+      if (!owns(run) || run.frame) return;
+      if (typeof requestAnimationFrame === "function") {
+        let committed = false;
+        const commit = () => {
+          if (committed) return;
+          committed = true; cancelAnimationFrame(frame); clearTimeout(timer);
+          run.frame = null; publish(run);
+        };
+        const frame = requestAnimationFrame(commit);
+        // Background/occluded views can suspend animation frames while fetch keeps reading.
+        const timer = setTimeout(commit, 50);
+        run.frame = () => { committed = true; cancelAnimationFrame(frame); clearTimeout(timer); };
+      } else {
+        const timer = setTimeout(() => { run.frame = null; publish(run); }, 16);
+        run.frame = () => clearTimeout(timer);
+      }
+    }
+    function stopRun(run: LiveRun) { run.frame?.(); run.frame = null; run.controller.abort(); }
+    function fail(error: unknown) {
+      if (!current() || failure !== undefined) return;
+      failure = error; setNotice(chatReason(error));
+      if (live) { publish(live); stopRun(live); } wakeMetadata();
+    }
+    function refreshApprovals(run: LiveRun) {
+      if (!owns(run) || run.terminal) return;
+      run.approvalsDirty = true;
+      if (run.approvalsLoading) return;
+      run.approvalsLoading = true;
+      void (async () => {
+        try {
+          while (owns(run) && !run.terminal && run.approvalsDirty) {
+            run.approvalsDirty = false;
+            const raw = await request(turnPath(workspace, id, run.turn.id) + "/approvals", apiKey, undefined, run.controller.signal);
+            if (!owns(run) || run.terminal) return;
+            if (!Array.isArray(raw)) throw new Error("审批无效");
+            const pendingApprovals = raw.map(object);
+            if (pendingApprovals.some(item => item.run_id !== run.turn.run_id)) throw new Error("审批身份不匹配");
+            setApprovals(previous => sameValue(previous, pendingApprovals) ? previous : pendingApprovals);
+          }
+        } catch (error) {
+          if (!owns(run) || run.terminal) return;
+          if (error instanceof RequestError && (error.status === 401 || error.status === 403)) fail(error);
+          else setNotice(chatReason(error));
+        } finally { run.approvalsLoading = false; }
+      })();
+    }
+    function receive(run: LiveRun, event: RunStreamEvent) {
+      if (!owns(run)) return;
+      if (event.run_id !== run.turn.run_id || event.seq !== run.cursor) throw new StreamProtocolError("事件身份不匹配");
+      run.events.push(event); run.cursor++;
+      if (event.kind === "terminal") {
+        run.terminal = true; publish(run); clearApprovals(); wakeMetadata();
+      } else {
+        schedulePublish(run);
+        if (event.kind === "approval_request" || event.kind === "approval_reply") refreshApprovals(run);
+      }
+    }
+    async function readEvents(turn: Turn, start: number, target: Record<string, unknown>[], signal = controller.signal, onEvent?: (event: RunStreamEvent) => void) {
+      let next = start, raw: unknown;
+      do {
+        raw = await request(turnPath(workspace, id, turn.id) + "/events?from_seq=" + next, apiKey, undefined, signal);
+        if (!current() || signal.aborted) return null;
+        if (!Array.isArray(raw)) throw new Error("事件无效");
+        for (const item of raw) {
+          const event = object(item);
+          if (event.run_id !== turn.run_id || event.seq !== next || typeof event.kind !== "string") throw new StreamProtocolError("事件身份不匹配");
+          if (onEvent) onEvent(event as RunStreamEvent); else target.push(event);
+          next++;
+        }
+      } while ((raw as unknown[]).length === 64);
+      return next;
+    }
+    async function readFallback(run: LiveRun) {
+      if (run.fallbackRead) return run.fallbackRead;
+      const pending = readEvents(run.turn, run.cursor, run.events, run.controller.signal, event => receive(run, event));
+      run.fallbackRead = pending;
+      try { return await pending; }
+      finally { if (run.fallbackRead === pending) run.fallbackRead = null; }
+    }
+    async function streamRun(run: LiveRun) {
+      let retries = 0;
+      try {
+        while (owns(run) && !run.terminal) {
+          const before = run.cursor;
+          try {
+            await readTurnStream(turnPath(workspace, id, run.turn.id) + "/stream?from_seq=" + run.cursor, apiKey, run.turn.run_id!, run.cursor, run.controller.signal, event => receive(run, event));
+            if (!owns(run) || run.terminal) return;
+          } catch (error) {
+            if (!owns(run)) return;
+            if (error instanceof StreamUnavailableError) {
+              run.fallback = true;
+              const end = await readFallback(run);
+              if (end !== null) publish(run);
+              if (owns(run) && !run.terminal) { await delay(run.controller.signal); wakeMetadata(); }
+              return;
+            }
+            if (error instanceof StreamProtocolError || error instanceof RequestError && error.status < 500 && error.status !== 408 && error.status !== 429) throw error;
+            if (!(error instanceof TypeError) && !(error instanceof RequestError)) throw error;
+          }
+          // The accepted cursor survives EOF and transient failures; only reading is retried.
+          retries = run.cursor > before ? 0 : retries + 1;
+          publish(run);
+          await delay(run.controller.signal, Math.min(5000, 300 * 2 ** Math.min(retries, 4)));
+        }
+      } catch (error) { if (owns(run)) fail(error); }
+    }
+    function startRun(turn: Turn) {
+      if (live?.turn.id === turn.id && live.turn.run_id === turn.run_id) { live.turn = turn; refreshApprovals(live); return; }
+      if (live) { publish(live); stopRun(live); }
+      clearApprovals();
+      const cached = turnEventsRef.current[turn.id];
+      const events = cached?.every((event, seq) => event.run_id === turn.run_id && event.seq === seq) ? [...cached] : [];
+      const run: LiveRun = { turn, cursor: events.length, events, published: -1, controller: new AbortController(), frame: null, terminal: events.at(-1)?.kind === "terminal", fallback: false, fallbackRead: null, approvalsLoading: false, approvalsDirty: false };
+      live = run; publish(run);
+      // Stream and ancillary reads start independently, so a slow approval GET cannot hold text.
+      void streamRun(run); refreshApprovals(run);
+    }
     setReading(true);
     async function load() {
-      let cursor = 0, runId = ""; const timeline: Record<string, unknown>[] = [];
-      let activeRun: { turn: Turn; cursor: number; events: Record<string, unknown>[] } | null = null;
       let turns: Turn[] = [], historyLoaded = false, recoveredPartial = false;
       const hydratedFinished = new Set<string>();
-      async function readEvents(turn: Turn, start: number, target: Record<string, unknown>[]) {
-        let next = start, raw: unknown;
-        do {
-          raw = await request(turnPath(workspace, id, turn.id) + "/events?from_seq=" + next, apiKey, undefined, controller.signal);
-          if (!current()) return null;
-          if (!Array.isArray(raw)) throw new Error("事件无效");
-          for (const item of raw) { const event = object(item); if (event.run_id !== turn.run_id || event.seq !== next) throw new Error("事件身份不匹配"); target.push(event); next++; }
-        } while ((raw as unknown[]).length === 64);
-        return next;
-      }
       async function readFacts(turn: Turn) {
         const value = object(await request(turnPath(workspace, id, turn.id) + "/result", apiKey, undefined, controller.signal));
         if (!current()) return null;
@@ -143,7 +277,7 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       }
       function keepRunData(turn: Turn, runEvents: Record<string, unknown>[], facts?: Record<string, unknown>) {
         const capturedEvents = [...runEvents];
-        setTurnEvents(previous => ({ ...previous, [turn.id]: capturedEvents }));
+        setTurnEvents(previous => sameValue(previous[turn.id], capturedEvents) ? previous : { ...previous, [turn.id]: capturedEvents });
         if (facts) setTurnFacts(previous => ({ ...previous, [turn.id]: facts }));
         setDetails(previous => {
           const prior = previous[turn.id];
@@ -178,26 +312,54 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
           if (offset === 9950) throw new Error("对话列表容量超限");
         }
         if (new Set(sessions.map(s => s.id)).size !== sessions.length) throw new Error("对话列表重复，请刷新");
-        setList(sessions);
-        if (!id) { setSession(null); setHistory([]); return; }
+        setList(previous => sameValue(previous, sessions) ? previous : sessions);
+        if (!id) { setSession(null); setHistory(previous => previous.length ? [] : previous); return; }
         while (current()) {
-          const value = parseSession(await request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal));
-          if (!current()) return; if (value.id !== id || value.workspace_id !== workspace) throw new Error("对话身份不匹配");
+          if (failure !== undefined) throw failure;
+          const sessionRequest = request(sessionPath(workspace) + "/" + encodeURIComponent(id), apiKey, undefined, controller.signal);
           const firstMutable = historyLoaded ? turns.findIndex(t => t.status === "queued" || t.status === "running") : 0;
-          if (historyLoaded && firstMutable < 0) break;
+          if (historyLoaded && firstMutable < 0) { await sessionRequest; break; }
           const offset = historyLoaded ? Math.floor(firstMutable / 50) * 50 : 0;
           const refreshed = historyLoaded ? turns.slice(0, offset) : [];
-          for (let pageOffset = offset; pageOffset <= 1024; pageOffset += 50) {
-            const raw = await request(sessionPath(workspace) + "/" + encodeURIComponent(id) + `/turns?offset=${pageOffset}&limit=50`, apiKey, undefined, controller.signal);
-            if (!current()) return; if (!Array.isArray(raw)) throw new Error("历史无效");
-            const page = raw.map(parseTurn); if (page.some(t => t.session_id !== id || t.workspace_id !== workspace)) throw new Error("历史身份不匹配"); refreshed.push(...page);
-            if (page.length < 50) break;
-            if (pageOffset === 1000) throw new Error("历史容量超限");
-          }
+          const historyRequest = (async () => {
+            for (let pageOffset = offset; pageOffset <= 1024; pageOffset += 50) {
+              const raw = await request(sessionPath(workspace) + "/" + encodeURIComponent(id) + `/turns?offset=${pageOffset}&limit=50`, apiKey, undefined, controller.signal);
+              if (!current()) return;
+              if (!Array.isArray(raw)) throw new Error("历史无效");
+              const page = raw.map(parseTurn);
+              if (page.some(t => t.session_id !== id || t.workspace_id !== workspace)) throw new Error("历史身份不匹配");
+              refreshed.push(...page); if (page.length < 50) break;
+              if (pageOffset === 1000) throw new Error("历史容量超限");
+            }
+          })();
+          const [rawSession] = await Promise.all([sessionRequest, historyRequest]);
+          if (!current()) return;
+          if (failure !== undefined) throw failure;
+          const value = parseSession(rawSession);
+          if (value.id !== id || value.workspace_id !== workspace) throw new Error("对话身份不匹配");
           if (new Set(refreshed.map(t => t.id)).size !== refreshed.length) throw new Error("历史重复");
-          turns = refreshed; historyLoaded = true;
-          setSession(value); setHistory(turns); setReading(false);
-          const running = turns.find(t => t.status === "running");
+          const prior = new Map(turns.map(turn => [turn.id, turn]));
+          const next = refreshed.map(turn => { const old = prior.get(turn.id); return old && sameValue(old, turn) ? old : turn; });
+          if (turns.length !== next.length || next.some((turn, index) => turn !== turns[index])) turns = next;
+          historyLoaded = true;
+          setSession(previous => sameValue(previous, value) ? previous : value);
+          setHistory(previous => previous.length === turns.length && previous.every((turn, index) => turn === turns[index]) ? previous : turns);
+          setReading(false);
+          const running = turns.find(t => t.status === "running" && !!t.run_id);
+          const finished = live && turns.find(t => t.id === live!.turn.id && t.run_id === live!.turn.run_id && t.status !== "running" && t.status !== "queued");
+          let completedRun: LiveRun | null = null;
+          if (finished && live) { completedRun = live; publish(live); stopRun(live); live = null; clearApprovals(); }
+          // Attach to the next running turn before slower final-result hydration.
+          if (running) startRun(running);
+          const fallbackRun = live;
+          if (fallbackRun?.fallback && !fallbackRun.terminal) {
+            await readFallback(fallbackRun);
+          }
+          if (completedRun && finished) {
+            if (!await hydrateFinished(finished, completedRun.events, completedRun.cursor)) return;
+            if (!running) setEvents([...completedRun.events]);
+            recoveredPartial = true;
+          }
           if (!recoveredPartial) {
             const recentPartial = [...turns].reverse().find(t => ["failed", "cancelled", "interrupted"].includes(t.status) && !!t.run_id);
             if (recentPartial && recentPartial.id !== running?.id) {
@@ -207,44 +369,24 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
               if (!running) setEvents([...partialEvents]);
             }
           }
-          if (activeRun) {
-            const finished = turns.find(t => t.id === activeRun!.turn.id && t.run_id === activeRun!.turn.run_id && t.status !== "running" && t.status !== "queued");
-            if (finished) {
-              if (!await hydrateFinished(finished, activeRun.events, activeRun.cursor)) return;
-              setEvents([...activeRun.events]); setApprovals([]); activeRun = null; recoveredPartial = true;
-            }
-          }
           const recentCompleted = [...turns].reverse().find(item => item.status === "completed" && !!item.run_id
             && !!item.transcript?.length && !item.transcript.some(message => message.role === "assistant"));
           if (recentCompleted && !hydratedFinished.has(recentCompleted.id)) {
             const finishedEvents: Record<string, unknown>[] = [];
             if (!await hydrateFinished(recentCompleted, finishedEvents, 0)) return;
           }
-          if (running?.run_id) {
-            if (!activeRun || activeRun.turn.id !== running.id || activeRun.turn.run_id !== running.run_id) {
-              runId = running.run_id; cursor = 0; timeline.length = 0;
-              activeRun = { turn: running, cursor: 0, events: timeline };
-            } else { activeRun.turn = running; runId = running.run_id; cursor = activeRun.cursor; }
-            const end = await readEvents(running, cursor, timeline);
-            if (end === null) return;
-            cursor = end; activeRun.cursor = end;
-            const pendingRaw = await request(turnPath(workspace, id, running.id) + "/approvals", apiKey, undefined, controller.signal);
-            if (!current()) return; if (!Array.isArray(pendingRaw)) throw new Error("审批无效");
-            const pendingApprovals = pendingRaw.map(object);
-            if (pendingApprovals.some(item => item.run_id !== runId)) throw new Error("审批身份不匹配");
-            const capturedEvents = [...timeline];
-            setEvents(capturedEvents); setTurnEvents(previous => ({ ...previous, [running.id]: capturedEvents })); setApprovals(pendingApprovals);
-          } else if (!activeRun) {
-            setApprovals([]);
-            if (!turns.some(t => t.status === "failed" || t.status === "cancelled" || t.status === "interrupted") && !turns.some(t => t.status === "running")) setEvents([]);
+          if (!running && !live) {
+            clearApprovals();
+            if (!turns.some(t => t.status === "failed" || t.status === "cancelled" || t.status === "interrupted")) setEvents(previous => previous.length ? [] : previous);
           }
           if (!turns.some(t => t.status === "running" || t.status === "queued") || value.dispatch_paused && !running) break;
-          await delay(controller.signal);
+          await waitForMetadata(live && !live.fallback && !live.terminal ? 1500 : 300);
         }
       } catch (error) { if (current()) setNotice(chatReason(error)); }
-      finally { if (current()) setReading(false); }
+      finally { if (live) stopRun(live); if (current()) setReading(false); }
     }
-    void load(); return () => controller.abort();
+    void load();
+    return () => { controller.abort(); if (live) stopRun(live); wake?.(); };
   }, [apiKey, active, ready, actor, workspace, id, version, fenceGeneration]);
   function setSessionListView(view: "active" | "archived" | "trash") {
     if (view === listView) return;
@@ -488,7 +630,12 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
           if (object(facts.run).id !== turn.run_id) throw new Error("结果身份不匹配");
         }
         if (!current()) return;
-        setTurnEvents(previous => ({ ...previous, [turn.id]: [...runEvents!] }));
+        setTurnEvents(previous => {
+          const latest = previous[turn.id];
+          // A live stream may have advanced while the detail request was in flight.
+          return latest && latest.length >= runEvents.length && latest.every((event, seq) => event.run_id === turn.run_id && event.seq === seq)
+            ? previous : { ...previous, [turn.id]: [...runEvents] };
+        });
         if (facts) setTurnFacts(previous => ({ ...previous, [turn.id]: facts }));
         setDetails(previous => ({ ...previous, [turn.id]: { facts, trace, events: [...runEvents!], loadedForStatus: turn.status, traceLoaded: true } }));
       } catch (error) { if (current()) setNotice(chatReason(error)); }

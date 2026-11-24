@@ -4,8 +4,8 @@ import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 import { useCopyFeedback } from "../hooks/use-copy-feedback";
-import { projectTurn } from "../lib/session-presentation";
-import { turnPath } from "../lib/session-contracts";
+import { projectTurn, type TurnPresentation } from "../lib/session-presentation";
+import { turnPath, type Turn } from "../lib/session-contracts";
 import { MessageMarkdown } from "./messages/MessageMarkdown";
 import { CopyFeedback } from "./messages/CopyFeedback";
 import { ToolCallCard } from "./ToolCallCard";
@@ -22,6 +22,11 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
   const stickToBottom = useRef(true);
   const selected = useRef(chat.id);
   const refreshedDetails = useRef(new Set<string>());
+  const projections = useRef(new Map<string, { turn: Turn; events: unknown[]; approvals: unknown[]; detailEvents: unknown[] | undefined; facts: Record<string, unknown> | null | undefined; items: TurnPresentation[] }>());
+  useEffect(() => {
+    const ids = new Set(chat.history.map(turn => turn.id));
+    for (const id of projections.current.keys()) if (!ids.has(id)) projections.current.delete(id);
+  }, [chat.history]);
 
   function bottom() {
     stickToBottom.current = true;
@@ -101,7 +106,11 @@ export function ChatHistory({ chat, onTrace, children, empty }: { chat: SessionS
         {chat.history.map(turn => {
           const detail = chat.details[turn.id];
           const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : EMPTY_EVENTS);
-          const items = projectTurn(turn, events, chat.approvals, { events: detail?.events, facts: chat.turnFacts?.[turn.id] ?? detail?.facts });
+          const facts = chat.turnFacts?.[turn.id] ?? detail?.facts;
+          const cached = projections.current.get(turn.id);
+          const items = cached && cached.turn === turn && cached.events === events && cached.approvals === chat.approvals && cached.detailEvents === detail?.events && cached.facts === facts
+            ? cached.items : projectTurn(turn, events, chat.approvals, { events: detail?.events, facts });
+          if (items !== cached?.items) projections.current.set(turn.id, { turn, events, approvals: chat.approvals, detailEvents: detail?.events, facts, items });
           const lastAnswer = items.filter(item => item.type === "assistant").at(-1);
           const waitingApproval = items.some(item => item.type === "tool" && item.approval);
           const working = turn.status === "running" || turn.status === "queued";
