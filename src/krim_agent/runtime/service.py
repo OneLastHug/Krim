@@ -10,13 +10,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from pydantic import JsonValue
 from sqlalchemy import select, update
 
 from krim_agent.config import SESSION_FIELDS, Settings
 from krim_agent.context import builder
+from krim_agent.context.types import ChildRunContext
 from krim_agent.contracts import (
     RETIRED_TARGETS,
     TERMINAL,
@@ -36,9 +37,10 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.providers.unconfigured import UnconfiguredProvider
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.storage.sandbox_models import sandbox_operations
+from krim_agent.subagents.types import StartTask
 from krim_agent.tools.core import Decision, Invocation, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
-from krim_agent.tools.pipeline import _owns, _producing
+from krim_agent.tools.pipeline import _CALL, _PRODUCER, _owns, _producing
 from krim_agent.tools.registry import ToolRegistry
 
 from . import model_step as model_step_module
@@ -46,7 +48,7 @@ from . import sdk_execution as sdk_execution_module
 from .contracts import ExecutionBudget, RunSnapshot, RunStore, settled
 from .engine import AgentLoop, Parked
 from .facts import project_facts
-from .recovery import SDKResume, sdk_resume
+from .recovery import SDKResume, prepare_resume
 from .sdk_loop import DevelopmentSDKLoop
 
 type ExecutionPolicyRecheck = Callable[[str, Invocation, ToolSpec], Awaitable[Decision]]
@@ -131,6 +133,8 @@ class RunBinding:
         )))
         result += tuple(map(id, (
             loop.context_service, loop.session_tool_host, loop.session_media,
+            # 子代理域服务替换视为绑定变更：组合层必须在冻结bindings前注入。
+            loop.subagents,
         )))
         if loop.context_service is not None:
             result += (id(loop.context_service.snapshots),)
@@ -364,6 +368,25 @@ class TurnBinding:
             self.executor.registry.assert_current()
 
 
+class RunLifecycle(Protocol):
+    """可选结算观察（组合层注入SubagentService）；None保持旧行为。
+
+    on_settled 在 store.finish 成功后触发（_drive收尾与_cancel停靠收尾）；
+    on_cancelled 在 stop 请求成功且任务收束后触发；on_stopping 在根run持久
+    request_stop 之后、等待根task收束之前触发——域服务借此先关闭旧tree准入/
+    提高input_version并停止后代，不等根_drive全收尾。域内取消后代不得在
+    持有全局admission锁时跨await，避免父子互锁。域服务用它同事务结算
+    子结果/通知，不要自行包装 _drive。清理/域失败不得覆盖已保存终态；
+    storage_unavailable 不许吞成正常：实现见 _settle_observer。
+    """
+
+    async def on_settled(self, run_id: str, status: str, code: str | None) -> None: ...
+
+    async def on_cancelled(self, run_id: str) -> None: ...
+
+    async def on_stopping(self, run_id: str) -> None: ...
+
+
 class RunService:
     def __init__(
         self,
@@ -373,6 +396,8 @@ class RunService:
         target: dict[str, JsonValue],
         bindings: dict[str, RunBinding] | None = None,
         *,
+        delegates: dict[str, RunBinding] | None = None,
+        subagents_store: Any | None = None,
         execution_policy_recheck: ExecutionPolicyRecheck | None = None,
     ) -> None:
         self.store, self.loop, self.settings = store, loop, settings
@@ -388,6 +413,14 @@ class RunService:
         else:
             selected_bindings = bindings
         self.bindings = MappingProxyType(selected_bindings)
+        # 子代理内部binding命名空间（如 "subagent:<profile>"）；组合层在冻结前
+        # 预建全部路由。与公共bindings分开：模型可配的RunRequest.target仍是
+        # 公共Literal，profile路由键只允许宿主经 start_delegate 持久化。
+        self.delegates = MappingProxyType(dict(delegates) if delegates else {})
+        # 组合层注入 SubagentStore（subagents.storage）：start_delegate 的
+        # run+child_run映射同事务写口。None时子准入直接拒绝，旧行为不变。
+        self.subagents_store = subagents_store
+        self.lifecycle: RunLifecycle | None = None
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._admission = asyncio.Lock()
         self._approval_lock = asyncio.Lock()
@@ -463,6 +496,54 @@ class RunService:
                 request, internal=True, expected=digest, turn_id=turn_id
             )
 
+    async def start_delegate(self, spec: StartTask) -> RunView:
+        """生产子运行内部准入（宿主SubagentService专用）：不建用户turn、不借评测入口。
+
+        复用同一admission锁、请求键幂等、binding核对、容量核算、任务登记与
+        producer/approval/stop/drain机制。run与child_run归属映射由
+        store.start_task同事务落库；binding按持久描述符key选delegates，完整
+        descriptor逐字节核对，模型可填的RunRequest.target不参与路由。调用方
+        责任：域服务先经SessionToolHost producer fence核对发起run与树内
+        parent关系（可用 caller_run() 辅助），本方法只做宿主准入。
+        """
+        if not isinstance(spec, StartTask):
+            raise ServiceError("invalid_input", 422)
+        request = spec.request
+        if not request.request_key.startswith("ac-child.") or "context" in spec.target:
+            # ac-child.是内部前缀；context由store.start_task同事务构造。
+            raise ServiceError("invalid_input", 422)
+        async with self._admission:
+            return await self._admit_locked(request, internal=True, delegate=spec)
+
+    async def cancel_delegate(self, run_id: str) -> RunView:
+        """run内工具链可用的内部取消入口：不受 _external(self_wait) 限制。
+
+        仅允许child_run映射中的运行（宿主域先校验同树/activation）；用户根
+        run仍只能走外部cancel。机制与_cancel一致：先持久stop再收束任务。
+        """
+        from krim_agent.storage.sessions import child_run_owner
+
+        owner = await self.store.work_read(lambda conn: child_run_owner(conn, run_id))
+        if owner is None:
+            raise ServiceError("not_found", 404)
+        return await settled(self._cancel(run_id))
+
+    def caller_run(self) -> str | None:
+        """当前协程处于本服务注册run的工具链内时返回producer run id。"""
+        producer, call = _PRODUCER.get(), _CALL.get()
+        if producer is None or call is None or not _owns(self, self.tasks):
+            return None
+        return producer.run_id
+
+    def _binding_for_run(self, snapshot: RunSnapshot) -> RunBinding | None:
+        """按持久run target选binding：公共键走bindings，子代理键走delegates。"""
+        declared = snapshot.target.get("key")
+        if isinstance(declared, str) and declared.startswith("subagent:"):
+            if snapshot.request.target in RETIRED_TARGETS:
+                return None
+            return self.delegates.get(declared)
+        return self.bindings.get(snapshot.request.target)
+
     async def _admit_locked(
         self,
         request: RunRequest,
@@ -470,6 +551,7 @@ class RunService:
         internal: bool = False,
         expected: str | None = None,
         turn_id: str | None = None,
+        delegate: StartTask | None = None,
     ) -> RunView:
         if self.closed:
             raise ServiceError("closed", 503)
@@ -488,11 +570,19 @@ class RunService:
         if (self.settings.max_input_bytes is not None
                 and len(request.text.encode()) > self.settings.max_input_bytes):
             raise ServiceError("input_limit", 422)
-        if request.request_key.startswith(("lc-eval.", "ac-turn.")) and not internal:
+        if request.request_key.startswith(("lc-eval.", "ac-turn.", "ac-child.")) and not internal:
             raise ServiceError("invalid_input", 422)
         if request.target in RETIRED_TARGETS:
             raise ServiceError("target_retired", 410)
-        binding = self.bindings.get(request.target)
+        if delegate is not None:
+            # 子代理路由按宿主持久化描述符key选内部binding；模型可填的
+            # RunRequest.target不参与选择，完整descriptor必须逐字节一致。
+            route = delegate.target.get("key") if isinstance(delegate.target, dict) else None
+            binding = self.delegates.get(route) if isinstance(route, str) else None
+            if binding is None:
+                raise ServiceError("provider_not_configured", 503)
+        else:
+            binding = self.bindings.get(request.target)
         if binding is None:
             if request.target == "target-http":
                 raise ServiceError("provider_not_configured", 503)
@@ -501,9 +591,13 @@ class RunService:
             raise ServiceError("provider_not_configured", 503)
         binding.assert_current()
         if (binding.loop.sandbox is not None or isinstance(binding.loop, DevelopmentSDKLoop)) \
-                and turn_id is None:
+                and turn_id is None and delegate is None:
             raise ServiceError("workspace_contract_required")
         if expected is not None and fingerprint(parse_json(binding.descriptor_json)) != expected:
+            raise ServiceError("target_binding_changed")
+        if delegate is not None and fingerprint(delegate.target) != fingerprint(
+            parse_json(binding.descriptor_json)
+        ):
             raise ServiceError("target_binding_changed")
         if (binding.settings.max_input_bytes is not None
                 and len(request.text.encode()) > binding.settings.max_input_bytes):
@@ -516,7 +610,16 @@ class RunService:
         descriptor = cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
         executing: RunBinding | TurnBinding = binding
         provisional_connections: tuple[Any, ...] = ()
-        if turn_id is None:
+        if delegate is not None:
+            # 同一事务插入run与child_run归属映射（SubagentStore.start_task）。
+            if self.subagents_store is None:
+                raise ServiceError("provider_not_configured", 503)
+            outcome = await self.subagents_store.start_task(delegate)
+            run = await self.store.by_key(request.request_key)
+            if run is None:
+                raise ServiceError("facts_corrupt")
+            created = bool(outcome.get("created"))
+        elif turn_id is None:
             run, created = await self.store.begin(request, descriptor)
         else:
             executor = None
@@ -595,9 +698,12 @@ class RunService:
             session_scope = None
             executing: RunBinding | TurnBinding = binding
             base = binding.base if isinstance(binding, TurnBinding) else binding
-            gate_session = getattr(
-                (await self.store.snapshot(run.id)).session_context, "session_id", None
-            )
+            initial_context = (await self.store.snapshot(run.id)).session_context
+            if isinstance(initial_context, ChildRunContext):
+                # 独立子代理启动闸门：不与用户会话模式CAS排序争用（ADR-0015）。
+                gate_session = "agent:" + initial_context.agent_id
+            else:
+                gate_session = getattr(initial_context, "session_id", None)
 
             def startup_gate() -> asyncio.Lock | None:
                 # 非会话运行不进入会话执行策略闸门。
@@ -610,7 +716,13 @@ class RunService:
                     if recovery_checkpoint is None:
                         raise ServiceError("facts_corrupt")
                     data, _stored = recovery_checkpoint
-                    remaining = data.get("budget_remaining")
+                    if data.get("format") == "isolated-bootstrap/1":
+                        budget = data.get("budget")
+                        remaining = (
+                            budget.get("remaining") if isinstance(budget, dict) else None
+                        )
+                    else:
+                        remaining = data.get("budget_remaining")
                     deadline = (None if remaining is None
                                 else asyncio.get_running_loop().time()
                                 + max(0.0, float(remaining)))
@@ -619,6 +731,11 @@ class RunService:
                     deadline = (None if timeout is None else
                                 asyncio.get_running_loop().time() + max(
                                     0, run.created_at + timeout - time.time()))
+                    if isinstance(initial_context, ChildRunContext):
+                        # 子预算取child配置期限与根run剩余预算的交集；根不在内存
+                        # （已结算/重启恢复）时按自身期限。冷恢复沿checkpoint
+                        # remaining，不在此分支。
+                        deadline = await self._child_deadline(initial_context, deadline)
                 budget = ExecutionBudget(deadline)
                 self._execution_budgets[run.id] = budget
                 timeout_context = asyncio.timeout_at(deadline)
@@ -637,7 +754,9 @@ class RunService:
                         }):
                             # 停靠后环境（目标档案）变了：不静默续跑（ADR-0015 硬门）
                             raise ServiceError("target_binding_changed")
-                        if snapshot.session_context is not None:
+                        if snapshot.session_context is not None and not isinstance(
+                            snapshot.session_context, ChildRunContext
+                        ):
                             from krim_agent.context import builder as context_builder
 
                             try:
@@ -686,7 +805,7 @@ class RunService:
                             if isinstance(call_id, str) and call_id:
                                 replies.setdefault(call_id, True)
                         data, stored = recovery_checkpoint
-                        recovery = sdk_resume(data, stored, replies)
+                        recovery = prepare_resume(data, stored, replies)
                     if self.session_tool_host is not None:
                         current = await self.store.snapshot(run.id)
                         if current.session_context is not None:
@@ -772,6 +891,7 @@ class RunService:
                     if not parked and base.loop.sandbox is not None:
                         from krim_agent.sandbox.tasks import cancel_run_tasks
 
+                        failure_code: str | None = None
                         try:
                             await cancel_run_tasks(base.loop.sandbox.service, run.id)
                         except ServiceError as error:
@@ -829,10 +949,16 @@ class RunService:
                                         )
                                     )
                             await base.loop.sandbox.service.store._write(mark_tasks_unknown)
-                            if status == "completed":
-                                status, code = "failed", error.code
+                        except Exception:
+                            # 清理通道本身损坏（宿主/桩缺陷）也不许让run永远
+                            # 卡在running：终态照常落库，清理按失败保留诊断。
+                            failure_code = "sandbox_cleanup_failed"
+                        if status == "completed" and failure_code is not None:
+                            status, code = "failed", failure_code
                     if not parked:
-                        await self.store.finish(run.id, status, code)
+                        await self._settle_observer(
+                            run.id, await self.store.finish(run.id, status, code)
+                        )
                 finally:
                     self._finalizing.discard(run.id)
                     self._cancelled.discard(run.id)
@@ -889,10 +1015,25 @@ class RunService:
     async def _cancel(self, run_id: str) -> RunView:
         task = self.tasks.get(run_id)
         error: ServiceError | None = None
+        pending_storage: ServiceError | None = None
         try:
             # Persist stop before joining: parking may commit while the owner
             # is finalizing, but cannot discard this request or resume the run.
             await self.store.request_stop(run_id)
+            lifecycle = self.lifecycle
+            if lifecycle is not None:
+                # 根已持久停止、尚未收束：域先关tree准入并停止后代，
+                # 不等根_drive收尾（on_cancelled太迟）。此处不持admission锁。
+                try:
+                    await lifecycle.on_stopping(run_id)
+                except asyncio.CancelledError:
+                    raise
+                except ServiceError as hook_error:
+                    # 全局存储故障不许吞成正常：完成必要cancel后原样抛。
+                    if hook_error.code == "storage_unavailable":
+                        pending_storage = hook_error
+                except Exception:
+                    pass  # 域收尾失败不阻塞根收束；残余由settle/close兜底
         except ServiceError as failure:
             error = failure
         finally:
@@ -909,17 +1050,96 @@ class RunService:
                 await settled(task)
         if error is not None:
             raise error
+        lifecycle = self.lifecycle
+        if lifecycle is not None:
+            try:
+                await lifecycle.on_cancelled(run_id)
+            except asyncio.CancelledError:
+                raise
+            except ServiceError as hook_error:
+                # 全局存储故障不许吞成正常：完成必要cancel后原样抛。
+                if hook_error.code == "storage_unavailable" and pending_storage is None:
+                    pending_storage = hook_error
+            except Exception:
+                pass  # 取消通知失败不影响既有取消语义；settle仍是权威路径
         snapshot = await self.store.snapshot(run_id)
         if snapshot.run.status == "awaiting":
-            binding = self.bindings.get(snapshot.request.target)
+            binding = self._binding_for_run(snapshot)
             if binding is not None and isinstance(binding.loop, DevelopmentSDKLoop):
                 await binding.loop.development_cleanup(run_id)
             if binding is not None and binding.loop.sandbox is not None:
                 from krim_agent.sandbox.tasks import cancel_run_tasks
 
                 await cancel_run_tasks(binding.loop.sandbox.service, run_id)
-            return await self.store.finish(run_id, "aborted", "cancelled")
+            view = await self.store.finish(run_id, "aborted", "cancelled")
+            await self._settle_observer(run_id, view)
+            if pending_storage is not None:
+                raise pending_storage
+            return view
+        if pending_storage is not None:
+            raise pending_storage
         return snapshot.run
+
+    async def _child_deadline(
+        self, context: ChildRunContext, deadline: float | None
+    ) -> float | None:
+        """子预算=child期限 ∧ 根剩余；根剩余≤0→立即到期，不给新满预算。
+
+        根预算不在内存（重启/停靠/已结算）时从持久状态恢复守卫：停靠
+        checkpoint的budget_remaining；根终态或无checkpoint按0；tree无根
+        锚点同样按立即到期。plan §8.3：子预算来自根剩余。
+        """
+        from krim_agent.storage.sessions import (
+            tree_root_budget_remaining,
+            tree_root_run_id,
+        )
+
+        now = asyncio.get_running_loop().time()
+        try:
+            root_run_id = await self.store.work_read(
+                lambda conn: tree_root_run_id(conn, context.tree_id)
+            )
+        except ServiceError:
+            root_run_id = None
+        if root_run_id is None:
+            return now  # 无根锚点：不给新满预算
+        root_budget = self._execution_budgets.get(root_run_id)
+        if root_budget is not None:
+            remaining = root_budget.remaining
+        else:
+            try:
+                remaining = await self.store.work_read(
+                    lambda conn: tree_root_budget_remaining(conn, root_run_id)
+                )
+            except ServiceError:
+                remaining = 0.0  # 存储异常按守卫收紧，不放大额度
+        if remaining is None:
+            return deadline  # 根无期限/预算池已释放：子沿用自身期限
+        if remaining <= 0:
+            return now  # 根预算耗尽：子立即到期，不给新满预算
+        capped = now + remaining
+        return capped if deadline is None else min(deadline, capped)
+
+    async def _settle_observer(self, run_id: str, view: RunView) -> None:
+        """结算观察：域失败不覆盖已保存终态；storage_unavailable绝不吞成正常。
+
+        域结算异常被消费（run终态已落库，下一次通知/批复/取消仍可补结算）；
+        全局存储故障保持store不健康语义，置位slot_changed唤醒调度方停止
+        新准入后原样抛出，由任务回调按既有失败语义处理。
+        """
+        lifecycle = self.lifecycle
+        if lifecycle is None:
+            return
+        try:
+            await lifecycle.on_settled(run_id, view.status, view.code)
+        except asyncio.CancelledError:
+            raise
+        except ServiceError as error:
+            if error.code == "storage_unavailable" or not self.store.healthy:
+                self.slot_changed.set()
+                raise
+        except Exception:
+            pass  # 观察者缺陷不推翻已落库的run终态
 
     async def _approval_request(
         self, invocation: Invocation, budget_remaining: float | None
@@ -943,7 +1163,7 @@ class RunService:
                 if isinstance(spec.get("source"), dict):
                     provenance["source"] = spec["source"]
                 break
-        binding = self.bindings.get(snapshot.request.target)
+        binding = self._binding_for_run(snapshot)
         if binding is None:
             raise ServiceError("target_binding_changed")
         timeout = binding.settings.approval_timeout
@@ -962,7 +1182,7 @@ class RunService:
             "budget_remaining": budget_remaining,
             **provenance,
         }
-        selected_binding = self.bindings.get(snapshot.request.target)
+        selected_binding = self._binding_for_run(snapshot)
         if selected_binding is not None and isinstance(selected_binding.loop, DevelopmentSDKLoop):
             projection = selected_binding.loop.development_approval_projection
             if projection is not None:
@@ -1023,7 +1243,9 @@ class RunService:
             from krim_agent.storage.models import runs, turns
 
             async def bound_runs(conn: Any) -> list[str]:
-                return [
+                from krim_agent.storage.sessions import session_bound_child_runs
+
+                rows = [
                     row[0] for row in (await conn.execute(
                         select(runs.c.id)
                         .select_from(turns.join(runs, turns.c.run_id == runs.c.id))
@@ -1031,6 +1253,8 @@ class RunService:
                                runs.c.status == "awaiting")
                     )).all()
                 ]
+                # 子运行经child_run映射纳入同一会话的重评与批准路由（plan 8.2）。
+                return rows + await session_bound_child_runs(conn, session_id)
 
             try:
                 candidates.update(await self.store.work_read(bound_runs))
@@ -1084,7 +1308,7 @@ class RunService:
             return 0
         # Retired or changed targets stay parked: never evaluate old approval
         # requests against the base loop's unrelated tool registry.
-        binding = self.bindings.get(snapshot.request.target)
+        binding = self._binding_for_run(snapshot)
         if binding is None or snapshot.request.target in RETIRED_TARGETS:
             return 0
         registry = binding.loop.executor.registry
@@ -1264,7 +1488,7 @@ class RunService:
         target = snapshot.request.target
         if target in RETIRED_TARGETS:
             return False
-        binding = self.bindings.get(target)
+        binding = self._binding_for_run(snapshot)
         if binding is None:
             return False  # 存储的目标键已不存在：留给 recover 定稿，不猜着续跑
         resumed = asyncio.create_task(
@@ -1354,8 +1578,9 @@ class RunService:
                     # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
                     self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
-            if (snapshot.request.target in RETIRED_TARGETS
-                    or snapshot.request.target not in self.bindings):
+            if snapshot.request.target in RETIRED_TARGETS or self._binding_for_run(
+                snapshot
+            ) is None:
                 raise ServiceError("approval_unavailable")
             if snapshot.run.status in TERMINAL or snapshot.run.stop_requested:
                 raise ServiceError("approval_unavailable")

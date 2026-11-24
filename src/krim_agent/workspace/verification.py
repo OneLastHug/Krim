@@ -8,18 +8,22 @@ from __future__ import annotations
 
 from krim_agent.validation.completion import condition as _condition
 from krim_agent.workspace.terminal import (
+    _TERMINAL_HELPERS,
     SCHEMA,
     ConditionResult,
     VerificationCommitRejected,
     VerificationIdentity,
     VerificationResult,
+    terminal_attempt_same_conn,
 )
 
 __all__ = [
+    "_TERMINAL_HELPERS",
     "_condition",
     "SCHEMA",
     "ConditionResult",
     "VerificationCommitRejected",
     "VerificationIdentity",
     "VerificationResult",
+    "terminal_attempt_same_conn",
 ]

@@ -7,6 +7,7 @@ import { readObsState, writeObsState } from "../src/observability/obs-route";
 import type { ObsRequestRecord } from "../src/observability/obs-contracts";
 import { contextRequestSnapshot } from "../src/hooks/use-session-context";
 import { formatCount, formatReportedTokens, formatTokens } from "../src/observability/obs-format";
+import { parseTracePage } from "../src/lib/trace-contracts";
 
 
 test("原Trace轮次深链进入运行诊断，新增观测链接作为同一分区别名", () => {
@@ -25,6 +26,29 @@ test("原Trace轮次深链进入运行诊断，新增观测链接作为同一分
 /** 来自隔离验收服务（合成脚本运行）的真实响应；不含任何正文。 */
 
 const page = parseObservationsPage(pageFixture);
+
+test("开发目标记录不会使整个观测列表失效", () => {
+  const raw = structuredClone(pageFixture);
+  raw.items[0]!.target_key = "target-development";
+  const before = JSON.stringify(raw);
+  expect(parseObservationsPage(raw).items[0]!.target_key).toBe("target-development");
+  expect(JSON.stringify(raw)).toBe(before);
+  raw.items[0]!.target_key = "unknown-target";
+  expect(() => parseObservationsPage(raw)).toThrow();
+});
+
+test("兼容 Trace 列表接受正式开发目标而不放宽未知目标", () => {
+  const item = page.items[0]!;
+  const raw = { items: [{
+    source_kind: item.source_kind, run_id: item.run_id, trace_id: item.trace_id,
+    session_id: item.session_id, turn_id: item.turn_id, session_title: item.session_title,
+    target_key: "target-development", status: item.status,
+    created_at: item.created_at, finished_at: item.finished_at,
+  }], next_cursor: null };
+  expect(parseTracePage(raw).items[0]!.target_key).toBe("target-development");
+  raw.items[0]!.target_key = "unknown-target";
+  expect(() => parseTracePage(raw)).toThrow();
+});
 
 function tokenRequest(id: string, overrides: Partial<ObsRequestRecord> = {}): ObsRequestRecord {
   return { id, step_index: 0, purpose: "task", status: "ok", started_at: 1, ended_at: 2,

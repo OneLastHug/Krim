@@ -6,14 +6,14 @@ import { PlanModeStatus } from "./PlanModeStatus";
 import { Button } from "./ui/button";
 import "./session-features.css";
 
-export function SessionFeatures({ chat, apiKey, active, fence }: {
-  chat: SessionState; apiKey: string; active: boolean; fence: { current: number };
+export function SessionFeatures({ chat, apiKey, active, fence, backgroundRunning = false }: {
+  chat: SessionState; apiKey: string; active: boolean; fence: { current: number }; backgroundRunning?: boolean;
 }) {
   const features = useSessionFeatures({
     apiKey, principalId: chat.actor?.principal_id ?? "", generation: chat.actor?.generation ?? 0,
     workspaceId: chat.workspace, sessionId: chat.id,
     enabled: active && chat.ready && !!chat.session && !chat.session.deleted_at,
-    running: chat.history.some(turn => turn.status === "running" || turn.status === "queued"),
+    running: backgroundRunning || chat.history.some(turn => turn.status === "running" || turn.status === "queued"),
     fence,
   }, chat.refresh);
   const canRespond = chat.canWrite && chat.session?.owner_id === chat.actor?.principal_id

@@ -16,6 +16,7 @@ from krim_agent.config import Settings
 from krim_agent.context import builder
 from krim_agent.context.serialization import fingerprint as unlimited_fingerprint
 from krim_agent.context.types import (
+    ChildRunContext,
     CompactionPolicy,
     ContextPolicy,
     ContextSnapshot,
@@ -47,8 +48,24 @@ from krim_agent.workspace.types import ExecutionAccess, WorkspaceTurnRequest
 from . import work as work_sql
 from .account_models import accounts
 from .mcp_models import turn_mcp
-from .models import runs, session_controls, sessions, turns, work_turns
+from .models import (
+    park_checkpoints,
+    runs,
+    session_controls,
+    sessions,
+    turns,
+    work_turns,
+)
 from .sandbox_models import sandbox_projects, sandbox_session_bindings, sandbox_turn_contracts
+from .subagent_models import (
+    subagent_child_runs,
+    subagent_members,
+    subagent_tasks,
+    subagent_trees,
+)
+
+CHILD_CONTEXT_SCHEMA_VERSION = 5
+CHILD_REQUEST_PREFIX = "ac-child."
 
 if TYPE_CHECKING:
     from .sqlite import SQLiteStore
@@ -114,7 +131,9 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
+    if store.schema_version not in {
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    }:
         raise ServiceError("schema_upgrade_required")
 
 
@@ -1202,11 +1221,19 @@ async def source(
     | WorkspaceSessionContext
     | None
 ):
-    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
+    if version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}:
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:
         # context只由内部Session准入事务写入；旧合法请求前缀不能声明来源。
+        target_context = target.get("context")
+        if (
+            isinstance(target_context, dict)
+            and target_context.get("schema_version") == CHILD_CONTEXT_SCHEMA_VERSION
+            and request_key.startswith(CHILD_REQUEST_PREFIX)
+        ):
+            # 子运行没有turns行：由child_run映射、成员与任务输入重建归属上下文。
+            return await child_run_context(conn, run_id, target_context)
         if "context" in target:
             raise ServiceError("facts_corrupt")
         return None
@@ -1443,6 +1470,8 @@ def task_transcript(snapshot: RunSnapshot) -> list[Message]:
 async def finish_turn(conn: AsyncConnection, snapshot: RunSnapshot) -> None:
     if snapshot.session_context is None:
         return
+    if isinstance(snapshot.session_context, ChildRunContext):
+        return  # 子运行无turns行：结果与通知由子代理域结算，不动根owner turn
     if isinstance(snapshot.session_context, WorkspaceSessionContext):
         await work_sql.finish(
             conn, snapshot.run.id, interrupted=snapshot.run.status == "interrupted"
@@ -1523,7 +1552,7 @@ async def owned_active_runs(store: SQLiteStore, principal_id: str) -> list[str]:
     """Include parked runs even when their producer has already ended."""
 
     async def operation(conn: AsyncConnection) -> list[str]:
-        return list(
+        owned = list(
             await conn.scalars(
                 select(runs.c.id)
                 .join(turns, turns.c.run_id == runs.c.id)
@@ -1532,6 +1561,17 @@ async def owned_active_runs(store: SQLiteStore, principal_id: str) -> list[str]:
                 .order_by(runs.c.created_at, runs.c.id)
             )
         )
+        # 子运行经child_run映射归属根会话owner：撤销收敛同样覆盖（含停靠）。
+        owned.extend(await conn.scalars(
+            select(runs.c.id)
+            .select_from(
+                subagent_child_runs.join(
+                    sessions, subagent_child_runs.c.owner_session_id == sessions.c.id
+                ).join(runs, subagent_child_runs.c.run_id == runs.c.id)
+            )
+            .where(sessions.c.owner_id == principal_id, runs.c.status.not_in(TERMINAL))
+        ))
+        return owned
 
     return await read(store, operation)
 
@@ -2002,3 +2042,192 @@ async def workspace_history(
         builder.validate_groups(messages)
         result.append({"ref": dict(ref), "messages": messages})
     return result
+
+
+async def child_run_owner(conn: AsyncConnection, run_id: str) -> dict[str, Any] | None:
+    """child run 到根owner的映射行；session_tools scope、撤销与内部取消入口共用。
+
+    返回键与turns JOIN行对齐（session_id/workspace_id/owner_id/turn_id/
+    session_status/run_status/stop_requested），并附 tree_id/agent_id/
+    activation_id/task_id 供子代理域寻址；project_id 由调用方按owner会话补查。
+    """
+    root_run = runs.alias()
+    row = (
+        (
+            await conn.execute(
+                select(
+                    subagent_child_runs.c.task_id,
+                    subagent_child_runs.c.agent_id,
+                    subagent_child_runs.c.activation_id,
+                    subagent_child_runs.c.tree_id,
+                    subagent_child_runs.c.owner_session_id,
+                    subagent_child_runs.c.owner_turn_id,
+                    sessions.c.id.label("session_id"),
+                    sessions.c.workspace_id,
+                    sessions.c.owner_id,
+                    sessions.c.status.label("session_status"),
+                    runs.c.stop_requested,
+                    runs.c.status.label("run_status"),
+                    # 根准入状态：tree关闭或根run已请求停止时，子运行不得再
+                    # 执行敏感工具（scope创建与每次策略resolve都重读）。
+                    subagent_trees.c.status.label("tree_status"),
+                    root_run.c.stop_requested.label("root_stop_requested"),
+                )
+                .select_from(
+                    subagent_child_runs.join(
+                        sessions, subagent_child_runs.c.owner_session_id == sessions.c.id
+                    )
+                    .join(runs, subagent_child_runs.c.run_id == runs.c.id)
+                    .join(subagent_trees, subagent_child_runs.c.tree_id == subagent_trees.c.id)
+                    .join(root_run, subagent_trees.c.root_run_id == root_run.c.id, isouter=True)
+                )
+                .where(subagent_child_runs.c.run_id == run_id)
+            )
+        )
+        .mappings()
+        .first()
+    )
+    return dict(row) if row is not None else None
+
+
+async def tree_root_run_id(conn: AsyncConnection, tree_id: str) -> str | None:
+    """代理树绑定以根run为预算锚点；无根run的树返回None。"""
+    return await conn.scalar(
+        select(subagent_trees.c.root_run_id).where(subagent_trees.c.id == tree_id)
+    )
+
+
+async def tree_root_budget_remaining(
+    conn: AsyncConnection, root_run_id: str
+) -> float | None:
+    """根预算不在内存时的持久守卫；None表示预算池已释放（子沿用自身期限）。
+
+    根completed→余额归还池，返回None（委派预留已计，子按自身期限推进）；
+    根failed/aborted/interrupted→0守卫，不给新满预算；停靠checkpoint携带
+    budget_remaining→返回其剩余；非终态无checkpoint（重启边界）→0守卫。
+    其余正值≥0。
+    """
+    status = await conn.scalar(select(runs.c.status).where(runs.c.id == root_run_id))
+    if status is None:
+        return 0.0
+    if status == "completed":
+        return None
+    if status in TERMINAL:
+        return 0.0
+    row = (
+        (
+            await conn.execute(
+                select(park_checkpoints).where(park_checkpoints.c.run_id == root_run_id)
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is not None and isinstance(row["checkpoint"], dict):
+        value = row["checkpoint"].get("budget_remaining")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0.0, float(value))
+    return 0.0
+
+
+async def session_bound_child_runs(conn: AsyncConnection, session_id: str) -> list[str]:
+    """会话模式下重评/批准路由涉及的停靠子运行；与turns JOIN结果并集使用。"""
+    return list(
+        await conn.scalars(
+            select(runs.c.id)
+            .select_from(
+                subagent_child_runs.join(runs, subagent_child_runs.c.run_id == runs.c.id)
+            )
+            .where(
+                subagent_child_runs.c.owner_session_id == session_id,
+                runs.c.status == "awaiting",
+            )
+        )
+    )
+
+
+async def child_run_context(
+    conn: AsyncConnection, run_id: str, target_context: dict[str, JsonValue]
+) -> ChildRunContext:
+    """schema5描述符与持久child_run/成员/树/任务行逐字段核对；不一致不猜。
+
+    独立历史messages读自已验证task.input["history"]（Message dumps，不含
+    system）；缺省为fresh空历史。任何字段不一致一律facts_corrupt。
+    """
+    row = (
+        (
+            await conn.execute(
+                select(subagent_child_runs).where(subagent_child_runs.c.run_id == run_id)
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ServiceError("facts_corrupt")
+    task = (
+        (
+            await conn.execute(select(subagent_tasks).where(subagent_tasks.c.id == row["task_id"]))
+        )
+        .mappings()
+        .first()
+    )
+    member = (
+        (
+            await conn.execute(
+                select(subagent_members).where(subagent_members.c.id == row["agent_id"])
+            )
+        )
+        .mappings()
+        .first()
+    )
+    tree = (
+        (
+            await conn.execute(select(subagent_trees).where(subagent_trees.c.id == row["tree_id"]))
+        )
+        .mappings()
+        .first()
+    )
+    if task is None or member is None or tree is None:
+        raise ServiceError("facts_corrupt")
+    expected = {
+        "schema_version": CHILD_CONTEXT_SCHEMA_VERSION,
+        "tree_id": row["tree_id"],
+        "agent_id": row["agent_id"],
+        "activation_id": row["activation_id"],
+        "task_id": row["task_id"],
+        "owner_session_id": row["owner_session_id"],
+        "owner_turn_id": row["owner_turn_id"],
+        "owner_id": tree["owner_id"],
+        "workspace_id": tree["workspace_id"],
+        "depth": member["depth"],
+        "parent_run_id": task["parent_run_id"],
+        "profile": member["profile"],
+        "path": member["path"],
+    }
+    if any(target_context.get(key) != value for key, value in expected.items()):
+        raise ServiceError("facts_corrupt")
+    raw_messages = task["input"].get("history") if isinstance(task["input"], dict) else None
+    messages: list[Message] = []
+    if raw_messages is not None:
+        if not isinstance(raw_messages, list):
+            raise ServiceError("facts_corrupt")
+        try:
+            messages = [Message.model_validate(item) for item in raw_messages]
+        except ValueError:
+            raise ServiceError("facts_corrupt") from None
+    return ChildRunContext(
+        workspace_id=tree["workspace_id"],
+        session_id=row["owner_session_id"],
+        owner_id=tree["owner_id"],
+        turn_id=row["owner_turn_id"],
+        tree_id=row["tree_id"],
+        agent_id=row["agent_id"],
+        activation_id=row["activation_id"],
+        task_id=row["task_id"],
+        parent_run_id=task["parent_run_id"],
+        depth=member["depth"],
+        profile=member["profile"],
+        path=member["path"],
+        messages=tuple(messages),
+    )

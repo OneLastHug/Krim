@@ -158,10 +158,9 @@ def _event_index(events: tuple[RunEvent, ...], run_id: str | None = None) -> _Ev
     started_call_ids = {cast(str, event.data["call_id"]) for event in starts.values()}
     if not intents.issubset(started_call_ids):
         raise _facts_corrupt()
-    if not set(calls).issubset(starts):
-        # A new model response missing admission facts is inconsistent; it is not
-        # safe to invent a tool result or infer whether its effects were dispatched.
-        raise _facts_corrupt()
+    # A completed model response may precede a rejected or interrupted admission
+    # batch. Missing admission is not evidence of execution or of non-execution:
+    # consumers must retain it as unknown, never as a successful result.
     return _EventIndex(tuple(steps), calls, starts, ends, frozenset(intents))
 
 
@@ -184,7 +183,22 @@ def transcript(snapshot: RunSnapshot) -> list[Message]:
             if end is None:
                 if snapshot.run.status == "completed":
                     raise _facts_corrupt()
-                start = index.starts[provider_id]
+                start = index.starts.get(provider_id)
+                if start is None:
+                    result.append(Message(
+                        role="tool",
+                        call_id=provider_id,
+                        content=encoded({
+                            "status": "unknown",
+                            "source": "persisted_model_call_without_tool_start",
+                            "executor_started": None,
+                            "result_available": None,
+                            "execution_outcome": "unknown",
+                            "replay_forbidden": True,
+                            "note": "工具准入记录缺失；不推断是否执行，未知副作用不得自动重放。",
+                        }),
+                    ))
+                    continue
                 result.append(
                     Message(
                         role="tool",
@@ -250,9 +264,9 @@ def deterministic_signature(events: tuple[RunEvent, ...]) -> str | None:
         normalized_calls: list[JsonValue] = []
         for call in calls:
             provider_id = cast(str, call["id"])
-            start = index.starts[provider_id]
+            start = index.starts.get(provider_id)
             end = index.ends.get(provider_id)
-            if end is None:
+            if start is None or end is None:
                 return None
             data = end.data
             status = data.get("status")
@@ -281,8 +295,10 @@ def deterministic_signature(events: tuple[RunEvent, ...]) -> str | None:
 
 
 def has_unknown_execution(events: tuple[RunEvent, ...]) -> bool:
-    """Whether a dispatched tool has no reliable terminal result record."""
+    """Whether a declared tool has no reliable admission or terminal record."""
     index = _event_index(events)
+    if not set(index.calls).issubset(index.starts):
+        return True
     for provider_id, start in index.starts.items():
         end = index.ends.get(provider_id)
         host_call_id = start.data.get("call_id")

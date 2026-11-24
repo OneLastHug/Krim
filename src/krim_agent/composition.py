@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -53,6 +54,8 @@ from krim_agent.security import LOCAL, AccessPolicy, PrincipalContext
 from krim_agent.sessions.service import SessionService
 from krim_agent.source_fingerprints import reset_source_fingerprints
 from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.subagents.configuration import SubagentsConfiguration
+from krim_agent.subagents.service import SubagentService
 from krim_agent.tools.bundles import compose_executor, policy_spec
 from krim_agent.tools.core import Decision, Invocation, Policy, PostHook, PreHook, ToolSpec
 from krim_agent.tools.executor import ToolExecutor
@@ -91,6 +94,7 @@ class Application:
     context_service: ContextService | None = None
     goals: GoalService | None = None
     media: SessionMediaHost | None = None
+    subagents: SubagentService | None = None
     configuration_snapshot: dict[str, JsonValue] = field(default_factory=dict, repr=False)
 
     async def __aenter__(self) -> Application:
@@ -127,6 +131,8 @@ class Application:
             async with self.service._admission:
                 self.service.closed = True
             try:
+                if self.subagents is not None:
+                    await self.subagents.drain()
                 try:
                     if self.product_evaluations is not None:
                         await self.product_evaluations.close()
@@ -196,6 +202,8 @@ async def open_application(
     configuration: ServiceConfiguration | None = None,
     legacy_artifact_root: Path | None = None,
     personal_mcp_key_file: Path | None = None,
+    subagent_configuration: SubagentsConfiguration | None = None,
+    model_routes: Mapping[str, ModelProvider] | None = None,
 ) -> Application:
     from sqlalchemy import select
 
@@ -205,7 +213,7 @@ async def open_application(
         if any(item is not None for item in (
             settings, provider, registry, http_config, access_policy, tool_config,
             development_configuration, sandbox_configuration, legacy_artifact_root,
-            personal_mcp_key_file,
+            personal_mcp_key_file, subagent_configuration, model_routes,
         )) or path != configuration.settings.database:
             raise ServiceError("invalid_input", 422)
         settings = configuration.settings
@@ -216,6 +224,7 @@ async def open_application(
         access_policy = configuration.access
         legacy_artifact_root = configuration.legacy_artifact_root
         personal_mcp_key_file = configuration.personal_mcp_key_file
+        subagent_configuration = configuration.subagents
     try:
         config = Settings.model_validate(
             settings.model_dump() if settings is not None else {"database": path}
@@ -331,6 +340,7 @@ async def open_application(
             ),
         }
         bindings: dict[str, RunBinding] = {}
+        delegates: dict[str, RunBinding] = {}
         if not isinstance(selected, UnconfiguredProvider):
             bindings["target-http"] = RunBinding.freeze("target-http", loop, primary_settings)
         sandbox_service = (
@@ -424,7 +434,9 @@ async def open_application(
         async def image_capabilities(scope: SessionToolScope) -> ImageCapabilities:
             scope.check()
             snapshot = await store.snapshot(scope.run_id)
-            active_binding = bindings.get(snapshot.request.target)
+            route = snapshot.target.get("key")
+            active_binding = (delegates.get(route) if isinstance(route, str) else None)
+            active_binding = active_binding or bindings.get(snapshot.request.target)
             active_provider = active_binding.loop.provider if active_binding is not None else None
             return ImageCapabilities(vision=(
                 isinstance(active_provider, OpenAICompatibleProvider)
@@ -466,8 +478,28 @@ async def open_application(
             # account/host tools and trusted read-only configuration are known.
             binding.loop.executor = compose_executor(binding.loop.executor, shared_bundles)
             bindings[key] = RunBinding.freeze(key, binding.loop, binding.settings)
+        from krim_agent.subagents.composition import prepare as prepare_subagents
+
+        prepared_subagents = prepare_subagents(
+            store, subagent_configuration or SubagentsConfiguration(), bindings, session_tools,
+            main_provider=selected, main_model=http_config,
+            models=configuration.models if configuration is not None else {},
+            owned_providers=owned, model_routes=model_routes, sandbox_service=sandbox_service,
+        )
+        subagents = prepared_subagents.service if prepared_subagents is not None else None
+        if subagents is not None:
+            subagents.authorize_session = planning.authorize
+            subagents.sandbox_service = sandbox_service
+        if prepared_subagents is not None:
+            delegates.update(prepared_subagents.delegates)
+            await subagents.recover()
         target["tools"] = cast(JsonValue, loop.executor.registry.schemas())
-        service = RunService(store, loop, config, target, bindings)
+        service = RunService(
+            store, loop, config, target, bindings, delegates=delegates,
+            subagents_store=subagents.repository if subagents is not None else None,
+        )
+        if prepared_subagents is not None:
+            prepared_subagents.attach(service, session_tools)
         session_tools.runtime = service
         service.interactions = interactions
         interactions.on_answer = service.input_answered
@@ -482,10 +514,53 @@ async def open_application(
 
         async def open_tools(scope: SessionToolScope, base: ToolExecutor) -> RunTools:
             state: dict[str, RunTools] = {}
+            child_profile = None
+            process_child = False
+            excluded: frozenset[str] = frozenset()
+            if subagents is not None:
+                owner = await session_tools.child_run_owner(scope.run_id)
+                if owner is not None:
+                    from krim_agent.subagents.configuration import SubagentProfileConfiguration
+
+                    task = await subagents.repository.task(owner["task_id"])
+                    child_profile = SubagentProfileConfiguration.model_validate(
+                        task["input"].get("profile_snapshot", {}),
+                    )
+                    if child_profile.provider == "process":
+                        from krim_agent.subagents.providers.process import ProcessAgentLoop
+
+                        child_snapshot = await store.snapshot(scope.run_id)
+                        child_binding = delegates.get(child_snapshot.target.get("key"))
+                        process_child = (child_binding is not None
+                                         and isinstance(child_binding.loop, ProcessAgentLoop))
+                    excluded = frozenset({
+                        "ask_user", "enter_plan_mode", "exit_plan_mode", "plan_update",
+                        "goal_update", "compact_context",
+                    })
+
+            def child_allows(spec: ToolSpec, readonly: frozenset[str]) -> bool:
+                if child_profile is None:
+                    return True
+                if spec.name in excluded or (
+                    child_profile.tools is not None and spec.name not in child_profile.tools
+                ):
+                    return False
+                if child_profile.workspace != "shared_read_only":
+                    return True
+                return spec.name in readonly or (spec.risk == "read" and (
+                    spec.source is None or spec.source.kind == "http"
+                ))
 
             async def guard(invocation: Invocation) -> Decision:
                 current_scope = await session_tools.resolve(invocation)
                 spec = policy_spec(state["runtime"].executor.registry, invocation)
+                from krim_agent.subagents.providers.process import is_internal_process_invocation
+
+                internal_process = process_child and is_internal_process_invocation(invocation)
+                if not internal_process and not child_allows(
+                    spec, state["runtime"].trusted_readonly_names,
+                ):
+                    return "deny"
                 from krim_agent.project_access.execution import session_decision
 
                 if not await interactions.permits(
@@ -501,9 +576,15 @@ async def open_application(
             runtime = await open_run_tools(
                 base, scope=scope, resolve=session_tools.resolve,
                 host=tool_runtime, account_mcp=service.account_mcp, guard=guard,
-                media_sink=media.media_sink,
+                media_sink=media.media_sink, deny=excluded,
             )
             state["runtime"] = runtime
+            if child_profile is not None:
+                readonly = runtime.trusted_readonly_names
+                runtime.visible = frozenset(
+                    spec.name for spec, _ in runtime.executor.registry._frozen
+                    if child_allows(spec, readonly)
+                )
             return runtime
 
         service.run_tool_factory = open_tools
@@ -553,6 +634,7 @@ async def open_application(
             context_service=context_service,
             goals=goals,
             media=media,
+            subagents=subagents,
             account_mcp=account_mcp if identities.managed else None,
             development=development,
             configuration_snapshot=(configuration.snapshot if configuration is not None else {}),

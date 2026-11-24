@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { ApprovalScope } from "../lib/execution-policy";
-import { ChevronRight, LoaderCircle, Shield, Wrench, FileText, Terminal, Search, Plug } from "lucide-react";
+import { ArrowUpRight, ChevronRight, LoaderCircle, Shield, Wrench, FileText, Terminal, Search, Plug } from "lucide-react";
 import { runReason } from "../lib/copy";
 import { displayToolName } from "../lib/tool-names";
 import type { ToolPresentation, ToolState } from "../lib/session-presentation";
@@ -39,7 +39,7 @@ function missingResult(tool: ToolPresentation) {
   return "结果未确认";
 }
 
-export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, pending, onDecision, onInspect }: {
+export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, pending, onDecision, onInspect, onOpenSubagent }: {
   tool: ToolPresentation;
   canApprove: boolean;
   canAllowSession?: boolean;
@@ -47,11 +47,15 @@ export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, 
   pending: boolean;
   onDecision: (allow: boolean, scope?: ApprovalScope) => void;
   onInspect: () => void;
+  onOpenSubagent?: (agentId: string) => void;
 }) {
   // 显示用名称：旧 dev_* 名映射为新名；事件与审批记录中的原始 name 不变。
   const toolName = displayToolName(tool.name);
   const Icon = ({ file: FileText, terminal: Terminal, search: Search, mcp: Plug, other: Wrench })[toolKind(tool.name)];
   const summary = toolSummary(tool.arguments);
+  const result = tool.result && typeof tool.result === "object" && !Array.isArray(tool.result) ? tool.result as Record<string, unknown> : null;
+  const value = result?.value && typeof result.value === "object" && !Array.isArray(result.value) ? result.value as Record<string, unknown> : result;
+  const agentId = tool.name === "spawn_agent" && tool.state === "ok" && typeof value?.agent_id === "string" ? value.agent_id : null;
   const [raw, setRaw] = useState(false);
   const scopeId = useId();
   const approvalIdentity = tool.approval ? JSON.stringify([tool.approval.run_id, tool.approval.request_id, tool.approval.call_id, tool.approval.tool_hash, tool.approval.arguments_hash]) : "";
@@ -80,6 +84,7 @@ export function ToolCallCard({ tool, canApprove, canAllowSession = false, busy, 
     <div className="chat-tool-body">
       <div className="chat-tool-bar"><span>{tool.source || tool.risk ? <ToolProvenance value={{ source: tool.source, risk: tool.risk }} /> : "来源未提供"}</span><Button variant="ghost" size="sm" className="g-info-link" aria-pressed={raw} onClick={() => setRaw(value => !value)}>{raw ? "查看格式化摘要" : "查看原始 JSON"}</Button></div>
       {raw ? <pre className="chat-tool-output" data-ui-data tabIndex={0}>{valueText({ name: tool.name, arguments: tool.arguments, output: tool.resultAvailable ? tool.result : undefined })}</pre> : tool.resultAvailable ? <pre className="chat-tool-output" data-ui-data tabIndex={0}>{formatToolValue(tool.result)}</pre> : <p className="detail-empty">{missingResult(tool)}</p>}
+      {agentId && onOpenSubagent && <Button variant="ghost" size="sm" className="sa-open-agent" onClick={() => onOpenSubagent(agentId)}>查看子代理<ArrowUpRight aria-hidden="true"/></Button>}
       {tool.code && <p className="chat-tool-error" data-ui-data>{tool.code === "invalid_input" ? "工具参数无效" : runReason(tool.code)} <code>{tool.code}</code></p>}
     </div>
   </details>;

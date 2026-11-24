@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,9 +68,12 @@ class ModelStep:
                  check: Callable[[], None], *, max_steps: int | None, max_output: int | None,
                  deadline: float | None, workspace: bool,
                  execution_budget: ExecutionBudget | None = None,
-                 model_timeout: float | None = None) -> None:
+                 model_timeout: float | None = None,
+                 request_slot: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
+                 ) -> None:
         self.provider, self.emit, self.check = provider, emit, check
         self.model_timeout = model_timeout
+        self.request_slot = request_slot
         self.max_steps, self.max_output = max_steps, max_output
         self.deadline, self.workspace = deadline, workspace
         self.execution_budget = execution_budget
@@ -183,7 +186,7 @@ class ModelStep:
         argument_bytes = 0
         async with _attributed_model_timeout(
             end, model_deadline=model_deadline, run_deadline=run_deadline,
-        ):
+        ), (self.request_slot(index) if self.request_slot is not None else nullcontext()):
             await self.emit("model_start", {"span_id": span, "step_index": index,
                 "context_manifest": context_manifest, **extra})
             self.check()

@@ -176,6 +176,15 @@ ERROR_CODES = frozenset(
         "target_retired",
         "execution_retired",
         "facts_corrupt",
+        "subagent_name_conflict",
+        "subagent_depth_exceeded",
+        "subagent_capability",
+        "subagent_tree_closed",
+        "subagent_activation_closed",
+        "subagent_task_closed",
+        "subagent_not_continuable",
+        "subagent_not_recoverable",
+        "subagent_cleanup_failed",
     }
 )
 

@@ -230,3 +230,29 @@ class DevelopmentSessionContext(StrictModel):
     authorization_generation: int = Field(ge=1)
     frozen: DevelopmentContextFrozen
     prepared: PreparedContext | None = None
+
+
+class ChildRunContext(StrictModel):
+    """子运行归属上下文（schema5 描述符；子run不建用户turn，归属继承根会话）。
+
+    session_id/turn_id 恒为根用户会话与其 owner turn：执行模式、allow 规则、
+    项目绑定与账号MCP按该归属生效；tree/agent/activation 标识子执行体。
+    messages 是已验证完成前缀的独立持久历史（不含 system 与本次任务输入，
+    来源 subagent_tasks.input["history"]；fresh 为空）。profile/path 仅作
+    展示与路由记录，不承担权限。
+    """
+
+    schema_version: Literal[5] = 5
+    workspace_id: str
+    session_id: str
+    owner_id: str
+    turn_id: str | None
+    tree_id: str
+    agent_id: str
+    activation_id: str
+    task_id: str
+    parent_run_id: str | None = None
+    depth: int = Field(default=1, ge=0)
+    profile: str | None = None
+    path: str | None = None
+    messages: tuple[Message, ...] = ()

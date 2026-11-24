@@ -10,6 +10,7 @@ from pydantic import JsonValue
 
 from krim_agent.config import Settings
 from krim_agent.context.types import (
+    ChildRunContext,
     DevelopmentSessionContext,
     OrdinarySessionContext,
     SessionContext,
@@ -27,7 +28,7 @@ class RunSnapshot:
     events: tuple[RunEvent, ...]
     session_context: (
         SessionContext | DevelopmentSessionContext | OrdinarySessionContext
-        | WorkspaceSessionContext | None
+        | WorkspaceSessionContext | ChildRunContext | None
     ) = None
     work: WorkFrame | None = None
 

@@ -7,6 +7,8 @@ import pytest
 from krim_agent.composition import open_application
 from krim_agent.contracts import RunEvent, RunRequest, ServiceError
 from krim_agent.storage.sqlite import APPLICATION_ID, SQLiteStore
+from tests.support.builtins import builtin_registry, demo_policy
+from tests.support.fake_provider import FakeProvider
 
 
 @pytest.mark.asyncio
@@ -71,7 +73,10 @@ async def test_transaction_failure_rolls_back_and_disables_admission(tmp_path, p
         calls.append(1)
         return "real"
 
-    app = await open_application(tmp_path / (point + ".db"), registry=registry_for(execute))
+    app = await open_application(
+        tmp_path / (point + ".db"), provider=FakeProvider(),
+        registry=registry_for(execute), policy=demo_policy,
+    )
     original = app.store._event
 
     async def fail(conn, run_id, kind, *args, **kwargs):
@@ -110,7 +115,8 @@ async def test_lost_tool_result_commit_return_reads_original_event_without_reexe
         return "real"
 
     async with await open_application(
-        tmp_path / "return.db", registry=registry_for(execute)
+        tmp_path / "return.db", provider=FakeProvider(),
+        registry=registry_for(execute), policy=demo_policy,
     ) as app:
         original = app.store._write
         lost = False
@@ -171,7 +177,10 @@ async def test_large_tool_events_roundtrip_replay_and_reopen_without_byte_quota(
 async def test_run_commit_return_loss_is_confirmed_without_duplicate_run_or_model(tmp_path, point):
     from krim_agent.contracts import RunView
 
-    async with await open_application(tmp_path / (point + "-return.db")) as app:
+    async with await open_application(
+        tmp_path / (point + "-return.db"), provider=FakeProvider(),
+        registry=builtin_registry(), policy=demo_policy,
+    ) as app:
         original = app.store._write
         lost = False
 

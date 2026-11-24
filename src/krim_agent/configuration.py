@@ -12,7 +12,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -30,6 +30,7 @@ from krim_agent.mcp.types import MCPServerConfig
 from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.sandbox.configuration import SandboxConfiguration
 from krim_agent.security import AccessPolicy, Credential, Membership
+from krim_agent.subagents.configuration import ROUTE_NAME_PATTERN, SubagentsConfiguration
 from krim_agent.tools.runtime import ToolRuntimeConfig
 from krim_agent.web_access.tavily import WebAccessConfig
 
@@ -186,6 +187,10 @@ class ServiceConfiguration:
     personal_mcp_key_file: Path | None
     snapshot: dict[str, Any]
     legacy_environment_variables: tuple[str, ...] = ()
+    # Named model routes for subagent profiles, resolved once at startup.
+    # Snapshots keep the env reference names, never the resolved values.
+    models: Mapping[str, OpenAICompatibleConfig] = field(default_factory=dict)
+    subagents: SubagentsConfiguration = field(default_factory=SubagentsConfiguration)
 
     @property
     def ready_for_execution(self) -> bool:
@@ -211,6 +216,31 @@ class _RootConfiguration(StrictModel):
     storage: StorageConfiguration = Field(default_factory=StorageConfiguration)
     server: ServerConfiguration = Field(default_factory=ServerConfiguration)
     evaluation: EvaluationConfiguration = Field(default_factory=EvaluationConfiguration)
+    models: dict[str, ModelConfiguration] = Field(default_factory=dict)
+    subagents: SubagentsConfiguration = Field(default_factory=SubagentsConfiguration)
+
+    @model_validator(mode="after")
+    def subagent_routes(self) -> _RootConfiguration:
+        """Validate declared route references; diagnostics keep names only."""
+        def key(value: str) -> str:
+            return re.sub(r"[^A-Za-z0-9_.-]", "_", value)[:64] or "key"
+
+        if "default" in self.models:
+            raise ConfigurationError("models.default:reserved")
+        for name in self.models:
+            if not ROUTE_NAME_PATTERN.fullmatch(name):
+                raise ConfigurationError(f"models.{key(name)}:invalid_name")
+        for profile_name, profile in self.subagents.profiles.items():
+            safe = key(profile_name)
+            if profile.model != "default" and profile.model not in self.models:
+                raise ConfigurationError(f"subagents.profiles.{safe}.model:unknown_route")
+            if profile.model == "default" and self.model is None:
+                raise ConfigurationError(
+                    f"subagents.profiles.{safe}.model:default_route_unconfigured"
+                )
+            if profile.provider == "process" and profile.process not in self.subagents.processes:
+                raise ConfigurationError(f"subagents.profiles.{safe}.process:unknown_process")
+        return self
 
 
 def _construct_mapping(
@@ -534,6 +564,12 @@ def load_configuration(
             )
             model = OpenAICompatibleConfig.model_validate(model_values)
 
+        models: dict[str, OpenAICompatibleConfig] = {}
+        for name, route in root.models.items():
+            route_values = route.model_dump(exclude={"api_key"})
+            route_values["api_key"] = _resolve_secret(route.api_key, environment) or SecretStr("")
+            models[name] = OpenAICompatibleConfig.model_validate(route_values)
+
         access_policy = _resolve_policy(root.access.policy, environment)
         access_key = _resolve_secret(root.access.api_key, environment) or SecretStr("")
         tools = _parse_tools(root.tools, environment)
@@ -578,6 +614,8 @@ def load_configuration(
         snapshot = {
             "schema_version": root.schema_version,
             "model": root.model.model_dump(mode="json") if root.model is not None else None,
+            "models": {name: route.model_dump(mode="json") for name, route in root.models.items()},
+            "subagents": root.subagents.model_dump(mode="json"),
             "execution": execution.model_dump(mode="json"),
             "environment": {
                 "sandbox": sandbox.model_dump(mode="json") if sandbox is not None else None,
@@ -614,6 +652,8 @@ def load_configuration(
             ),
             snapshot=snapshot,
             legacy_environment_variables=legacy,
+            models=models,
+            subagents=root.subagents,
         )
     except ConfigurationError:
         raise

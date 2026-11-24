@@ -28,6 +28,7 @@
     "resolveJsonModule": true
   },
   "include": [
+    "contracts/subagent-*.test.ts*",
     "contracts/memory*.test.ts*",
     "contracts/planning-*.test.ts*",
     "contracts/interaction-ui.test.tsx",

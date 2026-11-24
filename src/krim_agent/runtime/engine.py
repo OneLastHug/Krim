@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -13,7 +14,11 @@ from sqlalchemy import select
 from krim_agent.agent_sdk.context import CompactorHistory
 from krim_agent.config import Settings
 from krim_agent.context import builder, compaction
-from krim_agent.context.types import OrdinarySessionContext, SessionContext
+from krim_agent.context.types import (
+    ChildRunContext,
+    OrdinarySessionContext,
+    SessionContext,
+)
 from krim_agent.contracts import Message, RunEvent, ServiceError, encoded, fingerprint
 from krim_agent.providers.types import ModelProvider
 from krim_agent.sandbox.operations import SandboxOperations
@@ -61,6 +66,8 @@ class AgentLoop:
         self.context_service: Any | None = None
         self.session_tool_host: Any | None = None
         self.session_media: Any | None = None
+        # 子代理域服务（Any避免循环导入）；组合层在冻结bindings前注入同一实例。
+        self.subagents: Any | None = None
         self._d3_seal = (
             compaction.binding_token(), model_step.binding_token(), builder.binding_token()
         )
@@ -112,6 +119,14 @@ class AgentLoop:
             )
         if ordinary is not None:
             messages = [ordinary.frozen.current]
+        elif isinstance(snapshot.session_context, ChildRunContext):
+            # 子运行独立历史：系统提示 + 已验证完成前缀 + 本次任务输入；
+            # 未闭合工具调用的前缀在storage侧已拒绝，不重放未知副作用。
+            messages = [
+                Message(role="system", content=self.settings.system_prompt),
+                *snapshot.session_context.messages,
+                Message(role="user", content=snapshot.request.text),
+            ]
         elif snapshot.session_context is not None:
             if not isinstance(snapshot.session_context, SessionContext):
                 raise ServiceError("workspace_contract_required")
@@ -127,6 +142,10 @@ class AgentLoop:
         if self.sandbox is not None:
             scope = await self.sandbox.scope(run_id, check, execution_budget)
         policy = SDKExecutionPolicy.from_settings(self.settings)
+        if isinstance(snapshot.session_context, ChildRunContext):
+            # 子worker普通工具错误可修正：失败以工具结果返回而不是杀整棵树；
+            # 全局存储故障仍经 check_stop/healthy 拒绝继续。单代理行为不变。
+            policy = replace(policy, fail_on_tool_error=False)
         compressor: compaction.Compactor | None = None
 
         async def emit(kind: str, data: dict[str, JsonValue]) -> RunEvent:
@@ -267,4 +286,6 @@ class AgentLoop:
             resume=cast(SDKResume | None, resume),
             workspace=ordinary is not None,
             on_completed=on_completed,
+            # None时省略参数：未注入域服务的宿主完全保留旧行为。
+            **({"subagents": self.subagents} if self.subagents is not None else {}),
         ))

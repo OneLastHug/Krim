@@ -73,12 +73,26 @@ class SessionToolHost:
         """
         return await self._scope(run_id, lambda: None, allow_awaiting=True)
 
+    async def child_run_owner(self, run_id: str) -> dict[str, Any] | None:
+        """宿主域查询child run归属映射；组合层用它选择profile工具与deny集。
+
+        只读、不设producer围栏：返回None表示该run不是子运行。
+        """
+        from krim_agent.storage.sessions import child_run_owner
+
+        async def read(conn: Any) -> dict[str, Any] | None:
+            return await child_run_owner(conn, run_id)
+
+        return await self.store.work_read(read)
+
     async def _scope(
         self, run_id: str, fence: Callable[[], None], *, allow_awaiting: bool = False,
     ) -> SessionToolScope:
         fence()
 
         async def read(conn: Any) -> dict[str, Any]:
+            from krim_agent.storage.sessions import child_run_owner
+
             row = (
                 await conn.execute(
                     select(
@@ -93,14 +107,25 @@ class SessionToolHost:
                 )
             ).mappings().first()
             if row is None:
-                raise ServiceError("workspace_contract_required", 409)
-            result = dict(row)
+                # 子运行没有turns行：经child_run映射继承根owner会话/turn；
+                # 非会话非子运行的run仍按原错误拒绝。
+                child = await child_run_owner(conn, run_id)
+                if child is None or child["owner_turn_id"] is None:
+                    raise ServiceError("workspace_contract_required", 409)
+                result = dict(child)
+                result["turn_id"] = child["owner_turn_id"]
+                result["turn_status"] = "running"
+                if child.get("tree_status") != "open" or child.get("root_stop_requested"):
+                    # 根已停/树准入已关：孩子不得继续执行敏感工具。
+                    raise ServiceError("cancelled")
+            else:
+                result = dict(row)
             binding = (
                 await conn.execute(select(sandbox_session_bindings).where(
-                    sandbox_session_bindings.c.session_id == row["session_id"],
+                    sandbox_session_bindings.c.session_id == result["session_id"],
                 ))
             ).mappings().first()
-            if binding is not None and binding["principal_id"] != row["owner_id"]:
+            if binding is not None and binding["principal_id"] != result["owner_id"]:
                 raise ServiceError("facts_corrupt")
             result["project_id"] = binding["project_id"] if binding is not None else None
             return result

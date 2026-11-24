@@ -292,10 +292,12 @@ def create_app(
 
     mount_browser_ui(app)
     from .sessions import mount_sessions
+    from .subagents import mount_subagents
     from .traces import mount_traces
     from .workspace import mount_workspace
 
     mount_sessions(app)
+    mount_subagents(app)
     mount_traces(app)
     mount_workspace(app)
     from .observations import mount_observations

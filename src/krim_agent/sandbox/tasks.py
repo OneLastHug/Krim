@@ -666,20 +666,44 @@ async def cancel_run_tasks(service: SandboxService, run_id: str) -> None:
             or intent.get("project_id") != operation["project_id"]
         ):
             raise ServiceError("facts_corrupt")
+        # 根run走既有 turns JOIN；child run没有turns行，改用
+        # storage.sessions.child_run_owner 合法映射核对 owner 会话归属，
+        # 再按同一 workspace/principal/environment 收紧项目匹配，绝不裸认ID。
         async with service.store.lock, service.store.engine.connect() as conn:
-            owned_project = await conn.scalar(
-                select(sandbox_projects.c.project_id)
-                .join(sessions, sessions.c.workspace_id == sandbox_projects.c.workspace_id)
-                .join(turns, turns.c.session_id == sessions.c.id)
-                .where(
-                    sandbox_projects.c.project_id == operation["project_id"],
-                    sandbox_projects.c.principal_id == operation["principal_id"],
-                    sandbox_projects.c.environment_id == intent.get("environment_id"),
-                    sessions.c.id == session_id,
-                    sessions.c.owner_id == operation["principal_id"],
-                    turns.c.run_id == run_id,
+            from krim_agent.storage.sessions import child_run_owner
+
+            owner = await child_run_owner(conn, run_id)
+        if owner is not None:
+            if (
+                owner["owner_session_id"] != session_id
+                or owner["owner_id"] != operation["principal_id"]
+                or not owner["workspace_id"]
+            ):
+                raise ServiceError("facts_corrupt")
+            async with service.store.lock, service.store.engine.connect() as conn:
+                owned_project = await conn.scalar(
+                    select(sandbox_projects.c.project_id).where(
+                        sandbox_projects.c.project_id == operation["project_id"],
+                        sandbox_projects.c.principal_id == operation["principal_id"],
+                        sandbox_projects.c.environment_id == intent.get("environment_id"),
+                        sandbox_projects.c.workspace_id == owner["workspace_id"],
+                    )
                 )
-            )
+        else:
+            async with service.store.lock, service.store.engine.connect() as conn:
+                owned_project = await conn.scalar(
+                    select(sandbox_projects.c.project_id)
+                    .join(sessions, sessions.c.workspace_id == sandbox_projects.c.workspace_id)
+                    .join(turns, turns.c.session_id == sessions.c.id)
+                    .where(
+                        sandbox_projects.c.project_id == operation["project_id"],
+                        sandbox_projects.c.principal_id == operation["principal_id"],
+                        sandbox_projects.c.environment_id == intent.get("environment_id"),
+                        sessions.c.id == session_id,
+                        sessions.c.owner_id == operation["principal_id"],
+                        turns.c.run_id == run_id,
+                    )
+                )
         if owned_project is None:
             raise ServiceError("facts_corrupt")
         deadline = time.monotonic() + 18

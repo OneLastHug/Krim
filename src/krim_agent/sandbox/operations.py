@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, JsonValue
 from sqlalchemy import select
 
-from krim_agent.context.types import OrdinarySessionContext, SessionContext
+from krim_agent.context.types import (
+    ChildRunContext,
+    OrdinarySessionContext,
+    SessionContext,
+)
 from krim_agent.contracts import ServiceError, StrictModel
 from krim_agent.runtime.contracts import ExecutionBudget
 from krim_agent.sandbox.command import SandboxCommand
@@ -66,7 +70,7 @@ class SandboxOperations:
     async def scope(self, run_id: str, check: Callable[[], None], budget: ExecutionBudget) -> Scope:
         snapshot = await self.service.store.snapshot(run_id)
         context = snapshot.session_context
-        if not isinstance(context, (SessionContext, OrdinarySessionContext)):
+        if not isinstance(context, (SessionContext, OrdinarySessionContext, ChildRunContext)):
             raise ServiceError("workspace_contract_required")
         async with self.service.store.lock, self.service.store.engine.connect() as conn:
             session = (
@@ -75,7 +79,7 @@ class SandboxOperations:
                 .one()
             )
         if (session["workspace_id"] != context.workspace_id
-                or isinstance(context, OrdinarySessionContext)
+                or isinstance(context, (OrdinarySessionContext, ChildRunContext))
                 and session["owner_id"] != context.owner_id):
             raise ServiceError("permission_denied")
         actor = self.service.identities.resolve(session["owner_id"])
