@@ -174,7 +174,7 @@ export function WorkbenchLayout({ view, apiKey = "", identity, identityLoading, 
         </PopoverMenu>
       </header>
       <div className={`workbench-content${inspectorOpen && view !== "chat" && !narrow ? " inspector-open" : ""}`}>
-        <main className="workbench-page" id="main-content" tabIndex={-1}>{children}</main>
+        <main className={`workbench-page${view === "chat" ? " is-chat" : ""}`} id="main-content" tabIndex={-1}>{children}</main>
         {inspectorOpen && view !== "chat" && !narrow && <div className="inspector-desktop">{inspector}</div>}
       </div>
     </div>

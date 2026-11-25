@@ -20,6 +20,8 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
   const scroll = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const lastScrollTop = useRef(0);
+  const syncScroll = useRef<(() => void) | null>(null);
   const selected = useRef(chat.id);
   const refreshedDetails = useRef(new Set<string>());
   const projections = useRef(new Map<string, { turn: Turn; events: unknown[]; approvals: unknown[]; detailEvents: unknown[] | undefined; facts: Record<string, unknown> | null | undefined; items: TurnPresentation[] }>());
@@ -31,7 +33,11 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
   function bottom() {
     stickToBottom.current = true;
     setShowJump(false);
-    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+    if (scroll.current) {
+      const panel = scroll.current;
+      panel.scrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      lastScrollTop.current = panel.scrollTop;
+    }
   }
   function reuse(text: string) {
     chat.edit(text);
@@ -40,8 +46,12 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
 
   useLayoutEffect(() => {
     if (selected.current !== chat.id) { selected.current = chat.id; stickToBottom.current = true; setExpanded({}); }
-    if (stickToBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [chat.id, chat.history, chat.events, chat.turnEvents, chat.details, chat.turnFacts]);
+    if (stickToBottom.current && scroll.current) {
+      const panel = scroll.current;
+      panel.scrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      lastScrollTop.current = panel.scrollTop;
+    }
+  }, [chat.id, chat.history.length]);
 
   useEffect(() => {
     if (!chat.ready) { refreshedDetails.current.clear(); setExpanded({}); }
@@ -60,24 +70,40 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
 
   useEffect(() => {
     const panel = scroll.current, content = thread.current;
-    if (!panel || !content || typeof ResizeObserver === "undefined") return;
+    if (!panel || !content) return;
+    let frame: number | undefined, timer: ReturnType<typeof setTimeout> | undefined;
     const resize = () => {
-      if (stickToBottom.current) panel.scrollTop = panel.scrollHeight;
-      setShowJump(panel.scrollHeight - panel.clientHeight - panel.scrollTop > 48);
+      const maximum = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      if (stickToBottom.current && Math.abs(panel.scrollTop - maximum) > 1) panel.scrollTop = maximum;
+      lastScrollTop.current = panel.scrollTop;
+      const visible = maximum - panel.scrollTop > 48;
+      setShowJump(previous => previous === visible ? previous : visible);
     };
-    const observer = new ResizeObserver(resize);
-    observer.observe(panel);
-    observer.observe(content);
-    document.fonts?.addEventListener("loadingdone", resize);
-    return () => { observer.disconnect(); document.fonts?.removeEventListener("loadingdone", resize); };
+    const cancel = () => { if (frame !== undefined) cancelAnimationFrame(frame); clearTimeout(timer); frame = undefined; timer = undefined; };
+    const schedule = () => {
+      if (timer !== undefined) return;
+      const commit = () => { cancel(); resize(); };
+      if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(commit);
+      timer = setTimeout(commit, 50);
+    };
+    syncScroll.current = schedule;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
+    observer?.observe(panel); observer?.observe(content);
+    document.fonts?.addEventListener("loadingdone", schedule);
+    return () => { observer?.disconnect(); cancel(); syncScroll.current = null; document.fonts?.removeEventListener("loadingdone", schedule); };
   }, [chat.id]);
+  useEffect(() => { syncScroll.current?.(); }, [chat.events, chat.turnEvents, chat.details, chat.turnFacts]);
 
   useEffect(() => {
     const content = thread.current;
     if (!content) return;
-    const update = () => setPendingCount(content.querySelectorAll('.chat-approval,[data-pending-interaction="true"]').length);
+    const selector = '.chat-approval,[data-pending-interaction="true"]';
+    const update = () => { const count = content.querySelectorAll(selector).length; setPendingCount(previous => previous === count ? previous : count); };
+    const relevant = (node: Node) => node instanceof Element && (node.matches(selector) || node.querySelector(selector) !== null);
     update();
-    const observer = new MutationObserver(update);
+    const observer = new MutationObserver(records => {
+      if (records.some(record => record.type === "attributes" || [...record.addedNodes, ...record.removedNodes].some(relevant))) update();
+    });
     observer.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-pending-interaction"] });
     return () => observer.disconnect();
   }, [chat.id]);
@@ -87,7 +113,22 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
       const id = new URL(location.href).searchParams.get("turn");
       if (!id || !scroll.current) return;
       const target = [...scroll.current.querySelectorAll<HTMLElement>("[data-turn-id]")].find(element => element.dataset.turnId === id);
-      if (target) { stickToBottom.current = false; target.scrollIntoView?.({ block: "center" }); }
+      if (!target) return;
+      const focused = chat.history.find(turn => turn.id === id);
+      const latest = chat.history.at(-1);
+      if (focused && focused.id === latest?.id && (focused.status === "queued" || focused.status === "running")) {
+        // A submit receipt updates ?turn= too; keep following the live answer.
+        stickToBottom.current = true; setShowJump(false);
+        const panel = scroll.current;
+        panel.scrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+        lastScrollTop.current = panel.scrollTop;
+        return;
+      }
+      stickToBottom.current = false;
+      const panel = scroll.current, row = target.getBoundingClientRect(), viewport = panel.getBoundingClientRect();
+      // Limit navigation to the transcript; scrollIntoView also scrolls overflow-hidden ancestors.
+      panel.scrollTop += row.top - viewport.top - Math.max(0, (panel.clientHeight - row.height) / 2);
+      lastScrollTop.current = panel.scrollTop;
     };
     focusTurn();
     window.addEventListener("krim:focus-turn", focusTurn); window.addEventListener("popstate", focusTurn);
@@ -98,8 +139,11 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
       const panel = scroll.current;
       if (!panel) return;
       const atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 48;
-      stickToBottom.current = atBottom;
-      setShowJump(!atBottom);
+      if (atBottom) stickToBottom.current = true;
+      else if (panel.scrollTop < lastScrollTop.current - 1) stickToBottom.current = false;
+      lastScrollTop.current = panel.scrollTop;
+      if (stickToBottom.current && !atBottom) syncScroll.current?.();
+      else setShowJump(previous => previous === !atBottom ? previous : !atBottom);
     }}>
       <div className="chat-thread" ref={thread}>
         {!chat.history.length && (empty ?? <div className="chat-empty"><h2>{chat.session ? "发送第一条消息" : "选择或新建对话"}</h2></div>)}
@@ -132,7 +176,7 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
             {!working && items.some(item => item.type === "assistant" && item.partial) && <p className="chat-partial-note">以下为已生成部分</p>}
             {items.map(item => {
               if (item.type === "assistant") return <div className="chat-assistant" key={item.key}>
-                <div className={item.key === lastAnswer?.key ? "chat-answer" : "chat-step-text"} data-ui-data><MessageMarkdown text={item.text} onCopy={feedback.copy} /></div>
+                <div className={item.key === lastAnswer?.key ? "chat-answer" : "chat-step-text"} data-ui-data><MessageMarkdown text={item.text} onCopy={feedback.copy} streaming={working} /></div>
               </div>;
               const approval = item.approval;
               const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";

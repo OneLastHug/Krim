@@ -253,17 +253,31 @@ export function DevelopmentPanel({ chat, apiKey, active, fence, development, dar
     window.addEventListener("krim:development-state-request", requested); emit();
     return () => window.removeEventListener("krim:development-state-request", requested);
   }, [active, chat.ready, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id, dev.project?.title, infoOpen, maximized, workOpen, slots, activeSlot, activeTabs]);
+  const outputCache = useRef(new Map<string, { turn: SessionState["history"][number]; events: Record<string, unknown>[]; detailEvents: Record<string, unknown>[] | undefined; facts: Record<string, unknown> | null | undefined; paths: string[] }>());
   const outputFiles = useMemo(() => {
-    const outputPaths = new Set<string>();
+    const outputPaths = new Set<string>(), present = new Set<string>();
+    const toolEvent = (event: Record<string, unknown>) => event.kind === "tool_start" || event.kind === "tool_end" || event.kind === "model_end" || event.kind === "approval_request" || event.kind === "tool_intent";
     for (const turn of chat.history ?? []) {
-      const events = chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : []) ?? [];
-      for (const item of projectTurn(turn, events, [], { events: chat.details[turn.id]?.events, facts: chat.turnFacts?.[turn.id] ?? chat.details[turn.id]?.facts })) {
+      present.add(turn.id);
+      const events = (chat.turnEvents?.[turn.id] ?? (turn.id === chat.currentTurn?.id ? chat.events : []) ?? []).filter(toolEvent);
+      const detailEvents = chat.details[turn.id]?.events;
+      const facts = chat.turnFacts?.[turn.id] ?? chat.details[turn.id]?.facts;
+      const cached = outputCache.current.get(turn.id);
+      if (cached && cached.turn === turn && cached.detailEvents === detailEvents && cached.facts === facts && cached.events.length === events.length && events.every((event, index) => event === cached.events[index])) {
+        for (const path of cached.paths) outputPaths.add(path);
+        continue;
+      }
+      const paths = new Set<string>();
+      for (const item of projectTurn(turn, events, [], { events: detailEvents, facts })) {
         if (item.type !== "tool" || !["read", "edit", "write", "read_file", "edit_file", "write_file"].includes(displayToolName(item.name)) || !item.arguments || typeof item.arguments !== "object") continue;
         const args = item.arguments as Record<string, unknown>;
         const path = args.path ?? args.file_path;
-        if (typeof path === "string" && path.length > 0 && path.length <= 4096 && !path.includes("\0") && !path.split(/[\\/]/).includes("..")) outputPaths.add(path);
+        if (typeof path === "string" && path.length > 0 && path.length <= 4096 && !path.includes("\0") && !path.split(/[\\/]/).includes("..")) paths.add(path);
       }
+      outputCache.current.set(turn.id, { turn, events, detailEvents, facts, paths: [...paths] });
+      for (const path of paths) outputPaths.add(path);
     }
+    for (const id of outputCache.current.keys()) if (!present.has(id)) outputCache.current.delete(id);
     return [...outputPaths];
   }, [chat.history, chat.currentTurn?.id, chat.events, chat.turnEvents, chat.details, chat.turnFacts]);
   const environmentState = dev.environment?.state ?? null;

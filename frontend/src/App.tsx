@@ -379,7 +379,7 @@ export function App() {
       </>}
       inspector={<WorkbenchInspector view={mode} objectId={objectId} identity={identity} accountName={accountName} gatewayName={gatewayName} workspaceNames={workspaceNames}/>}
     >
-      <section className="page-view" hidden={mode !== "chat"} aria-label="对话页面">
+      <section className={`page-view${!loggedOut ? " chat-page-view" : ""}`} hidden={mode !== "chat"} aria-label="对话页面">
         {!loggedOut ? <ChatWorkbench key={chatMount} theme={theme} apiKey={key} active={mode === "chat"} fence={chatFence} onLegacy={setLegacy} onIdentity={acceptChatIdentity} onChatState={receiveChatNavigation} onTrace={openTrace} onSelection={setSelectedChatId} onConnect={() => setKeyOpen(true)}/>
           : <UnavailablePage title="登录 Krim">{identityError || "使用访问密钥登录你的账号。"}<br/><Button variant="outline" onClick={() => setKeyOpen(true)}>输入访问密钥</Button></UnavailablePage>}
       </section>
