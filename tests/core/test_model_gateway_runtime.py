@@ -360,3 +360,113 @@ async def test_close_releases_custom_providers(tmp_path):
         assert runtime.closed
         assert not runtime._providers
         assert all(provider.closed for provider in providers)
+
+
+async def test_non_openai_host_keeps_binding_and_gateway_boundary(tmp_path):
+    """非OpenAI宿主（FakeProvider）：无网关配置保留原绑定；自定义装配维持原拒绝边界。"""
+    from tests.support.fake_provider import FakeProvider
+
+    provider = FakeProvider()
+    app = await open_application(tmp_path / "fake-host.sqlite", provider=provider)
+    try:
+        # 无网关文档：隐式创建保留原宿主绑定，不以provider类型拒绝。
+        session = await _create(app, "s1")
+        frozen = await _frozen_target(app, session.id)
+        assert "model_gateway" not in frozen["provider"]["config"]
+        assert (await _submit(app, session, "t1", 0)).status == "completed"
+        # 显式选择：非OpenAI宿主无传输上限可继承，维持原provider_not_configured。
+        with pytest.raises(ServiceError) as error:
+            await _create(app, "s2", selection=dict(_SELECTION))
+        assert error.value.code == "provider_not_configured"
+        # 配置默认选择后隐式创建同样拒绝：同一装配边界。
+        await app.model_gateways.update(
+            "local",
+            _update(expected=0, key="cfg-1", base_url="http://127.0.0.1:9/v1",
+                    default=dict(_SELECTION)),
+        )
+        with pytest.raises(ServiceError) as error:
+            await _create(app, "s3")
+        assert error.value.code == "provider_not_configured"
+    finally:
+        await app.close()
+        await provider.close()
+
+
+async def test_model_null_host_runs_configured_gateway_sessions(tmp_path):
+    """model:null宿主：配置网关后无需宿主模型即可创建并运行自定义模型会话。"""
+    async with HTTPFixture() as fixture:
+        app = await open_application(tmp_path / "gateway-null-host.sqlite")
+        async with app:
+            # 未配置网关：显式与隐式（默认）选择都维持宿主未配置语义。
+            with pytest.raises(ServiceError) as error:
+                await _create(app, "s0")
+            assert error.value.code == "provider_not_configured"
+            with pytest.raises(ServiceError) as error:
+                await _create(app, "s0b", selection=dict(_SELECTION))
+            assert error.value.code == "provider_not_configured"
+            await app.model_gateways.update(
+                "local", _update(expected=0, key="cfg-1", base_url=fixture.url)
+            )
+            # 显式选择：无宿主模型仍按模板装配自定义网关并完成真实调用。
+            session = await _create(app, "s1", selection=dict(_SELECTION))
+            marker = _marker(await _frozen_target(app, session.id))
+            assert marker["selection"] == dict(_SELECTION)
+            view = await _submit(app, session, "t1", 0)
+            assert view.status == "completed"
+            assert fixture.requests[0]["body"]["model"] == "m1"
+            # 切回宿主模型在model:null下仍拒绝：模板provider不可执行。
+            with pytest.raises(ServiceError) as error:
+                await set_selection(app, LOCAL, "local", session.id, SessionModelUpdate(
+                    request_key="sel-back", expected_revision=1, model_selection=None,
+                ))
+            assert error.value.code == "provider_not_configured"
+            # 配置错误原样上报：装配路径不吞掉provider_config。
+            with pytest.raises(ServiceError) as error:
+                await _create(app, "s2", selection={
+                    "gateway_id": "absent", "model_id": "m1", "reasoning_level": None,
+                })
+            assert error.value.code == "provider_config"
+            # 账号默认选择：隐式创建同样装配网关会话。
+            await app.model_gateways.update(
+                "local",
+                _update(expected=1, key="cfg-2", base_url=fixture.url,
+                        default=dict(_SELECTION)),
+            )
+            defaulted = await _create(app, "s3")
+            marker = _marker(await _frozen_target(app, defaulted.id))
+            assert marker["selection"] == dict(_SELECTION)
+            assert (await _submit(app, defaulted, "t2", 0)).status == "completed"
+        # 重启（全新runtime缓存）后冻结会话按模板重建继续执行。
+        async with await open_application(tmp_path / "gateway-null-host.sqlite") as reopened:
+            view = await _submit(reopened, session, "t3", 1)
+            assert view.status == "completed"
+            assert fixture.requests[-1]["body"]["model"] == "m1"
+
+
+async def test_unconfigured_gateway_keeps_legacy_binding_admission_and_drift(tmp_path):
+    """默认未配置网关：旧宿主binding跨重启照常准入；宿主漂移仍按descriptor拒绝。"""
+    async with HTTPFixture() as fixture:
+        app = await _open_app(tmp_path, fixture, name="legacy-gateway-drift")
+        async with app:
+            session = await _create(app, "s1")
+            frozen = await _frozen_target(app, session.id)
+            assert "model_gateway" not in frozen["provider"]["config"]
+        # 同配置重启：无标记冻结目标仍按宿主binding准入并完成。
+        async with await _open_app(tmp_path, fixture, name="legacy-gateway-drift") as reopened:
+            view = await _submit(reopened, session, "t1", 0)
+            assert view.status == "completed"
+            assert fixture.requests[-1]["body"]["model"] == "base-model"
+        # 宿主system_prompt漂移后重启：冻结descriptor不再匹配现行binding，
+        # 派发按完整descriptor比较拒绝，不静默换用漂移后的binding。
+        async with await open_application(
+            tmp_path / "legacy-gateway-drift.sqlite",
+            settings=Settings(system_prompt="漂移后的提示词"),
+            http_config=OpenAICompatibleConfig(base_url=fixture.url, model="base-model"),
+        ) as drifted:
+            turn = await drifted.sessions.submit(
+                LOCAL, "local", session.id,
+                TurnRequest(request_key="t2", text="你好", expected_revision=1),
+            )
+            finished = await drifted.sessions.wait(LOCAL, "local", session.id, turn.id)
+            assert finished.status == "failed"
+            assert finished.code == "target_binding_changed"

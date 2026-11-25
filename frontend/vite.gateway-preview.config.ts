@@ -18,7 +18,8 @@ const preview: Plugin = {
   transform(code, rawId) {
     const id = normalizePath(rawId).split("?")[0];
     if (id === normalizePath(resolve(frontend, "src/components/ChatWorkbench.tsx"))) {
-      const start = code.indexOf('          <button type="button" ref={modelRef}');
+      const integrated = code.indexOf('          {gateways ? <ModelGatewayControls');
+      const start = integrated >= 0 ? integrated : code.indexOf('          <button type="button" ref={modelRef}');
       const end = code.indexOf("          {!chat.session", start);
       const infoStart = code.indexOf('      <PopoverMenu open={info !== null}');
       const infoEnd = code.indexOf("      </PopoverMenu>", infoStart);
@@ -28,6 +29,7 @@ const preview: Plugin = {
       return { code: 'import { GatewayControls } from "/@fs/' + normalizePath(resolve(frontend, "gateway-preview/GatewayControls.tsx")) + '";\n' + code, map: null };
     }
     if (id === normalizePath(resolve(frontend, "src/components/AppSidebar.tsx"))) {
+      if (code.includes('onAccountTab?.("gateways")')) return { code: code.replace('onAccountTab?.("gateways")', 'window.dispatchEvent(new Event("krim:gateway-settings"))'), map: null };
       const anchor = '      {accountAdmin && <button type="button" role="menuitem"';
       const at = code.indexOf(anchor);
       if (at < 0) this.error("Account menu preview anchor changed");

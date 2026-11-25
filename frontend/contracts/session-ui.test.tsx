@@ -172,6 +172,9 @@ for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBi
     return undefined;
   };
   await act(async () => root.render(<StrictMode><App/></StrictMode>));
+  const sidebarEvents: CustomEvent[] = [];
+  const onSidebarChanged = (event: Event) => sidebarEvents.push(event as CustomEvent);
+  window.addEventListener("krim:sidebar-changed", onSidebarChanged);
   await until(() => expect(document.querySelector('.empty-setup-card[data-kind="project"]')).toBeTruthy());
   await act(async () => (document.querySelector('.empty-setup-card[data-kind="project"]') as HTMLButtonElement).click());
   await until(() => expect(document.querySelector('input[name="dev-project"][value="project-one"]')).toBeTruthy());
@@ -191,7 +194,11 @@ for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBi
     expect((createCall.body as { project_id?: string }).project_id).toBe("project-one");
     const sent = calls.filter(call => call.path === base + "/A/turns" && call.method === "POST");
     expect(sent).toHaveLength(1); expect((sent[0]!.body as { expected_revision: number }).expected_revision).toBe(1);
+    // 项目即分组：创建后只通知侧栏重读，不再手工 PUT 排序。
+    expect(sidebarEvents.some(event => event.detail?.workspace === "local")).toBe(true);
   }
+  window.removeEventListener("krim:sidebar-changed", onSidebarChanged);
+  expect(calls.filter(call => call.path.endsWith("/session-sidebar") && call.method === "PUT")).toHaveLength(0);
 });
 
 test("创建请求携带所选项目且后端已绑定时不再重绑，环境就绪后发送首条消息", async () => {
@@ -233,6 +240,72 @@ test("创建请求携带所选项目且后端已绑定时不再重绑，环境�
   expect(calls.filter(call => call.path === bindingPath && call.method === "PUT")).toHaveLength(0);
   expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/prepare"))).toHaveLength(1);
   expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(1);
+  expect(calls.filter(call => call.path.endsWith("/session-sidebar") && call.method === "PUT")).toHaveLength(0);
+});
+
+test("从项目分组新建 target-http 会话携带项目并直接提交一次", async () => {
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path.endsWith("/session-sidebar")) {
+      if (method === "PUT") return json({ error: { code: "sidebar_project_mismatch" } }, 409);
+      return json({ revision: 0, groups: [{ id: "project-one", title: "项目一" }], sessions: [] });
+    }
+    return undefined;
+  };
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect(document.querySelector("[aria-label='在 项目一 新建会话']")).toBeTruthy());
+  await act(async () => (document.querySelector("[aria-label='在 项目一 新建会话']") as HTMLButtonElement).click());
+  await type("chat-prompt", "组内新建的普通会话");
+  await act(async () => button("发送").click());
+  await until(() => expect(calls.some(call => call.method === "POST" && call.path.endsWith("/sessions"))).toBe(true));
+  expect((calls.find(call => call.method === "POST" && call.path.endsWith("/sessions"))!.body as { project_id?: string }).project_id).toBe("project-one");
+  await until(() => expect(calls.some(call => call.method === "POST" && call.path.endsWith("/A/turns"))).toBe(true));
+  // 非开发目标：只创建并提交一次，不触发绑定或环境准备。
+  expect(calls.filter(call => call.method === "PUT" && call.path.includes("/project"))).toHaveLength(0);
+  expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/prepare"))).toHaveLength(0);
+  expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/A/turns"))).toHaveLength(1);
+});
+
+test("项目选择覆盖组内旧组，开发目标按所选项目准备并发送", async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let created = false, bound = false, accepted: ReturnType<typeof turn> | null = null;
+  const projectOne = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const projectTwo = { project_id: "project-two", environment_id: "env-two", principal_id: "local", workspace_id: "local", title: "项目二", generation: 1, status: "ready", created_at: 2, updated_at: 2 };
+  const environment = () => ({ owner_id: "local", project_id: "project-two", environment_id: "env-two", generation: 1, state: "ready" });
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: bound ? 1 : 0 });
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === "/v2/me/sandbox/projects?offset=0&limit=100") return json({ items: [projectOne, projectTwo], total: 2, offset: 0, limit: 100 });
+    if (path === "/v2/me/sandbox/projects/project-two") return json(projectTwo);
+    if (path === "/v2/me/development/projects/project-two/environment") return json(environment());
+    if (path === "/v2/me/development/projects/project-two/prepare" && method === "POST") return json(environment());
+    if (path.endsWith("/session-sidebar")) return json({ revision: 0, groups: [{ id: "project-one", title: "项目一" }], sessions: [] });
+    if (path === base && method === "POST") { created = true; return json({ ...developmentSession(), create_key: JSON.parse(String(options.body)).request_key }, 201); }
+    if (path === base + "?limit=50") return json(created ? [developmentSession()] : []);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === bindingPath) {
+      if (method === "PUT") bound = true;
+      return json({ session_id: "A", project_id: bound ? "project-two" : null, revision: bound ? 1 : 0, session_revision: bound ? 1 : 0, workspace_id: "local" });
+    }
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    return undefined;
+  };
+  await act(async () => root.render(<StrictMode><App/></StrictMode>));
+  await until(() => expect(document.querySelector("[aria-label='在 项目一 新建会话']")).toBeTruthy());
+  await act(async () => (document.querySelector("[aria-label='在 项目一 新建会话']") as HTMLButtonElement).click());
+  // 组内旧组被选择覆盖：打开选择器另选项目二。
+  await act(async () => (document.querySelector('.empty-setup-card[data-kind="project"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector('input[name="dev-project"][value="project-two"]')).toBeTruthy());
+  await act(async () => (document.querySelector('input[name="dev-project"][value="project-two"]') as HTMLInputElement).click());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="选择新会话项目"] button')].find(item => item.textContent?.trim() === "使用项目")!.click());
+  await type("chat-prompt", "改选项目二的首条任务");
+  await act(async () => button("发送").click());
+  await until(() => expect(accepted).not.toBeNull());
+  expect((calls.find(call => call.method === "POST" && call.path === base)!.body as { project_id?: string }).project_id).toBe("project-two");
+  expect(calls.filter(call => call.path === bindingPath && call.method === "PUT")).toHaveLength(1);
+  expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/prepare"))).toHaveLength(1);
 });
 
 test("已绑定会话发送下一条消息时项目未就绪先准备环境，就绪后提交", async () => {

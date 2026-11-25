@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../src/App";
 import { INTENT } from "../src/lib/run-requests";
+import { LOGIN_STATE } from "../src/lib/login-state";
 (globalThis as typeof globalThis & {
     IS_REACT_ACT_ENVIRONMENT: boolean;
 }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -144,7 +145,8 @@ test("换密钥中止旧读取，晚回程不覆盖新认证视图，Tab不写�
     await click("工具");
     await click("Trace");
     expect(calls.filter(c => c.method === "POST")).toEqual([]);
-    expect([...Array(localStorage.length)].map((_, i) => localStorage.getItem(localStorage.key(i)!)).join(" ")).not.toContain("new-key");
+    expect(JSON.parse(localStorage.getItem(LOGIN_STATE)!)).toEqual({ key: "new-key", loggedOut: false });
+    expect([...Array(localStorage.length)].map((_, i) => localStorage.key(i)!).filter(key => key !== LOGIN_STATE).map(key => localStorage.getItem(key)).join(" ")).not.toContain("new-key");
 });
 test("审批双击只发一次，未知回程重试保留原键原决定与绑定", async () => {
     let committed = false;

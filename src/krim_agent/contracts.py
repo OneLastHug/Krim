@@ -166,6 +166,7 @@ ERROR_CODES = frozenset(
         "candidate_input_mismatch",
         "revision_conflict",
         "sidebar_revision_conflict",
+        "sidebar_project_mismatch",
         "schema_upgrade_required",
         "skill_name_conflict",
         "skill_selection_invalid",

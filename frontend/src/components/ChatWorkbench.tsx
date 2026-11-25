@@ -9,6 +9,7 @@ import { useSubagents } from "../hooks/use-subagents";
 import { SubagentApprovals, SubagentSummary } from "./SubagentPanel";
 import { subagentState } from "../lib/subagent-contracts";
 import { useSessionContext } from "../hooks/use-session-context";
+import { useModelGateways } from "../hooks/use-model-gateways";
 import { fetchProjectsPage, TRANSITIONAL, useDevelopment } from "../hooks/use-development";
 import { openDevelopmentPanel } from "../lib/workbench-events";
 import { ChatHistory } from "./ChatHistory";
@@ -23,9 +24,12 @@ import { Dialog, DialogContent } from "./ui/dialog";
 import { PopoverMenu } from "./popover-menu";
 import { contextCount } from "./ContextSummary";
 import { defaultFormalTarget } from "../lib/run-requests";
+import { ModelGatewayControls } from "./ModelGatewayControls";
+import { toWireSelection, type GatewaySelection } from "../lib/model-gateways";
 import "../styles/chat-workbench.css";
 
 const EMPTY_SESSION_LIST: SessionState["list"] = [];
+const chatPath = (workspace: string, sessionId: string) => "/v2/workspaces/" + encodeURIComponent(workspace) + "/sessions/" + encodeURIComponent(sessionId) + "/model-selection";
 
 export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnect, onIdentity, onChatState, onTrace, onSelection }: { theme?: DisplayTheme; apiKey: string; active: boolean; fence: { current: number }; onLegacy: (value: boolean) => void; onConnect: () => void; onIdentity?: (actor: Actor | null, error: string, sourceKey: string) => void; onChatState?: (chat: SessionState, sourceKey: string) => void; onTrace?: (workspace: string, sessionId: string, turnId: string, page?: "runs" | "context") => void; onSelection?: (sessionId: string) => void }) {
   const chat = useSession(apiKey, active, fence, onLegacy);
@@ -43,10 +47,14 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [workMaximized, setWorkMaximized] = useState(false);
   const [info, setInfo] = useState<"model" | "extra" | null>(null);
+  const gateways = useModelGateways();
+  // 新会话模型覆盖：null 表示跟随账号默认；显式 GatewaySelection 随 create 冻结。
+  const [newSelection, setNewSelection] = useState<GatewaySelection | null>(null);
   const [projects, setProjects] = useState<SandboxProject[]>([]), [newProject, setNewProject] = useState(""), [group, setGroup] = useState<string>();
   const [startNotice, setStartNotice] = useState("");
   const canDevelop = chat.actor?.target_keys?.includes("target-development") === true;
   const accountScope = JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace]);
+  useEffect(() => { setNewSelection(null); }, [accountScope]);
   const liveScope = useRef(accountScope); liveScope.current = accountScope;
   const [starting, setStarting] = useState<{ id: string; project: string; text: string; scope: string; stage: "bind" | "prepare" | "wait" | "failed" } | null>(null);
   const autoFlight = useRef("");
@@ -60,7 +68,12 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
   useEffect(() => {
     const onNew = (event: Event) => {
       const detail = (event as CustomEvent).detail;
-      if (detail?.principal === chat.actor?.principal_id && detail?.generation === chat.actor?.generation && detail?.workspace === chat.workspace) setGroup(typeof detail.group === "string" ? detail.group : undefined);
+      if (detail?.principal === chat.actor?.principal_id && detail?.generation === chat.actor?.generation && detail?.workspace === chat.workspace) {
+        const nextGroup = typeof detail.group === "string" ? detail.group : undefined;
+        setGroup(nextGroup);
+        // 从某个项目分组新建时，项目选择同步为该组（项目）。
+        if (nextGroup) setNewProject(nextGroup);
+      }
     };
     window.addEventListener("krim:new-session", onNew);
     return () => window.removeEventListener("krim:new-session", onNew);
@@ -69,11 +82,20 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
     const target = defaultFormalTarget(chat.actor?.target_keys);
     if (!target) { setStartNotice("当前账号未配置正式运行目标，无法创建新对话。"); return; }
     const text = chat.draft;
-    if (!newProject || target !== "target-development") { await chat.createAndSubmit(text, target, group); return; }
-    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, group, text, newProject);
+    // 项目即分组：从组内新建始终携带组（项目）；组外新建仅开发目标沿用已选项目。
+    const projectId = group ?? (target === "target-development" ? newProject || undefined : undefined);
+    // 显式覆盖随创建冻结；无覆盖表示沿用账号默认，body 不携带 model_selection。
+    const modelSelection = newSelection ? toWireSelection(newSelection, gateways?.models ?? []) ?? undefined : undefined;
+    if (!projectId || target !== "target-development") {
+      // 非开发目标无需容器准备：带项目创建后直接提交一次。
+      await chat.createAndSubmit(text, target, projectId, modelSelection);
+      return;
+    }
+    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, projectId, text, modelSelection);
     if (!created || liveScope.current !== accountScope || new URL(location.href).searchParams.get("session") !== created.id) return;
     chat.edit(text);
-    setStarting({ id: created.id, project: newProject, text, scope: accountScope, stage: "bind" });
+    setNewProject(projectId);
+    setStarting({ id: created.id, project: projectId, text, scope: accountScope, stage: "bind" });
   }
   // 已有会话发送下一条：项目未就绪同样先走同一 prepare 入口，就绪后由同一 starting 流程提交。
   function sendWithPreparation(text?: string, recipient?: Session | null) {
@@ -155,8 +177,10 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
       <footer className="chat-controls" aria-label="会话控制栏">
         <div className="chat-controls-left"><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => openDevelopmentPanel(chat, "environment")}><Terminal aria-hidden="true"/>Linux 环境</button><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => chat.session ? openDevelopmentPanel(chat, "project") : setProjectPickerOpen(true)}><Folder aria-hidden="true"/>{development.project?.title ?? projects.find(project => project.project_id === newProject)?.title ?? "选择项目"}</button></div>
         <div className="chat-controls-right">
+          {gateways ? <ModelGatewayControls apiKey={apiKey} chat={{ id: chat.id, workspace: chat.workspace, session: chat.session ? { revision: chat.session.revision, owner_id: chat.session.owner_id } : null, actor: chat.actor ? { principal_id: chat.actor.principal_id, generation: chat.actor.generation } : null, canWrite: chat.canWrite && (!chat.session || chat.session.status === "open" && !chat.session.archived_at && !chat.session.deleted_at), running: chat.history.some(value => value.status === "queued" || value.status === "running"), refresh: chat.refresh }} sessionPath={chat.workspace && chat.id ? chatPath(chat.workspace, chat.id) : ""} frozen={{ model: context.data?.configuration?.model ?? null, effort: context.data?.configuration?.reasoning_effort ?? null, thinking: context.data?.configuration?.thinking ?? null }} onNewSelection={setNewSelection} newSelection={newSelection}/> : <>
           <button type="button" ref={modelRef} className="control-chip is-strong" aria-haspopup="menu" aria-expanded={info === "model"} onClick={() => setInfo(info === "model" ? null : "model")}><span className="control-model-name" title={model}>{model}</span><ChevronDown aria-hidden="true"/></button>
           <button type="button" ref={extraRef} className="control-chip" aria-haspopup="menu" aria-expanded={info === "extra"} onClick={() => setInfo(info === "extra" ? null : "extra")}>Extra<ChevronDown aria-hidden="true"/></button>
+          </>}
           {!chat.session && <button type="button" className="control-chip" title="创建会话后可切换权限模式" disabled>权限模式</button>}
           {chat.session && <SessionExecutionControl execution={chat.execution} canChange={chat.canWrite && chat.session.status === "open" && !chat.session.archived_at && !chat.session.deleted_at} />}
           <button type="button" className="context-meter" disabled={!chat.ready} aria-label={`上下文用量预估 ${contextCount(context.used)} / ${contextCount(context.limit)}`} title={`上次请求输入预估 ${contextCount(context.used)} / ${contextCount(context.limit)} tokens${context.manifest ? ` · ${context.manifest.counter_version}` : ""}`} onClick={() => openDevelopmentPanel(chat, "context")}><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity=".22"/><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray={`${ratio * 37.7} 37.7`} transform="rotate(-90 8 8)"/></svg><span>{context.used !== null && context.limit ? `${Math.round(context.used / context.limit * 100)}%` : "—"}</span></button>
@@ -165,7 +189,7 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
       <PopoverMenu open={info !== null} anchor={info === "model" ? modelRef.current : extraRef.current} placement="above" onClose={() => setInfo(null)} label={info === "model" ? "模型信息" : "运行配置"}>
         <p className="control-info-content">{info === "model" ? context.data?.configuration?.model ? `当前运行模型：${model}` : context.turnId ? "本轮未提供模型名称。模型接入在账号配置中管理。" : "完成首轮运行后显示实际模型配置。模型接入在账号配置中管理。" : `推理强度：${context.data?.configuration?.reasoning_effort ?? "未提供"}；思考配置：${context.data?.configuration?.thinking ?? "未提供"}`}</p>
       </PopoverMenu>
-      <Dialog open={projectPickerOpen} onOpenChange={setProjectPickerOpen}><DialogContent className="new-session-project-dialog" aria-label="选择新会话项目" aria-describedby={undefined}><ProjectDialogBody key={accountScope} dev={development} apiKey={apiKey} projectId={newProject || null} workspace={chat.workspace} canCreate={chat.canWrite} onClose={() => setProjectPickerOpen(false)} onChoose={id => { setNewProject(id); void fetchProjectsPage(apiKey).then(value => { if (liveScope.current === accountScope) setProjects(value.items.filter(project => project.workspace_id === chat.workspace)); }).catch(error => { if (liveScope.current === accountScope) setStartNotice(chatReason(error)); }); }}/></DialogContent></Dialog>
+      <Dialog open={projectPickerOpen} onOpenChange={setProjectPickerOpen}><DialogContent className="new-session-project-dialog" aria-label="选择新会话项目" aria-describedby={undefined}><ProjectDialogBody key={accountScope} dev={development} apiKey={apiKey} projectId={newProject || null} workspace={chat.workspace} canCreate={chat.canWrite} onClose={() => setProjectPickerOpen(false)} onChoose={id => { setNewProject(id); setGroup(undefined); void fetchProjectsPage(apiKey).then(value => { if (liveScope.current === accountScope) setProjects(value.items.filter(project => project.workspace_id === chat.workspace)); }).catch(error => { if (liveScope.current === accountScope) setStartNotice(chatReason(error)); }); }}/></DialogContent></Dialog>
     </section>
     <DevelopmentPanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} development={development} subagents={subagents} onMaximizedChange={setWorkMaximized} dark={theme === "dark"} context={context} onContextTrace={() => { if (context.turnId && chat.id) onTrace?.(chat.workspace, chat.id, context.turnId, "context"); }}/>
   </section>;

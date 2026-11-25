@@ -14,6 +14,7 @@ from krim_agent.storage.account_models import ACCOUNT_TABLE_NAMES
 from krim_agent.storage.development_models import DEVELOPMENT_TABLES
 from krim_agent.storage.execution_policy_models import EXECUTION_POLICY_TABLE_NAMES
 from krim_agent.storage.extension_models import EXTENSION_TABLES
+from krim_agent.storage.model_gateway_models import MODEL_GATEWAY_TABLE_NAMES
 from krim_agent.storage.models import metadata
 from krim_agent.storage.preview_models import PREVIEW_TABLES
 from krim_agent.storage.project_membership_models import PROJECT_MEMBERSHIP_TABLE_NAMES
@@ -54,6 +55,9 @@ def downgrade(path, version):
     """从当前完整表集逐层删除到目标版本的白名单集合；只读门与升级测试共用。"""
     conn = sqlite3.connect(path)
     try:
+        # schema22 增量：模型网关配置域三表；任何 <=21 的目标版本都必须删除。
+        for name in sorted(MODEL_GATEWAY_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
         schema20_tables = sort_tables([
             metadata.tables[name] for name in SCHEMA20_TABLE_NAMES
         ])
@@ -125,7 +129,7 @@ async def test_fresh_store_has_current_schema_with_sandbox_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 22
         assert store.schema_version == SCHEMA_VERSION
         assert SANDBOX_TABLE_NAMES <= set(metadata.tables)
         assert SANDBOX_TABLE_NAMES <= table_names(database)
@@ -421,6 +425,8 @@ async def test_schema9_readonly_and_quota_upgrade_preserve_binding(tmp_path):
     store = await SQLiteStore.open(database)
     await store.close()
     with sqlite3.connect(database) as conn:
+        for name in sorted(MODEL_GATEWAY_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
         schema20_tables = sort_tables([
             metadata.tables[name] for name in SCHEMA20_TABLE_NAMES
         ])

@@ -83,8 +83,9 @@ APPLICATION_ID = 0x4B4C4331
 # 19: project capability ceilings and independent session execution policies.
 # 20: 子代理树/成员/驻留/任务/消息/结果/通知、child_run ownership 映射、
 #     Team 任务板与持久请求预算。
-# 21: account model gateways, immutable credential revisions and mutation receipts.
-SCHEMA_VERSION = 21
+# 21: 侧栏布局按实际项目归组，保留独立显示别名（无列变更）。
+# 22: account model gateways, immutable credential revisions and mutation receipts.
+SCHEMA_VERSION = 22
 GENERAL_TABLE_NAMES = (
     PLANNING_TABLE_NAMES | INTERACTION_TABLE_NAMES | CONTEXT_TABLE_NAMES | GOAL_TABLE_NAMES
 )
@@ -225,6 +226,9 @@ class SQLiteStore:
 
         await migrate_project_access(conn)
         await migrate_execution_policy(conn)
+        from .session_sidebar import migrate_project_groups
+
+        await migrate_project_groups(conn)
         await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod
@@ -307,8 +311,9 @@ class SQLiteStore:
                     await conn.exec_driver_sql(f"PRAGMA user_version={SCHEMA_VERSION}")
                 else:
                     current_tables = set(metadata.tables) | set(TABLES)
-                    schema21 = current_tables
-                    schema20 = schema21 - MODEL_GATEWAY_TABLE_NAMES
+                    schema22 = current_tables
+                    schema21 = schema22 - MODEL_GATEWAY_TABLE_NAMES
+                    schema20 = schema21
                     schema19 = (
                         schema20
                         - SUBAGENT_TABLE_NAMES
@@ -366,11 +371,12 @@ class SQLiteStore:
                         19: schema19,
                         20: schema20,
                         21: schema21,
+                        22: schema22,
                     }.get(version, set())
                     if (
                         application != APPLICATION_ID
                         or version not in
-                        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
+                        set(range(1, SCHEMA_VERSION + 1))
                         or tables != expected
                     ):
                         raise ServiceError("database_invalid")

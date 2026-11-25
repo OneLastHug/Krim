@@ -18,6 +18,7 @@ class ReasoningLevel(StrictModel):
 
     effort: str | None = Field(default=None, max_length=64)
     thinking: Literal["enabled", "disabled"] | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=32)
 
     @field_validator("effort")
     @classmethod

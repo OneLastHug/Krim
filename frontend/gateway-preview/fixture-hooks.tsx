@@ -1,7 +1,7 @@
 /* Gateway preview data adapter. The rendered controls are the production React components; all data stays local and no requests are made. */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import cases from "../visual/approved-cases.json";
-import { DEFAULT_GROUP, type SidebarLayout } from "../src/lib/session-sidebar";
+import type { SidebarLayout } from "../src/lib/session-sidebar";
 import type { SessionState } from "../src/hooks/use-session";
 import type { DevelopmentState } from "../src/hooks/use-development";
 import type { SessionContextState } from "../src/hooks/use-session-context";
@@ -105,6 +105,15 @@ export function GatewayFixtureProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try { localStorage.setItem(STORE_KEY, JSON.stringify({ messages: localMessages, created, active: id })); } catch { /* 存储不可用时保持内存态 */ }
   }, [localMessages, created, id]);
+  useEffect(() => {
+    const rebind = (event: Event) => {
+      const { sessionId, projectId } = (event as CustomEvent<{ sessionId: string; projectId: string }>).detail;
+      setCreated(rows => rows.map(item => item.id === sessionId ? { ...item, group: projectId, project: projectId } : item));
+      setLayout(previous => ({ ...previous, revision: previous.revision + 1, sessions: previous.sessions.map(item => item.session_id === sessionId ? { ...item, group_id: projectId, parent_id: null } : item) }));
+    };
+    window.addEventListener("krim:preview-rebind", rebind);
+    return () => window.removeEventListener("krim:preview-rebind", rebind);
+  }, []);
   const value = useMemo<Model>(() => {
     const rawFor = (sessionId: string) => {
       const fromCases = cases.sessions.find(s => s.id === sessionId);
@@ -162,9 +171,10 @@ export function GatewayFixtureProvider({ children }: { children: ReactNode }) {
       url.searchParams.set("view", "chat"); url.searchParams.set("workspace", "local"); url.searchParams.set("session", sessionId);
       window.history.replaceState(null, "", url);
     };
-    const create = async (title?: string, _target?: string, group?: string, _text?: string, project?: string | null) => {
+    const create = async (title?: string, _target?: string, projectId?: string, _text?: string) => {
       const sessionId = crypto.randomUUID();
-      const entry: CreatedStub = { id: sessionId, title: (title ?? "").trim() || "新的对话", group: group || DEFAULT_GROUP, project: project || null };
+      const chosenProject = projects.find(item => item.project_id === projectId) ?? projects[0]!;
+      const entry: CreatedStub = { id: sessionId, title: (title ?? "").trim() || "新的对话", group: chosenProject.project_id, project: chosenProject.project_id };
       setCreated(previous => [...previous, entry]);
       setLayout(previous => ({ revision: previous.revision + 1, groups: previous.groups, sessions: [...previous.sessions, { session_id: sessionId, group_id: entry.group, parent_id: null, pinned: false }] }));
       openSession(sessionId);
@@ -215,6 +225,11 @@ export function useSessionContext() { return useFixture().context; }
 export function useSessionSidebar() { return useFixture().sidebar; }
 export function useSessionFeatures() { return useFixture().features; }
 export function useSubagents() { return emptySubagents; }
+export async function rebindSessionProject(_apiKey: string, sessionId: string, workspace: string, projectId: string) {
+  if (!projects.some(item => item.project_id === projectId)) throw new Error("项目不存在");
+  window.dispatchEvent(new CustomEvent("krim:preview-rebind", { detail: { sessionId, projectId } }));
+  return { session_id: sessionId, workspace_id: workspace, project_id: projectId, revision: 1, session_revision: 1 };
+}
 export async function fetchProjectsPage(_apiKey: string, _signal?: AbortSignal) { return { items: projects, total: projects.length, offset: 0, limit: 100 }; }
 export async function fetchDirectory(_apiKey: string, projectId: string, path: string, _signal?: AbortSignal, _offset = 0) { return { project_id: projectId, path, total: cases.outputs.length, offset: 0, next_offset: null, entries: cases.outputs.map(name => ({ name: name.split("/").at(-1)!, type: "file", size: fileText(name).length })) }; }
 export async function fetchFileBytes(_apiKey: string, _project: string, path: string, _signal?: AbortSignal) { const bytes = new TextEncoder().encode(fileText(path)); return { bytes, sha256: "d".repeat(64), size: bytes.length, eof: true, may_change: false }; }

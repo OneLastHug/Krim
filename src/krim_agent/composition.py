@@ -346,8 +346,19 @@ async def open_application(
         }
         bindings: dict[str, RunBinding] = {}
         delegates: dict[str, RunBinding] = {}
+        gateway_templates: dict[str, RunBinding] = {}
         if not isinstance(selected, UnconfiguredProvider):
             bindings["target-http"] = RunBinding.freeze("target-http", loop, primary_settings)
+        else:
+            # model:null：宿主provider不可执行。模板binding不进公共bindings——
+            # 管理-only契约（bindings为空、healthz unconfigured、profiles 404、
+            # 共享loop不注册会话工具）保持不变；模板用独立AgentLoop装配，
+            # 供每会话网关复制并替换provider后获得完整会话工具面。
+            gateway_templates["target-http"] = RunBinding.freeze(
+                "target-http",
+                AgentLoop(store, selected, executor, primary_settings),
+                primary_settings,
+            )
         sandbox_service = (
             SandboxService(store, identities, sandbox_configuration)
             if sandbox_configuration is not None
@@ -466,6 +477,10 @@ async def open_application(
             media.bundle(),
         )
         assembled_loops: set[int] = set()
+        if gateway_templates:
+            # model:null模板随装配走线：会话工具组合与子代理准备按根family
+            # 处理；RunService冻结前移出，公共bindings维持管理-only契约。
+            bindings.update(gateway_templates)
         for key in ("target-http", "target-development"):
             binding = bindings.get(key)
             if binding is None:
@@ -496,6 +511,11 @@ async def open_application(
         if prepared_subagents is not None:
             delegates.update(prepared_subagents.delegates)
             await subagents.recover()
+        for key in gateway_templates:
+            moved = bindings.pop(key, None)
+            # prepare重新冻结后的模板才是带组合executor/settings的装配形态。
+            if moved is not None:
+                gateway_templates[key] = moved
         target["tools"] = cast(JsonValue, loop.executor.registry.schemas())
         service = RunService(
             store, loop, config, target, bindings, delegates=delegates,
@@ -649,7 +669,10 @@ async def open_application(
         from krim_agent.model_gateway.service import ModelGatewayService
 
         application.model_gateways = ModelGatewayService(store, personal_mcp_vault)
-        service.model_gateway = GatewayRuntime(application.model_gateways, service)
+        service.model_gateway = GatewayRuntime(
+            application.model_gateways, service,
+            templates=gateway_templates or None,
+        )
         goals.queue = application.sessions
         if evaluation_path is not None:
             assert application.sessions is not None

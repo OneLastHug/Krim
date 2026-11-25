@@ -25,6 +25,17 @@ function bindingRejected(error: unknown): boolean {
 export async function fetchProjectsPage(apiKey: string, signal?: AbortSignal) {
   return parseProjectsPage(await request("/v2/me/sandbox/projects?offset=0&limit=100", apiKey, undefined, signal));
 }
+// 侧栏"移动到项目"入口：先读当前绑定取 revision，再按键 PUT 换绑；跨组父子由服务端解除。
+// 只接受真实项目 id（后端不接受 null 解绑）；结果未知（网络丢失）不重放，由调用方提示稍后重读确认。
+export async function rebindSessionProject(apiKey: string, sessionId: string, workspace: string, projectId: string): Promise<SessionBinding> {
+  const fresh = parseBinding(await request(`/v2/me/sandbox/sessions/${encodeURIComponent(sessionId)}/project`, apiKey));
+  if (fresh.session_id !== sessionId || fresh.workspace_id !== workspace) throw new Error("绑定身份不匹配");
+  if (fresh.project_id === projectId) return fresh;
+  const body = { request_key: crypto.randomUUID(), expected_revision: fresh.revision, expected_session_revision: fresh.session_revision, project_id: projectId };
+  const bound = parseBinding(await request(`/v2/me/sandbox/sessions/${encodeURIComponent(sessionId)}/project`, apiKey, body, undefined, "PUT"));
+  if (bound.session_id !== sessionId || bound.workspace_id !== workspace) throw new Error("绑定身份不匹配");
+  return bound;
+}
 export async function fetchDirectory(apiKey: string, projectId: string, path: string, signal?: AbortSignal, offset = 0) {
   return parseDirectory(await request(
     `/v2/me/sandbox/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}&limit=100${offset ? `&offset=${offset}` : ""}`,
@@ -206,6 +217,16 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
     return () => { clearTimeout(timer); controller.abort(); };
   }, [identity, version, active, environment?.project_id, environment?.state]);
   function reload() { epoch.current++; setVersion(value => value + 1); }
+  // 侧栏改绑成功（含本会话在侧栏"移动到项目"）会同步布局并推进 revision；
+  // 订阅同一事件刷新当前会话的绑定、项目与环境，避免开发栏停留在旧项目。
+  useEffect(() => {
+    const onSidebarChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ principal: string; workspace: string }>).detail;
+      if (detail?.principal === chatRef.current.actor?.principal_id && detail.workspace === chatRef.current.workspace) reload();
+    };
+    window.addEventListener("krim:sidebar-changed", onSidebarChanged);
+    return () => window.removeEventListener("krim:sidebar-changed", onSidebarChanged);
+  }, []);
   function sameScope(intent: DevWriteIntent) {
     const value = chatRef.current;
     return !!value.ready && !!value.actor
@@ -258,6 +279,7 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
       persistWrites(readDevWrites(localStorage).filter(item => item.request_key !== requestKey));
       setBinding(raw);
       setProject(null); setEnvironment(null);
+      window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: value.actor.principal_id, workspace: value.workspace } }));
       reload();
       value.refresh();
     } catch (error) {
@@ -453,6 +475,7 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
       if (!current()) return;
       if (receipt === "completed") {
         persistWrites(ledger().filter(item => item.request_key !== intent.request_key));
+        if (intent.kind === "bind-project") window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: intent.principal_id, workspace: intent.workspace_id } }));
         setNotice("已确认之前的操作生效"); reload(); chatRef.current.refresh();
         return;
       }
@@ -467,6 +490,7 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
       if (!current()) return;
       if (raw.session_id !== intent.session_id || raw.workspace_id !== intent.workspace_id) throw new Error("绑定身份不匹配");
       persistWrites(ledger().filter(item => item.request_key !== intent.request_key));
+      window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: intent.principal_id, workspace: intent.workspace_id } }));
       setBinding(raw); setNotice("已按原请求找回并生效"); reload(); chatRef.current.refresh();
     } catch (error) {
       if (!current()) return;

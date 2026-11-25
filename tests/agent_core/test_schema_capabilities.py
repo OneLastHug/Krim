@@ -9,7 +9,6 @@ import pytest
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
 from krim_agent.context.types import ContextPolicy
-from krim_agent.contracts import ServiceError
 from krim_agent.evaluation.adapters.krim_source import KrimSourceReader
 from krim_agent.security import LOCAL
 from krim_agent.sessions.types import SessionCreate, TurnRequest
@@ -22,6 +21,8 @@ from krim_agent.workspace.types import (
     WorkspaceProfile,
     WorkspaceTurnRequest,
 )
+from tests.support.builtins import builtin_registry, demo_policy
+from tests.support.fake_provider import FakeProvider
 
 
 @pytest.mark.parametrize("version", [11, 12, 13, 14, 15])
@@ -42,8 +43,11 @@ async def test_workspace_terminal_attempt_supports_feature_schema_versions(versi
 
 @pytest.mark.parametrize("legacy", [False, True])
 async def test_linked_session_source_works_after_current_schema_upgrade(tmp_path, legacy):
-    async with await open_application(tmp_path / "source.sqlite") as app:
-        assert app.store.schema_version == SCHEMA_VERSION == 20
+    async with await open_application(
+        tmp_path / "source.sqlite", provider=FakeProvider(),
+        registry=builtin_registry(), policy=demo_policy,
+    ) as app:
+        assert app.store.schema_version == SCHEMA_VERSION == 22
         session = await app.sessions.create(LOCAL, "local", SessionCreate(request_key="source"))
         turn = await app.sessions.submit(
             LOCAL,
@@ -69,7 +73,7 @@ async def test_linked_session_source_works_after_current_schema_upgrade(tmp_path
         assert source["terminal"] is True
 
 
-async def test_queued_workspace_requires_resource_before_recovery(tmp_path, monkeypatch):
+async def test_retired_workspace_queue_is_interrupted_during_recovery(tmp_path, monkeypatch):
     database = tmp_path / "queued-workspace.sqlite"
     profile = WorkspaceProfile(max_tools_per_step=1, environment={})
     store = await SQLiteStore.open(database)
@@ -105,13 +109,14 @@ async def test_queued_workspace_requires_resource_before_recovery(tmp_path, monk
         await original(active_store)
 
     monkeypatch.setattr(SQLiteStore, "recover", tracked_recover)
-    with pytest.raises(ServiceError, match="workspace_unavailable"):
-        await open_application(database)
-    assert recovered is False
+    async with await open_application(database):
+        pass
+    assert recovered is True
     reader = await SQLiteStore.open(database, readonly=True)
     try:
-        assert (await session_sql.get_session(reader, session.id)).dispatch_paused is False
+        assert (await session_sql.get_session(reader, session.id)).dispatch_paused is True
         current = await session_sql.get_turn(reader, turn.id)
-        assert current.status == "queued" and current.run_id is None
+        assert current.status == "interrupted" and current.run_id is None
+        assert current.code == "target_retired"
     finally:
         await reader.close()

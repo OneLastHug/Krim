@@ -50,7 +50,7 @@ function PreviewApp() {
     window.addEventListener("krim:gateway-settings", open);
     return () => window.removeEventListener("krim:gateway-settings", open);
   }, []);
-  function accountTab(next: "profile" | "accounts" | "events" | "appearance") { setTab(next); setView("settings"); }
+  function accountTab(next: Tab) { setTab(next); setView("settings"); }
   function navigate(next: WorkbenchView) { if (next === "settings") setTab("gateways"); setView(next); }
   const tabs: { id: Tab; label: string }[] = [{ id: "profile", label: "个人资料" }, { id: "gateways", label: "接入与模型" }, { id: "accounts", label: "账号管理" }, { id: "events", label: "管理记录" }, { id: "appearance", label: "外观与偏好" }];
   return <div className="app-shell core-member" data-reading-size={size}>

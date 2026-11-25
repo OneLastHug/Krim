@@ -137,9 +137,9 @@ class ControlView(StrictModel):
     result: dict[str, JsonValue] | None
 
 
-# 侧栏呈现（schema 17）：仅当前主体的展示层布局，不改变会话归属、生命周期
-# 或执行父子语义。group_id 为 null 表示默认"会话"分组；groups/sessions 数组
-# 顺序即手动排序；parent 链（嵌套层数，含顶层节点）最多 32 层，前端渲染同限。
+# 侧栏呈现（schema 17 引入，21 起按项目分组）：group.id/group_id 即 project_id；
+# title 是主体的显示别名，null 仅容纳历史无绑定会话。服务端事务校验真实绑定。
+# 数组顺序即手动排序；parent 链最多 32 层且必须属于同项目，不改变执行父子关系。
 SIDEBAR_MAX_PARENT_DEPTH = 32
 
 
@@ -166,8 +166,9 @@ class SessionSidebarDocument(StrictModel):
 
 
 class SessionSidebarWrite(StrictModel):
-    groups: tuple[SidebarGroup, ...] = Field(default=(), max_length=100)
-    sessions: tuple[SidebarSessionEntry, ...] = Field(default=(), max_length=10000)
+    # Entries reference existing, authorized facts; project counts are not layout quotas.
+    groups: tuple[SidebarGroup, ...] = ()
+    sessions: tuple[SidebarSessionEntry, ...] = ()
     expected_revision: int = Field(ge=0)
 
     @model_validator(mode="after")

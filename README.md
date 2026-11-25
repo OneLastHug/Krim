@@ -22,9 +22,9 @@ chmod 600 krim.yaml
 uv run --frozen python -m krim_agent serve --config krim.yaml
 ```
 
-样例中的 `model: null` 允许 API、管理和历史读取启动；运行就绪状态为 `false`，直到主配置中提供真实模型。数据库、环境、工具、访问策略、服务器和评测设置都在同一 YAML 文件中，主机路径相对该文件定位。
+样例中的 `model: null` 允许 API、管理和历史读取启动；宿主运行就绪状态为 `false`，账号仍可在「接入与模型」配置网关并为对话选择真实模型。数据库、环境、工具、访问策略、服务器和评测设置都在同一 YAML 文件中，主机路径相对该文件定位。
 
-主配置的模型、访问令牌和 MCP 凭据通过显式 `env:` 引用接入，程序不会自动读取 `.env`。账号可通过 `/v2/me/model-gateways` 保存额外网关、模型目录和默认选择；供应商密钥使用已有保险库加密保存，或通过 `api_key_env` 引用宿主环境变量。`environment.sandbox` 和 `environment.development` 分别配置对应宿主环境；未配置工具时不添加演示工具。
+主配置的模型、访问令牌和 MCP 凭据通过显式 `env:` 引用接入，程序不会自动读取 `.env`。账号可在设置中的「接入与模型」保存网关、模型目录和默认选择，聊天底栏支持模型及推理档位切换，对应接口为 `/v2/me/model-gateways`。供应商密钥使用已有保险库加密保存（需配置 `tools.personal_mcp_key_file`），也可通过 API 的 `api_key_env` 引用宿主环境变量。`environment.sandbox` 和 `environment.development` 分别配置对应宿主环境；未配置工具时不添加演示工具。
 
 HTTP 模型接入使用 Vercel Labs Python AI SDK `ai[openai]`，固定为 `0.9.0`，支持 Chat Completions 与 Responses 协议，直连主配置中的兼容端点。模型协议与流式事件由 SDK 处理；Krim 校验完整响应、工具参数和调用批次，再派发工具。默认调度宽度为 8；累计步骤、工具调用、输出、事件和运行时长未配置时不设应用层限额。
 

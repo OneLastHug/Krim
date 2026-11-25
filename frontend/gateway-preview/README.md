@@ -22,7 +22,7 @@
 3. 「返回对话」，在底栏选择模型和 Extra 推理档位。
 4. 账号菜单或模型菜单可以再次进入「接入与模型」。
 
-复用现有 WorkbenchLayout、AppSidebar、ChatWorkbench、ChatHistory、ChatComposer、DevelopmentPanel 和 Portal 组件。正式 `frontend/src` 未修改。
+复用现有 WorkbenchLayout、AppSidebar、ChatWorkbench、ChatHistory、ChatComposer、DevelopmentPanel 和 Portal 组件。该目录保留独立预览数据；正式前端现已接入真实后端，对应 `frontend/src/components/ModelGatewaySettings.tsx` 与 `ModelGatewayControls.tsx`。
 
 设置与预览消息仅写当前浏览器。API Key 只保存是否设置的标记，不保存密钥内容，不请求真实模型或正式后端。
 
@@ -32,10 +32,10 @@
 - 启动项：`krim-gateway-full-preview`。
 - 类型检查：`node frontend/node_modules/typescript/bin/tsc -p frontend/gateway-preview/tsconfig.json --noEmit`。
 - 重新导出：`node frontend/gateway-preview/export-html.mjs`。
-- 输出及设计资料只留本地，不发布。尚未接入正式前端。
+- 导出的 HTML 和设计资料只留本地，不发布；正式前端代码、可重建预览源码与测试纳入版本管理。
 
 ## 本轮验证
 
 实际打开供应商编辑、添加模板和推理折叠区，检查桌面/375px、长名称、空字段错误、深色主题。走通新供应商与模型保存、自定义 effort、浏览器持久化、聊天模型搜索和推理菜单联动。确认取消删除保留草稿，清理验收数据。
 
-最终 TypeScript 检查和生产构建通过，导出 HTML 为 7.4 MiB。已在静态服务打开导出文件，检查默认设置页和供应商弹窗；0 外部脚本、0 外部样式、字体加载完成、无失败请求及控制台错误。`git diff --name-only -- frontend/src` 为空。
+独立样板 TypeScript 检查和导出通过，HTML 为 7.4 MiB。正式前端也已完成类型检查、生产构建和真实 API 联调：供应商加密保存、模型 A 携带自定义 effort、同一会话切模型 B、刷新恢复及切回主配置。完整前端回归 578 项通过；详细验证结果在本地 `docs/MODEL-GATEWAYS-VALIDATION.md`。

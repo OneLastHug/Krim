@@ -5,9 +5,13 @@ export interface SidebarGroup { id: string; title: string }
 export interface SidebarEntry { session_id: string; group_id: string | null; parent_id: string | null; pinned: boolean }
 export interface SidebarLayout { revision: number; groups: SidebarGroup[]; sessions: SidebarEntry[] }
 export const emptySidebar = (): SidebarLayout => ({ revision: 0, groups: [], sessions: [] });
+// 项目即分组：组 id 为项目 id，title 为主体独立别名；无绑定的旧会话 group_id 为 null，
+// 归入仅用于展示的"未分组"区，该 id 永不写回布局。
+export const UNGROUPED = "ungrouped";
 export function parseSidebar(raw: unknown): SidebarLayout {
   const value = object(raw);
-  if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || !Array.isArray(value.groups) || value.groups.length > 100 || !Array.isArray(value.sessions) || value.sessions.length > 10000) throw new Error("会话排序响应无效");
+  // 数量由真实项目/会话集合自然约束（schema21 起无人为上限）；仅校验字段与结构。
+  if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || !Array.isArray(value.groups) || !Array.isArray(value.sessions)) throw new Error("会话排序响应无效");
   const groupIds = new Set<string>(), sessionIds = new Set<string>();
   for (const rawGroup of value.groups) {
     const group = object(rawGroup);
@@ -36,14 +40,12 @@ export function parseSidebar(raw: unknown): SidebarLayout {
   }
   return layout;
 }
-// Activity never contributes to order. Unrecorded sessions are appended by creation time.
-export const DEFAULT_GROUP = "sessions";
-export function includeSessions(layout: SidebarLayout, sessions: Session[]): SidebarLayout {
+// 列表中尚无排序记录的会话（刚创建或服务端尚未收录）按列表顺序以未绑定条目补齐；
+// 仅用于渲染，任何保存仍只提交服务端返回的布局。
+export function unrecordedEntries(layout: SidebarLayout, sessions: Session[]): SidebarEntry[] {
   const known = new Set(layout.sessions.map(entry => entry.session_id));
-  const extra = sessions.filter(session => !known.has(session.id)).sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
-  const needsDefault = extra.length > 0 || layout.groups.length === 0 || layout.sessions.some(entry => entry.group_id === null);
-  const groups = !needsDefault || layout.groups.some(group => group.id === DEFAULT_GROUP) ? layout.groups : [...layout.groups, { id: DEFAULT_GROUP, title: "会话" }];
-  return { ...layout, groups, sessions: [...layout.sessions.map(entry => ({ ...entry, group_id: entry.group_id ?? DEFAULT_GROUP })), ...extra.map(session => ({ session_id: session.id, group_id: DEFAULT_GROUP, parent_id: null, pinned: false }))] };
+  return sessions.filter(session => !known.has(session.id))
+    .map(session => ({ session_id: session.id, group_id: null, parent_id: null, pinned: false }));
 }
 export function moveSidebar(layout: SidebarLayout, kind: "group" | "session", source: string, target: string, after: boolean): SidebarLayout {
   if (source === target) return layout;

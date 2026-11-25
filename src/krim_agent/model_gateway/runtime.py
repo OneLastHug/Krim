@@ -21,6 +21,7 @@ from krim_agent.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
 )
+from krim_agent.providers.unconfigured import UnconfiguredProvider
 from krim_agent.runtime.service import RunBinding, RunService
 
 from .contracts import GatewaySelection
@@ -136,16 +137,30 @@ class GatewayRuntime:
 
     runs（RunService）保有执行与存储所有权；本类只做"选择 -> 冻结绑定"的
     解析与缓存，按 descriptor fingerprint 去重，不替换全局 bindings。
+    templates 是组合层在model:null启动时准备的宿主模板binding（不进公共
+    bindings，管理-only可见契约不变）：网关会话以它为底复制loop并替换
+    provider；宿主模型可用时模板缺省，直接以现行bindings为底。
     """
 
-    def __init__(self, gateways: ModelGatewayService, runs: RunService) -> None:
+    def __init__(
+        self,
+        gateways: ModelGatewayService,
+        runs: RunService,
+        *,
+        templates: Mapping[str, RunBinding] | None = None,
+    ) -> None:
         self.gateways = gateways
         self.runs = runs
+        self.templates: Mapping[str, RunBinding] = templates or {}
         self.closed = False
         self._lock = asyncio.Lock()
         self._by_marker: dict[str, RunBinding] = {}
         self._by_descriptor: dict[str, RunBinding] = {}
         self._providers: list[GatewayProvider] = []
+
+    def _template(self, target_key: str) -> RunBinding | None:
+        """装配底座：model:null模板优先，其次公共bindings；都没有返回None。"""
+        return self.templates.get(target_key) or self.runs.bindings.get(target_key)
 
     async def close(self) -> None:
         async with self._lock:
@@ -153,6 +168,7 @@ class GatewayRuntime:
                 return
             self.closed = True
             providers, self._providers = self._providers, []
+            self.templates = {}
             self._by_marker.clear()
             self._by_descriptor.clear()
         outcomes = await asyncio.gather(
@@ -168,13 +184,19 @@ class GatewayRuntime:
         target_key: str,
         selection: GatewaySelection | Mapping[str, Any] | None,
     ) -> RunBinding:
-        """会话创建选 binding：显式选择或账号默认走网关；无默认保持宿主目标。"""
-        base = self.runs.bindings.get(target_key)
+        """会话创建选 binding：显式选择或账号默认走网关；无默认保持宿主目标。
+
+        model:null 启动时宿主 provider 不可执行，templates 里的宿主 binding
+        只是模板：显式或默认网关选择照常按模板装配自定义绑定；两者皆无时
+        维持 provider_not_configured（管理-only 旧行为）。
+        """
+        base = self._template(target_key)
         explicit = selection is not None
         if base is None:
             if not self.runs.bindings or explicit:
                 raise ServiceError("provider_not_configured", 503)
             raise ServiceError("invalid_input", 422)
+        unconfigured_host = isinstance(base.loop.provider, UnconfiguredProvider)
         if not explicit:
             try:
                 config, chosen, revision = await self.gateways.resolve(
@@ -182,13 +204,18 @@ class GatewayRuntime:
                 )
             except ServiceError as error:
                 if error.code == "provider_not_configured":
-                    return base  # 无默认选择：保持原有宿主绑定
-                raise
+                    if unconfigured_host:
+                        # model:null模板且无默认网关：维持宿主未配置语义。
+                        raise
+                    return base  # 无默认选择：保留原有宿主绑定（不限provider类型）
+                raise  # provider_config 等配置错误原样上报，不吞掉
         else:
             config, chosen, revision = await self.gateways.resolve(
                 principal_id, selection, None
             )
-        if not isinstance(base.loop.provider, OpenAICompatibleProvider):
+        # 自定义装配只接受OpenAI兼容宿主（继承传输上限）与model:null模板
+        # （无宿主上限，自定义配置独立生效）；其余非OpenAI宿主保持原拒绝边界。
+        if not isinstance(base.loop.provider, OpenAICompatibleProvider) and not unconfigured_host:
             raise ServiceError("provider_not_configured", 503)
         return await self._binding(target_key, base, principal_id, revision, chosen, config)
 
@@ -215,8 +242,9 @@ class GatewayRuntime:
         cached = self._by_descriptor.get(expected)
         if cached is not None:
             return cached
-        base = self.runs.bindings.get(target_key)
-        if base is None or not isinstance(base.loop.provider, OpenAICompatibleProvider):
+        base = self._template(target_key)
+        if base is None:
+            # 无宿主模板binding：非自定义目标无处可回，自定义目标无处可装配。
             raise ServiceError("provider_not_configured", 503)
         config, chosen, resolved_revision = await self.gateways.resolve(
             principal_id, selection, revision
@@ -239,8 +267,9 @@ class GatewayRuntime:
         expected: str | None = None,
     ) -> RunBinding:
         """构造带标记的 provider 与 binding；按 marker/descriptor 指纹缓存。"""
-        base_config = cast(OpenAICompatibleProvider, base.loop.provider).config
-        config = _bounded_config(config, base_config)
+        # model:null 模板的宿主 provider 无传输上限可继承：自定义配置独立生效。
+        if isinstance(base.loop.provider, OpenAICompatibleProvider):
+            config = _bounded_config(config, base.loop.provider.config)
         marker = _marker_value(principal_id, revision, selection)
         marker_key = fingerprint({"target_key": target_key, "marker": marker})
         cached = self._by_marker.get(marker_key)

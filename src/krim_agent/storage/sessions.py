@@ -196,9 +196,9 @@ async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awa
 
 
 def require(store: SQLiteStore) -> None:
-    if store.schema_version not in {
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-    }:
+    from .sqlite import SCHEMA_VERSION
+
+    if store.schema_version not in range(3, SCHEMA_VERSION + 1):
         raise ServiceError("schema_upgrade_required")
 
 
@@ -1352,9 +1352,9 @@ async def source(
     | WorkspaceSessionContext
     | None
 ):
-    if version not in {
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-    }:
+    from .sqlite import SCHEMA_VERSION
+
+    if version not in range(3, SCHEMA_VERSION + 1):
         return None
     row = (await conn.execute(select(turns).where(turns.c.run_id == run_id))).mappings().first()
     if row is None:

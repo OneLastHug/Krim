@@ -3,7 +3,10 @@ import { useScrollbars } from "./hooks/use-scrollbars";
 import { AppearanceSettings } from "./components/AppearanceSettings";
 import { useCallback, useEffect, useRef, useState, type ReactNode, lazy, Suspense } from "react";
 import { object, request } from "./api";
+import { readLoginState, saveLoginState } from "./lib/login-state";
 import { AccountSettings, type AccountTab } from "./components/AccountSettings";
+import { ModelGatewaysProvider } from "./hooks/use-model-gateways";
+import { ModelGatewaySettings } from "./components/ModelGatewaySettings";
 import { useAccountIdentity } from "./hooks/use-account-identity";
 import { ChatWorkbench } from "./components/ChatWorkbench";
 import { RunComposer } from "./components/RunComposer";
@@ -38,8 +41,8 @@ function UnavailablePage({ title, children }: { title: string; children: ReactNo
 
 export function App() {
   useScrollbars();
-  const [key, setKey] = useState(""), [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
-  const [loggedOut, setLoggedOut] = useState(false);
+  const [{ key, loggedOut }, setLogin] = useState(readLoginState);
+  const [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
   const [accountTab, setAccountTab] = useState<AccountTab>("profile");
   const preparedKey = useRef<string | null>(null);
   const [keyPrepared, setKeyPrepared] = useState(false);
@@ -48,6 +51,15 @@ export function App() {
   const [obsPage, setObsPage] = useState<ObsPage>(() => readObsState(new URL(location.href)).page);
   const [sourceRun, setSourceRun] = useState(() => new URL(location.href).searchParams.get("source_run") ?? "");
   const [selectedChatId, setSelectedChatId] = useState("");
+  const [modelConnection, setModelConnection] = useState<{ principal_id: string; generation: number; workspace_id: string; session_id: string; gateway_name: string | null } | null>(null);
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const value = (event as CustomEvent).detail;
+      if (value && typeof value.principal_id === "string" && Number.isSafeInteger(value.generation) && typeof value.workspace_id === "string" && typeof value.session_id === "string" && (value.gateway_name === null || typeof value.gateway_name === "string")) setModelConnection(value);
+    };
+    window.addEventListener("krim:session-model-label", receive);
+    return () => window.removeEventListener("krim:session-model-label", receive);
+  }, []);
   const chatNavigation = useRef<{ key: string; state: SessionState } | null>(null);
   const liveKey = useRef(key);
   liveKey.current = key;
@@ -57,7 +69,7 @@ export function App() {
   const [legacy, setLegacy] = useState<boolean | null>(null);
   const [identityState, setIdentity] = useState<{ key: string; actor: Actor } | null>(null);
   const identity = identityState?.key === key ? identityState.actor : null;
-  const [identityLoading, setIdentityLoading] = useState(() => readWorkbenchView(new URL(location.href)) !== "chat"), [identityError, setIdentityError] = useState("");
+  const [identityLoading, setIdentityLoading] = useState(() => !loggedOut && readWorkbenchView(new URL(location.href)) !== "chat"), [identityError, setIdentityError] = useState("");
   const [httpEnabled, setHttpEnabled] = useState<boolean | null>(null);
   const [productEnabled, setProductEnabled] = useState<boolean | null>(null);
   const [automationEnabled, setAutomationEnabled] = useState(false);
@@ -132,6 +144,7 @@ export function App() {
     preparedKey.current = null; setKeyPrepared(false);
     chatFence.current++;
     liveKey.current = value;
+    setModelConnection(null);
     chatNavigation.current = null;
     run.invalidate();
     setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
@@ -144,18 +157,21 @@ export function App() {
       setAccountTab("profile");
     }
     window.history.replaceState(null, "", url);
-    setLoggedOut(false); setTaskOpen(false);
+    saveLoginState({ key: value, loggedOut: false });
+    setLogin({ key: value, loggedOut: false }); setTaskOpen(false);
     setIdentity(null); setLegacy(null); setIdentityError(""); setIdentityLoading(true);
-    setKey(value); setChatMount(revision => revision + 1);
+    setChatMount(revision => revision + 1);
   }
 
   function logout(message = "") {
     preparedKey.current = null; setKeyPrepared(false);
     chatFence.current++;
     liveKey.current = "";
+    setModelConnection(null);
     chatNavigation.current = null;
     run.invalidate();
-    setKey(""); setLoggedOut(true); setIdentity(null); setLegacy(null);
+    saveLoginState({ key: "", loggedOut: true });
+    setLogin({ key: "", loggedOut: true }); setIdentity(null); setLegacy(null);
     setIdentityError(message); setIdentityLoading(false); setKeyOpen(false); setTaskOpen(false);
     setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
     setAccountTab("profile"); setChatMount(revision => revision + 1);
@@ -330,10 +346,16 @@ export function App() {
   });
   const accountName = identity ? accountIdentity.profile?.display_name
     ?? (accountIdentity.legacy ? "本地账号" : accountIdentity.profileLoading ? "正在读取账号" : "账号资料未读取") : "未登录";
-  const gatewayName = accountIdentity.connection?.display_name
+  const selectedConnection = modelConnection?.principal_id === identity?.principal_id && modelConnection?.generation === identity?.generation && modelConnection?.workspace_id === sidebarChat?.workspace && modelConnection?.session_id === (sidebarChat?.id ?? "") ? modelConnection.gateway_name : null;
+  const gatewayName = selectedConnection ?? accountIdentity.connection?.display_name
     ?? (accountIdentity.connectionLoading || !connectionTarget ? "正在读取接入" : "接入信息未读取");
   const workspaceNames = Object.fromEntries((accountIdentity.profile?.workspaces ?? []).map(value => [value.workspace_id, value.workspace_id === "local" && value.display_name === "local" ? "个人工作区" : value.display_name]));
   function openAccountTab(tab: AccountTab) { setAccountTab(tab); choose("settings"); }
+  useEffect(() => {
+    const open = () => { setAccountTab("gateways"); choose("settings"); };
+    window.addEventListener("krim:gateway-settings", open);
+    return () => window.removeEventListener("krim:gateway-settings", open);
+  }, [mode]);
   function refreshAccount() {
     const source = key, owner = identity?.principal_id;
     void request("/v2/me", source).then(raw => {
@@ -345,7 +367,7 @@ export function App() {
     }).catch(() => { if (source === liveKey.current) accountIdentity.refresh(); });
   }
 
-  return <div className={`app-shell${legacy === false ? " core-member" : ""}`} data-reading-size={readingSize}>
+  return <ModelGatewaysProvider apiKey={key} identity={loggedOut ? null : identity}><div className={`app-shell${legacy === false ? " core-member" : ""}`} data-reading-size={readingSize}>
     <WorkbenchLayout
       apiKey={key}
       view={mode}
@@ -411,8 +433,8 @@ export function App() {
           {identity && accountIdentity.profile ? <AccountSettings key={JSON.stringify([key, identity.principal_id, identity.generation])}
             apiKey={key} identity={identity} profile={accountIdentity.profile} active tab={accountTab}
             onTabChange={setAccountTab} onProfileChange={refreshAccount}
-            onKeyChange={value => applyKey(value, true)} onKeyPrepared={value => { preparedKey.current = value; setKeyPrepared(true); }} onLogout={() => logout()}
-            gatewayName={gatewayName} onConnect={() => setKeyOpen(true)} appearance={<AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}/>
+            onKeyChange={value => applyKey(value, true)} onKeyPrepared={value => { saveLoginState({ key: value, loggedOut: false }); preparedKey.current = value; setKeyPrepared(true); }} onLogout={() => logout()}
+            gatewayName={gatewayName} onConnect={() => setKeyOpen(true)} gateways={<ModelGatewaySettings/>} appearance={<AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}/>
             : <UnavailablePage title={accountIdentity.profileLoading || identityLoading ? "正在读取账号" : "账号设置"}>
               {accountIdentity.profileError || identityError || "使用访问密钥登录后管理个人资料。"}<br/>
               <Button variant="outline" onClick={() => identity ? refreshAccount() : setKeyOpen(true)}>{identity ? "重新读取" : "输入访问密钥"}</Button>
@@ -421,9 +443,10 @@ export function App() {
         {accountIdentity.legacy && <section className="settings-page">
           <div className="settings-section"><h3>当前账号与工作区</h3>{identity ? <><p>{accountName} · {gatewayName}</p><ul>{identity.workspaces.map(workspace => <li key={workspace.workspace_id}><span>{workspaceNames[workspace.workspace_id] ?? "个人工作区"}</span><span>{workspace.role === "admin" ? "管理员" : workspace.role === "viewer" ? "只读" : "成员"}</span></li>)}</ul><p>{identity.legacy ? "旧版运行与评测能力可用。" : "当前身份提供工作区会话能力。"}</p></> : <p role="status">{identityLoading ? "正在读取账号与工作区能力。" : identityError || "登录后读取账号与工作区能力。"}</p>}</div>
         </section>}
+        {accountIdentity.legacy && <section className="accounts-settings model-gateway-settings-wide"><ModelGatewaySettings/></section>}
         {accountIdentity.legacy && <AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}
       </section>
     </WorkbenchLayout>
     <RunAccess apiKey={key} onKey={applyKey} onOpen={id => { choose("run"); run.select(id); }} keyOpen={keyOpen} setKeyOpen={setKeyOpen} taskOpen={taskOpen} setTaskOpen={setTaskOpen} isLegacy={isLegacyRouteAvailable}/>
-  </div>;
+  </div></ModelGatewaysProvider>;
 }

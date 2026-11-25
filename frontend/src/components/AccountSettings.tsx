@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 import "./account-settings.css";
 
-export type AccountTab = "profile" | "accounts" | "events" | "appearance";
+export type AccountTab = "profile" | "gateways" | "accounts" | "events" | "appearance";
 
 export interface AccountSettingsProps {
   apiKey: string;
@@ -59,6 +59,7 @@ export interface AccountSettingsProps {
   gatewayName?: string;
   onConnect: () => void;
   appearance?: import("react").ReactNode;
+  gateways?: ReactNode;
 }
 
 type ConfirmTarget = {
@@ -244,6 +245,7 @@ export function AccountSettings({
   gatewayName,
   onConnect,
   appearance,
+  gateways,
 }: AccountSettingsProps) {
   const admin = profile?.platform_role === "platform_admin";
   const selfId = profile?.principal_id ?? identity?.principal_id ?? "";
@@ -757,14 +759,16 @@ export function AccountSettings({
   const eventsEnd = events ? Math.min(eventsStart + EVENTS_PAGE_SIZE, events.total) : 0;
 
   return (
-    <div className="accounts-settings">
+    <div className={`accounts-settings${tab === "gateways" ? " model-gateway-settings-wide" : ""}`}>
       <nav className="account-tabs" aria-label="账号设置">
         <button type="button" className="account-tab" aria-current={tab === "profile" ? "page" : undefined} onClick={() => onTabChange("profile")}>个人资料</button>
+        {gateways && <button type="button" className="account-tab" aria-current={tab === "gateways" ? "page" : undefined} onClick={() => onTabChange("gateways")}>接入与模型</button>}
         {admin && <button type="button" className="account-tab" aria-current={tab === "accounts" ? "page" : undefined} onClick={() => onTabChange("accounts")}>账号管理</button>}
         {admin && <button type="button" className="account-tab" aria-current={tab === "events" ? "page" : undefined} onClick={() => onTabChange("events")}>管理记录</button>}
         {appearance && <button type="button" className="account-tab" aria-current={tab === "appearance" ? "page" : undefined} onClick={() => onTabChange("appearance")}>外观与偏好</button>}
       </nav>
 
+      {tab === "gateways" && gateways}
       {tab === "appearance" && appearance}
       {tab === "profile" && (profile ? (
         <>

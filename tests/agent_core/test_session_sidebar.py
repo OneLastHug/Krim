@@ -1,16 +1,24 @@
-"""侧栏呈现持久化：空默认、CAS冲突、身份/工作区隔离、结构校验与schema迁移。"""
+"""侧栏呈现持久化：空默认、CAS冲突、身份/工作区隔离、结构校验与schema迁移。
+
+schema21起组id必须是真实可见project_id，group_id与sandbox_session_bindings一致，
+GET自动补齐真实项目与owner范围可见会话；<=20旧行为用store.schema_version=20隔离。
+"""
 
 from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import asynccontextmanager
 
+import httpx
 import pytest
 
+from krim_agent.api.server import create_app
 from krim_agent.composition import open_application
 from krim_agent.config import Settings
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import ServiceError
+from krim_agent.project_access.policy import set_project_access
 from krim_agent.security import LOCAL, Membership, PrincipalContext
 from krim_agent.sessions.types import (
     SessionCreate,
@@ -22,8 +30,24 @@ from krim_agent.storage import session_sidebar as sidebar
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage.sidebar_models import SIDEBAR_TABLE_NAMES
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
-from tests.agent_core.test_account_api import client_for, initialize
+from tests.agent_core.test_account_api import initialize
 from tests.agent_core.test_extension_migration import downgrade_to_version
+
+
+@asynccontextmanager
+async def wired_client(database, token, wire):
+    """与client_for同形态；经wire夹具装配provider，会话创建才具备运行绑定。"""
+    async with wire.application(database) as app:
+        api = create_app(application=app)
+        async with (
+            api.router.lifespan_context(api),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=api),
+                base_url="http://127.0.0.1",
+                headers={"Authorization": "Bearer " + token},
+            ) as client,
+        ):
+            yield app, client
 
 
 async def seeded_session(store, owner: str, key: str, workspace: str = "local"):
@@ -39,11 +63,10 @@ async def seeded_session(store, owner: str, key: str, workspace: str = "local"):
 
 
 def layout(session_id: str, expected_revision: int = 0) -> SessionSidebarWrite:
+    # 本地库无项目ACL、会话无绑定：组id不设（凭空组id在schema21会404），
+    # 未绑定会话固定留在默认区（group_id=null）。
     return SessionSidebarWrite(
-        groups=(SidebarGroup(id="grp-1", title="进行中"),),
-        sessions=(
-            SidebarSessionEntry(session_id=session_id, group_id="grp-1", pinned=True),
-        ),
+        sessions=(SidebarSessionEntry(session_id=session_id, pinned=True),),
         expected_revision=expected_revision,
     )
 
@@ -55,13 +78,18 @@ async def test_sidebar_defaults_empty_and_survives_reload(tmp_path):
         assert store.schema_version == SCHEMA_VERSION
         session = await seeded_session(store, LOCAL.principal_id, "sidebar-reload")
         empty = await sidebar.get(store, principal=LOCAL, workspace="local")
-        assert empty.revision == 0 and empty.groups == () and empty.sessions == ()
+        # schema21：GET自动补齐owner范围可见会话；本地库无项目，组仍为空、修订为基线0。
+        assert empty.revision == 0 and empty.groups == ()
+        assert [(entry.session_id, entry.group_id) for entry in empty.sessions] == [
+            (session.id, None)
+        ]
         written = await sidebar.put(
             store, principal=LOCAL, workspace="local", body=layout(session.id)
         )
         assert written.revision == 1
-        assert [group.id for group in written.groups] == ["grp-1"]
+        assert written.groups == ()
         assert written.sessions[0].session_id == session.id
+        assert written.sessions[0].group_id is None
         assert written.sessions[0].pinned is True
     async with await open_application(database) as host:
         reloaded = await sidebar.get(host.store, principal=LOCAL, workspace="local")
@@ -88,7 +116,9 @@ async def test_sidebar_cas_rejects_stale_writes_and_advances(tmp_path):
             workspace="local",
             body=SessionSidebarWrite(expected_revision=1),
         )
-        assert cleared.revision == 2 and cleared.groups == () and cleared.sessions == ()
+        # 写投影始终补齐真实项目与可见会话：空写不产生空文档。
+        assert cleared.revision == 2 and cleared.groups == ()
+        assert [entry.session_id for entry in cleared.sessions] == [session.id]
         with pytest.raises(ServiceError, match="sidebar_revision_conflict"):
             await sidebar.put(
                 store, principal=LOCAL, workspace="local", body=layout(session.id, 1)
@@ -233,20 +263,76 @@ async def test_sidebar_references_require_visible_workspace_sessions(tmp_path):
                     ),
                 )
         assert store.healthy
-        # 管理员可引用工作区内全部会话。
-        admin = await sidebar.put(
+        # schema21起owner范围与list_sessions一致：管理员引用他人会话同样404。
+        for target in (mine.id, others.id):
+            with pytest.raises(ServiceError, match="not_found"):
+                await sidebar.put(
+                    store,
+                    principal=LOCAL,
+                    workspace="local",
+                    body=SessionSidebarWrite(
+                        sessions=(SidebarSessionEntry(session_id=target),),
+                        expected_revision=0,
+                    ),
+                )
+        # 管理员自己的会话仍可写入自己的布局。
+        local_own = await seeded_session(store, LOCAL.principal_id, "sidebar-local")
+        admin_write = await sidebar.put(
+            store, principal=LOCAL, workspace="local", body=layout(local_own.id)
+        )
+        assert admin_write.revision == 1 and len(admin_write.sessions) == 1
+        assert store.healthy
+
+
+async def test_sidebar_schema20_legacy_keeps_free_groups_and_admin_scope(tmp_path):
+    """schema<=20旧行为显式隔离（store.schema_version=20）：组id自由别名、
+    读路径原样返回存储布局不自动补齐、管理员仍可引用他人未绑定会话、空写即空文档。"""
+    database = tmp_path / "sidebar-legacy20.sqlite"
+    async with await open_application(database) as host:
+        store = host.store
+        store.schema_version = 20  # 仅隔离旧侧栏分支；本地库会话本就无绑定
+        mine = await seeded_session(store, "member-1", "legacy-mine")
+        others = await seeded_session(store, "member-2", "legacy-others")
+        actor = PrincipalContext(
+            "member-1", 1, (Membership(workspace_id="local", role="member"),)
+        )
+        written = await sidebar.put(
             store,
-            principal=LOCAL,
+            principal=actor,
             workspace="local",
             body=SessionSidebarWrite(
+                groups=(SidebarGroup(id="grp-1", title="进行中"),),
                 sessions=(
-                    SidebarSessionEntry(session_id=mine.id, pinned=True),
-                    SidebarSessionEntry(session_id=others.id),
+                    SidebarSessionEntry(session_id=mine.id, group_id="grp-1", pinned=True),
                 ),
                 expected_revision=0,
             ),
         )
-        assert admin.revision == 1 and len(admin.sessions) == 2
+        assert written.revision == 1
+        assert [group.id for group in written.groups] == ["grp-1"]
+        reloaded = await sidebar.get(store, principal=actor, workspace="local")
+        assert reloaded == written
+        admin_write = await sidebar.put(
+            store,
+            principal=LOCAL,
+            workspace="local",
+            body=SessionSidebarWrite(
+                groups=(SidebarGroup(id="grp-1", title="全部"),),
+                sessions=(
+                    SidebarSessionEntry(session_id=mine.id, group_id="grp-1", pinned=True),
+                    SidebarSessionEntry(session_id=others.id, group_id="grp-1"),
+                ),
+                expected_revision=0,
+            ),
+        )
+        assert admin_write.revision == 1 and len(admin_write.sessions) == 2
+        cleared = await sidebar.put(
+            store,
+            principal=LOCAL,
+            workspace="local",
+            body=SessionSidebarWrite(expected_revision=1),
+        )
+        assert cleared.revision == 2 and cleared.groups == () and cleared.sessions == ()
 
 
 async def test_sidebar_workspace_membership_gates_read_and_write(tmp_path):
@@ -272,9 +358,7 @@ async def test_sidebar_workspace_membership_gates_read_and_write(tmp_path):
 async def test_sidebar_readonly_schema16_gate(tmp_path):
     database = tmp_path / "sidebar-schema16-gate.sqlite"
     async with await open_application(database) as host:
-        session = await host.sessions.create(
-            LOCAL, "local", SessionCreate(request_key="sidebar-schema16-gate")
-        )
+        session = await seeded_session(host.store, LOCAL.principal_id, "sidebar-schema16-gate")
         await host.close()
     downgrade_to_version(database, 16)
     unchanged = database.read_bytes()
@@ -295,9 +379,7 @@ async def test_sidebar_readonly_schema16_gate(tmp_path):
 async def test_migration_from_schema16_preserves_source_and_enables_sidebar(tmp_path):
     database = tmp_path / "sidebar-migration.sqlite"
     async with await open_application(database) as host:
-        session = await host.sessions.create(
-            LOCAL, "local", SessionCreate(request_key="sidebar-migration")
-        )
+        session = await seeded_session(host.store, LOCAL.principal_id, "sidebar-migration")
         await host.close()
     downgrade_to_version(database, 16)
     with sqlite3.connect(database) as connection:
@@ -327,10 +409,10 @@ async def test_migration_from_schema16_preserves_source_and_enables_sidebar(tmp_
     assert SIDEBAR_TABLE_NAMES <= tables
 
 
-async def test_sidebar_api_roundtrip_conflict_and_key_rotation(tmp_path):
+async def test_sidebar_api_roundtrip_conflict_and_key_rotation(tmp_path, wire):
     database = tmp_path / "sidebar-api.sqlite"
     token = await initialize(database)
-    async with client_for(database, token) as (app, client):
+    async with wired_client(database, token, wire) as (app, client):
         actor = app.identities.authenticate("Bearer " + token)
         workspace = actor.memberships[0].workspace_id
         path = f"/v2/workspaces/{workspace}/session-sidebar"
@@ -339,15 +421,26 @@ async def test_sidebar_api_roundtrip_conflict_and_key_rotation(tmp_path):
         )
         assert created.status_code == 201, created.text
         session_id = created.json()["id"]
+        # 管理账号默认项目随会话创建自动建立；GET自动补齐真实项目与可见会话。
         empty = await client.get(path)
         assert empty.status_code == 200, empty.text
-        assert empty.json() == {"revision": 0, "groups": [], "sessions": []}
+        assert empty.json()["revision"] == 0
+        assert [group["title"] for group in empty.json()["groups"]] == ["默认项目"]
+        project_id = empty.json()["groups"][0]["id"]
+        assert empty.json()["sessions"] == [
+            {
+                "session_id": session_id,
+                "group_id": project_id,
+                "parent_id": None,
+                "pinned": False,
+            }
+        ]
         body = {
-            "groups": [{"id": "grp-1", "title": "进行中"}],
+            "groups": [{"id": project_id, "title": "进行中"}],
             "sessions": [
                 {
                     "session_id": session_id,
-                    "group_id": "grp-1",
+                    "group_id": project_id,
                     "parent_id": None,
                     "pinned": True,
                 }
@@ -357,12 +450,25 @@ async def test_sidebar_api_roundtrip_conflict_and_key_rotation(tmp_path):
         written = await client.put(path, json=body)
         assert written.status_code == 200, written.text
         assert written.json()["revision"] == 1
+        assert written.json()["groups"] == [{"id": project_id, "title": "进行中"}]
         stale = await client.put(path, json=body)
         assert stale.status_code == 409, stale.text
         assert stale.json()["error"]["code"] == "sidebar_revision_conflict"
         cleared = await client.put(path, json={"expected_revision": 1})
         assert cleared.status_code == 200, cleared.text
-        assert cleared.json() == {"revision": 2, "groups": [], "sessions": []}
+        # 空写不产生空文档：别名回落项目名，会话补齐真实绑定。
+        assert cleared.json() == {
+            "revision": 2,
+            "groups": [{"id": project_id, "title": "默认项目"}],
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "group_id": project_id,
+                    "parent_id": None,
+                    "pinned": False,
+                }
+            ],
+        }
         # 密钥轮换不清空偏好：同主体新token读到原布局与修订。
         restored = await client.put(path, json={**body, "expected_revision": 2})
         assert restored.status_code == 200 and restored.json()["revision"] == 3
@@ -373,15 +479,16 @@ async def test_sidebar_api_roundtrip_conflict_and_key_rotation(tmp_path):
         assert reauth.status_code == 200, reauth.text
         assert reauth.json()["revision"] == 3
         assert reauth.json()["sessions"][0]["session_id"] == session_id
+        assert reauth.json()["sessions"][0]["group_id"] == project_id
         assert (
             await client.get(path, headers={**fresh_headers, "Authorization": "Bearer x"})
         ).status_code == 401
 
 
-async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path):
+async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path, wire):
     database = tmp_path / "sidebar-isolation.sqlite"
     admin_token = await initialize(database)
-    async with client_for(database, admin_token) as (app, client):
+    async with wired_client(database, admin_token, wire) as (app, client):
         actor = app.identities.authenticate("Bearer " + admin_token)
         workspace = actor.memberships[0].workspace_id
         path = f"/v2/workspaces/{workspace}/session-sidebar"
@@ -421,7 +528,7 @@ async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path)
         assert member_session.status_code == 201, member_session.text
         member_session_id = member_session.json()["id"]
         member_path = path
-        # 非管理员引用他人会话被拒，且不泄露存在性。
+        # 非管理员引用他人会话被拒（他人项目不可见），且不泄露存在性。
         foreign = await client.put(
             member_path,
             json={
@@ -431,24 +538,44 @@ async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path)
             headers=member_headers,
         )
         assert foreign.status_code == 404, foreign.text
+        # 会话创建即绑定默认项目：GET自动补齐，写入必须引用真实项目id。
+        member_sidebar = await client.get(path, headers=member_headers)
+        assert member_sidebar.status_code == 200, member_sidebar.text
+        assert member_sidebar.json()["revision"] == 0
+        member_project = member_sidebar.json()["groups"][0]["id"]
+        assert [
+            entry["session_id"] for entry in member_sidebar.json()["sessions"]
+        ] == [member_session_id]
         own = await client.put(
             member_path,
             json={
-                "sessions": [{"session_id": member_session_id, "pinned": True}],
+                "groups": [{"id": member_project, "title": "我的"}],
+                "sessions": [
+                    {
+                        "session_id": member_session_id,
+                        "group_id": member_project,
+                        "pinned": True,
+                    }
+                ],
                 "expected_revision": 0,
             },
             headers=member_headers,
         )
         assert own.status_code == 200, own.text
         assert own.json()["revision"] == 1
-        # 两主体各自持久化，互不可见。
+        # 两主体各自持久化，互不可见：管理员侧看不到成员项目内的会话。
         admin_view = await client.get(path)
         assert admin_view.status_code == 200 and admin_view.json()["revision"] == 0
+        admin_project = admin_view.json()["groups"][0]["id"]
+        assert member_session_id not in {
+            entry["session_id"] for entry in admin_view.json()["sessions"]
+        }
         member_view = await client.get(path, headers=member_headers)
         assert member_view.json()["revision"] == 1
         assert member_view.json()["sessions"][0]["session_id"] == member_session_id
-        # 管理员可引用工作区内全部会话。
-        admin_write = await client.put(
+        # owner范围与list_sessions一致：管理员引用他人绑定会话或凭空组id均404，
+        # 自己默认项目仍可写。
+        denied = await client.put(
             path,
             json={
                 "groups": [{"id": "grp-1", "title": "全部"}],
@@ -456,6 +583,15 @@ async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path)
                     {"session_id": admin_session_id, "group_id": "grp-1"},
                     {"session_id": member_session_id, "group_id": "grp-1"},
                 ],
+                "expected_revision": 0,
+            },
+        )
+        assert denied.status_code == 404, denied.text
+        admin_write = await client.put(
+            path,
+            json={
+                "groups": [{"id": admin_project, "title": "全部"}],
+                "sessions": [{"session_id": admin_session_id, "group_id": admin_project}],
                 "expected_revision": 0,
             },
         )
@@ -513,12 +649,12 @@ async def test_sidebar_api_isolation_between_principals_and_workspaces(tmp_path)
         assert app.store.healthy
 
 
-async def test_sidebar_get_filters_invisible_references_after_demotion(tmp_path):
-    """管理员降member后：GET筛掉不可见引用、孤儿parent置null、revision保持基线，
-    仍能保存自己的布局；响应不泄露已不可见的会话引用。"""
+async def test_sidebar_get_filters_invisible_references_after_demotion(tmp_path, wire):
+    """管理员降member且被授权项目ACL撤权后：GET筛掉不可见引用、revision保持基线，
+    仍能保存自己项目内的布局；响应不泄露已不可见的会话引用（含他人的）。"""
     database = tmp_path / "sidebar-demotion.sqlite"
     admin_token = await initialize(database)
-    async with client_for(database, admin_token) as (app, client):
+    async with wired_client(database, admin_token, wire) as (app, client):
         actor = app.identities.authenticate("Bearer " + admin_token)
         admin_id = actor.principal_id
         shared = str(uuid.uuid4())
@@ -552,6 +688,7 @@ async def test_sidebar_get_filters_invisible_references_after_demotion(tmp_path)
             },
         )
         assert join_member.status_code == 200, join_member.text
+        # 各自创建会话：默认项目随创建自动建立并绑定。
         admin_session = await client.post(
             f"/v2/workspaces/{shared}/sessions", json={"request_key": "demotion-admin"}
         )
@@ -564,24 +701,55 @@ async def test_sidebar_get_filters_invisible_references_after_demotion(tmp_path)
         admin_session_id = admin_session.json()["id"]
         member_session_id = member_session.json()["id"]
         path = f"/v2/workspaces/{shared}/session-sidebar"
+        member_sidebar = await client.get(path, headers=member_headers)
+        assert member_sidebar.status_code == 200, member_sidebar.text
+        member_project = member_sidebar.json()["groups"][0]["id"]
+        # 项目ACL是owner能力、管理员不继承：由成员授予write后管理员才能在该项目建会话。
+        member_actor = app.identities.resolve(member_id)
+        granted = await app.store._write(lambda conn: set_project_access(
+            conn, member_actor, member_project, admin_id, "write", expected_revision=0
+        ))
+        assert granted.access == "write"
+        granted_session = await client.post(
+            f"/v2/workspaces/{shared}/sessions",
+            json={"request_key": "demotion-granted", "project_id": member_project},
+        )
+        assert granted_session.status_code == 201, granted_session.text
+        granted_session_id = granted_session.json()["id"]
+        seeded = await client.get(path)
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["revision"] == 0
+        bindings = {
+            entry["session_id"]: entry["group_id"] for entry in seeded.json()["sessions"]
+        }
+        assert member_session_id not in bindings
+        own_project = bindings[admin_session_id]
+        assert bindings[granted_session_id] == member_project
         saved = await client.put(
             path,
             json={
-                "groups": [{"id": "grp-1", "title": "全部"}],
+                "groups": [
+                    {"id": own_project, "title": "全部"},
+                    {"id": member_project, "title": "协作"},
+                ],
                 "sessions": [
-                    {"session_id": member_session_id, "group_id": "grp-1"},
-                    {
-                        "session_id": admin_session_id,
-                        "group_id": "grp-1",
-                        "parent_id": member_session_id,
-                    },
+                    {"session_id": admin_session_id, "group_id": own_project, "pinned": True},
+                    {"session_id": granted_session_id, "group_id": member_project},
                 ],
                 "expected_revision": 0,
             },
         )
         assert saved.status_code == 200, saved.text
         assert saved.json()["revision"] == 1
-        # 管理员降级为 member。
+        assert [group["id"] for group in saved.json()["groups"]] == [
+            own_project,
+            member_project,
+        ]
+        # 撤回项目授权，并把管理员降级为 member。
+        revoked = await app.store._write(lambda conn: set_project_access(
+            conn, member_actor, member_project, admin_id, "none", expected_revision=1
+        ))
+        assert revoked.access == "none"
         current = await client.get(f"/v2/admin/accounts/{admin_id}/memberships")
         demoted = await client.put(
             f"/v2/admin/accounts/{admin_id}/memberships",
@@ -592,31 +760,35 @@ async def test_sidebar_get_filters_invisible_references_after_demotion(tmp_path)
             },
         )
         assert demoted.status_code == 200, demoted.text
-        # GET 按当前角色筛选：不可见引用消失、孤儿parent置null、组与revision原样。
+        # GET 按当前授权筛选：不可见项目消失、自己项目与别名保留、revision原样。
         filtered = await client.get(path)
         assert filtered.status_code == 200, filtered.text
         body = filtered.json()
         assert body["revision"] == 1
-        assert [group["id"] for group in body["groups"]] == ["grp-1"]
+        assert [group["id"] for group in body["groups"]] == [own_project]
+        assert [group["title"] for group in body["groups"]] == ["全部"]
         assert [entry["session_id"] for entry in body["sessions"]] == [admin_session_id]
-        assert body["sessions"][0]["parent_id"] is None
+        assert body["sessions"][0]["group_id"] == own_project
+        assert body["sessions"][0]["pinned"] is True
+        assert all(entry["session_id"] != granted_session_id for entry in body["sessions"])
         assert all(entry["session_id"] != member_session_id for entry in body["sessions"])
-        # 降权后仍能保存自己的布局；引用他人会话仍404。
+        # 降权后仍能保存自己项目内的布局；他人会话与已不可见会话引用均404。
         resaved = await client.put(
             path,
             json={
-                "sessions": [{"session_id": admin_session_id, "pinned": True}],
+                "groups": [{"id": own_project, "title": "全部"}],
+                "sessions": [
+                    {"session_id": admin_session_id, "group_id": own_project, "pinned": True}
+                ],
                 "expected_revision": 1,
             },
         )
         assert resaved.status_code == 200, resaved.text
         assert resaved.json()["revision"] == 2
-        foreign = await client.put(
-            path,
-            json={
-                "sessions": [{"session_id": member_session_id}],
-                "expected_revision": 2,
-            },
-        )
-        assert foreign.status_code == 404, foreign.text
+        for target in (member_session_id, granted_session_id):
+            foreign = await client.put(
+                path,
+                json={"sessions": [{"session_id": target}], "expected_revision": 2},
+            )
+            assert foreign.status_code == 404, foreign.text
         assert app.store.healthy

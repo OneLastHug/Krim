@@ -89,6 +89,7 @@ export function AppSidebar({ active, apiKey = "", onCreateInGroup, identity, ide
         <div><strong title={identityLabel}>{identityLabel}</strong><span>{connection}</span></div>
       </div>
       <button type="button" role="menuitem" className="menu-item" onClick={() => { setAccountOpen(false); onAccountTab?.("profile"); onClose?.(); }}><UserRound aria-hidden="true" />个人资料</button>
+      <button type="button" role="menuitem" className="menu-item" onClick={() => { setAccountOpen(false); onAccountTab?.("gateways"); onClose?.(); }}><Settings2 aria-hidden="true"/>接入与模型</button>
       {accountAdmin && <button type="button" role="menuitem" className="menu-item" onClick={() => { setAccountOpen(false); onAccountTab?.("accounts"); onClose?.(); }}><Users aria-hidden="true" />账号管理</button>}
       <hr className="menu-separator" />
       <button type="button" role="menuitem" className="menu-item" onClick={() => { setAccountOpen(false); onConnect(); }}><KeyRound aria-hidden="true" />切换账号</button>

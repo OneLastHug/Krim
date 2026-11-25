@@ -442,7 +442,13 @@ class SessionService:
         accepted_session = await self.get(principal, workspace, session_id, write=True)
         selected_binding = self.runs.bindings.get(accepted_session.target_key)
         retired = accepted_session.target_key in RETIRED_TARGETS
-        if retired or selected_binding is None:
+        if selected_binding is None and not retired and await self._gateway_frozen_target(
+            accepted_session.id,
+        ):
+            # 每会话自定义模型：冻结目标带网关标记，派发按标记经网关runtime
+            # 重建绑定；公共bindings缺失（model:null宿主）不构成未配置。
+            pass
+        elif retired or selected_binding is None:
             # Existing idempotency keys still reach the storage equality check;
             # a new turn must never silently acquire another target's privileges.
             try:
@@ -501,6 +507,18 @@ class SessionService:
         # A cancelled HTTP waiter must not leave an admitted turn behind its
         # input fence; finish admission/cleanup first and then propagate cancel.
         return await settled(accept())
+
+    async def _gateway_frozen_target(self, session_id: str) -> bool:
+        """会话冻结目标是否带网关标记；公共binding缺失时submit的豁免判据。"""
+        from krim_agent.model_gateway.runtime import frozen_gateway_marker
+
+        async def read(conn: Any) -> Any:
+            row = await sql.session_row(conn, session_id)
+            target = row["target"]
+            return target if isinstance(target, dict) else None
+
+        target = await self.store.work_read(read)
+        return target is not None and frozen_gateway_marker(target) is not None
 
     def _boundary_target_upgrade(self, binding: RunBinding | None) -> dict[str, JsonValue] | None:
         """binding当前一致时返回现行目标描述符；否则None保持冻结target。

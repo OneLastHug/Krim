@@ -11,7 +11,7 @@ from krim_agent.observability import project_trace
 from krim_agent.runtime.facts import project_facts
 from krim_agent.security import PrincipalContext
 from krim_agent.sessions.service import SessionService
-from krim_agent.storage.sqlite import SQLiteStore
+from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 
 from ..domain import Observation, clone, neutral_fingerprint
 from ..trace_cases import observe_snapshot
@@ -66,7 +66,7 @@ class KrimSourceReader:
             guard()
             if exists is None:
                 raise ServiceError("not_found", 404)
-            if self.store.schema_version not in range(3, 20):
+            if self.store.schema_version not in range(3, SCHEMA_VERSION + 1):
                 return None
             row = (
                 await conn.execute(

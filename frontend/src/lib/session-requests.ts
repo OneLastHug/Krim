@@ -1,9 +1,10 @@
 import { isUnadmittedCreate, request } from "../api.ts";
 import { parseSession, parseTurn, sessionPath, type Session, type Turn } from "./session-contracts.ts";
+import type { WireSelection } from "./model-gateways";
 
 export const INTENTS = "krim.agent-core.intents/1", KNOWN = "krim.agent-core.known/1", CURRENT = "krim.agent-core.current/1", DRAFTS = "krim.agent-core.drafts/1";
 export interface Scope { principal_id: string; generation: number; workspace_id: string; session_id: string | null }
-export interface Intent extends Scope { version: 1; id: string; kind: "session" | "turn"; body: { request_key: string; title?: string; target_key?: string; project_id?: string; text?: string; expected_revision?: number } }
+export interface Intent extends Scope { version: 1; id: string; kind: "session" | "turn"; body: { request_key: string; title?: string; target_key?: string; project_id?: string; model_selection?: WireSelection; text?: string; expected_revision?: number } }
 export function sameScope(a: Scope, b: Scope) { return a.principal_id === b.principal_id && a.generation === b.generation && a.workspace_id === b.workspace_id && a.session_id === b.session_id; }
 export function readIntents(storage: Storage): Intent[] {
   const raw = storage.getItem(INTENTS); if (raw === null) return [];
@@ -13,6 +14,9 @@ export function readIntents(storage: Storage): Intent[] {
   for (const value of values) {
     const i = value as Intent;
     if (!i || i.version !== 1 || typeof i.id !== "string" || ids.has(i.id) || typeof i.principal_id !== "string" || !Number.isSafeInteger(i.generation) || typeof i.workspace_id !== "string" || (i.session_id !== null && typeof i.session_id !== "string") || !["session", "turn"].includes(i.kind) || typeof i.body?.request_key !== "string" || (i.kind === "turn" && (typeof i.body.text !== "string" || !Number.isSafeInteger(i.body.expected_revision) || i.session_id === null)) || (i.kind === "session" && (typeof i.body.title !== "string" || typeof i.body.target_key !== "string" || (i.body.project_id !== undefined && typeof i.body.project_id !== "string") || i.session_id !== null))) throw new Error("无法读取未确认请求");
+    const selection = i.body.model_selection;
+    if (selection !== undefined && (i.kind !== "session" || !selection || typeof selection !== "object" || typeof selection.gateway_id !== "string" || typeof selection.model_id !== "string" || selection.reasoning_level !== null && typeof selection.reasoning_level !== "string" || Object.keys(selection).some(key => !["gateway_id", "model_id", "reasoning_level"].includes(key)))) throw new Error("无法读取未确认请求");
+    if (selection) Object.freeze(selection);
     ids.add(i.id);
     Object.freeze(i.body); Object.freeze(i);
   }

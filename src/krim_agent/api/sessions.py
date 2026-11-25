@@ -75,11 +75,18 @@ def mount_sessions(app: FastAPI) -> None:
     @router.get("/v2/me")
     async def me(request: Request) -> dict[str, JsonValue]:
         actor = principal(request)
+        current = application(request)
+        targets = list(current.service.bindings)
+        runtime = current.service.model_gateway
+        if runtime is not None and runtime.templates and current.model_gateways is not None:
+            configured = await current.model_gateways.get(actor.principal_id)
+            if any(gateway.models for gateway in configured.gateways):
+                targets.extend(key for key in runtime.templates if key not in targets)
         return {
             "principal_id": actor.principal_id,
             "generation": actor.generation,
             "legacy": actor.legacy,
-            "target_keys": list(application(request).service.bindings),
+            "target_keys": targets,
             "workspaces": [
                 {
                     "workspace_id": m.workspace_id,

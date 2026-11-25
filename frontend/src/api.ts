@@ -1,3 +1,5 @@
+import { clearLoginState } from "./lib/login-state.ts";
+
 export interface RunData { id:string; request_key:string; status:string; trace_id:string; root_span_id:string; created_at:number; finished_at:number|null; code:string|null; stop_requested:boolean }
 const keys=["id","request_key","status","trace_id","root_span_id","created_at","finished_at","code","stop_requested"];
 export function object(value:unknown):Record<string,unknown>{
@@ -25,6 +27,7 @@ export async function request(path:string,key:string,body?:unknown,signal?:Abort
   const headers:Record<string,string>={};if(key)headers.Authorization="Bearer "+key;
   if(body!==undefined)headers["Content-Type"]="application/json";
   const response=await fetch(path,{method:method??(body===undefined?"GET":"POST"),headers,body:body===undefined?undefined:JSON.stringify(body),redirect:"error",signal:body===undefined?signal:undefined});
+  if(response.status===401)clearLoginState(key);
   const value:unknown=await response.json();
   if(!response.ok){const err=object(object(value).error);throw new RequestError(response.status,/^[a-z_]{1,64}$/.test(String(err.code))?String(err.code):"execution_error");}
   return value;

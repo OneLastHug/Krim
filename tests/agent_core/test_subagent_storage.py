@@ -11,6 +11,7 @@ from sqlalchemy.sql.ddl import sort_tables
 from krim_agent.contracts import RunRequest, ServiceError
 from krim_agent.storage import sessions as session_sql
 from krim_agent.storage import work as work_sql
+from krim_agent.storage.model_gateway_models import MODEL_GATEWAY_TABLE_NAMES
 from krim_agent.storage.models import metadata, sessions
 from krim_agent.storage.sqlite import SCHEMA_VERSION, SQLiteStore
 from krim_agent.storage.subagent_budget_models import BUDGET_TABLE_NAMES
@@ -68,6 +69,9 @@ def downgrade_to_19(path):
     """从当前完整表集逐层删除到 schema19 白名单；只读门与升级测试共用。"""
     conn = sqlite3.connect(path)
     try:
+        # schema22 增量：模型网关配置域三表；回降 <=21 必须先删除。
+        for name in sorted(MODEL_GATEWAY_TABLE_NAMES):
+            conn.execute(f'DROP TABLE "{name}"')
         schema20_tables = SUBAGENT_TABLE_NAMES | TEAM_TABLE_NAMES | BUDGET_TABLE_NAMES
         ordered = sort_tables([metadata.tables[name] for name in schema20_tables])
         for table in reversed(ordered):
@@ -155,11 +159,11 @@ async def build_tree(store):
     return sub, tree, root_id, reserved["activation"]["activation_id"], root_spawn
 
 
-async def test_fresh_store_has_schema20_with_subagent_tables(tmp_path):
+async def test_fresh_store_has_current_schema_with_subagent_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 22
         assert store.schema_version == SCHEMA_VERSION
         assert SUBAGENT_TABLE_NAMES <= set(metadata.tables)
         assert SUBAGENT_TABLE_NAMES <= table_names(database)

@@ -321,6 +321,41 @@ test("未绑定会话显示未准备，不显示凭据管理", async () => {
   expect(toolsList?.textContent).toContain("docs.search_pages");
 });
 
+test("侧栏改绑事件刷新当前会话绑定与项目显示，不匹配身份不刷新", async () => {
+  let bound = false;
+  readApi.mockImplementation((path: string) => {
+    if (path === "/v2/me/sandbox/sessions/session-A/project") return Promise.resolve(bound ? bindingBound : bindingUnbound);
+    if (path === "/v2/me/sandbox/projects/proj-9") return Promise.resolve(project);
+    if (path === "/v2/me/development/projects/proj-9/environment") return Promise.resolve(environment);
+    if (path === "/v2/targets/target-development/tools") return Promise.resolve(tools);
+    if (path === "/v2/me/mcp-connections") return Promise.resolve(connections);
+    return Promise.reject(new Error("意外请求：" + path));
+  });
+  await render();
+  expect(host.textContent).toContain("未绑定");
+  const bindingReads = () => readApi.mock.calls.filter(([path]) => path === "/v2/me/sandbox/sessions/session-A/project").length;
+  const readsBefore = bindingReads();
+  // 不匹配的 principal 不触发刷新。
+  await act(async () => {
+    window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: "someone-else", workspace: "local" } }));
+    for (let i = 0; i < 16; i++) await Promise.resolve();
+  });
+  await flush();
+  expect(bindingReads()).toBe(readsBefore);
+  // 移动到项目成功后广播同一事件：绑定、项目与环境按当前会话重读。
+  bound = true;
+  await act(async () => {
+    window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: "operator", workspace: "local" } }));
+    for (let i = 0; i < 16; i++) await Promise.resolve();
+  });
+  await flush();
+  expect(bindingReads()).toBeGreaterThan(readsBefore);
+  expect(readApi.mock.calls.some(([path]) => path === "/v2/me/sandbox/projects/proj-9")).toBe(true);
+  expect(host.textContent).toContain("图片服务项目");
+  expect(host.textContent).toContain("已就绪");
+  expect(host.textContent).not.toContain("未绑定");
+});
+
 test("Secret 添加：值只出现在一次 PUT 请求体中，界面与账本均不保留", async () => {
   readApi.mockImplementation((path: string, _key: string, body?: unknown, _signal?: AbortSignal, method?: string) => {
     if (path === "/v2/me/development/projects/proj-9/secrets/API_TOKEN" && method === "PUT") {
