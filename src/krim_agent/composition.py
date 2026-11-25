@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
-from typing import cast
+from typing import Any, cast
 
 from pydantic import JsonValue
 
@@ -96,6 +96,7 @@ class Application:
     media: SessionMediaHost | None = None
     subagents: SubagentService | None = None
     configuration_snapshot: dict[str, JsonValue] = field(default_factory=dict, repr=False)
+    model_gateways: Any | None = None
 
     async def __aenter__(self) -> Application:
         return self
@@ -144,7 +145,11 @@ class Application:
                         if self.evaluations is not None:
                             await self.evaluations.close()
             finally:
-                await self.service.close()
+                try:
+                    await self.service.close()
+                finally:
+                    if self.service.model_gateway is not None:
+                        await self.service.model_gateway.close()
         finally:
             try:
                 if self.artifacts is not None:
@@ -434,9 +439,7 @@ async def open_application(
         async def image_capabilities(scope: SessionToolScope) -> ImageCapabilities:
             scope.check()
             snapshot = await store.snapshot(scope.run_id)
-            route = snapshot.target.get("key")
-            active_binding = (delegates.get(route) if isinstance(route, str) else None)
-            active_binding = active_binding or bindings.get(snapshot.request.target)
+            active_binding = await service._binding_for_run(snapshot)
             active_provider = active_binding.loop.provider if active_binding is not None else None
             return ImageCapabilities(vision=(
                 isinstance(active_provider, OpenAICompatibleProvider)
@@ -642,6 +645,11 @@ async def open_application(
             development=development,
             configuration_snapshot=(configuration.snapshot if configuration is not None else {}),
         )
+        from krim_agent.model_gateway.runtime import GatewayRuntime
+        from krim_agent.model_gateway.service import ModelGatewayService
+
+        application.model_gateways = ModelGatewayService(store, personal_mcp_vault)
+        service.model_gateway = GatewayRuntime(application.model_gateways, service)
         goals.queue = application.sessions
         if evaluation_path is not None:
             assert application.sessions is not None

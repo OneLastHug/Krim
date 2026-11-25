@@ -1,0 +1,11 @@
+.gateway-settings-page { min-height: 0; overflow-y: auto; padding: 0 28px 36px; }
+.gateway-settings-page .accounts-settings { margin-top: 12px; }
+.gateway-settings-page .accounts-settings.gateway-settings-wide { max-width: 960px; }
+.gateway-back-row { margin-bottom: 12px; }
+.gateway-back-row > button { font-size: 12px; gap: 7px; }
+.gateway-back-row svg { width: 14px; height: 14px; }
+.gateway-settings-page .account-tabs { overflow-x: auto; flex-shrink: 0; gap: 22px; margin-bottom: 28px; }
+@media (max-width:700px) {
+  .gateway-settings-page { padding: 0 16px 24px; }
+  .gateway-settings-page .account-tabs { gap: 20px; margin-bottom: 24px; }
+}

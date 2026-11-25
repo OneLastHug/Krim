@@ -81,6 +81,21 @@ def implementation(value: object | None) -> dict[str, JsonValue]:
     }
 
 
+def _custom_model_marker(target: dict[str, JsonValue]) -> dict[str, JsonValue] | None:
+    """读取冻结目标里持久化的每会话模型标记（model_gateway.runtime写入）；无则None。
+
+    局部实现避免反向导入model_gateway包；标记结构由该包负责校验。
+    """
+    provider = target.get("provider")
+    if not isinstance(provider, dict):
+        return None
+    config = provider.get("config")
+    if not isinstance(config, dict):
+        return None
+    marker = config.get("model_gateway")
+    return cast(dict[str, JsonValue], marker) if isinstance(marker, dict) else None
+
+
 @dataclass(frozen=True)
 class RunBinding:
     loop: AgentLoop
@@ -440,6 +455,9 @@ class RunService:
         self.input_gate = asyncio.Lock()
         self._execution_budgets: dict[str, ExecutionBudget] = {}
         self.account_mcp: Any | None = None
+        # 每会话模型网关运行时（model_gateway.runtime.GatewayRuntime）；
+        # 组合层在装配后注入，None保持仅宿主绑定的旧行为。
+        self.model_gateway: Any | None = None
         self.interactions: Any | None = None
         self.session_tool_host: Any | None = None
         self.tool_runtime: Any | None = None
@@ -547,14 +565,68 @@ class RunService:
             return None
         return producer.run_id
 
-    def _binding_for_run(self, snapshot: RunSnapshot) -> RunBinding | None:
+    async def binding_for_target(
+        self,
+        target_key: str,
+        frozen_target: dict[str, JsonValue],
+        *,
+        owner_id: str | None = None,
+    ) -> RunBinding | None:
+        """按冻结目标选binding：自定义模型标记走网关runtime重建，其余走bindings。"""
+        if _custom_model_marker(frozen_target) is None:
+            return self.bindings.get(target_key)
+        if self.model_gateway is None:
+            return None
+        return await self.model_gateway.for_target(
+            target_key, frozen_target, owner_id=owner_id,
+        )
+
+    async def _binding_for_run(self, snapshot: RunSnapshot) -> RunBinding | None:
         """按持久run target选binding：公共键走bindings，子代理键走delegates。"""
         declared = snapshot.target.get("key")
         if isinstance(declared, str) and declared.startswith("subagent:"):
             if snapshot.request.target in RETIRED_TARGETS:
                 return None
             return self.delegates.get(declared)
-        return self.bindings.get(snapshot.request.target)
+        frozen = {
+            key: value for key, value in snapshot.target.items() if key != "context"
+        }
+        if _custom_model_marker(frozen) is None:
+            return self.bindings.get(snapshot.request.target)
+        if self.model_gateway is None:
+            return None
+        owner = getattr(snapshot.session_context, "owner_id", None)
+        try:
+            return await self.binding_for_target(
+                snapshot.request.target,
+                frozen,
+                owner_id=owner if isinstance(owner, str) else None,
+            )
+        except ServiceError:
+            # 停靠操作路径：重建失败（配置漂移/网关缺失）按既有None语义处理
+            # （审批不可用/保持停靠/跳过清理）；准入路径的漂移在_admit_locked
+            # 直接调用binding_for_target原样上报target_binding_changed。
+            return None
+
+    async def _turn_target(self, turn_id: str) -> tuple[dict[str, JsonValue], str]:
+        """读取turn所属会话的冻结目标与owner；准入路径单次只读，不递归store锁。"""
+        from krim_agent.storage.models import sessions, turns
+
+        async def read(conn: Any) -> tuple[dict[str, JsonValue], str]:
+            row = (
+                await conn.execute(
+                    select(sessions.c.target, sessions.c.owner_id)
+                    .select_from(turns.join(sessions, turns.c.session_id == sessions.c.id))
+                    .where(turns.c.id == turn_id)
+                )
+            ).mappings().first()
+            if row is None or not isinstance(row["target"], dict) or not isinstance(
+                row["owner_id"], str
+            ):
+                raise ServiceError("facts_corrupt")
+            return cast(dict[str, JsonValue], row["target"]), row["owner_id"]
+
+        return await self.store.work_read(read)
 
     async def _admit_locked(
         self,
@@ -595,6 +667,14 @@ class RunService:
                 raise ServiceError("provider_not_configured", 503)
         else:
             binding = self.bindings.get(request.target)
+            if turn_id is not None and self.model_gateway is not None:
+                # 每会话自定义模型：按会话冻结target的标记owner校验并按冻结
+                # revision重建绑定；工具/配置漂移由完整descriptor比较拒绝。
+                frozen_target, owner_id = await self._turn_target(turn_id)
+                if _custom_model_marker(frozen_target) is not None:
+                    binding = await self.binding_for_target(
+                        request.target, frozen_target, owner_id=owner_id,
+                    )
         if binding is None:
             if request.target == "target-http":
                 raise ServiceError("provider_not_configured", 503)
@@ -1077,7 +1157,7 @@ class RunService:
                 pass  # 取消通知失败不影响既有取消语义；settle仍是权威路径
         snapshot = await self.store.snapshot(run_id)
         if snapshot.run.status == "awaiting":
-            binding = self._binding_for_run(snapshot)
+            binding = await self._binding_for_run(snapshot)
             if binding is not None and isinstance(binding.loop, DevelopmentSDKLoop):
                 await binding.loop.development_cleanup(run_id)
             if binding is not None and binding.loop.sandbox is not None:
@@ -1176,7 +1256,7 @@ class RunService:
                 if isinstance(spec.get("source"), dict):
                     provenance["source"] = spec["source"]
                 break
-        binding = self._binding_for_run(snapshot)
+        binding = await self._binding_for_run(snapshot)
         if binding is None:
             raise ServiceError("target_binding_changed")
         timeout = binding.settings.approval_timeout
@@ -1195,7 +1275,7 @@ class RunService:
             "budget_remaining": budget_remaining,
             **provenance,
         }
-        selected_binding = self._binding_for_run(snapshot)
+        selected_binding = await self._binding_for_run(snapshot)
         if selected_binding is not None and isinstance(selected_binding.loop, DevelopmentSDKLoop):
             projection = selected_binding.loop.development_approval_projection
             if projection is not None:
@@ -1321,7 +1401,7 @@ class RunService:
             return 0
         # Retired or changed targets stay parked: never evaluate old approval
         # requests against the base loop's unrelated tool registry.
-        binding = self._binding_for_run(snapshot)
+        binding = await self._binding_for_run(snapshot)
         if binding is None or snapshot.request.target in RETIRED_TARGETS:
             return 0
         registry = binding.loop.executor.registry
@@ -1350,7 +1430,7 @@ class RunService:
         # 不因本轮无新增放行而卡死（_trigger_resume幂等，running不动）。
         snapshot = await self.store.snapshot(run_id)
         if self._all_waits_answered(snapshot):
-            return 1 if self._trigger_resume(run_id, snapshot) else 0
+            return 1 if await self._trigger_resume(run_id, snapshot) else 0
         return 0
 
     async def _policy_allow_request(
@@ -1483,14 +1563,14 @@ class RunService:
         for run_id in run_ids:
             snapshot = await self.store.snapshot(run_id)
             if self._all_waits_answered(snapshot):
-                self._trigger_resume(run_id, snapshot)
+                await self._trigger_resume(run_id, snapshot)
 
     async def input_answered(self, _result: dict[str, Any]) -> None:
         # No direct resume here: new-user-message admission and reconciliation
         # share the SessionService dispatcher fence, including notification races.
         self.slot_changed.set()
 
-    def _trigger_resume(self, run_id: str, snapshot: RunSnapshot) -> bool:
+    async def _trigger_resume(self, run_id: str, snapshot: RunSnapshot) -> bool:
         """停靠批全部答复后启动恢复驱动；已有驱动在跑则不动（幂等）。"""
         if (snapshot.run.stop_requested or snapshot.run.status != "awaiting"
                 or not self._all_waits_answered(snapshot)):
@@ -1501,7 +1581,7 @@ class RunService:
         target = snapshot.request.target
         if target in RETIRED_TARGETS:
             return False
-        binding = self._binding_for_run(snapshot)
+        binding = await self._binding_for_run(snapshot)
         if binding is None:
             return False  # 存储的目标键已不存在：留给 recover 定稿，不猜着续跑
         resumed = asyncio.create_task(
@@ -1589,10 +1669,10 @@ class RunService:
                 # 重放只确认原结果，不补写规则：用户清除后旧批复重放不得复活。
                 if snapshot.run.status == "awaiting" and self._all_waits_answered(snapshot):
                     # 幂等重放也能补触发恢复（首次答复后恢复启动失败的场景）
-                    self._trigger_resume(run_id, snapshot)
+                    await self._trigger_resume(run_id, snapshot)
                 return {"request_id": request_id, "allow": reply.allow, "replayed": True}
-            if snapshot.request.target in RETIRED_TARGETS or self._binding_for_run(
-                snapshot
+            if snapshot.request.target in RETIRED_TARGETS or (
+                await self._binding_for_run(snapshot)
             ) is None:
                 raise ServiceError("approval_unavailable")
             if snapshot.run.status in TERMINAL or snapshot.run.stop_requested:
@@ -1664,7 +1744,7 @@ class RunService:
                 await self.store.append(run_id, "approval_reply", frozen, event_id=event_id)
             snapshot = await self.store.snapshot(run_id)
             if self._all_waits_answered(snapshot):  # Both approvals and user answers are required.
-                self._trigger_resume(run_id, snapshot)
+                await self._trigger_resume(run_id, snapshot)
             return {"request_id": request_id, "allow": reply.allow, "replayed": False}
 
     async def close(self) -> None:

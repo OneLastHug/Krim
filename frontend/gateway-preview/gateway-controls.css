@@ -1,0 +1,42 @@
+/* 聊天底栏模型 / 推理菜单：本文件自足，不依赖 shell.css。
+   选择器带 .app-shell 与 .popover-menu 双类前缀，稳定覆盖 index.css 与
+   approved-workbench.css 中同特异性（0,2,0）的 .popover-menu 基础值。 */
+
+.app-shell .popover-menu.gateway-model-menu {
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 248px; max-width: min(340px, calc(100vw - 16px));
+  max-height: min(540px, calc(100dvh - 80px));
+}
+.app-shell .popover-menu.gateway-reasoning-menu {
+  min-width: 248px; max-width: min(340px, calc(100vw - 16px));
+  max-height: min(540px, calc(100dvh - 80px)); overflow-y: auto;
+}
+.app-shell .gateway-model-menu .gateway-menu-body { min-height: 0; overflow-y: auto; }
+
+.app-shell .gateway-menu-search {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  padding: 0 8px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--input-surface, var(--background));
+}
+.app-shell .gateway-menu-search:focus-within { border-color: var(--ring); outline: 1px solid var(--ring); outline-offset: -1px; }
+.app-shell .gateway-menu-search svg { width: 13px; height: 13px; flex: none; color: var(--muted-foreground); }
+.app-shell .gateway-menu-search input {
+  flex: 1; min-width: 0; height: 30px; border: 0; outline: none;
+  background: transparent; color: var(--foreground); font: inherit; font-size: 12px;
+}
+.app-shell .gateway-menu-search input::placeholder { color: var(--muted-foreground); }
+
+.app-shell .gateway-menu-heading { margin: 0; padding: 7px 9px 4px; overflow: hidden; font-size: 11px; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .gateway-menu-hint { margin: 0; padding: 6px 9px; font-size: 11px; line-height: 1.7; color: var(--muted-foreground); }
+
+.app-shell .gateway-choice { padding-top: 6px; padding-bottom: 6px; gap: 8px; }
+.app-shell .gateway-choice .gateway-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; flex: none; }
+.app-shell .gateway-choice .gateway-check svg { width: 13px; height: 13px; color: var(--foreground); }
+.app-shell .gateway-choice .gateway-choice-body { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.app-shell .gateway-choice strong { overflow: hidden; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .gateway-choice small { overflow: hidden; font-size: 10px; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .gateway-choice.is-selected { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+
+@media (max-width: 700px) {
+  .app-shell .popover-menu.gateway-model-menu, .app-shell .popover-menu.gateway-reasoning-menu { min-width: min(248px, calc(100vw - 16px)); }
+}

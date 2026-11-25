@@ -366,11 +366,21 @@ class SessionService:
             )
         if body.target_key in RETIRED_TARGETS:
             raise ServiceError("target_retired", 410)
-        binding = self.runs.bindings.get(body.target_key)
-        if binding is None:
-            if not self.runs.bindings:
+        gateway = getattr(self.runs, "model_gateway", None)
+        if gateway is not None:
+            # 每会话模型选择：显式选择或账号默认冻结进descriptor；无默认且
+            # 无选择时保持宿主绑定，错误语义与直连bindings完全一致。
+            binding = await gateway.for_create(
+                principal.principal_id, body.target_key, body.model_selection
+            )
+        else:
+            if body.model_selection is not None:
                 raise ServiceError("provider_not_configured", 503)
-            raise ServiceError("invalid_input", 422)
+            binding = self.runs.bindings.get(body.target_key)
+            if binding is None:
+                if not self.runs.bindings:
+                    raise ServiceError("provider_not_configured", 503)
+                raise ServiceError("invalid_input", 422)
         binding.assert_current()
         output = (
             binding.loop.provider.config.max_output_tokens
@@ -499,6 +509,9 @@ class SessionService:
         assert_current失败（含工具/绑定身份漂移）即返回None。冻结行与现行
         描述符的同异、白名单（仅实现摘要漂移）与busy栅栏全部由storage在
         升级事务内按实时冻结行核对，service不读快照对比，避免读取后漂移。
+        每会话自定义模型的冻结target带网关标记，provider身份与base绑定必然
+        不同，storage按implementation_only_upgrade拒绝候选，冻结行不会
+        被换回base（见tests/core/test_model_gateway_runtime.py冻结测试）。
         """
         if binding is None:
             return None

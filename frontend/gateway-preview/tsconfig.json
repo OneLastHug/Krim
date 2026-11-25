@@ -1,0 +1,6 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noUnusedLocals": true, "noUnusedParameters": true },
+  "include": ["./**/*.ts", "./**/*.tsx", "../vite.gateway-preview.config.ts"],
+  "exclude": []
+}

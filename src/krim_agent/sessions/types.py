@@ -1,8 +1,14 @@
 """v2会话/Turn/控制合约；不改变v1 Run协议。"""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 from krim_agent.context.types import ContextPolicy
 from krim_agent.contracts import Message, StrictModel
@@ -21,6 +27,23 @@ class SessionCreate(StrictModel):
     target_key: TargetKey = "target-http"
     context_policy: ContextPolicy | None = None
     project_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # 每会话自定义模型选择（model_gateway.GatewaySelection 的 JSON 形状）。
+    # None 时使用账号默认选择，仍无默认则保持宿主目标。字段用 dict 入口，
+    # 避免 sessions 与 model_gateway 包互相导入；形状由配置域解析时校验。
+    model_selection: dict[str, JsonValue] | None = None
+
+    @field_validator("model_selection", mode="before")
+    @classmethod
+    def typed_selection(cls, value: object) -> object:
+        """Python 直调传模型实例时取其 JSON 形状；API/JSON 入口本就是 dict。"""
+        return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """旧 create 请求摘要兼容：未选择自定义模型时该字段不参与哈希。"""
+        document = super().model_dump(*args, **kwargs)
+        if document.get("model_selection") is None:
+            document.pop("model_selection", None)
+        return document
 
 
 class TurnRequest(StrictModel):

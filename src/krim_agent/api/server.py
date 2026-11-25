@@ -329,6 +329,9 @@ def create_app(
     from .accounts import mount_accounts
 
     mount_accounts(app)
+    from .model_gateways import mount_model_gateways
+
+    mount_model_gateways(app)
 
     from .context import mount_context
     from .execution_policy import mount_execution_policy

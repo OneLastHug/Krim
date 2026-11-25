@@ -97,8 +97,10 @@ class OpenAICompatibleConfig(StrictModel):
     # None = 请求不带max_tokens/max_output_tokens，输出上限交给供应商真实
     # 能力；显式数值仍是"单次请求的生成预算"，不是累计输出配额。
     max_output_tokens: int | None = Field(default=None, ge=1)
-    reasoning_effort: Literal["xhigh"] | None = None
-    thinking: Literal["disabled"] | None = None
+    reasoning_effort: str | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    )
+    thinking: Literal["enabled", "disabled"] | None = None
     # None = 该传输阶段不设应用层硬超时；长连接的最终期限由运行层的
     # model_timeout/运行deadline执行。默认值不再压住大窗口请求的首字节等待。
     connect_timeout_seconds: float | None = Field(default=10.0, gt=0)
@@ -165,6 +167,8 @@ class OpenAICompatibleConfig(StrictModel):
 
     @model_validator(mode="after")
     def bounds(self) -> Self:
+        if self.wire_api == "responses" and self.thinking is not None:
+            raise ValueError("Responses协议不接受thinking参数")
         # Arguments may span many events; a finite aggregate argument bound need
         # not fit one event. Only two explicitly finite wire bounds are related.
         if (self.max_event_bytes is not None and self.max_response_bytes is not None

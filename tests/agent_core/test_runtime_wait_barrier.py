@@ -34,9 +34,9 @@ def test_reply_ids_cannot_satisfy_another_kind_of_wait():
     assert service()._all_waits_answered(SimpleNamespace(events=events)) is False
 
 
-def test_resume_guard_rejects_early_trigger_even_with_no_registered_task():
+async def test_resume_guard_rejects_early_trigger_even_with_no_registered_task():
     snapshot = SimpleNamespace(
         run=SimpleNamespace(status="awaiting", stop_requested=False),
         events=[event("user_input_request", "question")],
     )
-    assert service()._trigger_resume("run", snapshot) is False
+    assert await service()._trigger_resume("run", snapshot) is False
