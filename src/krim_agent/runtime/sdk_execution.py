@@ -130,6 +130,7 @@ class SDKExecutionPlan:
     workspace: bool = False
     on_completed: CompletionHook | None = None
     subagents: Any | None = None
+    stream_check: Callable[[], None] | None = None
 
 
 async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
@@ -151,6 +152,7 @@ async def execute_sdk(plan: SDKExecutionPlan) -> ProbeResult:
         deadline=plan.execution_budget.deadline,
         workspace=plan.workspace,
         execution_budget=plan.execution_budget,
+        stream_check=plan.stream_check,
         request_slot=(
             (lambda index: plan.subagents.request_slot(plan.run_id, index, plan.check))
             if plan.subagents is not None else None

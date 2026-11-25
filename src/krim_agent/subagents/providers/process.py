@@ -1037,7 +1037,10 @@ class ProcessAgentLoop(AgentLoop):
         run_tools: Any | None = None,
         session_scope: Any | None = None,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        stream_check: Callable[[], None] | None = None,
     ) -> None:
+        # Process workers do not consume model text deltas. Accept the shared
+        # run interface while retaining complete checks around their effects.
         def check() -> None:
             assert_target_current()
             if self._d3_seal != (

@@ -162,7 +162,9 @@ class DevelopmentSDKLoop(AgentLoop):
         run_tools: Any | None = None,
         session_scope: SessionToolScope | None = None,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        stream_check: Callable[[], None] | None = None,
     ) -> None:
+        check_stream = stream_check if stream_check is not None else assert_target_current
         if execution_budget is None:
             raise ServiceError("execution_error")
         assert_target_current()
@@ -215,7 +217,8 @@ class DevelopmentSDKLoop(AgentLoop):
             assert_target_current()
 
         async def emit(kind: str, data: dict[str, JsonValue]) -> RunEvent:
-            assert_target_current()
+            (check_stream if kind in {"text", "summary_text", "model_activity"}
+             else assert_target_current)()
             if kind == "model_start":
                 await verify_source()
             event = await self.store.append(run_id, kind, data)
@@ -372,6 +375,7 @@ class DevelopmentSDKLoop(AgentLoop):
             tool_context=context,
             emit=emit,
             check=assert_target_current,
+            stream_check=check_stream,
             approval_request=approval_request,
             read_result=unused_result,
             read_receipt=read_receipt,

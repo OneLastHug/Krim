@@ -70,8 +70,10 @@ class ModelStep:
                  execution_budget: ExecutionBudget | None = None,
                  model_timeout: float | None = None,
                  request_slot: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
+                 stream_check: Callable[[], None] | None = None,
                  ) -> None:
         self.provider, self.emit, self.check = provider, emit, check
+        self.stream_check = stream_check if stream_check is not None else check
         self.model_timeout = model_timeout
         self.request_slot = request_slot
         self.max_steps, self.max_output = max_steps, max_output
@@ -200,7 +202,12 @@ class ModelStep:
                 stream = self.provider.stream(request_messages, request_tools)
             try:
                 async for delta in stream:
-                    self.check()
+                    # Pure text/progress cannot dispatch tools. Keep their
+                    # identity fences cheap; usage/calls and step boundaries
+                    # still run the complete live-definition check.
+                    check_delta = (self.stream_check
+                                   if type(delta) in (ModelText, ModelProgress) else self.check)
+                    check_delta()
                     if final_usage and not isinstance(delta, ModelUsage):
                         raise ServiceError("provider_event")
                     try:
@@ -273,7 +280,7 @@ class ModelStep:
                             raise ServiceError("provider_event")
                     except (ValidationError, ValueError):
                         raise ServiceError("provider_event") from None
-                    self.check()
+                    check_delta()
             finally:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
