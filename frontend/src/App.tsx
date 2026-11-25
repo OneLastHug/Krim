@@ -3,6 +3,7 @@ import { useScrollbars } from "./hooks/use-scrollbars";
 import { AppearanceSettings } from "./components/AppearanceSettings";
 import { useCallback, useEffect, useRef, useState, type ReactNode, lazy, Suspense } from "react";
 import { object, request } from "./api";
+import { readLoginState, saveLoginState } from "./lib/login-state";
 import { AccountSettings, type AccountTab } from "./components/AccountSettings";
 import { useAccountIdentity } from "./hooks/use-account-identity";
 import { ChatWorkbench } from "./components/ChatWorkbench";
@@ -38,8 +39,8 @@ function UnavailablePage({ title, children }: { title: string; children: ReactNo
 
 export function App() {
   useScrollbars();
-  const [key, setKey] = useState(""), [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
-  const [loggedOut, setLoggedOut] = useState(false);
+  const [{ key, loggedOut }, setLogin] = useState(readLoginState);
+  const [keyOpen, setKeyOpen] = useState(false), [taskOpen, setTaskOpen] = useState(false);
   const [accountTab, setAccountTab] = useState<AccountTab>("profile");
   const preparedKey = useRef<string | null>(null);
   const [keyPrepared, setKeyPrepared] = useState(false);
@@ -57,7 +58,7 @@ export function App() {
   const [legacy, setLegacy] = useState<boolean | null>(null);
   const [identityState, setIdentity] = useState<{ key: string; actor: Actor } | null>(null);
   const identity = identityState?.key === key ? identityState.actor : null;
-  const [identityLoading, setIdentityLoading] = useState(() => readWorkbenchView(new URL(location.href)) !== "chat"), [identityError, setIdentityError] = useState("");
+  const [identityLoading, setIdentityLoading] = useState(() => !loggedOut && readWorkbenchView(new URL(location.href)) !== "chat"), [identityError, setIdentityError] = useState("");
   const [httpEnabled, setHttpEnabled] = useState<boolean | null>(null);
   const [productEnabled, setProductEnabled] = useState<boolean | null>(null);
   const [automationEnabled, setAutomationEnabled] = useState(false);
@@ -144,9 +145,10 @@ export function App() {
       setAccountTab("profile");
     }
     window.history.replaceState(null, "", url);
-    setLoggedOut(false); setTaskOpen(false);
+    saveLoginState({ key: value, loggedOut: false });
+    setLogin({ key: value, loggedOut: false }); setTaskOpen(false);
     setIdentity(null); setLegacy(null); setIdentityError(""); setIdentityLoading(true);
-    setKey(value); setChatMount(revision => revision + 1);
+    setChatMount(revision => revision + 1);
   }
 
   function logout(message = "") {
@@ -155,7 +157,8 @@ export function App() {
     liveKey.current = "";
     chatNavigation.current = null;
     run.invalidate();
-    setKey(""); setLoggedOut(true); setIdentity(null); setLegacy(null);
+    saveLoginState({ key: "", loggedOut: true });
+    setLogin({ key: "", loggedOut: true }); setIdentity(null); setLegacy(null);
     setIdentityError(message); setIdentityLoading(false); setKeyOpen(false); setTaskOpen(false);
     setSelectedChatId(""); setSelectedProductTaskId(""); setSourceRun("");
     setAccountTab("profile"); setChatMount(revision => revision + 1);
@@ -411,7 +414,7 @@ export function App() {
           {identity && accountIdentity.profile ? <AccountSettings key={JSON.stringify([key, identity.principal_id, identity.generation])}
             apiKey={key} identity={identity} profile={accountIdentity.profile} active tab={accountTab}
             onTabChange={setAccountTab} onProfileChange={refreshAccount}
-            onKeyChange={value => applyKey(value, true)} onKeyPrepared={value => { preparedKey.current = value; setKeyPrepared(true); }} onLogout={() => logout()}
+            onKeyChange={value => applyKey(value, true)} onKeyPrepared={value => { saveLoginState({ key: value, loggedOut: false }); preparedKey.current = value; setKeyPrepared(true); }} onLogout={() => logout()}
             gatewayName={gatewayName} onConnect={() => setKeyOpen(true)} appearance={<AppearanceSettings theme={theme} onTheme={selectTheme} size={readingSize} onSize={selectReadingSize}/>}/>
             : <UnavailablePage title={accountIdentity.profileLoading || identityLoading ? "正在读取账号" : "账号设置"}>
               {accountIdentity.profileError || identityError || "使用访问密钥登录后管理个人资料。"}<br/>
