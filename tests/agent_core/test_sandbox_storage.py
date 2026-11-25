@@ -125,7 +125,7 @@ async def test_fresh_store_has_current_schema_with_sandbox_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 21
         assert store.schema_version == SCHEMA_VERSION
         assert SANDBOX_TABLE_NAMES <= set(metadata.tables)
         assert SANDBOX_TABLE_NAMES <= table_names(database)

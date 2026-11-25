@@ -60,7 +60,12 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
   useEffect(() => {
     const onNew = (event: Event) => {
       const detail = (event as CustomEvent).detail;
-      if (detail?.principal === chat.actor?.principal_id && detail?.generation === chat.actor?.generation && detail?.workspace === chat.workspace) setGroup(typeof detail.group === "string" ? detail.group : undefined);
+      if (detail?.principal === chat.actor?.principal_id && detail?.generation === chat.actor?.generation && detail?.workspace === chat.workspace) {
+        const nextGroup = typeof detail.group === "string" ? detail.group : undefined;
+        setGroup(nextGroup);
+        // 从某个项目分组新建时，项目选择同步为该组（项目）。
+        if (nextGroup) setNewProject(nextGroup);
+      }
     };
     window.addEventListener("krim:new-session", onNew);
     return () => window.removeEventListener("krim:new-session", onNew);
@@ -69,11 +74,18 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
     const target = defaultFormalTarget(chat.actor?.target_keys);
     if (!target) { setStartNotice("当前账号未配置正式运行目标，无法创建新对话。"); return; }
     const text = chat.draft;
-    if (!newProject || target !== "target-development") { await chat.createAndSubmit(text, target, group); return; }
-    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, group, text, newProject);
+    // 项目即分组：从组内新建始终携带组（项目）；组外新建仅开发目标沿用已选项目。
+    const projectId = group ?? (target === "target-development" ? newProject || undefined : undefined);
+    if (!projectId || target !== "target-development") {
+      // 非开发目标无需容器准备：带项目创建后直接提交一次。
+      await chat.createAndSubmit(text, target, projectId);
+      return;
+    }
+    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, projectId, text);
     if (!created || liveScope.current !== accountScope || new URL(location.href).searchParams.get("session") !== created.id) return;
     chat.edit(text);
-    setStarting({ id: created.id, project: newProject, text, scope: accountScope, stage: "bind" });
+    setNewProject(projectId);
+    setStarting({ id: created.id, project: projectId, text, scope: accountScope, stage: "bind" });
   }
   // 已有会话发送下一条：项目未就绪同样先走同一 prepare 入口，就绪后由同一 starting 流程提交。
   function sendWithPreparation(text?: string, recipient?: Session | null) {
@@ -165,7 +177,7 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
       <PopoverMenu open={info !== null} anchor={info === "model" ? modelRef.current : extraRef.current} placement="above" onClose={() => setInfo(null)} label={info === "model" ? "模型信息" : "运行配置"}>
         <p className="control-info-content">{info === "model" ? context.data?.configuration?.model ? `当前运行模型：${model}` : context.turnId ? "本轮未提供模型名称。模型接入在账号配置中管理。" : "完成首轮运行后显示实际模型配置。模型接入在账号配置中管理。" : `推理强度：${context.data?.configuration?.reasoning_effort ?? "未提供"}；思考配置：${context.data?.configuration?.thinking ?? "未提供"}`}</p>
       </PopoverMenu>
-      <Dialog open={projectPickerOpen} onOpenChange={setProjectPickerOpen}><DialogContent className="new-session-project-dialog" aria-label="选择新会话项目" aria-describedby={undefined}><ProjectDialogBody key={accountScope} dev={development} apiKey={apiKey} projectId={newProject || null} workspace={chat.workspace} canCreate={chat.canWrite} onClose={() => setProjectPickerOpen(false)} onChoose={id => { setNewProject(id); void fetchProjectsPage(apiKey).then(value => { if (liveScope.current === accountScope) setProjects(value.items.filter(project => project.workspace_id === chat.workspace)); }).catch(error => { if (liveScope.current === accountScope) setStartNotice(chatReason(error)); }); }}/></DialogContent></Dialog>
+      <Dialog open={projectPickerOpen} onOpenChange={setProjectPickerOpen}><DialogContent className="new-session-project-dialog" aria-label="选择新会话项目" aria-describedby={undefined}><ProjectDialogBody key={accountScope} dev={development} apiKey={apiKey} projectId={newProject || null} workspace={chat.workspace} canCreate={chat.canWrite} onClose={() => setProjectPickerOpen(false)} onChoose={id => { setNewProject(id); setGroup(undefined); void fetchProjectsPage(apiKey).then(value => { if (liveScope.current === accountScope) setProjects(value.items.filter(project => project.workspace_id === chat.workspace)); }).catch(error => { if (liveScope.current === accountScope) setStartNotice(chatReason(error)); }); }}/></DialogContent></Dialog>
     </section>
     <DevelopmentPanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} development={development} subagents={subagents} onMaximizedChange={setWorkMaximized} dark={theme === "dark"} context={context} onContextTrace={() => { if (context.turnId && chat.id) onTrace?.(chat.workspace, chat.id, context.turnId, "context"); }}/>
   </section>;

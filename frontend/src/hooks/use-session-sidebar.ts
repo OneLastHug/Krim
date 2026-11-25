@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { request, RequestError } from "../api";
 import type { SessionState } from "./use-session";
-import { emptySidebar, includeSessions, parseSidebar, type SidebarLayout } from "../lib/session-sidebar";
+import { emptySidebar, parseSidebar, type SidebarLayout } from "../lib/session-sidebar";
 
 export function useSessionSidebar(chat: SessionState, apiKey: string) {
   const scope = JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.ready]);
@@ -27,12 +27,12 @@ export function useSessionSidebar(chat: SessionState, apiKey: string) {
     return () => controller.abort();
   }, [scope, path, apiKey, version, chat.ready, chat.workspace]);
   const value = loaded?.scope === scope ? loaded.layout : emptySidebar();
-  const layout = includeSessions(value, chat.list);
+  // 服务端在 GET 时按真实绑定补齐组（项目）与会话；缺项只等下一次重读，不再本地拼组。
+  const layout = value;
   async function save(next: SidebarLayout) {
     if (!chat.ready || !chat.canWrite || loaded?.scope !== scope || flight.current || pending === scope) return false;
     const captured = scope, generation = epoch.current, prior = loaded.layout, body = { expected_revision: prior.revision, groups: next.groups, sessions: next.sessions };
     const valid = () => mounted.current && current.current === captured && epoch.current === generation;
-    if (next.groups.length > 100 || new TextEncoder().encode(JSON.stringify(body)).length > 65536) { setMessage({ scope, text: "会话排序超过保存容量，请减少分组或条目" }); return false; }
     flight.current = true; setPending(captured); setMessage(null);
     try {
       const result = parseSidebar(await request(path, apiKey, body, undefined, "PUT"));

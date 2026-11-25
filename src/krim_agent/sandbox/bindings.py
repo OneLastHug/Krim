@@ -166,6 +166,10 @@ async def bind_project(
             from krim_agent.storage.execution_policy import clear_allow_rules
 
             await clear_allow_rules(conn, session_id)
+        if service.store.schema_version >= 21:
+            from krim_agent.storage.session_sidebar import sync_project_binding
+
+            await sync_project_binding(conn, session_id, values.project_id)
         # sql.submit核对同一session revision，不能用改绑前的页面状态入队。
         await conn.execute(
             update(sessions)

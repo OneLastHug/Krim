@@ -587,3 +587,31 @@ test("非本人的已关闭会话即使admin也不触发生命周期请求", asy
   expect(hookCalls.filter(call => call.method === "POST")).toHaveLength(0);
   expect(localStorage.getItem(CONTROL)).toBeNull();
 });
+
+test("恢复成功后派发侧栏刷新事件，归属交给服务端补齐", async () => {
+  let restored = false;
+  const events: CustomEvent[] = [];
+  const onSidebarChanged = (event: Event) => events.push(event as CustomEvent);
+  window.addEventListener("krim:sidebar-changed", onSidebarChanged);
+  const restoredSession = () => lifecycleSession({ status: "open", closed_at: null, archived_at: null, deleted_at: null, lifecycle_revision: 2 });
+  serve((path, _method, body) => {
+    if (path === "/v2/me") return identity();
+    if (path === hookBase + "?limit=50") return json(restored ? [restoredSession()] : [lifecycleSession({ archived_at: 5, deleted_at: 6, lifecycle_revision: 1 })]);
+    if (path === hookBase + "/A") return json(restored ? restoredSession() : lifecycleSession({ archived_at: 5, deleted_at: 6, lifecycle_revision: 1 }));
+    if (path.startsWith(hookBase + "/A/turns?")) return json([]);
+    if (path === hookBase + "/A/lifecycle/restore") {
+      expect((body as { expected_revision: number }).expected_revision).toBe(1);
+      restored = true;
+      return json(restoredSession());
+    }
+    return undefined;
+  });
+  await mountHook();
+  await until(() => expect(hookState?.list).toHaveLength(1));
+  await act(async () => hookState!.lifecycle("restore", "A"));
+  await until(() => expect(restored).toBe(true));
+  await until(() => expect(events.some(event => event.detail?.principal === "local" && event.detail?.workspace === "local")).toBe(true));
+  window.removeEventListener("krim:sidebar-changed", onSidebarChanged);
+  await until(() => expect(localStorage.getItem(CONTROL)).toBe("{}"));
+  expect(hookCalls.filter(call => call.path.endsWith("/session-sidebar") && call.method === "PUT")).toHaveLength(0);
+});

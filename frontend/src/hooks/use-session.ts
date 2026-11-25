@@ -3,7 +3,6 @@ import { object, request, RequestError } from "../api";
 import { chatReason } from "../lib/copy";
 import { parseActor, parseSession, parseTurn, sessionPath, turnPath, type Actor, type Session, type Turn } from "../lib/session-contracts";
 import { CURRENT, performIntent, prepareIntent, readDraft, readIntents, saveDraft, saveSelection, type Intent, type Scope } from "../lib/session-requests";
-import { DEFAULT_GROUP, includeSessions, parseSidebar } from "../lib/session-sidebar";
 import { readTurnStream, StreamProtocolError, StreamUnavailableError, type RunStreamEvent } from "../lib/session-stream";
 import { useExecutionPolicy } from "./use-execution-policy";
 import type { ApprovalScope } from "../lib/execution-policy";
@@ -463,6 +462,8 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
       saveControls(latest);
       if (action === "trash" && selected.current.id === sessionId) select(workspace, "");
       if (action === "restore" && selected.current.id === sessionId) setSessionListView("active");
+      // 恢复后会话重新可见，归属由服务端按绑定补齐；通知侧栏重读而不是沿用旧布局。
+      if (action === "restore") window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: identity.principal_id, workspace } }));
       invalidate();
       setNotice(null);
       setVersion(value => value + 1);
@@ -481,29 +482,19 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     }
   }
   function edit(text: string) { try { saveDraft(localStorage, scope(), text); setDraft(text); } catch (error) { setNotice(chatReason(error)); } }
-  async function create(title: string, target: string, groupId?: string, initialDraft = title, projectId?: string): Promise<Session | null | undefined> {
+  async function create(title: string, target: string, projectId?: string, initialDraft = title): Promise<Session | null | undefined> {
     let marker = "", ownsFlight = false; let current = () => false; let created: Session | null = null;
-    const originalSession = id;
     try {
       const targetScope = scope(null); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
       flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, initialDraft);
       const { intent, first } = prepareIntent(localStorage, targetScope, "session", projectId ? { title, target_key: target, project_id: projectId } : { title, target_key: target }); refreshPending();
       await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; created = value as Session; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
+      // 项目即分组：归属由后端按绑定在 GET 时补齐；这里只通知侧栏重读，不再手工写排序。
       const who = actorRef.current?.value;
-      const sameAccount = () => mounted.current && activeRef.current && keyRef.current === apiKey && actorRef.current?.value.principal_id === targetScope.principal_id && actorRef.current?.value.generation === targetScope.generation && selected.current.workspace === targetScope.workspace_id;
-      if (created && who && sameAccount()) {
-        try {
-          const path = `/v2/workspaces/${encodeURIComponent(targetScope.workspace_id)}/session-sidebar`;
-          const prior = parseSidebar(await request(path, apiKey));
-          if (!sameAccount()) return created;
-          const next = includeSessions(prior, [...list.filter(session => session.id !== created!.id), created]);
-          if (next.groups.length > 100 || new TextEncoder().encode(JSON.stringify(next)).length > 64000) throw new Error("排序容量超限");
-          const destination = groupId ?? prior.sessions.find(entry => entry.session_id === originalSession)?.group_id ?? DEFAULT_GROUP;
-          if (!next.groups.some(group => group.id === destination)) throw new Error("会话分组已变化");
-          const entries = next.sessions.map(entry => entry.session_id === created!.id ? { ...entry, group_id: destination } : entry);
-          await request(path, apiKey, { expected_revision: prior.revision, groups: next.groups, sessions: entries }, undefined, "PUT");
-          if (sameAccount()) window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: targetScope.principal_id, workspace: targetScope.workspace_id } }));
-        } catch { if (sameAccount()) setNotice("会话已创建，分组保存结果未确认。请重新读取排序后检查。"); }
+      if (created && who && mounted.current && activeRef.current && keyRef.current === apiKey
+        && actorRef.current?.value.principal_id === targetScope.principal_id && actorRef.current?.value.generation === targetScope.generation
+        && selected.current.workspace === targetScope.workspace_id) {
+        window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: targetScope.principal_id, workspace: targetScope.workspace_id } }));
       }
       return created;
     } catch (error) { if (current()) setNotice(chatReason(error)); return null; }
@@ -520,9 +511,9 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     } catch (error) { if (current()) setNotice(chatReason(error)); }
     finally { if (marker && ownsFlight) flight(marker, false); refreshPending(); }
   }
-  async function createAndSubmit(text: string, target: string, groupId?: string) {
+  async function createAndSubmit(text: string, target: string, projectId?: string) {
     if (!text.trim()) return;
-    const created = await create(text.trim().split("\n")[0]!.slice(0, 128), target, groupId, text);
+    const created = await create(text.trim().split("\n")[0]!.slice(0, 128), target, projectId, text);
     if (!created || selected.current.id !== created.id) return;
     saveDraft(localStorage, scope(created.id), text); setDraft(text);
     await submit(text, created);

@@ -155,11 +155,11 @@ async def build_tree(store):
     return sub, tree, root_id, reserved["activation"]["activation_id"], root_spawn
 
 
-async def test_fresh_store_has_schema20_with_subagent_tables(tmp_path):
+async def test_fresh_store_has_current_schema_with_subagent_tables(tmp_path):
     database = tmp_path / "fresh.sqlite"
     store = await SQLiteStore.open(database)
     try:
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 21
         assert store.schema_version == SCHEMA_VERSION
         assert SUBAGENT_TABLE_NAMES <= set(metadata.tables)
         assert SUBAGENT_TABLE_NAMES <= table_names(database)

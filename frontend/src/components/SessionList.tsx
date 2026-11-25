@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ChevronDown, ChevronRight, CodeXml, Ellipsis, FolderInput, GitFork, Pin, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { request } from "../api";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -8,7 +9,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { PopoverMenu } from "./popover-menu";
 import type { SessionState } from "../hooks/use-session";
 import { useSessionSidebar } from "../hooks/use-session-sidebar";
-import { DEFAULT_GROUP, moveSidebar, type SidebarEntry, type SidebarLayout } from "../lib/session-sidebar";
+import { rebindSessionProject } from "../hooks/use-development";
+import { UNGROUPED, moveSidebar, unrecordedEntries, type SidebarEntry, type SidebarLayout } from "../lib/session-sidebar";
+import { devReason, parseProject } from "../lib/development-contracts";
 import type { Session } from "../lib/session-contracts";
 import "./session-sidebar.css";
 
@@ -28,23 +31,33 @@ interface Drag { kind: "group" | "session"; id: string; pointerId: number; x: nu
 export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }: { chat: SessionState; apiKey?: string; beforeSelect?: (workspace: string, sessionId: string) => void; onCreateInGroup?: (groupId: string) => void }) {
   const sidebar = useSessionSidebar(chat, apiKey), layout = sidebar.layout;
   const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement } | null>(null), [viewMenu, setViewMenu] = useState<HTMLElement | null>(null);
+  const [groupMenu, setGroupMenu] = useState<{ id: string; anchor: HTMLElement } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set()), [nodes, setNodes] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<{ kind: "rename" | "archive" | "unarchive" | "trash" | "restore" | "move" | "group"; id: string } | null>(null);
-  const [text, setText] = useState(""), [group, setGroup] = useState(DEFAULT_GROUP), [submitted, setSubmitted] = useState<string | null>(null), [notice, setNotice] = useState("");
+  const [dialog, setDialog] = useState<{ kind: "rename" | "archive" | "unarchive" | "trash" | "restore" | "move" | "group" | "group-rename"; id: string } | null>(null);
+  const [text, setText] = useState(""), [group, setGroup] = useState(UNGROUPED), [submitted, setSubmitted] = useState<string | null>(null), [notice, setNotice] = useState("");
+  const [moving, setMoving] = useState(false), [projectBusy, setProjectBusy] = useState(false);
+  const projectCreate = useRef<{ request_key: string; workspace_id: string; title: string } | null>(null);
   const tree = useRef<HTMLElement>(null), scroll = useRef(0), drag = useRef<Drag | null>(null), suppress = useRef(false), [dragUI, setDragUI] = useState<Drag | null>(null);
   const live = useRef({ layout, sidebar }); live.current = { layout, sidebar };
   const scope = JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace]);
-  useEffect(() => { setMenu(null); setViewMenu(null); setDialog(null); setSubmitted(null); setCollapsed(new Set()); setNodes(new Set()); setNotice(""); setDragUI(null); suppress.current = false; scroll.current = 0; }, [scope]);
+  const liveScope = useRef(scope); liveScope.current = scope;
+  useEffect(() => { setMenu(null); setViewMenu(null); setGroupMenu(null); setDialog(null); setSubmitted(null); setCollapsed(new Set()); setNodes(new Set()); setNotice(""); setDragUI(null); suppress.current = false; scroll.current = 0; setMoving(false); setProjectBusy(false); projectCreate.current = null; }, [scope]);
   useLayoutEffect(() => { if (tree.current) tree.current.scrollTop = scroll.current; });
   const edited = dialog ? chat.list.find(session => session.id === dialog.id) ?? (chat.session?.id === dialog.id ? chat.session : null) : null;
   const pendingRename = chat.pendingControls.find(value => value.session_id === dialog?.id && value.target.endsWith("/rename"));
   useEffect(() => { if (submitted && edited?.title === submitted) { setDialog(null); setSubmitted(null); } }, [submitted, edited?.title]);
   useEffect(() => { if (submitted && chat.notice && !pendingRename && !chat.controlling) setSubmitted(null); }, [submitted, chat.notice, pendingRename, chat.controlling]);
-  const byId = new Map(chat.list.map(session => [session.id, session])), entries = new Map(layout.sessions.map(entry => [entry.session_id, entry]));
-  function closeMenu() { const anchor = menu?.anchor ?? viewMenu; setMenu(null); setViewMenu(null); anchor?.focus({ preventScroll: true }); }
+  const byId = new Map(chat.list.map(session => [session.id, session]));
+  // 排序以服务端布局为准；列表中尚未收录的会话按未绑定条目补齐（仅渲染，不写回）。
+  const entries = new Map(layout.sessions.map(entry => [entry.session_id, entry]));
+  const visible = [...layout.sessions.filter(entry => byId.has(entry.session_id)), ...unrecordedEntries(layout, chat.list)];
+  const isProjectGroup = (id: string) => id !== "Pinned" && id !== UNGROUPED;
+  function closeMenu() { const anchor = menu?.anchor ?? viewMenu ?? groupMenu?.anchor ?? null; setMenu(null); setViewMenu(null); setGroupMenu(null); anchor?.focus({ preventScroll: true }); }
   function coming() { closeMenu(); setNotice("敬请期待"); }
   function openDialog(kind: NonNullable<typeof dialog>["kind"], id: string) {
-    closeMenu(); const selected = byId.get(id); setText(kind === "rename" ? selected?.title ?? "" : ""); setSubmitted(null); setGroup(entries.get(id)?.group_id ?? DEFAULT_GROUP); setDialog({ kind, id });
+    closeMenu(); const selected = byId.get(id);
+    setText(kind === "rename" ? selected?.title ?? "" : kind === "group-rename" ? layout.groups.find(item => item.id === id)?.title ?? "" : "");
+    setSubmitted(null); setGroup(entries.get(id)?.group_id ?? UNGROUPED); setDialog({ kind, id });
   }
   function select(id: string) { if (chat.id !== id) beforeSelect?.(chat.workspace, id); chat.select(chat.workspace, id); }
   async function save(next: SidebarLayout) { scroll.current = tree.current?.scrollTop ?? 0; return sidebar.save(next); }
@@ -57,7 +70,7 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
       value.drop = null;
       if (!row || !tree.current?.contains(row)) { setDragUI({ ...value }); return; }
       const id = value.kind === "group" ? row.dataset.groupHandle! : row.dataset.sessionRow!;
-      if (id === value.id || id === "Pinned") { setDragUI({ ...value }); return; }
+      if (id === value.id || id === "Pinned" || id === UNGROUPED) { setDragUI({ ...value }); return; }
       if (value.kind === "session") {
         const a = live.current.layout.sessions.find(entry => entry.session_id === value.id), b = live.current.layout.sessions.find(entry => entry.session_id === id);
         if (!a || !b || a.pinned || b.pinned || a.group_id !== b.group_id || a.parent_id !== b.parent_id) { setDragUI({ ...value }); return; }
@@ -85,7 +98,7 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
     return () => { document.removeEventListener("pointerdown", down, true); document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); document.removeEventListener("pointercancel", cancelDrag); document.removeEventListener("keydown", key, true); window.removeEventListener("blur", cancelDrag); drag.current = null; };
   }, [scope]);
   function startDrag(event: ReactPointerEvent<HTMLElement>, kind: Drag["kind"], id: string) {
-    if (event.pointerType !== "mouse" || event.button !== 0 || !event.isPrimary || !chat.canWrite || !sidebar.ready || sidebar.saving || chat.listView !== "active" || menu || dialog || id === "Pinned") return;
+    if (event.pointerType !== "mouse" || event.button !== 0 || !event.isPrimary || !chat.canWrite || !sidebar.ready || sidebar.saving || chat.listView !== "active" || menu || viewMenu || groupMenu || dialog || id === "Pinned" || id === UNGROUPED) return;
     if ((event.target as Element).closest("[data-no-drag]")) return;
     if (kind === "session" && entries.get(id)?.pinned) return;
     drag.current = { kind, id, pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false, drop: null, handle: event.currentTarget };
@@ -109,10 +122,12 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
     </div>{!!children.length && !closed && <ul className="session-tree-children">{children.map(child => row(child, depth + 1))}</ul>}</li>;
   }
   const views = { active: "会话视图 · 活跃", archived: "已归档", trash: "回收站" };
-  const visible = layout.sessions.filter(entry => byId.has(entry.session_id));
   const childrenByParent = new Map<string, SidebarEntry[]>();
   for (const entry of visible) if (!entry.pinned && entry.parent_id) { const children = childrenByParent.get(entry.parent_id) ?? []; children.push(entry); childrenByParent.set(entry.parent_id, children); }
-  const groups = chat.listView === "active" ? [{ id: "Pinned", title: "Pinned" }, ...layout.groups] : [{ id: "lifecycle", title: views[chat.listView] }];
+  const ungrouped = visible.some(entry => !entry.pinned && entry.group_id === null);
+  const groups = chat.listView === "active"
+    ? [{ id: "Pinned", title: "Pinned" }, ...layout.groups, ...(ungrouped ? [{ id: UNGROUPED, title: "未分组" }] : [])]
+    : [{ id: "lifecycle", title: views[chat.listView] }];
   const menuSession = menu ? byId.get(menu.id) : null;
   const manageable = !!menuSession && chat.canWrite && !chat.busy && menuSession.owner_id === chat.actor?.principal_id;
   const lifecycleAllowed = manageable && menuSession?.status === "closed";
@@ -122,17 +137,25 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
     {(notice || sidebar.message) && <div className="session-sidebar-notice" role="status">{notice || sidebar.message}{sidebar.message && <button onClick={sidebar.reload}>重新读取</button>}</div>}
     <nav ref={tree} className={`chat-session-list session-tree${dragUI?.active ? " is-sorting" : ""}`} aria-label="已存对话" onLostPointerCapture={event => { if (drag.current?.pointerId === event.pointerId) cancelDrag(); }} onScroll={event => { scroll.current = event.currentTarget.scrollTop; if (drag.current?.active) { drag.current.drop = null; setDragUI({ ...drag.current }); } }} onDragStart={event => event.preventDefault()} onClickCapture={event => { if (suppress.current) { event.preventDefault(); event.stopPropagation(); } }}>
       {groups.map(item => {
-        const list = visible.filter(entry => chat.listView !== "active" || (item.id === "Pinned" ? entry.pinned : !entry.pinned && entry.group_id === item.id));
-        if (!list.length && item.id === "Pinned") return null;
+        const list = visible.filter(entry => chat.listView !== "active" || (item.id === "Pinned" ? entry.pinned : item.id === UNGROUPED ? !entry.pinned && entry.group_id === null : !entry.pinned && entry.group_id === item.id));
+        if (!list.length && (item.id === "Pinned" || item.id === UNGROUPED)) return null;
         const closed = collapsed.has(item.id), memberIds = new Set(list.map(entry => entry.session_id)), roots = list.filter(entry => entry.pinned || !memberIds.has(entry.parent_id ?? ""));
+        const projectGroup = isProjectGroup(item.id) && chat.listView === "active";
         return <section className={`session-tree-group${sortClass("group", item.id)}`} key={item.id}>
-          <div className={`session-tree-heading${item.id === "Pinned" ? " is-pinned" : " is-project"}`} data-group-handle={item.id}><button type="button" aria-expanded={!closed} onPointerDown={event => startDrag(event, "group", item.id)} onClick={() => setCollapsed(old => { const next = new Set(old); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })}><span className="group-title">{item.title}</span><span data-no-drag>{closed ? <ChevronRight/> : <ChevronDown/>}</span></button>{item.id !== "Pinned" && chat.listView === "active" && onCreateInGroup && <Button variant="ghost" className="session-group-new" aria-label={`在 ${item.title} 新建会话`} disabled={!chat.canWrite} onClick={() => onCreateInGroup(item.id)}><Plus aria-hidden="true"/></Button>}</div>
+          <div className={`session-tree-heading${item.id === "Pinned" ? " is-pinned" : " is-project"}`} {...(projectGroup ? { "data-group-handle": item.id } : {})}>
+            <button type="button" aria-expanded={!closed} {...(projectGroup ? { onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => startDrag(event, "group", item.id) } : {})} onClick={() => setCollapsed(old => { const next = new Set(old); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })}><span className="group-title">{item.title}</span><span data-no-drag>{closed ? <ChevronRight/> : <ChevronDown/>}</span></button>
+            {projectGroup && onCreateInGroup && <Button variant="ghost" className="session-group-new" aria-label={`在 ${item.title} 新建会话`} disabled={!chat.canWrite} onClick={() => onCreateInGroup(item.id)}><Plus aria-hidden="true"/></Button>}
+            {projectGroup && <Button variant="ghost" className="session-group-new" aria-label={`${item.title} 的分组操作`} aria-haspopup="menu" aria-expanded={groupMenu?.id === item.id} disabled={!chat.canWrite} onClick={event => setGroupMenu({ id: item.id, anchor: event.currentTarget })}><Ellipsis aria-hidden="true"/></Button>}
+          </div>
           {!closed && <ul className="session-tree-list">{roots.map(entry => row(entry, 0))}</ul>}
         </section>;
       })}
       {!chat.list.length && <p className="chat-list-empty">{chat.ready ? chat.listView === "trash" ? "回收站为空" : chat.listView === "archived" ? "暂无已归档对话" : "还没有会话" : "连接后显示对话"}</p>}
     </nav>
-    <SidebarMenu open={!!viewMenu} anchor={viewMenu} onClose={closeMenu} label="会话列表范围">{(["active", "archived", "trash"] as const).map(view => <button key={view} role="menuitem" className="menu-item" onClick={() => { closeMenu(); chat.setSessionListView(view); }}>{view === "active" ? "所有会话" : views[view]}</button>)}<hr className="menu-separator"/><button role="menuitem" className="menu-item" disabled={!canArrange} onClick={() => openDialog("group", "")}>新建分组</button></SidebarMenu>
+    <SidebarMenu open={!!viewMenu} anchor={viewMenu} onClose={closeMenu} label="会话列表范围">{(["active", "archived", "trash"] as const).map(view => <button key={view} role="menuitem" className="menu-item" onClick={() => { closeMenu(); chat.setSessionListView(view); }}>{view === "active" ? "所有会话" : views[view]}</button>)}<hr className="menu-separator"/><button role="menuitem" className="menu-item" disabled={!canArrange} onClick={() => openDialog("group", "")}>新建项目分组</button></SidebarMenu>
+    <SidebarMenu open={!!groupMenu} anchor={groupMenu?.anchor ?? null} onClose={closeMenu} label="分组操作">
+      <button role="menuitem" className="menu-item" disabled={!canArrange} onClick={() => openDialog("group-rename", groupMenu!.id)}>重命名分组</button>
+    </SidebarMenu>
     <SidebarMenu open={!!menuSession} anchor={menu?.anchor ?? null} onClose={closeMenu} label="会话操作">
       <button role="menuitem" className="menu-item" onClick={() => { if (menu) select(menu.id); closeMenu(); }}>在主会话打开</button>
       <button role="menuitem" className="menu-item" onClick={() => { if (menuSession && chat.actor) window.dispatchEvent(new CustomEvent("krim:open-aux", { detail: { principal: chat.actor.principal_id, generation: chat.actor.generation, workspace: chat.workspace, sessionId: menuSession.id } })); closeMenu(); }}>在辅助会话打开</button>
@@ -140,7 +163,7 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
       <button role="menuitem" className="menu-item" onClick={coming}>标记为未读</button>
       {manageable && menuSession?.status === "open" && <button role="menuitem" className="menu-item" onClick={() => openDialog("rename", menu!.id)} aria-label={menu?.id === chat.id ? "重命名当前对话" : "重命名会话"}>重命名</button>}
       <button role="menuitem" className="menu-item" onClick={coming}><GitFork/>Fork</button>
-      <button role="menuitem" className="menu-item" disabled={!canArrange} onClick={() => openDialog("move", menu!.id)}><FolderInput/>移动到分组</button>
+      <button role="menuitem" className="menu-item" disabled={!canArrange} onClick={() => openDialog("move", menu!.id)}><FolderInput/>移动到项目</button>
       <hr className="menu-separator"/>
       {lifecycleAllowed && chat.listView === "active" && <button role="menuitem" className="menu-item" aria-label="归档此对话" onClick={() => openDialog("archive", menu!.id)}><Archive/>归档</button>}
       {lifecycleAllowed && chat.listView === "archived" && <button role="menuitem" className="menu-item" aria-label="取消归档" onClick={() => openDialog("unarchive", menu!.id)}><RotateCcw/>取消归档</button>}
@@ -149,24 +172,56 @@ export function SessionList({ chat, apiKey = "", beforeSelect, onCreateInGroup }
       {manageable && menuSession?.status === "open" && menuSession.id === chat.id && <button role="menuitem" className="menu-item" disabled={chat.controlling} onClick={() => { closeMenu(); void chat.control(null, "close"); }}>关闭会话</button>}
       {manageable && menuSession?.status === "open" && <button role="menuitem" className="menu-item" onClick={() => { closeMenu(); setNotice("关闭会话后可归档或移入回收站"); }}>归档与删除</button>}
     </SidebarMenu>
-    <Dialog open={!!dialog} onOpenChange={open => { if (!open && !submitted) setDialog(null); }}><DialogContent className={`session-sidebar-dialog${dialog?.kind === "rename" ? " session-rename-dialog" : ""}`} aria-describedby={undefined}><DialogHeader><DialogTitle>{dialog?.kind === "group" ? "新建分组" : dialog?.kind === "move" ? "移动到分组" : dialog?.kind === "rename" ? "重命名会话" : dialog?.kind === "trash" ? "移入回收站" : dialog?.kind === "restore" ? "恢复会话" : dialog?.kind === "unarchive" ? "取消归档" : "归档会话"}</DialogTitle></DialogHeader>
+    <Dialog open={!!dialog} onOpenChange={open => { if (!open && !submitted) setDialog(null); }}><DialogContent className={`session-sidebar-dialog${dialog?.kind === "rename" ? " session-rename-dialog" : ""}`} aria-describedby={undefined}><DialogHeader><DialogTitle>{dialog?.kind === "group" ? "新建项目分组" : dialog?.kind === "group-rename" ? "重命名分组" : dialog?.kind === "move" ? "移动到项目" : dialog?.kind === "rename" ? "重命名会话" : dialog?.kind === "trash" ? "移入回收站" : dialog?.kind === "restore" ? "恢复会话" : dialog?.kind === "unarchive" ? "取消归档" : "归档会话"}</DialogTitle></DialogHeader>
       <form onSubmit={event => { event.preventDefault(); if (!dialog) return;
         if (dialog.kind === "rename") { if (!text.trim() || pendingRename || !edited) return; if (text.trim() === edited.title) { setDialog(null); return; } setSubmitted(text.trim()); void chat.rename(text.trim(), dialog.id); }
-        else if (dialog.kind === "group") { if (!text.trim()) return; void save({ ...layout, groups: [...layout.groups, { id: crypto.randomUUID(), title: text.trim() }] }).then(ok => { if (ok) setDialog(null); }); }
+        else if (dialog.kind === "group") {
+          if (!text.trim() || !chat.canWrite || projectBusy) return;
+          const captured = scope, principalId = chat.actor?.principal_id, workspaceId = chat.workspace;
+          setProjectBusy(true);
+          const body = projectCreate.current ?? { request_key: crypto.randomUUID(), workspace_id: chat.workspace, title: text.trim() };
+          projectCreate.current = body;
+          void request("/v2/me/sandbox/projects", apiKey, body, undefined, "POST").then(value => {
+            if (liveScope.current !== captured) return;
+            const created = parseProject(value);
+            if (created.workspace_id !== chat.workspace) throw new Error("项目身份不匹配");
+            projectCreate.current = null;
+            setNotice("");
+            setDialog(null);
+            // 新项目分组由服务端在下次 GET 补齐；广播侧栏变更让布局重读，而不是本地插入。
+            window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: principalId, workspace: workspaceId } }));
+          }).catch((error: unknown) => {
+            if (liveScope.current !== captured) return;
+            setNotice(error instanceof TypeError ? "创建结果未知；已保留原请求，可重试同一请求" : devReason(error));
+          }).finally(() => { if (liveScope.current === captured) setProjectBusy(false); });
+        }
+        else if (dialog.kind === "group-rename") { if (!text.trim()) return; void save({ ...layout, groups: layout.groups.map(item => item.id === dialog.id ? { ...item, title: text.trim() } : item) }).then(ok => { if (ok) { setNotice(""); setDialog(null); } }); }
         else if (dialog.kind === "move") {
-          const children = new Map<string, string[]>(); for (const entry of layout.sessions) if (entry.parent_id) children.set(entry.parent_id, [...(children.get(entry.parent_id) ?? []), entry.session_id]);
-          const moved = new Set<string>(), queue = [dialog.id]; for (let i = 0; i < queue.length; i++) { const id = queue[i]!; if (moved.has(id)) continue; moved.add(id); queue.push(...(children.get(id) ?? [])); }
-          if (entries.get(dialog.id)?.group_id === group) { setDialog(null); return; }
-          const retained = layout.sessions.filter(entry => !moved.has(entry.session_id)), transferred = layout.sessions.filter(entry => moved.has(entry.session_id)).map(entry => ({ ...entry, group_id: group, parent_id: entry.session_id === dialog.id ? null : entry.parent_id }));
-          void save({ ...layout, sessions: [...retained, ...transferred] }).then(ok => { if (ok) setDialog(null); });
-        } else { void chat.lifecycle(dialog.kind, dialog.id); setDialog(null); }
+          // 后端绑定接口不接受 null；历史无绑定会话必须先选择一个项目，占位项不可提交。
+          if (moving || group === UNGROUPED) return;
+          const destination = group, captured = scope;
+          const principalId = chat.actor?.principal_id, workspaceId = chat.workspace;
+          if ((entries.get(dialog.id)?.group_id ?? null) === destination) { setDialog(null); return; }
+          setMoving(true);
+          void rebindSessionProject(apiKey, dialog.id, chat.workspace, destination).then(() => {
+            if (liveScope.current !== captured) return;
+            setNotice("");
+            setDialog(null);
+            // 归属已由绑定接口变更、布局由服务端同步推进；广播侧栏变更让布局与当前会话的开发栏绑定一起重读。
+            window.dispatchEvent(new CustomEvent("krim:sidebar-changed", { detail: { principal: principalId, workspace: workspaceId } }));
+          }).catch((error: unknown) => {
+            if (liveScope.current !== captured) return;
+            setNotice(error instanceof TypeError ? "移动结果未知；请稍后重新读取会话列表确认" : devReason(error));
+          }).finally(() => { if (liveScope.current === captured) setMoving(false); });
+        }
+        else { void chat.lifecycle(dialog.kind, dialog.id); setDialog(null); }
       }}>
-        {(dialog?.kind === "rename" || dialog?.kind === "group") ? <><Label htmlFor={dialog.kind === "rename" ? "rename-session-title" : "sidebar-title"}>名称</Label><Input id={dialog.kind === "rename" ? "rename-session-title" : "sidebar-title"} value={text} maxLength={dialog.kind === "group" ? 256 : 128} required disabled={!!submitted || !!pendingRename} onChange={event => setText(event.target.value)}/></> : dialog?.kind === "move" ? <><Label htmlFor="sidebar-group">分组</Label><select id="sidebar-group" value={group} onChange={event => setGroup(event.target.value)}>{layout.groups.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></> : <p>{dialog?.kind === "trash" ? "移入回收站后可恢复。" : "确认操作此会话？"}<strong>{edited?.title}</strong></p>}
+        {(dialog?.kind === "rename" || dialog?.kind === "group" || dialog?.kind === "group-rename") ? <><Label htmlFor={dialog.kind === "rename" ? "rename-session-title" : dialog.kind === "group-rename" ? "sidebar-group-title" : "sidebar-title"}>名称</Label><Input id={dialog.kind === "rename" ? "rename-session-title" : dialog.kind === "group-rename" ? "sidebar-group-title" : "sidebar-title"} value={text} maxLength={dialog.kind === "group-rename" ? 256 : 128} required disabled={!!submitted || !!pendingRename || dialog.kind === "group" && projectBusy} onChange={event => setText(event.target.value)}/></> : dialog?.kind === "move" ? <><Label htmlFor="sidebar-group">项目</Label><select id="sidebar-group" value={group} onChange={event => setGroup(event.target.value)}>{layout.groups.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}{group === UNGROUPED && <option value={UNGROUPED} disabled>未分组（历史无绑定）</option>}</select></> : <p>{dialog?.kind === "trash" ? "移入回收站后可恢复。" : "确认操作此会话？"}<strong>{edited?.title}</strong></p>}
         {dialog?.kind === "rename" && chat.notice && <p role="alert">{chat.notice}</p>}
         {submitted && <p role="status">{pendingRename ? "操作结果尚未确认，请查找原操作。" : "等待名称同步。"}</p>}
         {submitted && !pendingRename && <Button type="button" variant="outline" onClick={chat.refresh}>重新读取名称</Button>}
         {pendingRename && <Button type="button" variant="outline" onClick={() => void chat.recoverControl(pendingRename)}>查找操作结果</Button>}
-        <div className="dialog-actions"><Button type="button" variant="outline" disabled={!!submitted} onClick={() => setDialog(null)}>取消</Button><Button type="submit" disabled={!!submitted || !!pendingRename || sidebar.saving}>{dialog?.kind === "rename" || dialog?.kind === "group" || dialog?.kind === "move" ? "保存" : "确认"}</Button></div>
+        <div className="dialog-actions"><Button type="button" variant="outline" disabled={!!submitted} onClick={() => setDialog(null)}>取消</Button><Button type="submit" disabled={!!submitted || !!pendingRename || sidebar.saving || moving || dialog?.kind === "group" && projectBusy}>{dialog?.kind === "rename" || dialog?.kind === "group" || dialog?.kind === "group-rename" || dialog?.kind === "move" ? "保存" : "确认"}</Button></div>
       </form></DialogContent></Dialog>
   </section>;
 }
