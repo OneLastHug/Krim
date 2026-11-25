@@ -14,7 +14,7 @@ from krim_agent.providers.openai_compatible import (
     ProviderError,
 )
 from krim_agent.providers.types import ModelToolCall
-from tests.support.builtins import builtin_registry
+from tests.support.builtins import builtin_registry, demo_policy
 
 
 def tool_events(arguments='{"left":2,"right":3}'):
@@ -145,9 +145,10 @@ async def test_responses_sdk_tool_result_round_trip_is_stateless(tmp_path):
             async with await open_application(
                 tmp_path / "responses.sqlite",
                 provider=provider,
+                registry=builtin_registry(),
+                policy=demo_policy,
                 settings=Settings(
                     provider="http",
-                    http_mode="agent",
                     max_steps=2,
                     max_tool_calls=1,
                     max_tools_per_step=1,

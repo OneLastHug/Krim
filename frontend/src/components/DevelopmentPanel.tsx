@@ -13,7 +13,7 @@ import { fetchDirectory, fetchFileBytes, fetchProjectsPage, useDevelopment, type
 import type { SessionState } from "../hooks/use-session.ts";
 import { useSessionCompaction } from "../hooks/use-session-compaction";
 import { request } from "../api.ts";
-import { parsePreviewBootstrap, registeredPreviews } from "../lib/development-previews";
+import { parsePreviewBootstrap, PREVIEW_FRAME_SANDBOX, previewTargetName, registeredPreviews } from "../lib/development-previews";
 import { displayToolName } from "../lib/tool-names";
 import { modeLabels } from "../lib/execution-policy";
 import { contextCount } from "./ContextSummary";
@@ -467,33 +467,85 @@ function BrowserView({ chat, apiKey, projectId, environmentState, onOpenEnvironm
   chat: SessionState; apiKey: string; projectId: string | null; environmentState: EnvironmentState | null; onOpenEnvironment: () => void;
 }) {
   const previews = registeredPreviews(chat, projectId), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [frame, setFrame] = useState<{ name: string; action: string; ticket: string } | null>(null);
+  const [loadingFrame, setLoadingFrame] = useState<string | null>(null);
   const alive = useRef(true);
+  const submitted = useRef<string | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  async function openPreview(id: string) {
+  // 已提交过的帧名不重复提交；StrictMode 双跑 effect 也不会重复消耗一次性票据。
+  // 票据只在命名帧挂载后随 POST 正文提交，目标名每次打开重新生成，旧票据进不了新帧。
+  useEffect(() => {
+    if (!frame || !frame.ticket || submitted.current === frame.name) return;
+    submitted.current = frame.name;
+    const form = document.createElement("form"), ticket = document.createElement("input");
+    form.method = "POST"; form.action = frame.action; form.target = frame.name; form.hidden = true;
+    ticket.type = "hidden"; ticket.name = "ticket"; ticket.value = frame.ticket; form.append(ticket);
+    document.body.append(form);
+    try {
+      form.submit();
+      // 提交完成即把票据从 state 擦掉，仅保留帧名与地址用于继续使用该帧。
+      setFrame(current => current && current.name === frame.name ? { name: current.name, action: current.action, ticket: "" } : current);
+    } catch { setFrame(null); setLoadingFrame(null); setError("预览打开未完成，请检查环境、授权或预览状态"); }
+    finally { ticket.value = ""; form.remove(); }
+  }, [frame]);
+  useEffect(() => {
+    if (!loadingFrame) return;
+    const timer = window.setTimeout(() => {
+      setFrame(current => current?.name === loadingFrame ? null : current);
+      setLoadingFrame(null);
+      setError("预览加载超时，请重新打开预览；仍无法加载时请检查项目服务和网络连接。");
+    }, 30_000);
+    return () => window.clearTimeout(timer);
+  }, [loadingFrame]);
+  function frameLoaded(element: HTMLIFrameElement) {
+    // 初始空文档也会发 load；只有提交后的文档导航才能结束等待。
+    if (!frame || submitted.current !== frame.name) return;
+    try {
+      const location = element.contentWindow?.location.href;
+      if (!location || location === "about:blank") return;
+    } catch {
+      // 跨 origin 导航后无法读取 location，这是预览隔离的正常结果。
+    }
+    setLoadingFrame(current => current === frame.name ? null : current);
+  }
+  async function openPreview(id: string, mode: "auto" | "window") {
     if (busy || !chat.ready) return;
-    const name = "krim-preview-" + crypto.randomUUID(), tab = window.open("about:blank", name);
-    if (!tab) { setError("请允许打开项目预览窗口"); return; }
-    tab.opener = null; setBusy(true); setError("");
+    // 在任何 await 之前同步预开候选窗口，保住 user activation，await 后的 fallback 不被弹窗拦截；
+    // 服务端授权嵌入时立即关闭候选窗口，改由命名 iframe 接收 POST。
+    const name = previewTargetName(), windowName = name + "-window", tab = window.open("about:blank", windowName);
+    if (!tab && mode === "window") { setError("请允许打开项目预览窗口"); return; }
+    if (tab) tab.opener = null;
+    setBusy(true); setError("");
     try {
       const bootstrap = parsePreviewBootstrap(await request(`/api/development/previews/${encodeURIComponent(id)}/open`, apiKey, {}));
-      if (!alive.current) { tab.close(); return; }
-      // A one-use ticket travels only in the POST body to the authenticated API's
-      // validated HTTPS bootstrap action, never in a URL or persisted browser state.
-      const form = document.createElement("form"), ticket = document.createElement("input");
-      form.method = "POST"; form.action = bootstrap.action; form.target = name; form.hidden = true;
-      ticket.type = "hidden"; ticket.name = "ticket"; ticket.value = bootstrap.ticket; form.append(ticket);
-      document.body.append(form); try { form.submit(); } finally { ticket.value = ""; form.remove(); }
-    } catch { tab.close(); if (alive.current) setError("预览打开未完成，请检查环境、授权或预览状态"); }
+      if (!alive.current) { tab?.close(); return; }
+      if (mode === "auto" && bootstrap.allow_embedding) { tab?.close(); setLoadingFrame(name); setFrame({ name, action: bootstrap.action, ticket: bootstrap.ticket }); }
+      else if (tab) submitBootstrap(bootstrap, windowName);
+      else setError("请允许打开项目预览窗口");
+    } catch { tab?.close(); if (alive.current) setError("预览打开未完成，请检查环境、授权或预览状态"); }
     finally { if (alive.current) setBusy(false); }
+  }
+  // A one-use ticket travels only in the POST body to the authenticated API's
+  // validated HTTPS bootstrap action, never in a URL or persisted browser state.
+  function submitBootstrap(bootstrap: { action: string; ticket: string }, target: string) {
+    const form = document.createElement("form"), ticket = document.createElement("input");
+    form.method = "POST"; form.action = bootstrap.action; form.target = target; form.hidden = true;
+    ticket.type = "hidden"; ticket.name = "ticket"; ticket.value = bootstrap.ticket; form.append(ticket);
+    document.body.append(form); try { form.submit(); } finally { ticket.value = ""; form.remove(); }
   }
   const reason = !projectId ? "绑定项目后可打开开发服务的页面预览。"
     : environmentState !== "ready" ? "项目环境尚未就绪。"
-      : "页面预览凭票据打开到独立窗口；运行记录中还没有已注册的预览。";
-  return <div className="g-work-empty">
+      : "页面预览凭票据打开；运行记录中还没有已注册的预览。";
+  return <div className={frame ? "g-browser-preview" : "g-work-empty"}>
     <strong>浏览器预览</strong>
-    {!previews.length ? <span>{reason}</span> : previews.map(preview => <div className="g-row" key={preview.preview_id}><span>端口 {preview.port} · {preview.state === "ready" ? "已就绪" : preview.state === "pending" ? "准备中" : "已关闭或状态未知"}</span><Button size="sm" variant="outline" disabled={busy || !["ready", "pending"].includes(preview.state)} onClick={() => void openPreview(preview.preview_id)}>在新窗口打开</Button></div>)}
+    {!previews.length ? <span>{reason}</span> : previews.map(preview => <div className="g-row" key={preview.preview_id}><span>端口 {preview.port} · {preview.state === "ready" ? "已就绪" : preview.state === "pending" ? "准备中" : "已关闭或状态未知"}</span><span className="g-row-actions">
+      <Button size="sm" variant="outline" disabled={busy || !["ready", "pending"].includes(preview.state)} onClick={() => void openPreview(preview.preview_id, "auto")}>打开预览</Button>
+      {frame && <Button size="sm" variant="ghost" disabled={busy || !["ready", "pending"].includes(preview.state)} onClick={() => void openPreview(preview.preview_id, "window")}>新窗口</Button>}
+    </span></div>)}
     {error && <p role="status">{error}</p>}
+    {loadingFrame && <p role="status">正在加载预览…</p>}
     <div className="g-inline-actions"><Button variant="outline" size="sm" onClick={onOpenEnvironment}>项目环境</Button></div>
+    {frame && <iframe key={frame.name} name={frame.name} title="浏览器预览" sandbox={PREVIEW_FRAME_SANDBOX} onLoad={event => frameLoaded(event.currentTarget)} />}
   </div>;
 }
 

@@ -16,7 +16,7 @@ from weakref import WeakValueDictionary
 
 from ai import events
 from ai import messages as sdk
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from sqlalchemy import func, select
 
 from krim_agent.agent_sdk.model import host_messages
@@ -332,6 +332,110 @@ class SubagentService:
             ) from None
         return selected, profile, entry
 
+    # 工具名与风险映射同源tools/project_names.py：shell是command执行工具，
+    # write/edit是改文件工具。目录按family descriptor实际工具名与profile.tools
+    # 交集判断，不按workspace模式猜测能力。
+    _SHELL_TOOLS = frozenset({"shell"})
+    _EDIT_TOOLS = frozenset({"write", "edit"})
+
+    def _profile_catalog(self, family: str) -> list[dict[str, Any]]:
+        """当前family实际注册的worker能力目录；只发布配置与描述符事实。
+
+        can_run_shell/can_edit_workspace按准入实现（composition.child_allows：
+        shared_read_only仅放行只读工具）叠加descriptor工具名与profile.tools
+        交集计算；process只执行宿主预配置的一次性命令，不等于任意shell，
+        以can_execute_task单独表达。不发布endpoint、密钥、argv、宿主路径或
+        其他family的profile；tools清单不发布（避免把shared_read_only下准入
+        会拒绝的工具名误传为可用），布尔值已计入allowlist收窄。配置后续
+        变更以重新注册结果为准。
+        """
+        entries: list[dict[str, Any]] = []
+        for (name, registered), registration in sorted(self._registrations.items()):
+            if registered != family:
+                continue
+            profile = self._profiles[name]
+            descriptor_tools = registration.provider.descriptor.get("tools")
+            names = {
+                str(item.get("name"))
+                for item in descriptor_tools
+                if isinstance(descriptor_tools, list) and isinstance(item, dict)
+            } if descriptor_tools is not None else set()
+            effective = names & set(profile.tools) if profile.tools is not None else names
+            writable = profile.workspace != "shared_read_only"
+            entries.append(
+                {
+                    "name": name,
+                    "provider": profile.provider,
+                    "workspace": profile.workspace,
+                    "can_run_shell": (
+                        profile.provider == "sdk_session"
+                        and writable
+                        and bool(effective & self._SHELL_TOOLS)
+                    ),
+                    "can_edit_workspace": (
+                        profile.workspace == "isolated_write"
+                        and bool(effective & self._EDIT_TOOLS)
+                    ),
+                    "can_execute_task": profile.provider == "process",
+                    "fork": registration.capabilities.fork,
+                    "max_depth": profile.max_depth,
+                }
+            )
+        return entries
+
+    async def _caller_family(self, caller: Caller) -> str:
+        root = await self.store.snapshot(caller.tree["root_run_id"])
+        return str(root.request.target)
+
+    @staticmethod
+    def _restored_profile(task_input: Any) -> SubagentProfileConfiguration | None:
+        """回执profile事实来自任务持久化的profile_snapshot，不读当前配置。
+
+        配置变更不得让旧回执声称新权限；快照缺失或无法按当前模型解析时
+        省略workspace字段，不虚构。
+        """
+        if not isinstance(task_input, dict):
+            return None
+        snapshot_profile = task_input.get("profile_snapshot")
+        if not isinstance(snapshot_profile, dict):
+            return None
+        try:
+            return SubagentProfileConfiguration.model_validate(snapshot_profile)
+        except ValidationError:
+            return None
+
+    @staticmethod
+    def _receipt_notice(profile: SubagentProfileConfiguration) -> dict[str, str]:
+        if profile.workspace != "shared_read_only":
+            return {}
+        return {
+            "notice": (
+                "This worker uses workspace=shared_read_only: it cannot run shell "
+                "commands or tests, and write tool calls are denied. If tests or "
+                "file changes are needed, check the list_agents profiles catalog "
+                "and spawn a helper whose profile entry reports can_run_shell; "
+                "the helper writes only to its isolated workspace copy, never "
+                "the main project."
+            )
+        }
+
+    @staticmethod
+    def _capability_note(profile: SubagentProfileConfiguration, name: str) -> str:
+        """新worker输入前的宿主能力说明；不改变task文本语义，只前置事实。"""
+        if profile.workspace != "shared_read_only":
+            return ""
+        return (
+            "[host capability notice] profile=" + name
+            + " workspace=shared_read_only: shell commands, tests and file writes "
+            "are not permitted here; those tool calls are denied. Do not retry "
+            "denied tools or invent substitutes such as fabricated status tools. "
+            "If this task needs tests or file changes, stop and report back to "
+            "your parent agent so it can pick, from the list_agents profiles "
+            "catalog, an isolated_write profile whose entry reports can_run_shell; "
+            "that helper works only in its isolated workspace copy, never the "
+            "main project."
+        )
+
     async def _depth_limit(self, member: dict[str, Any]) -> int:
         if member["role"] == "root":
             return self.configuration.max_depth
@@ -371,7 +475,8 @@ class SubagentService:
             if receipt is not None:
                 if receipt["task"]["input"].get("request_fingerprint") != intent:
                     raise ServiceError("key_conflict")
-                return {
+                # 回执带持久化的profile选择，不重新解析配置；配置变更不升级旧键。
+                replay: dict[str, Any] = {
                     "accepted": True,
                     "agent_id": receipt["agent_id"],
                     "path": prior["agent"]["path"],
@@ -383,6 +488,12 @@ class SubagentService:
                     "delivery": "background",
                     "created": False,
                 }
+                replay["profile"] = str(prior["agent"]["profile"])
+                saved = self._restored_profile(receipt["task"]["input"])
+                if saved is not None:
+                    replay["workspace_mode"] = saved.workspace
+                    replay.update(self._receipt_notice(saved))
+                return replay
         root = await self.store.snapshot(caller.tree["root_run_id"])
         key, profile, registration = self._profile(request.profile, family=root.request.target)
         try:
@@ -408,10 +519,11 @@ class SubagentService:
         path = caller.member["path"] + "/" + name
         binding = registration.provider.descriptor
         system = str(binding.get("system_prompt", ""))
+        notice = self._capability_note(profile, key)
         if request.context == "fork":
             snapshot = fork_context(
                 await self._fork_source(invocation.run_id),
-                request.task,
+                "\n\n".join(part for part in (notice, request.task) if part),
                 source_run_id=invocation.run_id,
                 system_prompt=system,
                 prefix_end=request.prefix_end,
@@ -422,7 +534,7 @@ class SubagentService:
             snapshot = fresh_context(
                 request.task,
                 system_prompt=system,
-                background=request.background,
+                background="\n\n".join(part for part in (request.background, notice) if part),
                 max_bytes=profile.context_max_bytes,
             )
         history = [message.model_dump(mode="json") for message in snapshot.messages[1:-1]]
@@ -537,6 +649,9 @@ class SubagentService:
                 "seq": receipt["seq"],
                 "scheduled": task["status"] in ACTIVE_TASK_STATUS,
                 "delivery": "background",
+                "profile": key,
+                "workspace_mode": profile.workspace,
+                **self._receipt_notice(profile),
             }
         except BaseException:
             if not accepted and budget_reserved and self.store.healthy:
@@ -672,20 +787,26 @@ class SubagentService:
                 parsed.model_dump(mode="json"),
             ):
                 raise ServiceError("facts_corrupt")
+            recovered: dict[str, Any] = {
+                "ok": True,
+                "accepted": True,
+                "agent_id": receipt["agent_id"],
+                "activation_id": receipt["activation_id"],
+                "path": reserved["agent"]["path"],
+                "task_id": receipt["task_id"],
+                "message_id": receipt["message_id"],
+                "seq": receipt["seq"],
+                "delivery": "background",
+                "created": False,
+            }
+            recovered["profile"] = str(reserved["agent"]["profile"])
+            saved = self._restored_profile(receipt["task"]["input"])
+            if saved is not None:
+                recovered["workspace_mode"] = saved.workspace
+                recovered.update(self._receipt_notice(saved))
             return cast(
                 JsonValue,
-                {
-                    "ok": True,
-                    "accepted": True,
-                    "agent_id": receipt["agent_id"],
-                    "activation_id": receipt["activation_id"],
-                    "path": reserved["agent"]["path"],
-                    "task_id": receipt["task_id"],
-                    "message_id": receipt["message_id"],
-                    "seq": receipt["seq"],
-                    "delivery": "background",
-                    "created": False,
-                },
+                recovered,
             )
         parsed_message = SendAgentMessage.model_validate(arguments)
         target = await self._target(Caller(member, tree, scope), parsed_message.target)
@@ -717,9 +838,13 @@ class SubagentService:
 
     async def list_agents(self, invocation: Invocation, request: ListAgents) -> dict[str, Any]:
         caller = await self._caller(invocation)
+        family = await self._caller_family(caller)
+        default = self.configuration.default_profile or "default"
         return {
             "tree_id": caller.tree["tree_id"],
             "caller_id": caller.member["agent_id"],
+            "profiles": self._profile_catalog(family),
+            "default_profile": default if (default, family) in self._registrations else None,
             "agents": await self.repository.list_agents(
                 caller.tree["tree_id"],
                 after_path=request.after_path,
@@ -776,8 +901,43 @@ class SubagentService:
                 action="Host residency is full; release an idle worker first.",
             )
 
-    async def _restore(self, member: dict[str, Any]) -> dict[str, Any]:
-        registration = self._registration(member, cold=True)
+    async def _followup_registration(self, member: dict[str, Any]) -> ProviderRegistration:
+        """Only a new task may adopt an implementation-compatible SDK route."""
+        try:
+            return self._registration(member, cold=True)
+        except SubagentError as error:
+            if error.code != "subagent_not_recoverable":
+                raise
+            rejected = error
+        from krim_agent.contracts import TERMINAL
+        from krim_agent.storage.sessions import implementation_only_upgrade
+
+        from .providers.sdk import SdkSessionProvider
+
+        task = member.get("task")
+        profile = self._profiles.get(member["profile"])
+        if (profile is None or fingerprint(profile.model_dump(mode="json"))
+                != member["profile_version"] or not task or not task.get("run_id")):
+            raise rejected
+        try:
+            current = self.providers.resolve(member["provider"])
+        except ProviderUnavailable:
+            raise rejected from None
+        if not isinstance(current.provider, SdkSessionProvider):
+            raise rejected
+        snapshot = await self.store.snapshot(task["run_id"])
+        prior = {key: value for key, value in snapshot.target.items() if key != "context"}
+        if (snapshot.run.status not in TERMINAL
+                or fingerprint(prior) != member["provider_version"]
+                or not implementation_only_upgrade(prior, current.provider.descriptor)):
+            raise rejected
+        return current
+
+    async def _restore(
+        self, member: dict[str, Any], registration: ProviderRegistration | None = None,
+    ) -> dict[str, Any]:
+        registration = registration or self._registration(member, cold=True)
+        self.providers.assert_current(registration)
         if not registration.capabilities.continuable:
             raise SubagentError("subagent_not_continuable", accepted=False)
         latest = member.get("activation")
@@ -923,6 +1083,59 @@ class SubagentService:
                 "started": bool(receipt.get("started")),
                 "delivery": receipt.get("delivery", "queued")}
 
+    async def _inherited_workspace(
+        self,
+        agent: dict[str, Any],
+        profile: SubagentProfileConfiguration,
+        tree: dict[str, Any],
+    ) -> tuple[Any, Any] | None:
+        """续聊新任务继承该 agent 已持久化的隔离 workspace 事实。
+
+        spawn 为 process/isolated_write profile 写入的 assignment/baseline 是
+        该 agent 的域事实：续聊任务必须继续在同一个受控目录、针对同一基线
+        工作，否则DevelopmentSDKLoop._isolated_assignment 读不到 workspace
+        会把 shell.cwd 退回共享根目录。事实只来自该 agent 已持久化的任务输入
+        （发送请求没有对应字段，无法伪造），同 agent、同 project、基线与
+        assignment 指纹一致才继承；事实缺失时拒绝续派而不是静默降级。
+        """
+        from .workspace import WorkspaceAssignment, WorkspaceBaseline, validate_assignment
+
+        if not (profile.provider == "process" or profile.workspace == "isolated_write"):
+            return None
+        tasks = await self.repository.tasks(agent["agent_id"], limit=1)
+        for task in reversed(tasks):
+            raw_workspace = task["input"].get("workspace")
+            raw_baseline = task["input"].get("baseline")
+            if raw_workspace is None and raw_baseline is None:
+                continue
+            if not isinstance(raw_workspace, dict) or not isinstance(raw_baseline, dict):
+                raise ServiceError("facts_corrupt")
+            try:
+                assignment = WorkspaceAssignment.model_validate(raw_workspace)
+                baseline = WorkspaceBaseline.model_validate_json(encoded(raw_baseline))
+                validate_assignment(assignment, expected_mode=profile.workspace)
+            except (ValidationError, ValueError, ServiceError):
+                raise ServiceError("facts_corrupt") from None
+            if (
+                assignment.agent_id != agent["agent_id"]
+                or baseline.mode != assignment.mode
+                or baseline.input_version != assignment.input_version
+                or baseline.project_id != assignment.source_project_id
+                or assignment.workspace_project_id != assignment.source_project_id
+                or assignment.baseline_fingerprint != baseline.fingerprint
+                or assignment.source_project_id != tree["project_id"]
+            ):
+                raise ServiceError("facts_corrupt")
+            return assignment, baseline
+        raise SubagentError(
+            "subagent_capability",
+            accepted=False,
+            action=(
+                "This worker's profile runs in an isolated workspace, but no persisted "
+                "workspace fact exists for this agent; spawn a fresh worker instead."
+            ),
+        )
+
     async def _deliver(
         self,
         caller: Caller,
@@ -949,7 +1162,11 @@ class SubagentService:
             raise SubagentError("input_limit", accepted=False)
         registration = None
         if target["role"] != "root":
-            registration = self._registration(target, cold=not target["resident"])
+            registration = (
+                await self._followup_registration(target)
+                if request.new_task and not target["resident"]
+                else self._registration(target, cold=not target["resident"])
+            )
             if not registration.capabilities.continuable:
                 raise SubagentError("subagent_not_continuable", accepted=False)
         sender_id = caller.member["agent_id"] if actor is None else None
@@ -1013,6 +1230,20 @@ class SubagentService:
                 depth_limit=await self._depth_limit(target),
                 snapshot=snapshot.record(),
             )
+            inherited = await self._inherited_workspace(target, profile, caller.tree)
+            if inherited is not None:
+                assignment, baseline = inherited
+                body["workspace"] = cast(
+                    dict[str, JsonValue], assignment.model_dump(mode="json")
+                )
+                body["baseline"] = cast(
+                    dict[str, JsonValue], baseline.model_dump(mode="json")
+                )
+                if profile.provider == "process":
+                    from .providers.process import build_task_document
+
+                    # process worker 运行前从任务文本解析 workspace 文档。
+                    body["text"] = build_task_document(request.text, assignment)
         budget_key = "send:" + fingerprint({"target": target["agent_id"], "send_key": send_key})
         budget_reserved = False
         if request.new_task:
@@ -1068,7 +1299,7 @@ class SubagentService:
                         raise SubagentError("subagent_task_closed", accepted=False)
                     task_id = current["task_id"]
                 if request.wake == "auto" and not target["resident"] and target["role"] != "root":
-                    target = await self._restore(target)
+                    target = await self._restore(target, registration)
                 receipt = await self.repository.accept_message(
                     SendMessage(
                         tree_id=caller.tree["tree_id"],

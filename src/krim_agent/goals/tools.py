@@ -51,7 +51,26 @@ def bundle(service: GoalService, resolve: SessionScopeResolver) -> ToolBundle:
     async def execute(invocation: Invocation, parsed: BaseModel, context: object) -> JsonValue:
         scope = await scope_for(invocation)
         if invocation.name == "goal_update" and isinstance(parsed, GoalUpdate):
-            result = await service.update_from_tool(scope, parsed)
+            try:
+                result = await service.update_from_tool(scope, parsed)
+            except ServiceError as error:
+                if error.code != "revision_conflict":
+                    raise
+                current = await service.read(
+                    scope.actor, scope.workspace_id, scope.session_id, GoalRead(),
+                    check=scope.check,
+                )
+                scope.check()
+                return {
+                    "ok": False, "code": error.code,
+                    "current_goal": current.model_dump(mode="json"),
+                    "next_action": (
+                        "The goal was not updated. Review current_goal before choosing a valid "
+                        "action and expected_revision; only paused or blocked goals can be "
+                        "replaced with action=set. Do not retry the same update unchanged. "
+                        "Continue the user's task even if no goal update is needed."
+                    ),
+                }
         elif invocation.name == "goal_status" and isinstance(parsed, GoalRead):
             result = await service.read(
                 scope.actor, scope.workspace_id, scope.session_id, parsed, check=scope.check

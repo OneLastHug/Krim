@@ -481,13 +481,13 @@ export function useSession(apiKey: string, active: boolean, fence: { current: nu
     }
   }
   function edit(text: string) { try { saveDraft(localStorage, scope(), text); setDraft(text); } catch (error) { setNotice(chatReason(error)); } }
-  async function create(title: string, target: string, groupId?: string, initialDraft = title): Promise<Session | null | undefined> {
+  async function create(title: string, target: string, groupId?: string, initialDraft = title, projectId?: string): Promise<Session | null | undefined> {
     let marker = "", ownsFlight = false; let current = () => false; let created: Session | null = null;
     const originalSession = id;
     try {
       const targetScope = scope(null); marker = "post:" + JSON.stringify(targetScope); if (flights.current.has(marker)) return;
       flight(marker, true); ownsFlight = true; invalidate(); current = capture(); setVersion(v => v + 1); saveDraft(localStorage, targetScope, initialDraft);
-      const { intent, first } = prepareIntent(localStorage, targetScope, "session", { title, target_key: target }); refreshPending();
+      const { intent, first } = prepareIntent(localStorage, targetScope, "session", projectId ? { title, target_key: target, project_id: projectId } : { title, target_key: target }); refreshPending();
       await performIntent(localStorage, intent, apiKey, first, value => { if (!current()) return false; created = value as Session; setListView("active"); select(intent.workspace_id, value.id); setSession(value as Session); return true; });
       const who = actorRef.current?.value;
       const sameAccount = () => mounted.current && activeRef.current && keyRef.current === apiKey && actorRef.current?.value.principal_id === targetScope.principal_id && actorRef.current?.value.generation === targetScope.generation && selected.current.workspace === targetScope.workspace_id;

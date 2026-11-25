@@ -114,6 +114,71 @@ def frozen_target_key(raw: dict[str, JsonValue]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+# 新用户turn边界允许漂移的实现摘要子键；白名单按名声明，不递归放行所有
+# "digest"命名，避免误放配置/契约指纹。键集合与白名单外字段必须逐字节一致。
+_UPGRADE_DIGEST_FIELDS: dict[str, frozenset[str]] = {
+    "pre": frozenset({"digest"}),
+    "post": frozenset({"digest"}),
+    "policy": frozenset({"digest"}),
+    "provider": frozenset({"digest", "implementation_digest"}),
+    "execution_kernel": frozenset({"digest"}),
+}
+
+
+def _tools_upgrade_allowed(frozen: Any, current: Any) -> bool:
+    """tools逐项核对：原生工具仅implementation_digest可漂移，其余逐键一致。
+
+    带source/binding的外部MCP/HTTP工具整项严格一致；数量、顺序、名称、
+    input/output schema、risk/capability/policy_version任一变化都拒绝。
+    """
+    if not isinstance(frozen, list) or not isinstance(current, list):
+        return False
+    if len(frozen) != len(current):
+        return False
+    for old, new in zip(frozen, current, strict=True):
+        if not isinstance(old, dict) or not isinstance(new, dict) or set(old) != set(new):
+            return False
+        external = "source" in old or "binding" in old
+        for key, value in old.items():
+            if encoded(new[key]) == encoded(value):
+                continue
+            if key == "implementation_digest" and not external:
+                continue
+            return False
+    return True
+
+
+def implementation_only_upgrade(frozen: Any, current: Any) -> bool:
+    """冻结目标→现行目标的差异是否仅为代码实现摘要；外部契约必须逐字节一致。
+
+    provider路由/配置（id/name/behavior_version/config）、工具schema、policy
+    身份id、limits/system prompt、development/sandbox契约、version等任一差异
+    都拒绝升级；新增或缺失键一律拒绝。
+    """
+    if not isinstance(frozen, dict) or not isinstance(current, dict):
+        return False
+    if set(frozen) != set(current):
+        return False
+    for key, value in frozen.items():
+        now = current[key]
+        if encoded(now) == encoded(value):
+            continue
+        if key == "tools" and _tools_upgrade_allowed(value, now):
+            continue
+        allowed = _UPGRADE_DIGEST_FIELDS.get(key)
+        if allowed is None or not isinstance(value, dict) or not isinstance(now, dict):
+            return False
+        if set(value) != set(now):
+            return False
+        if any(
+            encoded(now[sub_key]) != encoded(sub_value)
+            for sub_key, sub_value in value.items()
+            if sub_key not in allowed
+        ):
+            return False
+    return True
+
+
 async def read[T](store: SQLiteStore, operation: Callable[[AsyncConnection], Awaitable[T]]) -> T:
     if store.closed:
         raise ServiceError("closed")
@@ -594,6 +659,63 @@ async def closing(conn: AsyncConnection, session_id: str) -> bool:
     return pending is not None
 
 
+async def _admit_boundary_target_upgrade(
+    store: SQLiteStore,
+    conn: AsyncConnection,
+    session: Any,
+    upgrade_target: dict[str, JsonValue],
+) -> None:
+    """新用户turn边界的实现摘要升级；与turn插入同一事务，栅栏任一命中即冻结不动。
+
+    栅栏：无queued/running turn、无pending审批/输入请求、无queued内部续接
+    意图、无活跃或停靠的会话绑定child run、无pending关闭控制。interaction/
+    goal表按schema≥17、child表按schema≥19参与核对。旧run/turn/审批描述符
+    不触碰，也不放宽旧run恢复核对。
+    """
+    session_id = session["id"]
+    active_turn = await conn.scalar(select(turns.c.id).where(
+        turns.c.session_id == session_id,
+        turns.c.status.in_(("queued", "running")),
+    ).limit(1))
+    if active_turn is not None:
+        return
+    if store.schema_version >= 17:
+        from .goal_models import goal_continuations
+        from .interaction_models import interaction_requests
+
+        pending_input = await conn.scalar(select(interaction_requests.c.id).where(
+            interaction_requests.c.session_id == session_id,
+            interaction_requests.c.status == "pending",
+        ).limit(1))
+        if pending_input is not None:
+            return
+        continuation = await conn.scalar(select(goal_continuations.c.request_key).where(
+            goal_continuations.c.session_id == session_id,
+            goal_continuations.c.status == "queued",
+        ).limit(1))
+        if continuation is not None:
+            return
+    if store.schema_version >= 19:
+        child_run = await conn.scalar(
+            select(subagent_child_runs.c.run_id)
+            .join(runs, subagent_child_runs.c.run_id == runs.c.id)
+            .where(
+                subagent_child_runs.c.owner_session_id == session_id,
+                runs.c.status.in_(("queued", "running", "awaiting")),
+            )
+            .limit(1)
+        )
+        if child_run is not None:
+            return
+    if await closing(conn, session_id):
+        return
+    await conn.execute(update(sessions).where(
+        sessions.c.id == session_id,
+        sessions.c.target_key == session["target_key"],
+        sessions.c.status == "open",
+    ).values(target=upgrade_target))
+
+
 async def submit(
     store: SQLiteStore,
     session_id: str,
@@ -604,6 +726,7 @@ async def submit(
     actor: PrincipalContext | None = None,
     extension_service: ExtensionService | None = None,
     account_mcp_service: AccountMCPService | None = None,
+    upgrade_target: dict[str, JsonValue] | None = None,
 ) -> TurnView:
     require(store)
     if isinstance(body, WorkspaceTurnRequest):
@@ -655,6 +778,14 @@ async def submit(
             account_mcp_service.actor(actor)
         if session["revision"] != body.expected_revision:
             raise ServiceError("revision_conflict")
+        # 幂等重放在上方early-return，永远不会到达升级；目标升级与新turn
+        # 插入同一事务，任何后续校验失败都会整体回滚。冻结行与现行描述符
+        # 一致时不跑栅栏不写库；差异合法性按事务内实时冻结行判定。
+        if upgrade_target is not None:
+            frozen = session["target"]
+            if not (isinstance(frozen, dict) and encoded(frozen) == encoded(upgrade_target)):
+                if implementation_only_upgrade(frozen, upgrade_target):
+                    await _admit_boundary_target_upgrade(store, conn, session, upgrade_target)
         # Aggregate scheduling facts without loading all historical transcripts.
         count, ordinal, queued_count = (
             await conn.execute(

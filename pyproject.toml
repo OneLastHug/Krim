@@ -301,6 +301,7 @@ only-include = [
   "src/krim_agent/tools/__init__.py",
   "src/krim_agent/tools/core.py",
   "src/krim_agent/tools/executor.py",
+  "src/krim_agent/tools/input_errors.py",
   "src/krim_agent/tools/output.py",
   "src/krim_agent/tools/pipeline.py",
   "src/krim_agent/tools/registry.py",

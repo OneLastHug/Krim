@@ -25,7 +25,14 @@ class FileInput(StrictModel):
     @field_validator("path")
     @classmethod
     def project_path(cls, value: str) -> str:
-        _parts(value)
+        try:
+            _parts(value)
+        except ServiceError as error:
+            if error.code != "invalid_input":
+                raise
+            # Pydantic reports a field error to the existing no-dispatch input
+            # recovery path. Protected project paths remain permission errors.
+            raise ValueError("Use a valid project-relative path.") from None
         return value
 
 

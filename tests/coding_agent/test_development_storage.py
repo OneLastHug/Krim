@@ -151,6 +151,141 @@ async def test_request_drift_and_cross_session_run_are_rejected(tmp_path: Path) 
         await store.close()
 
 
+async def prepare_child(path: Path):
+    from krim_agent.subagents.storage import SubagentStore
+    from krim_agent.subagents.types import AcceptSpawn, ReserveAgent, StartTask, TreeScope
+
+    store, repositories, _, request = await prepare(path)
+    context = (await store.snapshot(request.ownership.run_id)).session_context
+    subagents = SubagentStore(store)
+    tree = await subagents.ensure_tree(TreeScope(
+        session_id=request.ownership.session_id, turn_id=context.turn_id,
+        run_id=request.ownership.run_id, workspace_id=context.workspace_id,
+        owner_id=request.ownership.owner_id, project_id=request.environment.project_id,
+        request_key="development-tree",
+    ))
+    lead = await subagents.reserve_agent(ReserveAgent(
+        tree_id=tree["tree_id"], path="lead", role="root", provider="sdk_session",
+        profile="coordinator", provider_version="v1", profile_version="v1",
+        request_key="development-lead",
+    ))
+    worker = await subagents.reserve_agent(ReserveAgent(
+        tree_id=tree["tree_id"], parent_id=lead["agent"]["agent_id"], path="worker",
+        provider="sdk_session", profile="isolated_write", provider_version="v1",
+        profile_version="v1", request_key="development-worker",
+    ))
+    accepted = await subagents.accept_spawn(AcceptSpawn(
+        agent_id=worker["agent"]["agent_id"], activation_id=worker["activation"]["activation_id"],
+        parent_run_id=request.ownership.run_id, input={"text": "check the project"},
+    ))
+    child = await subagents.start_task(StartTask(
+        agent_id=worker["agent"]["agent_id"], activation_id=worker["activation"]["activation_id"],
+        task_id=accepted["task_id"], owner_turn_id=context.turn_id,
+        request=RunRequest(text="check the project", request_key="ac-child.development"),
+        target={"fixture": True, "tools": []},
+    ))
+    await store.set_running(child["run_id"])
+    return store, repositories, request.model_copy(update={
+        "ownership": request.ownership.model_copy(update={"run_id": child["run_id"]}),
+    }), tree
+
+
+@pytest.mark.parametrize("root_completed", [False, True])
+async def test_child_run_without_user_turn_admits_development_operations(
+    tmp_path: Path, root_completed: bool,
+) -> None:
+    from sqlalchemy import select
+
+    from krim_agent.storage.models import turns
+
+    store, repositories, request, tree = await prepare_child(tmp_path / "dev.sqlite")
+    try:
+        if root_completed:
+            await store.append(tree["root_run_id"], "model_end", {
+                "step_index": 0, "text": "Work delegated", "tool_calls": [],
+            })
+            await store.finish(tree["root_run_id"], "completed")
+        assert await store.work_read(lambda conn: conn.scalar(
+            select(turns.c.id).where(turns.c.run_id == request.ownership.run_id))) is None
+        identity = OperationIdentity(
+            operation_id=request.operation_id, call_id="child-bootstrap",
+            environment=request.environment, ownership=request.ownership,
+            request_digest=request.authorization.arguments_digest,
+        )
+        assert (await repositories.operations.admit(identity)).execute
+        await repositories.operations.bind_command(identity, request)
+        assert (await repositories.processes.reserve(request, command_digest(request))).execute
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("mismatch", ["session_id", "owner_id", "workspace_id", "unmapped"])
+async def test_child_development_admission_keeps_identity_fences(tmp_path, mismatch):
+    from sqlalchemy import update
+
+    from krim_agent.storage.models import sessions
+    from krim_agent.storage.subagent_models import subagent_child_runs
+
+    store, repositories, request, _ = await prepare_child(tmp_path / "dev.sqlite")
+    try:
+        if mismatch in {"session_id", "owner_id"}:
+            request = request.model_copy(update={
+                "ownership": request.ownership.model_copy(update={mismatch: "unrelated"}),
+            })
+        elif mismatch == "workspace_id":
+            async with store.engine.begin() as conn:
+                await conn.execute(update(sessions).where(
+                    sessions.c.id == request.ownership.session_id,
+                ).values(workspace_id="unrelated"))
+        else:
+            async with store.engine.begin() as conn:
+                await conn.execute(subagent_child_runs.delete().where(
+                    subagent_child_runs.c.run_id == request.ownership.run_id))
+        with pytest.raises(ServiceError, match="permission_denied"):
+            await repositories.processes.reserve(request, command_digest(request))
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(("fence", "code"), [
+    ("child_stopped", "cancelled"), ("child_closed", "run_closed"),
+    ("root_stopped", "cancelled"), ("tree_closed", "cancelled"),
+    ("session_closed", "session_closed"), ("missing_turn", "permission_denied"),
+])
+async def test_child_development_admission_keeps_lifecycle_fences(tmp_path, fence, code):
+    from sqlalchemy import update
+
+    from krim_agent.storage.models import sessions
+    from krim_agent.storage.subagent_models import subagent_child_runs, subagent_trees
+
+    store, repositories, request, tree = await prepare_child(tmp_path / "dev.sqlite")
+    try:
+        if fence == "child_stopped":
+            await store.request_stop(request.ownership.run_id)
+        elif fence == "child_closed":
+            await store.finish(request.ownership.run_id, "completed")
+        elif fence == "root_stopped":
+            await store.request_stop(tree["root_run_id"])
+        else:
+            async with store.engine.begin() as conn:
+                if fence == "tree_closed":
+                    await conn.execute(update(subagent_trees).where(
+                        subagent_trees.c.id == tree["tree_id"],
+                    ).values(status="closed"))
+                elif fence == "session_closed":
+                    await conn.execute(update(sessions).where(
+                        sessions.c.id == request.ownership.session_id,
+                    ).values(status="closed"))
+                else:
+                    await conn.execute(update(subagent_child_runs).where(
+                        subagent_child_runs.c.run_id == request.ownership.run_id,
+                    ).values(owner_turn_id=None))
+        with pytest.raises(ServiceError, match=code):
+            await repositories.processes.reserve(request, command_digest(request))
+    finally:
+        await store.close()
+
+
 async def test_environment_cas_and_stale_generation(tmp_path: Path) -> None:
     store, repositories, record, _ = await prepare(tmp_path / 'dev.sqlite')
     try:

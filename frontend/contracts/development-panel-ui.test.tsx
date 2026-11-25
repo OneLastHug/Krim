@@ -442,7 +442,7 @@ test("未支持的操作显示敬请期待", async () => {
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain("项目打包下载暂未开放");
 });
 
-test("浏览器预览页签不使用 iframe，并说明真实原因", async () => {
+test("无已注册预览时不建 iframe，并说明真实原因", async () => {
   readApi.mockImplementation((path: string) => route(path, {
     "/v2/me/sandbox/sessions/session-A/project": bindingBound,
     "/v2/me/sandbox/projects/proj-9": project,
@@ -458,6 +458,318 @@ test("浏览器预览页签不使用 iframe，并说明真实原因", async () =
   expect(host.querySelector('[aria-label="开发工作区"]')).toBeTruthy();
   expect(host.querySelectorAll("iframe")).toHaveLength(0);
   expect(host.textContent).toContain("凭票据打开");
+});
+
+// ---- 面板内嵌预览 ----
+
+const previewHandle = { preview_id: "preview-1", environment: { owner_id: "operator", project_id: "proj-9" }, port: 3000, state: "ready" };
+const previewEvents = [
+  { run_id: "run-p", seq: 0, kind: "tool_start", data: { call_id: "c1", provider_call_id: "pc1", step_index: 0, name: "dev_preview_register", arguments: {} } },
+  { run_id: "run-p", seq: 1, kind: "tool_end", data: { call_id: "c1", provider_call_id: "pc1", step_index: 0, name: "dev_preview_register", arguments: {}, status: "ok", result_available: true, value: previewHandle } },
+];
+const previewTurn = { id: "turn-p", session_id: "session-A", workspace_id: "local", owner_id: "operator", ordinal: 0, request_key: "rp", text: "启动预览", accepted_revision: 0, status: "running", run_id: "run-p", context_fingerprint: null, transcript: null, code: null, created_at: 1, started_at: 1, finished_at: null };
+const previewChat = () => fakeChat({ history: [previewTurn], details: {}, turnEvents: { "turn-p": previewEvents }, turnFacts: {}, events: [] });
+const previewBootstrap = (allow: boolean) => ({
+  action: `https://preview-${"c".repeat(40)}.example.test/.krim-preview/session`, ticket: "k".repeat(43),
+  expires_at: Date.now() / 1000 + 30, allow_embedding: allow,
+});
+const previewRoutes = {
+  "/v2/me/sandbox/sessions/session-A/project": bindingBound,
+  "/v2/me/sandbox/projects/proj-9": project,
+  "/v2/me/development/projects/proj-9/environment": environment,
+  "/v2/targets/target-development/tools": tools,
+  "/v2/me/mcp-connections": connections,
+};
+function stubSubmissions() {
+  const submitted: { form: HTMLFormElement; ticket: string | null }[] = [];
+  const original = HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit = function (this: HTMLFormElement) {
+    const input = this.querySelector('input[name="ticket"]') as HTMLInputElement | null;
+    submitted.push({ form: this, ticket: input?.value ?? null });
+  } as typeof HTMLFormElement.prototype.submit;
+  return { submitted, restore: () => { HTMLFormElement.prototype.submit = original; } };
+}
+function stubWindowOpen() {
+  const opened: { url: string; name: string; close: ReturnType<typeof vi.fn>; opener: unknown }[] = [];
+  const original = window.open;
+  window.open = ((url: string, name: string) => {
+    const tab = { url, name, close: vi.fn(), opener: null as unknown };
+    opened.push(tab);
+    return tab;
+  }) as unknown as typeof window.open;
+  return { opened, restore: () => { window.open = original; } };
+}
+function previewRow() {
+  const row = [...host.querySelectorAll(".g-row")].find(item => item.textContent?.includes("端口 3000"));
+  expect(row, "预览行未找到").toBeTruthy();
+  return row as HTMLElement;
+}
+async function openBrowserTab() {
+  const outputRow = [...host.querySelectorAll(".g-output-row")].find(row => row.textContent?.includes("打开浏览器实时预览"));
+  await act(async () => (outputRow as HTMLButtonElement).click());
+}
+
+test("服务端授权嵌入后，预览经命名 iframe 在面板内打开，票据只随 POST 正文提交", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await flush();
+
+    // 候选窗口同步预开保住 user activation；授权嵌入后立即关闭，不重复导航。
+    expect(open.opened).toHaveLength(1);
+    expect(open.opened[0]!.url).toBe("about:blank");
+    expect(open.opened[0]!.close).toHaveBeenCalledTimes(1);
+    const iframe = host.querySelector("iframe");
+    expect(iframe).toBeTruthy();
+    expect(iframe!.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin allow-forms allow-downloads");
+    expect(submit.submitted).toHaveLength(1);
+    const { form, ticket } = submit.submitted[0]!;
+    expect(form.method.toLowerCase()).toBe("post");
+    expect(form.action).toBe(previewBootstrap(true).action);
+    expect(form.target).toMatch(/^krim-preview-/);
+    expect(form.target).toBe(iframe!.getAttribute("name"));
+    expect(form.target).not.toBe(open.opened[0]!.name);
+    // 提交瞬间票据在 POST 正文里，提交后立即清空且表单移除，不留在 DOM 或 URL。
+    expect(ticket).toBe("k".repeat(43));
+    expect((form.querySelector('input[name="ticket"]') as HTMLInputElement).value).toBe("");
+    expect(document.body.querySelector("form")).toBeNull();
+    expect(iframe!.getAttribute("src")).toBeNull(); // 帧由命名表单 POST 导航，初始不带任何携带票据的地址
+    // 嵌入打开后保留行内"新窗口"入口；不渲染任何"成功"字样。
+    expect([...row.querySelectorAll("button")].map(button => button.textContent)).toEqual(["打开预览", "新窗口"]);
+    expect(host.textContent).not.toContain("已成功");
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("预览长时间没有完成加载时退出空白帧并显示超时原因", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    vi.useFakeTimers();
+    await act(async () => findButton(previewRow(), "打开预览").click());
+    await flush();
+    expect(host.querySelector("iframe")).not.toBeNull();
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(host.textContent).toContain("预览加载超时");
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(findButton(previewRow(), "打开预览").disabled).toBe(false);
+    expect(submit.submitted).toHaveLength(1);
+  } finally { vi.useRealTimers(); submit.restore(); open.restore(); }
+});
+
+test("初始 about:blank 的 load 事件不能取消预览加载超时", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    vi.useFakeTimers();
+    await act(async () => findButton(previewRow(), "打开预览").click());
+    await flush();
+    const frame = host.querySelector("iframe")!;
+    // 浏览器初始 about:blank load 不能当作预览加载完成。
+    await act(async () => frame.dispatchEvent(new Event("load")));
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.textContent).toContain("预览加载超时");
+  } finally { vi.useRealTimers(); submit.restore(); open.restore(); }
+});
+
+test("完成预览文档导航后清理旧超时，重开时重新计时", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    vi.useFakeTimers();
+    await act(async () => findButton(previewRow(), "打开预览").click());
+    await flush();
+    const frame = host.querySelector("iframe")!;
+    Object.defineProperty(frame, "contentWindow", { configurable: true, value: {
+      get location() { throw new DOMException("Blocked cross-origin access", "SecurityError"); },
+    } });
+    await act(async () => frame.dispatchEvent(new Event("load")));
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(host.querySelector("iframe")).toBe(frame);
+    expect(host.textContent).not.toContain("预览加载超时");
+    await act(async () => findButton(previewRow(), "打开预览").click());
+    await flush();
+    expect(host.querySelector("iframe")).not.toBe(frame);
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.textContent).toContain("预览加载超时");
+  } finally { vi.useRealTimers(); submit.restore(); open.restore(); }
+});
+
+test("允许嵌入时不依赖浏览器允许弹窗", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const original = window.open;
+  window.open = () => null;
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    await act(async () => findButton(previewRow(), "打开预览").click());
+    await flush();
+    expect(host.querySelector("iframe")).not.toBeNull();
+    expect(submit.submitted).toHaveLength(1);
+    expect(host.textContent).not.toContain("请允许打开项目预览窗口");
+  } finally { window.open = original; submit.restore(); }
+});
+
+test("未获嵌入授权时保持新窗口行为", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(false) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await flush();
+
+    expect(open.opened).toHaveLength(1);
+    expect(open.opened[0]!.url).toBe("about:blank");
+    expect(open.opened[0]!.name).toMatch(/^krim-preview-/);
+    expect(open.opened[0]!.opener).toBeNull();
+    expect(submit.submitted).toHaveLength(1);
+    expect(submit.submitted[0]!.form.target).toBe(open.opened[0]!.name);
+    expect(submit.submitted[0]!.ticket).toBe("k".repeat(43));
+    expect(open.opened[0]!.close).not.toHaveBeenCalled(); // 窗口保留，由 POST 导航到预览
+    expect(host.querySelectorAll("iframe")).toHaveLength(0);
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("打开失败如实报错，候选窗口关闭且不进帧不提交", async () => {
+  readApi.mockImplementation((path: string) => path === "/api/development/previews/preview-1/open"
+    ? Promise.reject(new RequestError(503, "preview_unavailable"))
+    : route(path, previewRoutes));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await flush();
+
+    expect(host.textContent).toContain("预览打开未完成");
+    expect(host.querySelectorAll("iframe")).toHaveLength(0);
+    expect(open.opened).toHaveLength(1);
+    expect(open.opened[0]!.close).toHaveBeenCalledTimes(1);
+    expect(submit.submitted).toHaveLength(0);
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("打开的 iframe 名称每次唯一，重复打开替换旧帧", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    const reopen = async () => act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await reopen(); await flush();
+    const firstFrame = host.querySelector("iframe")!;
+    const firstName = firstFrame.getAttribute("name");
+    await reopen(); await flush();
+    const secondFrame = host.querySelector("iframe")!;
+    const secondName = secondFrame.getAttribute("name");
+    expect(secondFrame).not.toBe(firstFrame);
+    expect(firstFrame.isConnected).toBe(false);
+
+    expect(firstName).toMatch(/^krim-preview-/);
+    expect(secondName).toMatch(/^krim-preview-/);
+    expect(secondName).not.toBe(firstName);
+    expect(host.querySelectorAll("iframe")).toHaveLength(1);
+    expect(submit.submitted).toHaveLength(2);
+    expect(submit.submitted[1]!.form.target).toBe(secondName);
+    expect(submit.submitted.map(item => item.ticket)).toEqual(["k".repeat(43), "k".repeat(43)]);
+    expect(open.opened).toHaveLength(2);
+    expect(open.opened.map(item => item.close)).toEqual([expect.anything(), expect.anything()]);
+    expect(open.opened.every(item => item.close.mock.calls.length === 1)).toBe(true);
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("切换会话后旧预览 iframe 随卸载移除", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await flush();
+    expect(host.querySelectorAll("iframe")).toHaveLength(1);
+    expect(open.opened[0]!.close).toHaveBeenCalledTimes(1);
+    await render({ ...baseProps, chat: fakeChat({ id: "session-B" }, { id: "session-B" }) });
+
+    expect(host.querySelectorAll("iframe")).toHaveLength(0);
+    expect(document.querySelectorAll("iframe")).toHaveLength(0);
+    expect(submit.submitted).toHaveLength(1);
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("卸载后迟到的授权回执不建帧、不提交票据", async () => {
+  let release!: (value: unknown) => void;
+  readApi.mockImplementation((path: string) => path === "/api/development/previews/preview-1/open"
+    ? new Promise(resolve => { release = resolve; })
+    : route(path, previewRoutes));
+  const submit = stubSubmissions();
+  const open = stubWindowOpen();
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    expect(submit.submitted).toHaveLength(0);
+    await render({ ...baseProps, chat: fakeChat({ id: "session-B" }, { id: "session-B" }) });
+    await act(async () => { release(previewBootstrap(true)); });
+    await flush();
+
+    expect(document.querySelectorAll("iframe")).toHaveLength(0);
+    expect(submit.submitted).toHaveLength(0);
+    expect(open.opened).toHaveLength(1);
+    expect(open.opened[0]!.close).toHaveBeenCalledTimes(1);
+  } finally { submit.restore(); open.restore(); }
+});
+
+test("帧内提交异常时清空预览并如实报错", async () => {
+  readApi.mockImplementation((path: string) => route(path, { ...previewRoutes, "/api/development/previews/preview-1/open": previewBootstrap(true) }));
+  const open = stubWindowOpen();
+  const original = HTMLFormElement.prototype.submit;
+  let attempts = 0;
+  HTMLFormElement.prototype.submit = function () {
+    attempts += 1;
+    throw new Error("submit failed");
+  } as typeof HTMLFormElement.prototype.submit;
+  try {
+    await render({ ...baseProps, chat: previewChat() });
+    await openBrowserTab();
+    const row = previewRow();
+    await act(async () => ([...row.querySelectorAll("button")][0] as HTMLButtonElement).click());
+    await flush();
+
+    expect(attempts).toBe(1); // 只尝试一次，异常后不重放票据
+    expect(host.querySelectorAll("iframe")).toHaveLength(0);
+    expect(document.body.querySelector("form")).toBeNull();
+    expect(host.textContent).toContain("预览打开未完成");
+    expect(open.opened[0]!.close).toHaveBeenCalledTimes(1);
+  } finally {
+    HTMLFormElement.prototype.submit = original;
+    open.restore();
+  }
 });
 
 test("绑定冲突只提交一次并如实提示", async () => {

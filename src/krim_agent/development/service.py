@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, JsonValue, model_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
 from sqlalchemy import select
 
 from krim_agent.account_mcp.contracts import SecretVault
@@ -151,7 +151,11 @@ class DevelopmentScope:
 
 class ShellInput(StrictModel):
     command: str = Field(min_length=1, max_length=32768)
-    cwd: str = "."
+    cwd: str = Field(
+        default=".", min_length=1, max_length=4096,
+        description=("Working directory relative to the project root; "
+                     "use '.' for the root, never '/workspace'."),
+    )
     pty: bool = False
     lifecycle: Literal["run", "project_service"] = "run"
     timeout_seconds: float | None = Field(default=None, gt=0)
@@ -160,6 +164,9 @@ class ShellInput(StrictModel):
         default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
     secret_refs: list[str] = Field(default_factory=list, max_length=8)
+
+    _relative_cwd = field_validator("cwd")(CommandRequest.project_relative_cwd.__func__)
+    _valid_command = field_validator("command")(CommandRequest.no_nul_command.__func__)
 
     @model_validator(mode="after")
     def bounded_download(self) -> ShellInput:
@@ -1313,22 +1320,37 @@ class DevelopmentService:
             )
             return cast(JsonValue, handle.model_dump(mode="json"))
         if isinstance(parameters, PreviewInput):
-            selected = self.require_previews()
-            preview_record = await selected.repository.get(parameters.preview_id)
-            if (
-                preview_record.handle.environment.owner_id != scope.actor.principal_id
-                or preview_record.handle.environment.project_id != scope.environment.project_id
-                or (preview_record.handle.environment.environment_id
-                    != scope.environment.environment_id)
-                or preview_record.handle.environment.generation != scope.environment.generation
-            ):
-                raise ServiceError("permission_denied", 403)
-            if isinstance(parameters, PreviewStatusInput):
-                handle = await self.inspect_preview(
-                    scope.actor, parameters.preview_id, wait_seconds=parameters.wait_seconds,
-                )
-            else:
-                handle = await self.stop_preview(scope.actor, parameters.preview_id)
+            try:
+                selected = self.require_previews()
+                preview_record = await selected.repository.get(parameters.preview_id)
+                if (
+                    preview_record.handle.environment.owner_id != scope.actor.principal_id
+                    or preview_record.handle.environment.project_id != scope.environment.project_id
+                    or (preview_record.handle.environment.environment_id
+                        != scope.environment.environment_id)
+                    or preview_record.handle.environment.generation != scope.environment.generation
+                ):
+                    raise ServiceError("permission_denied", 403)
+                if isinstance(parameters, PreviewStatusInput):
+                    handle = await self.inspect_preview(
+                        scope.actor, parameters.preview_id, wait_seconds=parameters.wait_seconds,
+                    )
+                else:
+                    handle = await self.stop_preview(scope.actor, parameters.preview_id)
+            except ServiceError as error:
+                if not isinstance(parameters, PreviewStatusInput) or error.code not in {
+                    "not_found", "workspace_busy", "preview_inactive", "preview_not_ready",
+                    "preview_route_unavailable", "preview_route_invalidated",
+                    "preview_route_capacity",
+                }:
+                    raise
+                scope.check()
+                return {
+                    "ok": False, "preview_id": parameters.preview_id, "code": error.code,
+                    "next_action": "Check the original service with process_status/read_output. "
+                    "If it exited, start the required project_service and register its new "
+                    "process. Do not assume a missing or inactive preview is ready.",
+                }
             return cast(JsonValue, handle.model_dump(mode="json"))
         if isinstance(parameters, ProcessInput):
             record = await self.repositories.processes.get(parameters.process_id)
@@ -1570,7 +1592,8 @@ class DevelopmentService:
                 "shell",
                 ShellInput,
                 "command",
-                "Run project Shell commands (wait_seconds <= 20). Inspect exit_code and use "
+                "Run project Shell commands (wait_seconds <= 20; cwd is project-relative, "
+                "'.' for root). Inspect exit_code and use "
                 "read_output to read logs. Use write/edit for file changes; project_service "
                 "retains explicitly requested services.",
             ),

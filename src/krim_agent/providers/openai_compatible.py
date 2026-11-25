@@ -48,9 +48,45 @@ from .types import (
     ModelUsage,
 )
 
+# 首个模型事件转发之前的有限传输重试：3次总尝试（首发+2次重试）。
+# 仅对可重试HTTP状态与首事件前的网络/超时失败生效；合法数值Retry-After
+# 夹取到有界上值，HTTP-date或非法值退回指数退避（0.5秒起步，逐次翻倍）。
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 0.5
+_RETRY_MAX_DELAY = 10.0
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_CODES = frozenset({"provider_network", "provider_timeout"})
+
 
 class ProviderError(ServiceError):
     """仅本地稳定码，不携原URL、上游正文或异常链。"""
+
+
+def _stream_error(raw: Any) -> ProviderError:
+    """Classify explicit remote errors without retaining or logging their text."""
+    known = {
+        "server_error": (503, "transient"),
+        "internal_error": (503, "transient"),
+        "internal_server_error": (503, "transient"),
+        "service_unavailable": (503, "transient"),
+        "overloaded_error": (503, "transient"),
+        "rate_limit_error": (429, "rate_limit"),
+        "rate_limit_exceeded": (429, "rate_limit"),
+        "authentication_error": (401, "authentication"),
+        "invalid_api_key": (401, "authentication"),
+        "invalid_request_error": (400, "invalid_request"),
+        "context_length_exceeded": (400, "invalid_request"),
+        "insufficient_quota": (400, "quota"),
+    }
+    values = (raw.get("code"), raw.get("type")) if isinstance(raw, dict) else ()
+    matched = next((known[value] for value in values if isinstance(value, str)
+                    and value in known), None)
+    logging.getLogger(__name__).warning(
+        "Provider stream error: category=%s", matched[1] if matched else "unclassified",
+    )
+    return ProviderError("provider_http_error", matched[0]) if matched else ProviderError(
+        "provider_protocol",
+    )
 
 
 class OpenAICompatibleConfig(StrictModel):
@@ -418,8 +454,10 @@ class _StreamBoundary:
             self.complete()
             return "[DONE]"
         event = parse_json(payload)
-        if not isinstance(event, dict) or "error" in event:
+        if not isinstance(event, dict):
             raise ProviderError("provider_protocol")
+        if "error" in event:
+            raise _stream_error(event["error"])
         event_reasoning = event.get("reasoning_content")
         if event_reasoning is not None and not isinstance(event_reasoning, str):
             raise ProviderError("provider_protocol")
@@ -459,6 +497,20 @@ class _StreamBoundary:
             or delta.get("role", "assistant") != "assistant"
             or delta.get("refusal")
         ):
+            logging.getLogger(__name__).warning(
+                "Provider delta rejected: unknown_fields=%d role=%s refusal=%s metadata=%s",
+                len(set(delta) - allowed),
+                "absent" if "role" not in delta else
+                "assistant" if delta["role"] == "assistant" else
+                "null" if delta["role"] is None else "other",
+                bool(delta.get("refusal")),
+                {
+                    name: "null" if delta[name] is None else type(delta[name]).__name__
+                    for name in ("reasoning", "reasoning_details", "annotations",
+                                 "function_call", "audio", "images", "tool_use",
+                                 "reasoning_signature", "signature") if name in delta
+                },
+            )
             raise ProviderError("provider_protocol")
         if delta.get("content") is not None and not isinstance(delta["content"], str):
             raise ProviderError("provider_protocol")
@@ -558,7 +610,9 @@ class _ResponsesBoundary:
         if kind == "response.incomplete":
             raise ProviderError("provider_output_limit")
         if kind in {"error", "response.failed"}:
-            raise ProviderError("provider_protocol")
+            response = event.get("response")
+            raise _stream_error(response.get("error") if isinstance(response, dict) else
+                                event.get("error", event))
         if kind == "response.output_item.added":
             item = event.get("item")
             if not isinstance(item, dict) or item.get("type") not in {
@@ -825,6 +879,46 @@ class OpenAICompatibleProvider:
             raise boundary.error
         response.stream = _GuardedStream(response, boundary)
 
+    def _translate_failure(
+        self, error: Exception, boundary: _StreamBoundary | _ResponsesBoundary
+    ) -> ServiceError:
+        """单次尝试失败收敛为一个本地稳定码；不携带URL、上游正文或异常链。"""
+        if boundary.error is not None:
+            return boundary.error
+        if isinstance(error, ServiceError):
+            return error
+        cause: BaseException | None = error
+        for _ in range(16):
+            if isinstance(cause, (httpx.TimeoutException, openai.APITimeoutError)):
+                return ProviderError("provider_timeout")
+            if isinstance(cause, (httpx.HTTPError, openai.APIConnectionError)):
+                return ProviderError("provider_network")
+            cause = cause.__cause__ if cause is not None else None
+        logging.getLogger(__name__).warning(
+            "Provider SDK rejected: exception_type=%s frames=%s",
+            type(error).__name__,
+            [
+                (frame.f_code.co_name, line)
+                for frame, line in traceback.walk_tb(error.__traceback__)
+            ],
+        )
+        return ProviderError("provider_protocol")
+
+    def _retry_wait(self, response: httpx.Response | None, backoff: float) -> float:
+        """合法数值Retry-After夹取到有界上值；非法/非有限值退回指数退避。"""
+        header = response.headers.get("retry-after") if response is not None else None
+        if header is not None:
+            try:
+                seconds = float(header.strip())
+            except (ValueError, OverflowError):
+                seconds = -1.0
+            # NaN两个比较都不成立退回退避；inf/超大有限值被上界钳制。
+            if 0.0 <= seconds <= _RETRY_MAX_DELAY:
+                return seconds
+            if seconds > _RETRY_MAX_DELAY:
+                return _RETRY_MAX_DELAY
+        return backoff
+
     def binding_token(self) -> tuple[object, ...]:
         """仅私有内存使用，含凭据的值绝不repr/序列化。"""
         config = self.config.model_dump(mode="json", exclude={"api_key", "base_url"})
@@ -966,11 +1060,6 @@ class OpenAICompatibleProvider:
             else:
                 max_tool_calls = min(max_tool_calls, step_cap)
         responses = self.config.wire_api == "responses"
-        boundary = (
-            _ResponsesBoundary(self.config, max_tool_calls)
-            if responses
-            else _StreamBoundary(self.config, max_tool_calls)
-        )
         # Keep each protocol's native token field; Responses requests are stateless.
         # None leaves the output cap to the provider's real capability: no invented
         # default presses it down, and a provider-side reject surfaces as-is.
@@ -1013,112 +1102,149 @@ class OpenAICompatibleProvider:
         projected = _sdk_messages(messages, allow_images=self.config.allow_images)
         self.calls += 1
         self.active += 1
-        argument_bytes = 0
-        streamed_arguments: dict[str, int] = {}
+        attempt = 0
         try:
-            async with ai.stream(
-                self._sdk_model,
-                projected,
-                tools=declarations,
-                params=ai.InferenceRequestParams(extra_body=extra),
-            ) as stream:
-                while True:
-                    # 仅在 SDK 拉取事件期间绑定，不能跨 yield 保留 ContextVar token：
-                    # Krim 的 settled(aclose) 会在独立清理任务中关闭生成器。
-                    token = self._boundary.set(boundary)
-                    try:
-                        try:
-                            event = await anext(stream)
-                        except StopAsyncIteration:
-                            break
-                    finally:
-                        self._boundary.reset(token)
-                    while boundary.snapshots:
-                        yield ModelUsage(usage=boundary.snapshots.pop(0), final=False)
-                    if isinstance(event, ai.events.TextDelta):
-                        for part in _texts(event.chunk):
-                            if include_progress:
-                                yield ModelProgress(phase="text", argument_bytes=argument_bytes)
-                            yield ModelText(text=part)
-                    elif isinstance(event, ai.events.ToolStart):
-                        if include_progress:
-                            yield ModelProgress(phase="tool_start", argument_bytes=argument_bytes)
-                    elif isinstance(event, ai.events.ToolDelta):
-                        call_id = event.tool_call_id
-                        delta_bytes = len(event.chunk.encode("utf-8"))
-                        streamed_arguments[call_id] = (
-                            streamed_arguments.get(call_id, 0) + delta_bytes
-                        )
-                        argument_bytes += delta_bytes
-                        if include_progress:
-                            yield ModelProgress(
-                                phase="tool_arguments", argument_bytes=argument_bytes,
-                            )
-                    elif isinstance(event, ai.events.ToolEnd):
-                        call = event.tool_call
-                        call_id = call.tool_call_id
-                        complete_bytes = len(call.tool_args.encode("utf-8"))
-                        streamed_bytes = streamed_arguments.get(call_id, 0)
-                        if complete_bytes > streamed_bytes:
-                            argument_bytes += complete_bytes - streamed_bytes
-                            streamed_arguments[call_id] = complete_bytes
-                        if include_progress:
-                            yield ModelProgress(
-                                phase="tool_complete", argument_bytes=argument_bytes,
-                            )
-                    elif include_progress:
-                        # Includes provider-only/reasoning activity without retaining
-                        # its payload, IDs, names, or any other content.
-                        yield ModelProgress(phase="response", argument_bytes=argument_bytes)
-                complete = boundary.complete()
-                sdk_calls = {call.tool_call_id: call for call in stream.tool_calls}
-                if len(sdk_calls) != len(complete):
-                    raise ProviderError("provider_protocol")
-                for index, call in enumerate(complete):
-                    sdk_call = sdk_calls.get(boundary.sdk_ids[index])
-                    if (
-                        sdk_call is None
-                        or parse_json(sdk_call.tool_args) != call.arguments
-                        or responses
-                        and sdk_call.tool_name != call.name
-                    ):
+            while True:
+                # 有限重试仅覆盖首个语义事件（文本/用量/工具内容）转发之前；
+                # 每 attempt 换全新边界与缓冲。
+                attempt += 1
+                boundary = (
+                    _ResponsesBoundary(self.config, max_tool_calls)
+                    if responses
+                    else _StreamBoundary(self.config, max_tool_calls)
+                )
+                argument_bytes = 0
+                streamed_arguments: dict[str, int] = {}
+                forwarded = False
+                try:
+                    async with ai.stream(
+                        self._sdk_model,
+                        projected,
+                        tools=declarations,
+                        params=ai.InferenceRequestParams(extra_body=extra),
+                    ) as stream:
+                        while True:
+                            # 仅在 SDK 拉取事件期间绑定，不能跨 yield 保留 ContextVar token：
+                            # Krim 的 settled(aclose) 会在独立清理任务中关闭生成器。
+                            token = self._boundary.set(boundary)
+                            try:
+                                try:
+                                    event = await anext(stream)
+                                except StopAsyncIteration:
+                                    break
+                            finally:
+                                self._boundary.reset(token)
+                            while boundary.snapshots:
+                                forwarded = True
+                                yield ModelUsage(usage=boundary.snapshots.pop(0), final=False)
+                            if isinstance(event, ai.events.TextDelta):
+                                for part in _texts(event.chunk):
+                                    if include_progress:
+                                        forwarded = True
+                                        yield ModelProgress(
+                                            phase="text", argument_bytes=argument_bytes
+                                        )
+                                    forwarded = True
+                                    yield ModelText(text=part)
+                            elif isinstance(event, ai.events.ToolStart):
+                                if include_progress:
+                                    forwarded = True
+                                    yield ModelProgress(
+                                        phase="tool_start", argument_bytes=argument_bytes
+                                    )
+                            elif isinstance(event, ai.events.ToolDelta):
+                                call_id = event.tool_call_id
+                                delta_bytes = len(event.chunk.encode("utf-8"))
+                                streamed_arguments[call_id] = (
+                                    streamed_arguments.get(call_id, 0) + delta_bytes
+                                )
+                                argument_bytes += delta_bytes
+                                if include_progress:
+                                    forwarded = True
+                                    yield ModelProgress(
+                                        phase="tool_arguments", argument_bytes=argument_bytes,
+                                    )
+                            elif isinstance(event, ai.events.ToolEnd):
+                                call = event.tool_call
+                                call_id = call.tool_call_id
+                                complete_bytes = len(call.tool_args.encode("utf-8"))
+                                streamed_bytes = streamed_arguments.get(call_id, 0)
+                                if complete_bytes > streamed_bytes:
+                                    argument_bytes += complete_bytes - streamed_bytes
+                                    streamed_arguments[call_id] = complete_bytes
+                                if include_progress:
+                                    forwarded = True
+                                    yield ModelProgress(
+                                        phase="tool_complete", argument_bytes=argument_bytes,
+                                    )
+                            elif include_progress:
+                                # Includes provider-only/reasoning activity without retaining
+                                # its payload, IDs, names, or any other content. 纯本地封装
+                                # 事件与推理活动不算已发语义事件，重试边界以首个可见内容为准。
+                                yield ModelProgress(phase="response", argument_bytes=argument_bytes)
+                    complete = boundary.complete()
+                    sdk_calls = {call.tool_call_id: call for call in stream.tool_calls}
+                    if len(sdk_calls) != len(complete):
                         raise ProviderError("provider_protocol")
-                # SDK 的 ToolStart 只带最初名称；分片工具名仍使用边界完成校验的名称。
-                # 调用 ID 和参数必须同时通过 SDK 聚合与 Krim 的严格 JSON 校验。
-            if boundary.response is not None:
-                await settled(boundary.response.aclose())
-            for call in complete:
-                yield call
-            if boundary.prior is not None:
-                yield ModelUsage(usage=boundary.prior, final=True)
-        except Exception as error:
-            if boundary.error is not None:
-                raise boundary.error from None
-            if isinstance(error, ServiceError):
-                raise
-            cause: BaseException | None = error
-            for _ in range(16):
-                if isinstance(cause, (httpx.TimeoutException, openai.APITimeoutError)):
-                    raise ProviderError("provider_timeout") from None
-                if isinstance(cause, (httpx.HTTPError, openai.APIConnectionError)):
-                    raise ProviderError("provider_network") from None
-                cause = cause.__cause__ if cause is not None else None
-            logging.getLogger(__name__).warning(
-                "Provider SDK rejected: exception_type=%s frames=%s",
-                type(error).__name__,
-                [
-                    (frame.f_code.co_name, line)
-                    for frame, line in traceback.walk_tb(error.__traceback__)
-                ],
-            )
-            raise ProviderError("provider_protocol") from None
+                    for index, call in enumerate(complete):
+                        sdk_call = sdk_calls.get(boundary.sdk_ids[index])
+                        if (
+                            sdk_call is None
+                            or parse_json(sdk_call.tool_args) != call.arguments
+                            or responses
+                            and sdk_call.tool_name != call.name
+                        ):
+                            raise ProviderError("provider_protocol")
+                    # SDK 的 ToolStart 只带最初名称；分片工具名仍使用边界完成校验的名称。
+                    # 调用 ID 和参数必须同时通过 SDK 聚合与 Krim 的严格 JSON 校验。
+                    if boundary.response is not None:
+                        await settled(boundary.response.aclose())
+                    for call in complete:
+                        forwarded = True
+                        yield call
+                    if boundary.prior is not None:
+                        forwarded = True
+                        yield ModelUsage(usage=boundary.prior, final=True)
+                    return
+                except Exception as error:
+                    failure = self._translate_failure(error, boundary)
+                    response = boundary.response
+                    status = response.status_code if response is not None else None
+                    retry_class = (
+                        isinstance(failure, ProviderError)
+                        and not forwarded
+                        and (
+                            failure.code in _RETRYABLE_CODES
+                            or failure.code == "provider_http_error"
+                            and (status in _RETRYABLE_STATUS
+                                 or boundary.error is failure
+                                 and failure.status in _RETRYABLE_STATUS)
+                        )
+                    )
+                    if retry_class and attempt < _RETRY_ATTEMPTS:
+                        wait = self._retry_wait(
+                            response, _RETRY_BASE_DELAY * 2 ** (attempt - 1)
+                        )
+                        # 只含稳定码/数字状态/次数/等待时长；无端点、密钥或请求内容。
+                        logging.getLogger(__name__).warning(
+                            "Provider retry: attempt=%d/%d code=%s status=%s wait_ms=%d",
+                            attempt, _RETRY_ATTEMPTS, failure.code, status, round(wait * 1000),
+                        )
+                        # CancelledError/GeneratorExit 不进 except Exception，立即传播。
+                        await asyncio.sleep(wait)
+                        continue
+                    if retry_class:
+                        logging.getLogger(__name__).warning(
+                            "Provider retry exhausted: attempts=%d code=%s status=%s",
+                            attempt, failure.code, status,
+                        )
+                    raise failure from None
+                finally:
+                    if boundary.response is not None:
+                        await settled(boundary.response.aclose())
         finally:
-            try:
-                if boundary.response is not None:
-                    await settled(boundary.response.aclose())
-            finally:
-                self.active -= 1
-                self.streams_closed += 1
+            self.active -= 1
+            self.streams_closed += 1
 
     async def close(self) -> None:
         self.closed = True

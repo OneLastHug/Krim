@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Folder, RefreshCw, Terminal } from "lucide-react";
 import type { DisplayTheme } from "../lib/use-display-theme";
-import type { Actor } from "../lib/session-contracts";
+import type { Actor, Session } from "../lib/session-contracts";
 import type { SandboxProject } from "../lib/development-contracts";
 import type { SessionState } from "../hooks/use-session";
 import { useSession } from "../hooks/use-session";
@@ -9,7 +9,7 @@ import { useSubagents } from "../hooks/use-subagents";
 import { SubagentApprovals, SubagentSummary } from "./SubagentPanel";
 import { subagentState } from "../lib/subagent-contracts";
 import { useSessionContext } from "../hooks/use-session-context";
-import { fetchProjectsPage, useDevelopment } from "../hooks/use-development";
+import { fetchProjectsPage, TRANSITIONAL, useDevelopment } from "../hooks/use-development";
 import { openDevelopmentPanel } from "../lib/workbench-events";
 import { ChatHistory } from "./ChatHistory";
 import { SessionFeatures } from "./SessionFeatures";
@@ -48,7 +48,7 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
   const canDevelop = chat.actor?.target_keys?.includes("target-development") === true;
   const accountScope = JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace]);
   const liveScope = useRef(accountScope); liveScope.current = accountScope;
-  const [starting, setStarting] = useState<{ id: string; project: string; text: string; scope: string; stage: "bind" | "wait" } | null>(null);
+  const [starting, setStarting] = useState<{ id: string; project: string; text: string; scope: string; stage: "bind" | "prepare" | "wait" | "failed" } | null>(null);
   const autoFlight = useRef("");
   useEffect(() => { setInfo(null); setProjectPickerOpen(false); setGroup(undefined); setProjects([]); setNewProject(""); setStarting(null); setStartNotice(""); autoFlight.current = ""; }, [accountScope]);
   useEffect(() => {
@@ -70,10 +70,19 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
     if (!target) { setStartNotice("当前账号未配置正式运行目标，无法创建新对话。"); return; }
     const text = chat.draft;
     if (!newProject || target !== "target-development") { await chat.createAndSubmit(text, target, group); return; }
-    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, group, text);
+    const created = await chat.create(text.trim().split("\n")[0]!.slice(0, 128), target, group, text, newProject);
     if (!created || liveScope.current !== accountScope || new URL(location.href).searchParams.get("session") !== created.id) return;
     chat.edit(text);
     setStarting({ id: created.id, project: newProject, text, scope: accountScope, stage: "bind" });
+  }
+  // 已有会话发送下一条：项目未就绪同样先走同一 prepare 入口，就绪后由同一 starting 流程提交。
+  function sendWithPreparation(text?: string, recipient?: Session | null) {
+    const projectId = development.binding?.project_id;
+    if (!projectId || development.environment?.state === "ready"
+      || (recipient !== undefined && recipient !== null && recipient.id !== chat.id)) return chat.submit(text, recipient);
+    const transitional = development.environment !== null && TRANSITIONAL.includes(development.environment.state);
+    setStarting({ id: chat.id, project: projectId, text: text ?? chat.draft, scope: accountScope, stage: transitional ? "wait" : "prepare" });
+    return Promise.resolve();
   }
   useEffect(() => {
     if (!starting || !active || starting.scope !== accountScope || chat.id !== starting.id || chat.session?.id !== starting.id || chat.reading) return;
@@ -81,13 +90,36 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
       const marker = accountScope + starting.id;
       if (autoFlight.current === marker) return;
       autoFlight.current = marker;
-      void development.bindProject(starting.project).then(() => setStarting(previous => previous?.id === starting.id && previous.scope === starting.scope ? { ...previous, stage: "wait" } : previous));
-    } else if (development.binding?.project_id === starting.project && chat.session.revision >= development.binding.session_revision && !development.busy) {
-      setStarting(null); void chat.submit(starting.text);
-    } else if (development.notice && development.binding?.project_id !== starting.project && !development.busy) {
-      setStarting(null); setStartNotice("首条消息已保留。请确认项目绑定后重新发送。");
+      void development.bindProject(starting.project).then(() => {
+        if (autoFlight.current === marker) autoFlight.current = "";
+        setStarting(previous => previous?.id === starting.id && previous.scope === starting.scope && previous.stage === "bind" ? { ...previous, stage: "prepare" } : previous);
+      });
+    } else if (starting.stage === "prepare") {
+      // 绑定状态先行：未读到匹配绑定时等待（bind 阶段回执/已有绑定都会推进），绑定明确失败才保留草稿退出。
+      if (development.binding?.project_id !== starting.project) {
+        if (development.notice && !development.busy) { setStarting(null); setStartNotice("首条消息已保留。请确认项目绑定后重新发送。"); }
+        return;
+      }
+      const marker = accountScope + starting.id + ":prepare";
+      if (autoFlight.current === marker) return;
+      autoFlight.current = marker;
+      void development.prepareEnvironment().then(prepared => {
+        if (autoFlight.current === marker) autoFlight.current = "";
+        setStarting(previous => previous?.id === starting.id && previous.scope === starting.scope && previous.stage === "prepare" ? { ...previous, stage: prepared ? "wait" : "failed" } : previous);
+      });
+    } else if (starting.stage === "wait") {
+      const environment = development.environment;
+      if (development.binding?.project_id === starting.project && environment?.project_id === starting.project && environment.state === "ready" && chat.session.revision >= development.binding.session_revision && !development.busy) {
+        setStarting(null); void chat.submit(starting.text);
+      } else if (environment?.project_id === starting.project && environment.state !== "ready" && !TRANSITIONAL.includes(environment.state)) {
+        setStarting(null); setStartNotice("首条消息已保留。请确认项目环境就绪后重新发送。");
+      } else if (development.notice && development.binding?.project_id !== starting.project && !development.busy) {
+        setStarting(null); setStartNotice("首条消息已保留。请确认项目绑定后重新发送。");
+      }
+    } else {
+      setStarting(null); setStartNotice("首条消息已保留。请确认项目环境就绪后重新发送。");
     }
-  }, [starting, accountScope, active, chat.id, chat.session?.id, chat.session?.revision, chat.reading, development.binding?.project_id, development.busy, development.notice]);
+  }, [starting, accountScope, active, chat.id, chat.session?.id, chat.session?.revision, chat.reading, development.binding?.project_id, development.environment?.project_id, development.environment?.state, development.busy, development.notice]);
   useEffect(() => { if (active) window.dispatchEvent(new Event("krim:focus-turn")); }, [active]);
   const workspaceMode = chat.session?.target_key === "target-workspace";
   const ratio = context.used !== null && context.limit ? Math.max(0, Math.min(1, context.used / context.limit)) : 0;
@@ -119,7 +151,7 @@ export function ChatWorkbench({ theme, apiKey, active, fence, onLegacy, onConnec
         <SessionFeatures key={JSON.stringify([apiKey, chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} backgroundRunning={subagents.members.some(member => ["running", "approval"].includes(subagentState(member)))} />
       </ChatHistory>
       <SubagentSummary state={subagents} chat={chat}/>
-      {workspaceMode ? <details className="workspace-task-area"><summary><strong>工作区任务</strong><span>输入文件、工作请求与完成条件</span></summary><WorkspacePanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} /></details> : <ChatComposer chat={chat} busy={!!starting} onStart={starting ? undefined : () => { void start(); }} />}
+      {workspaceMode ? <details className="workspace-task-area"><summary><strong>工作区任务</strong><span>输入文件、工作请求与完成条件</span></summary><WorkspacePanel key={JSON.stringify([chat.actor?.principal_id, chat.actor?.generation, chat.workspace, chat.id])} chat={chat} apiKey={apiKey} active={active} fence={fence} /></details> : <ChatComposer chat={{ ...chat, submit: sendWithPreparation }} busy={!!starting} onStart={starting ? undefined : () => { void start(); }} />}
       <footer className="chat-controls" aria-label="会话控制栏">
         <div className="chat-controls-left"><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => openDevelopmentPanel(chat, "environment")}><Terminal aria-hidden="true"/>Linux 环境</button><button type="button" className="control-chip" disabled={!chat.ready} onClick={() => chat.session ? openDevelopmentPanel(chat, "project") : setProjectPickerOpen(true)}><Folder aria-hidden="true"/>{development.project?.title ?? projects.find(project => project.project_id === newProject)?.title ?? "选择项目"}</button></div>
         <div className="chat-controls-right">

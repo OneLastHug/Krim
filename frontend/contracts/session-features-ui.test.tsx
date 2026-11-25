@@ -7,7 +7,7 @@ import type { InteractionRequest, InteractionState, PlanConfirmationRequest, Use
 import type { PlanSnapshot, PlanStep } from "../src/lib/planning-contracts";
 
 type Call = { path: string; method: string; body?: Record<string, unknown> };
-let root: Root, host: HTMLDivElement, calls: Call[];
+let root: Root, host: HTMLDivElement, calls: Call[], featureFence: { current: number };
 let handleFetch: (path: string, method: string, body?: Record<string, unknown>) => Response | Promise<Response>;
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 function question(id: string, sessionId = "session-a"): UserInputRequest {
@@ -27,12 +27,13 @@ function chat(overrides: { id?: string; principalId?: string; ownerId?: string; 
   const id = overrides.id ?? "session-a";
   return { actor: { principal_id: overrides.principalId ?? "owner-a", generation: 2 }, id, workspace: "workspace-a", history: [], canWrite: overrides.canWrite ?? true, refresh: vi.fn(), ready: true, session: { id, owner_id: overrides.ownerId ?? "owner-a", status: overrides.status ?? "open", archived_at: null, deleted_at: null } } as unknown as SessionState;
 }
-async function render(value = chat(), active = true) { await act(async () => root.render(<SessionFeatures chat={value} apiKey="test-key" active={active} fence={{ current: 1 }} />)); }
+async function render(value = chat(), active = true) { await act(async () => root.render(<SessionFeatures chat={value} apiKey="test-key" active={active} fence={featureFence} />)); }
 async function until(check: () => void) { let error: unknown; for (let i = 0; i < 100; i++) { try { check(); return; } catch (value) { error = value; } await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); } throw error; }
 function button(label: string, scope: ParentNode = host) { const found = [...scope.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent?.trim() === label); expect(found, label).toBeTruthy(); return found!; }
 async function fill(element: HTMLTextAreaElement, value: string) { await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); }
 
 beforeEach(() => {
+  featureFence = { current: 1 };
   calls = []; handleFetch = () => json({ error: { code: "not_found" } }, 404);
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -129,6 +130,37 @@ test("read failure is visible and retry issues fresh requests", async () => {
   await render(); await until(() => expect(host.querySelector("[role='alert']")?.textContent).toContain("计划暂时无法读取"));
   fail = false; await act(async () => button("重新读取任务状态").click()); await until(() => expect(host.textContent).toContain("重试后计划"));
   expect(calls.filter(call => call.path.endsWith("/plan"))).toHaveLength(2); expect(calls.filter(call => call.path.endsWith("/interactions"))).toHaveLength(2);
+});
+
+test("refreshes the plan when a new turn completes without a running render", async () => {
+  let snapshot = plan();
+  handleFetch = path => path.endsWith("/plan") ? json(snapshot) : json(state([], "execute"));
+  const before = { ...chat(), currentTurn: { id: "turn-before", status: "completed" }, events: [] } as unknown as SessionState;
+  await render(before);
+  await until(() => expect(host.querySelector(".task-plan")?.getAttribute("data-plan-revision")).toBe("3"));
+  snapshot = { ...plan("session-a", "本轮计划已完成"), revision: 4, content_hash: "b".repeat(64),
+    counts: { pending: 0, in_progress: 0, completed: 1, blocked: 0 },
+    steps: [{ id: "step-one", text: "本轮计划已完成", status: "completed" }] };
+  await render({ ...before, currentTurn: { id: "turn-after", status: "completed" } } as unknown as SessionState);
+  await until(() => expect(host.querySelector(".task-plan")?.getAttribute("data-plan-revision")).toBe("4"));
+  expect(host.textContent).toContain("已完成 1 / 1");
+});
+
+test("refreshes on a plan tool result without polling for every text event", async () => {
+  let snapshot = plan();
+  handleFetch = path => path.endsWith("/plan") ? json(snapshot) : json(state([], "execute"));
+  const before = { ...chat(), currentTurn: { id: "turn-a", status: "running" },
+    history: [{ id: "turn-a", status: "running" }], events: [] } as unknown as SessionState;
+  await render(before);
+  await until(() => expect(host.querySelector(".task-plan")?.getAttribute("data-plan-revision")).toBe("3"));
+  const reads = calls.filter(call => call.path.endsWith("/plan")).length;
+  const text = { kind: "text", seq: 1, data: { text: "progress" } };
+  await render({ ...before, events: [text] } as unknown as SessionState);
+  expect(calls.filter(call => call.path.endsWith("/plan"))).toHaveLength(reads);
+  snapshot = { ...plan("session-a", "新的计划步骤"), revision: 4, content_hash: "b".repeat(64) };
+  await render({ ...before, events: [text, { kind: "tool_end", seq: 2,
+    data: { name: "plan_update", status: "ok", value: snapshot } }] } as unknown as SessionState);
+  expect(host.querySelector(".task-plan")?.getAttribute("data-plan-revision")).toBe("4");
 });
 
 test("merges plan pages using the original revision and content hash", async () => {

@@ -147,12 +147,15 @@ for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBi
   let created = false, bound = false, accepted: ReturnType<typeof turn> | null = null;
   let sidebar = { revision: 0, groups: [] as { id: string; title: string }[], sessions: [] as { session_id: string; group_id: string | null; parent_id: string | null; pinned: boolean }[] };
   const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const environment = () => ({ owner_id: "local", project_id: "project-one", environment_id: "env-one", generation: 1, state: "ready" });
   const developmentSession = () => ({ ...session(), target_key: "target-development", revision: bound ? 1 : 0 });
   override = (path, options) => {
     const method = options.method ?? "GET";
     if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
     if (path === "/v2/me/sandbox/projects?offset=0&limit=100") return json({ items: [project], total: 1, offset: 0, limit: 100 });
     if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path === "/v2/me/development/projects/project-one/environment") return json(environment());
+    if (path === "/v2/me/development/projects/project-one/prepare" && method === "POST") return json(environment());
     if (path.endsWith("/session-sidebar")) {
       if (method === "PUT") { const body = JSON.parse(String(options.body)); sidebar = { revision: sidebar.revision + 1, groups: body.groups, sessions: body.sessions }; }
       return json(sidebar);
@@ -180,12 +183,168 @@ for (const rejectBinding of [false, true]) test(`新会话项目绑定${rejectBi
   if (rejectBinding) {
     await until(() => expect(container.textContent).toContain("首条消息已保留"));
     expect(calls.filter(call => call.path === base + "/A/turns" && call.method === "POST")).toHaveLength(0);
+    expect(calls.filter(call => call.path.endsWith("/prepare"))).toHaveLength(0);
     expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe("绑定后才发送的第一条任务");
   } else {
     await until(() => expect(accepted).not.toBeNull());
+    const createCall = calls.find(call => call.method === "POST" && call.path === base)!;
+    expect((createCall.body as { project_id?: string }).project_id).toBe("project-one");
     const sent = calls.filter(call => call.path === base + "/A/turns" && call.method === "POST");
     expect(sent).toHaveLength(1); expect((sent[0]!.body as { expected_revision: number }).expected_revision).toBe(1);
   }
+});
+
+test("创建请求携带所选项目且后端已绑定时不再重绑，环境就绪后发送首条消息", async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let created = false, accepted: ReturnType<typeof turn> | null = null;
+  let sidebar = { revision: 0, groups: [] as { id: string; title: string }[], sessions: [] as { session_id: string; group_id: string | null; parent_id: string | null; pinned: boolean }[] };
+  const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const environment = () => ({ owner_id: "local", project_id: "project-one", environment_id: "env-one", generation: 1, state: "ready" });
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: 0 });
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === "/v2/me/sandbox/projects?offset=0&limit=100") return json({ items: [project], total: 1, offset: 0, limit: 100 });
+    if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path === "/v2/me/development/projects/project-one/environment") return json(environment());
+    if (path === "/v2/me/development/projects/project-one/prepare" && method === "POST") return json(environment());
+    if (path.endsWith("/session-sidebar")) {
+      if (method === "PUT") { const body = JSON.parse(String(options.body)); sidebar = { revision: sidebar.revision + 1, groups: body.groups, sessions: body.sessions }; }
+      return json(sidebar);
+    }
+    if (path === base && method === "POST") { created = true; return json({ ...developmentSession(), create_key: JSON.parse(String(options.body)).request_key }, 201); }
+    if (path === base + "?limit=50") return json(created ? [developmentSession()] : []);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === bindingPath) return json({ session_id: "A", project_id: "project-one", revision: 1, session_revision: 0, workspace_id: "local" });
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    return undefined;
+  };
+  await act(async () => root.render(<StrictMode><App/></StrictMode>));
+  await until(() => expect(document.querySelector('.empty-setup-card[data-kind="project"]')).toBeTruthy());
+  await act(async () => (document.querySelector('.empty-setup-card[data-kind="project"]') as HTMLButtonElement).click());
+  await until(() => expect(document.querySelector('input[name="dev-project"][value="project-one"]')).toBeTruthy());
+  await act(async () => (document.querySelector('input[name="dev-project"][value="project-one"]') as HTMLInputElement).click());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="选择新会话项目"] button')].find(item => item.textContent?.trim() === "使用项目")!.click());
+  await type("chat-prompt", "环境就绪后才发送的首条任务");
+  await act(async () => button("发送").click());
+  await until(() => expect(accepted).not.toBeNull());
+  expect((calls.find(call => call.method === "POST" && call.path === base)!.body as { project_id?: string }).project_id).toBe("project-one");
+  expect(calls.filter(call => call.path === bindingPath && call.method === "PUT")).toHaveLength(0);
+  expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/prepare"))).toHaveLength(1);
+  expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(1);
+});
+
+test("已绑定会话发送下一条消息时项目未就绪先准备环境，就绪后提交", async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let accepted: ReturnType<typeof turn> | null = null;
+  const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const environment = (state: string) => ({ owner_id: "local", project_id: "project-one", environment_id: "env-one", generation: 1, state });
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: 0 });
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === base + "?limit=50") return json([developmentSession()]);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    if (path.includes("/events?") || path.endsWith("/approvals")) return json([]);
+    if (path.endsWith("/result")) return json({ run: { id: "run-A1" }, tools: [] });
+    if (path === bindingPath) return json({ session_id: "A", project_id: "project-one", revision: 1, session_revision: 0, workspace_id: "local" });
+    if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path === "/v2/me/development/projects/project-one/environment") return json(environment("failed"));
+    if (path === "/v2/me/development/projects/project-one/prepare" && method === "POST") return json(environment("ready"));
+    return undefined;
+  };
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  await type("chat-prompt", "环境未就绪的后续消息");
+  await act(async () => button("发送").click());
+  await until(() => expect(calls.filter(call => call.method === "POST" && call.path.endsWith("/prepare"))).toHaveLength(1));
+  await until(() => expect(accepted).not.toBeNull());
+  expect(accepted!.text).toBe("环境未就绪的后续消息");
+  expect(calls.filter(call => call.path === bindingPath && call.method === "PUT")).toHaveLength(0);
+  expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(1);
+});
+
+test("准备失败后再次发送按原键找回，不重复创建环境请求", async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let accepted: ReturnType<typeof turn> | null = null, prepared = false, preparePosts = 0, prepareKeys: string[] = [];
+  const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const environment = (state: string) => ({ owner_id: "local", project_id: "project-one", environment_id: "env-one", generation: 1, state });
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: 0 });
+  const notFound = () => json({ error: { code: "not_found" } }, 404);
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === base + "?limit=50") return json([developmentSession()]);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    if (path.includes("/events?") || path.endsWith("/approvals")) return json([]);
+    if (path.endsWith("/result")) return json({ run: { id: "run-A1" }, tools: [] });
+    if (path === bindingPath) return json({ session_id: "A", project_id: "project-one", revision: 1, session_revision: 0, workspace_id: "local" });
+    if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path === "/v2/me/development/projects/project-one/environment") return prepared ? json(environment("ready")) : notFound();
+    if (path.startsWith("/v2/me/sandbox/operations?")) return notFound();
+    if (path === "/v2/me/development/projects/project-one/prepare" && method === "POST") {
+      preparePosts++; prepareKeys.push(JSON.parse(String(options.body)).request_key);
+      if (preparePosts === 1) return json({ error: { code: "sandbox_backend_unavailable" } }, 503);
+      prepared = true;
+      return json(environment("ready"));
+    }
+    return undefined;
+  };
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  await type("chat-prompt", "首次准备失败的消息");
+  await act(async () => button("发送").click());
+  await until(() => expect(container.textContent).toContain("首条消息已保留"));
+  expect(preparePosts).toBe(1);
+  expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(0);
+  await act(async () => button("发送").click());
+  await until(() => expect(accepted).not.toBeNull());
+  expect(accepted!.text).toBe("首次准备失败的消息");
+  expect(preparePosts).toBe(2);
+  expect(new Set(prepareKeys).size).toBe(1);
+  expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(1);
+});
+
+test("准备回执读取失败时保留草稿解除占用且不盲发原键", async () => {
+  const base = "/v2/workspaces/local/sessions", bindingPath = "/v2/me/sandbox/sessions/A/project";
+  let accepted: ReturnType<typeof turn> | null = null, preparePosts = 0;
+  const project = { project_id: "project-one", environment_id: "env-one", principal_id: "local", workspace_id: "local", title: "开发项目一", generation: 1, status: "ready", created_at: 1, updated_at: 1 };
+  const developmentSession = () => ({ ...session(), target_key: "target-development", revision: 0 });
+  const networkLost = () => Promise.reject(new TypeError("env read lost"));
+  override = (path, options) => {
+    const method = options.method ?? "GET";
+    if (path === "/v2/me") return json({ principal_id: "local", generation: 1, legacy: true, target_keys: ["target-development"], workspaces: [{ workspace_id: "local", role: "admin", approve: true }] });
+    if (path === base + "?limit=50") return json([developmentSession()]);
+    if (path === base + "/A") return json(developmentSession());
+    if (path === base + "/A/turns" && method === "POST") { accepted = turn(JSON.parse(String(options.body))); return json(accepted, 202); }
+    if (path === base + "/A/turns?offset=0&limit=50") return json(accepted ? [accepted] : []);
+    if (path.includes("/events?") || path.endsWith("/approvals")) return json([]);
+    if (path.endsWith("/result")) return json({ run: { id: "run-A1" }, tools: [] });
+    if (path === bindingPath) return json({ session_id: "A", project_id: "project-one", revision: 1, session_revision: 0, workspace_id: "local" });
+    if (path === "/v2/me/sandbox/projects/project-one") return json(project);
+    if (path === "/v2/me/development/projects/project-one/environment") return networkLost();
+    if (path === "/v2/me/development/projects/project-one/prepare" && method === "POST") { preparePosts++; return networkLost(); }
+    return undefined;
+  };
+  history.replaceState({}, "", "/ui/?view=chat&workspace=local&session=A");
+  await act(async () => root.render(<StrictMode><App /></StrictMode>));
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  await type("chat-prompt", "读取失败也要保留的消息");
+  await act(async () => button("发送").click());
+  await until(() => expect(container.textContent).toContain("首条消息已保留"));
+  expect(preparePosts).toBe(1);
+  await act(async () => button("发送").click());
+  await until(() => expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).disabled).toBe(false));
+  expect(preparePosts).toBe(1);
+  expect(calls.filter(call => call.method === "POST" && call.path === base + "/A/turns")).toHaveLength(0);
+  expect((document.getElementById("chat-prompt") as HTMLTextAreaElement).value).toBe("读取失败也要保留的消息");
 });
 
 async function type(id: string, value: string) {

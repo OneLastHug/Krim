@@ -16,6 +16,7 @@ from pydantic import JsonValue, ValidationError
 from krim_agent.agent_sdk.context import CompactorHistory
 from krim_agent.config import Settings
 from krim_agent.context.compaction import Compactor
+from krim_agent.context.compaction_source import RunGroupSource
 from krim_agent.context.types import (
     ChildRunContext,
     ContextPolicy,
@@ -105,6 +106,9 @@ class DevelopmentSDKLoop(AgentLoop):
         task = await subagents.repository.task(context.task_id)
         raw = task["input"].get("workspace")
         if raw is None:
+            profile = task["input"].get("profile_snapshot")
+            if isinstance(profile, dict) and profile.get("workspace") == "isolated_write":
+                raise ServiceError("facts_corrupt")
             return None
         try:
             assignment = WorkspaceAssignment.model_validate(raw)
@@ -158,7 +162,9 @@ class DevelopmentSDKLoop(AgentLoop):
         run_tools: Any | None = None,
         session_scope: SessionToolScope | None = None,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        stream_check: Callable[[], None] | None = None,
     ) -> None:
+        check_stream = stream_check if stream_check is not None else assert_target_current
         if execution_budget is None:
             raise ServiceError("execution_error")
         assert_target_current()
@@ -211,7 +217,8 @@ class DevelopmentSDKLoop(AgentLoop):
             assert_target_current()
 
         async def emit(kind: str, data: dict[str, JsonValue]) -> RunEvent:
-            assert_target_current()
+            (check_stream if kind in {"text", "summary_text", "model_activity"}
+             else assert_target_current)()
             if kind == "model_start":
                 await verify_source()
             event = await self.store.append(run_id, kind, data)
@@ -297,6 +304,9 @@ class DevelopmentSDKLoop(AgentLoop):
                     compactor, run_id, boundary=boundary,
                     live_memory=(boundary is not None and self.context_service is not None
                                  and self.context_service.snapshots is not None),
+                    run_source=RunGroupSource(
+                        development_context.frozen.turn_id, source.verify,
+                    ),
                 )
             return SDKHistory(history, context_policy)
 
@@ -365,6 +375,7 @@ class DevelopmentSDKLoop(AgentLoop):
             tool_context=context,
             emit=emit,
             check=assert_target_current,
+            stream_check=check_stream,
             approval_request=approval_request,
             read_result=unused_result,
             read_receipt=read_receipt,

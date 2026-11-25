@@ -325,9 +325,9 @@ class RunBinding:
             else None,
         )
 
-    def assert_current(self) -> None:
-        # describe() validates and returns the current registry schemas below.
-        # Keep one complete schema check per synchronous binding check.
+    def assert_runtime_current(self) -> None:
+        """Retain live identity/config fences without rebuilding tool schemas."""
+        self.loop.executor.registry.assert_runtime_current()
         if self.tool_tokens(self.loop) != self.tool_identities:
             raise ServiceError("tool_binding_changed")
         if self._http_token is not None and (
@@ -335,11 +335,16 @@ class RunBinding:
             or self.loop.provider.binding_token() != self._http_token
         ):
             raise ServiceError("target_binding_changed")
-        actual = self.runtime_identities(self.loop)
+        if self.runtime_identities(self.loop) != self.identities:
+            raise ServiceError("target_binding_changed")
+
+    def assert_current(self) -> None:
+        self.assert_runtime_current()
+        # Full model/tool boundaries still rebuild and compare live schemas;
+        # a cached descriptor must never certify its own unchanged contents.
         descriptor = cast(dict[str, JsonValue], parse_json(self.descriptor_json))
         if (
-            actual != self.identities
-            or encoded(self.describe(cast(str, descriptor["key"]), self.loop, self.loop.settings))
+            encoded(self.describe(cast(str, descriptor["key"]), self.loop, self.loop.settings))
             != self.descriptor_json
         ):
             raise ServiceError("target_binding_changed")
@@ -359,6 +364,13 @@ class TurnBinding:
     @property
     def settings(self) -> Settings:
         return self.base.settings
+
+    def assert_runtime_current(self) -> None:
+        self.base.assert_runtime_current()
+        if builder.binding_token() != self.context_token:
+            raise ServiceError("context_binding_changed")
+        if self.executor is not None:
+            self.executor.registry.assert_runtime_current()
 
     def assert_current(self) -> None:
         self.base.assert_current()
@@ -822,6 +834,7 @@ class RunService:
                             self._approval_request,
                             executing.assert_current,
                             execution_budget=budget,
+                            stream_check=executing.assert_runtime_current,
                             resume=cast(Any, recovery),
                             executor=(
                                 run_tools.executor if run_tools is not None else

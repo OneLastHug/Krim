@@ -137,6 +137,8 @@ export interface ObsCompactionChange {
   summary_step_index: number | null;
   before_input_bytes: number;
   after_input_bytes: number;
+  before_input_tokens?: number | null;
+  after_input_tokens?: number | null;
   counter_version: string | null;
   source_hash: string | null;
   output_hash: string | null;
@@ -213,14 +215,17 @@ function parseManifestItem(raw: unknown): ObsManifestItem {
 const manifestFields = ["version", "counter_version", "input_bytes", "estimated_tokens", "items", "model_context_window", "items_truncated", "omitted_items", "source_refs_truncated"] as const;
 const manifestOptionalFields = ["compaction_changes", "reserved_output_tokens", "input_budget_bytes"] as const;
 const compactionChangeFields = ["pass_index", "summary_step_index", "before_input_bytes", "after_input_bytes", "counter_version", "source_hash", "output_hash"] as const;
+const compactionChangeOptionalFields = ["before_input_tokens", "after_input_tokens"] as const;
 
 function parseCompactionChange(raw: unknown): ObsCompactionChange {
   const value = object(raw);
-  if (compactionChangeFields.some(field => !(field in value)) || Object.keys(value).length !== compactionChangeFields.length) {
+  if (compactionChangeFields.some(field => !(field in value)) || Object.keys(value).some(field => !(compactionChangeFields as readonly string[]).includes(field) && !(compactionChangeOptionalFields as readonly string[]).includes(field))) {
     throw new Error("压缩变化结构无效");
   }
   if (!nonNegativeInt(value.pass_index) || !integerOrNull(value.summary_step_index)
     || !nonNegativeInt(value.before_input_bytes) || !nonNegativeInt(value.after_input_bytes)
+    || (value.before_input_tokens !== undefined && value.before_input_tokens !== null && !nonNegativeInt(value.before_input_tokens))
+    || (value.after_input_tokens !== undefined && value.after_input_tokens !== null && !nonNegativeInt(value.after_input_tokens))
     || (value.counter_version !== null && !idText(value.counter_version))
     || (value.source_hash !== null && !idText(value.source_hash, 256))
     || (value.output_hash !== null && !idText(value.output_hash, 256))) {

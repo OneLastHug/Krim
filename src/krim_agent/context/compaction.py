@@ -49,6 +49,12 @@ class Measurement:
 
 
 class Compactor:
+    # Current-run segments (development sessions). Workspace sources keep these
+    # unset; every check below then reduces to the frozen anchor prefix.
+    run_refs: tuple[dict[str, JsonValue], ...] | None = None
+    run_rows: list[dict[str, Any]] | None = None
+    run_spans: list[tuple[int, int]] | None = None
+
     def __init__(
         self,
         store: SQLiteStore,
@@ -164,6 +170,105 @@ class Compactor:
             "compaction": source.compaction_policy.model_dump(mode="json"),
             "extensions": source.extensions,
         }
+
+    def _covered_refs(self, count: int) -> list[dict[str, JsonValue]]:
+        """Exact refs of a covered prefix: frozen anchors plus current-run segments."""
+        head = min(count, len(self.anchor_refs))
+        extra = count - head
+        run = self.run_refs or ()
+        if extra > 0 and (self.run_refs is None or extra > len(run)):
+            raise ServiceError("facts_corrupt")
+        return [dict(ref) for ref in (*self.anchor_refs[:head], *run[:extra])]
+
+    def _set_run_history(self, run_history: list[dict[str, Any]] | None) -> None:
+        """Adopt caller-derived current-run rows; refs may extend but never shift.
+
+        Rows carry optional conversation spans (start/end indexes). Without
+        them the rows are laid out contiguously from index 1, which is the
+        restored-projection default; the caller overlays real spans before any
+        composition so injected user envelopes are never inside a span.
+        """
+        if run_history is None:
+            if self.run_refs:
+                raise ServiceError("facts_corrupt")
+            return
+        refs: list[dict[str, JsonValue]] = []
+        spans: list[tuple[int, int]] = []
+        cursor = 1
+        for row in run_history:
+            ref, messages = row.get("ref"), row.get("messages")
+            if (
+                not isinstance(ref, dict)
+                or set(ref) != {"turn_id", "run_id", "terminal_seq", "transcript_fingerprint"}
+                or not isinstance(ref["turn_id"], str)
+                or not ref["turn_id"]
+                or ref["run_id"] != self.run_id
+                or type(ref["terminal_seq"]) is not int
+                or ref["terminal_seq"] < 0
+                or not isinstance(ref["transcript_fingerprint"], str)
+                or len(ref["transcript_fingerprint"]) != 64
+                or not isinstance(messages, list)
+                or not messages
+            ):
+                raise ServiceError("facts_corrupt")
+            builder.validate_groups(list(messages))
+            start, end = row.get("start"), row.get("end")
+            if start is None and end is None:
+                start, end = cursor, cursor + len(messages)
+            elif (
+                type(start) is not int
+                or type(end) is not int
+                or start < 1
+                or end <= start
+                or end - start != len(messages)
+            ):
+                raise ServiceError("facts_corrupt")
+            if spans and start < spans[-1][1]:
+                raise ServiceError("facts_corrupt")
+            spans.append((start, end))
+            cursor = end
+            refs.append(dict(ref))
+        if self.run_refs is not None and refs[: len(self.run_refs)] != list(self.run_refs):
+            raise ServiceError("facts_corrupt")
+        self.run_refs, self.run_rows, self.run_spans = tuple(refs), list(run_history), spans
+
+    def _run_skip(self, covered: int) -> frozenset[int]:
+        """Conversation indexes replaced by covered current-run segments.
+
+        Only the closed assistant/tool messages inside a covered span leave the
+        conversation; the leading user goal and every injected user envelope
+        between groups keep their positions.
+        """
+        extra = covered - len(self.anchor_refs)
+        if extra <= 0:
+            return frozenset()
+        spans = self.run_spans or []
+        if extra > len(spans):
+            raise ServiceError("facts_corrupt")
+        skip: set[int] = set()
+        for start, end in spans[:extra]:
+            skip.update(range(start, end))
+        return frozenset(skip)
+
+    def _composed(
+        self,
+        summary: str,
+        covered: int,
+        history: list[dict[str, Any]],
+        conversation: list[Message],
+    ) -> list[Message]:
+        skip = self._run_skip(covered)
+        return [
+            Message(role="system", content=self.system),
+            *([Message(role="user", content="[不可信历史摘要] " + summary)] if summary else []),
+            *[m for turn in history[covered:] for m in turn["messages"]],
+            *extension_messages(self.projected_extensions()),
+            *self.projections,
+            # The current user goal and every injected user envelope keep their
+            # positions; only the closed assistant/tool messages inside covered
+            # spans leave the conversation.
+            *[m for i, m in enumerate(conversation) if i == 0 or i not in skip],
+        ]
 
     def _assert_source(self) -> None:
         if fingerprint(self._source_descriptor()) != self._source_binding:
@@ -317,7 +422,7 @@ class Compactor:
                 refs = row["source_refs"]
                 if (
                     not refs
-                    or refs != list(self.anchor_refs[: len(refs)])
+                    or refs != self._covered_refs(len(refs))
                     or row["source_hash"] != fingerprint(refs)
                     or row["session_id"] != self.session_id
                     or row["policy"] != self.record_policy
@@ -342,14 +447,7 @@ class Compactor:
 
     def snapshot(self, summary: str, covered: int) -> PreparedContext:
         assert self.history is not None
-        messages = [
-            Message(role="system", content=self.system),
-            *([Message(role="user", content="[不可信历史摘要] " + summary)] if summary else []),
-            *[m for turn in self.history[covered:] for m in turn["messages"]],
-            *extension_messages(self.projected_extensions()),
-            *self.projections,
-            *self.conversation,
-        ]
+        messages = self._composed(summary, covered, self.history, self.conversation)
         measured = self.measure(messages, self.tools, self.max_group, self.remaining_tools)
         size, tokens = measured.size_bytes, measured.tokens
         cap = self._byte_cap()
@@ -402,7 +500,7 @@ class Compactor:
             refs = row["source_refs"]
             if (
                 not refs
-                or refs != list(self.anchor_refs[: len(refs)])
+                or refs != self._covered_refs(len(refs))
                 or row["source_hash"] != fingerprint(refs)
                 or row["session_id"] != self.session_id
                 or row["policy"] != self.record_policy
@@ -449,7 +547,7 @@ class Compactor:
 
     async def summarize(self, refs: list[dict[str, JsonValue]], messages: list[Message]) -> str:
         self.guard()
-        if not refs or refs != list(self.anchor_refs[: len(refs)]):
+        if not refs or refs != self._covered_refs(len(refs)):
             raise ServiceError("facts_corrupt")
         index = self.passes
         if self.compaction.max_passes is not None and index >= self.compaction.max_passes:
@@ -570,6 +668,7 @@ class Compactor:
         projections: list[Message] | None = None,
         projection_metadata: list[ItemMetadata | None] | None = None,
         live_memory: bool = False,
+        run_history: list[dict[str, Any]] | None = None,
     ) -> list[Message]:
         # Never summarize or persist a projection across an unresolved tool group.
         builder.validate_groups(conversation)
@@ -582,6 +681,7 @@ class Compactor:
         if len(self.projection_metadata) != len(self.projections):
             raise ServiceError("facts_corrupt")
         self.run_id = run_id
+        self._set_run_history(run_history)
         self.compaction_changes = []
         self.conversation = [Message.model_validate_json(m.model_dump_json()) for m in conversation]
         self.tools = tools
@@ -664,7 +764,7 @@ class Compactor:
                 count = len(row["source_refs"])
                 if (
                     0 < count <= len(self.history) - self.compaction.keep_turns
-                    and row["source_refs"] == list(self.anchor_refs[:count])
+                    and row["source_refs"] == self._covered_refs(count)
                     and row["source_hash"] == fingerprint(row["source_refs"])
                     and row["policy"] == self.record_policy
                     and row["provider_identity"] == self.provider_identity
@@ -709,19 +809,9 @@ class Compactor:
             return request
 
         def compose() -> list[Message]:
-            return [
-                Message(role="system", content=self.system),
-                *(
-                    [Message(role="user", content="[不可信历史摘要] " + self.summary)]
-                    if self.summary
-                    else []
-                ),
-                *[m for turn in history[self.covered :] for m in turn["messages"]],
-                *extension_messages(self.projected_extensions()),
-                *self.projections,
-                *conversation,
-            ]
+            return self._composed(self.summary, self.covered, history, conversation)
 
+        total = len(history) + len(self.run_rows or ())
         while True:
             messages = compose()
             measured = self.measure(messages, tools, self.max_group, self.remaining_tools)
@@ -730,13 +820,17 @@ class Compactor:
                 measured.tokens,
                 measured.triggered,
             )
-            remaining = len(history) - self.compaction.keep_turns
+            remaining = total - self.compaction.keep_turns
             if not (trigger or force) or self.covered >= remaining:
                 break
             end = self.covered
             selected: list[Message] = []
             while end < remaining:
-                trial = selected + history[end]["messages"]
+                if end < len(history):
+                    tail = history[end]["messages"]
+                else:
+                    tail = self.run_rows[end - len(history)]["messages"]
+                trial = selected + tail
                 try:
                     summary_request(trial)
                 except ServiceError as error:
@@ -747,17 +841,22 @@ class Compactor:
                 end += 1
             if end == self.covered:
                 raise ServiceError("compaction_budget")
-            # A contiguous prefix of complete turns; no synthetic source IDs.
-            refs = [dict(ref) for ref in self.anchor_refs[:end]]
+            # A contiguous prefix of complete turns and closed current-run
+            # groups; every ref keeps its real ledger shape, never a synthetic id.
+            refs = self._covered_refs(end)
             self.candidate_end = end
             pass_index, summary_step = self.passes, self.step.index
             output = await self.summarize(refs, summary_request(selected))
             self.guard()
+            # Summary usage may calibrate the shared token counter. Compare
+            # both projections with that same current counter, not a stale
+            # pre-summary estimate against a newly calibrated estimate.
+            before = self.measure(messages, tools, self.max_group, self.remaining_tools)
             self.summary, self.covered = output, end
             after = self.measure(compose(), tools, self.max_group, self.remaining_tools)
             # 回归判定用本代绑定域：token窗口代比token，旧代比字节。投影不
             # 变小则更多provider调用不能成立；完整账本仍可检索。
-            binding_before = tokens if self.counts_tokens else size
+            binding_before = before.tokens if self.counts_tokens else before.size_bytes
             binding_after = after.tokens if self.counts_tokens else after.size_bytes
             if binding_after >= binding_before:
                 raise ServiceError("compaction_budget", 422)
@@ -768,7 +867,7 @@ class Compactor:
                     "summary_step_index": summary_step,
                     "before_input_bytes": size,
                     "after_input_bytes": after.size_bytes,
-                    "before_input_tokens": tokens,
+                    "before_input_tokens": before.tokens,
                     "after_input_tokens": after.tokens,
                     "counter_version": (
                         self._counter.version if self.counts_tokens else LEGACY_COUNTER_VERSION
@@ -818,9 +917,7 @@ class Compactor:
         result: list[ItemMetadata | None] = [None] * len(messages)
         cursor = 1  # compose() always starts with the top-level system message
         if self.summary and self.covered and cursor < len(messages):
-            refs = tuple(
-                cast(dict[str, JsonValue], ref) for ref in self.anchor_refs[: self.covered]
-            )
+            refs = tuple(self._covered_refs(self.covered))
             result[cursor] = ItemMetadata(
                 category="summary",
                 label="Compacted history summary",
@@ -843,11 +940,12 @@ class Compactor:
         extension_items = (
             cast(list[dict[str, JsonValue]], raw_items) if isinstance(raw_items, list) else []
         )
-        projection_cursor = len(messages) - len(self.conversation) - len(self.projections)
-        extension_cursor = projection_cursor - len(extension_items)
+        extension_cursor = cursor
+        projection_cursor = extension_cursor + len(extension_items)
+        conversation_cursor = projection_cursor + len(self.projections)
         for offset, item in enumerate(extension_items):
             index = extension_cursor + offset
-            if index >= len(messages) - len(self.conversation):
+            if not 0 <= index < len(messages):
                 break
             category: Category = "skill" if item.get("kind") == "skill" else "memory"
             label = (
@@ -860,8 +958,28 @@ class Compactor:
             )
         for offset, metadata in enumerate(self.projection_metadata):
             index = projection_cursor + offset
-            if 0 <= index < len(messages) - len(self.conversation):
+            if 0 <= index < len(messages):
                 result[index] = metadata
+        skip = self._run_skip(self.covered)
+        refs_by_index = {
+            index: ref
+            for ref, (start, end) in zip(
+                self.run_refs or (), self.run_spans or (), strict=True
+            )
+            for index in range(start, end)
+            if index not in skip
+        }
+        for original, message in enumerate(self.conversation):
+            if original in skip:
+                continue
+            ref = refs_by_index.get(original)
+            if ref is not None and conversation_cursor < len(messages):
+                result[conversation_cursor] = ItemMetadata(
+                    category="tool_result" if message.role == "tool" else "history",
+                    label="Current run tool exchange",
+                    source_refs=(ref,),
+                )
+            conversation_cursor += 1
         return result
 
 

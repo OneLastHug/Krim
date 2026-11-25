@@ -23,7 +23,7 @@ from ai.agents import Context as SDKContext
 from ai.agents import HookDeferredException, HookRegistry, ToolRunner, deferred_tool_result
 from ai.types.tools import ToolApproval
 from ai.types.tools import ToolSpec as SDKToolSpec
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from krim_agent.config import DEFAULT_TOOL_PARALLELISM
 from krim_agent.contracts import (
@@ -45,6 +45,7 @@ from krim_agent.interaction.contracts import RequestPending
 from krim_agent.runtime.contracts import RunStore, settled
 from krim_agent.tools.core import Invocation
 from krim_agent.tools.executor import Admission, StartupHandoff, ToolContext, ToolExecutor
+from krim_agent.tools.input_errors import ToolInputError, blocked_batch_result
 
 from .host import CURRENT_OPERATION, HostExecution, sdk_lifetime
 from .media import DEFAULT_MEDIA_LIMITS, MediaLimits, authorize_history
@@ -118,6 +119,7 @@ class _Entry:
     predecessors: tuple[asyncio.Event, ...] = ()
     input_request: dict[str, Any] | None = None
     startup_gate: asyncio.Lock | None = None
+    input_error: dict[str, JsonValue] | None = None
     # 会话启动闸门：ordered() 在最新判定前获取；execute() 移交 StartupHandoff
     # 后置 None，executor 在 entered 边界释放。停靠/异常路径由 ordered() 兜底。
 
@@ -210,6 +212,16 @@ class _OrderedAgent(ai.Agent):
                 for predecessor in entry.predecessors:
                     await predecessor.wait()
                 await owner.check_stop()
+                if entry.input_error is not None:
+                    if part.cached_result is not None:
+                        return cast(events.ToolCallResult, await native())
+                    result = await owner.reject_input(entry)
+                    result_part = messages.ToolResultPart(
+                        tool_call_id=part.tool_call_id, tool_name=part.tool_name,
+                        result=result, result_kind="error",
+                    )
+                    message = messages.Message(role="tool", parts=[result_part])
+                    return events.ToolCallResult(message=message, results=message.tool_results)
                 if owner.deferred and (
                     owner.deferred.metadata.get("interaction_request_id")
                     or not owner.batch_approvals
@@ -612,31 +624,46 @@ class SDKAdapter:
                 provider_call_id=call.tool_call_id,
             )
             context = self.context()
-            admission = await self.executor.admit(
-                invocation, context, timeout_seconds=context.timeout,
-            )
-            identity = None
-            if (spec.risk != "read" and self.operations is not None
-                    and spec.name not in INPUT_TOOLS):
-                assert self.environment is not None and self.ownership is not None
-                identity = OperationIdentity(
-                    operation_id=f"op-{uuid4().hex}",
-                    call_id=invocation.call_id,
-                    environment=self.environment,
-                    ownership=self.ownership,
-                    request_digest=fingerprint(
-                        {"name": invocation.name, "args": args, "tool_hash": spec.fingerprint}
-                    ),
+            input_error = None
+            try:
+                admission = await self.executor.admit(
+                    invocation, context, timeout_seconds=context.timeout,
                 )
-            entry = _Entry(
-                invocation,
-                replace(admission, start_emitted=True),
-                identity,
-                asyncio.Event(),
+            except ToolInputError as error:
+                # Only schema validation before hooks/policy/dispatch is recoverable.
+                # Binding, authorization, hook, cancellation and storage errors still fail closed.
+                admission = Admission(spec, None, "deny", code="invalid_input")
+                input_error = error.details
+            prepared[call.tool_call_id] = _Entry(
+                invocation, replace(admission, start_emitted=True), None,
+                asyncio.Event(), input_error=input_error,
             )
-            prepared[call.tool_call_id] = entry
+        invalid_batch = any(entry.input_error is not None for entry in prepared.values())
+        for entry in prepared.values():
+            if invalid_batch:
+                if entry.input_error is None and entry.admission.decision != "deny":
+                    entry.input_error = blocked_batch_result()
+                    entry.admission = replace(
+                        entry.admission, decision="deny", code="batch_not_executed",
+                    )
+            if (entry.input_error is None and entry.admission.spec.risk != "read"
+                    and self.operations is not None and entry.invocation.name not in INPUT_TOOLS):
+                assert self.environment is not None and self.ownership is not None
+                entry.identity = OperationIdentity(
+                    operation_id=f"op-{uuid4().hex}",
+                    call_id=entry.invocation.call_id,
+                    environment=self.environment, ownership=self.ownership,
+                    request_digest=fingerprint({
+                        "name": entry.invocation.name,
+                        "args": parse_json(entry.invocation.arguments_json),
+                        "tool_hash": entry.invocation.tool_hash,
+                    }),
+                )
+        self.executor.registry.assert_current()
+        await self.check_stop()
         self.order(list(prepared.values()))
-        # Only after every admission succeeds do tool_start events become visible.
+        # Full-response validation still precedes every executable call. Invalid
+        # batches receive paired pre-dispatch failures, never partial side effects.
         for entry in prepared.values():
             await self.store.append(
                 self.run_id,
@@ -655,6 +682,37 @@ class SDKAdapter:
             )
         self.entries.update(prepared)
         await self.check_stop()
+
+    async def reject_input(self, entry: _Entry) -> dict[str, JsonValue]:
+        """Record a known pre-dispatch failure without invoking SDK validation or a tool."""
+        await self.check_stop()
+        self.executor.registry.assert_current()
+        if entry.input_error is None or entry.identity is not None:
+            raise ServiceError("facts_corrupt")
+        invocation = entry.invocation
+        observation = ToolObservation(
+            call_id=invocation.call_id, provider_call_id=invocation.provider_call_id,
+            span_id=invocation.span_id, step_index=invocation.step_index,
+            name=invocation.name,
+            arguments=cast(dict[str, JsonValue], parse_json(invocation.arguments_json)),
+            status="failed", decision="deny", executor_started=False,
+            result_available=True, value=entry.input_error,
+            code=cast(str, entry.input_error["code"]),
+        )
+        # A checkpoint may precede this write, or already contain its result.
+        # Reuse only the exact persisted observation; never dispatch on replay.
+        snapshot = await self.store.snapshot(self.run_id)
+        prior = [event for event in getattr(snapshot, "events", ())
+                 if event.data.get("call_id") == invocation.call_id
+                 and event.kind in {"tool_intent", "tool_end"}]
+        if prior:
+            if (len(prior) != 1 or prior[0].kind != "tool_end"
+                    or prior[0].data != observation.model_dump(mode="json")):
+                raise ServiceError("facts_corrupt")
+        else:
+            await self.context().emit("tool_end", observation.model_dump(mode="json"))
+        await self.check_stop()
+        return observation.model_dump(mode="json", exclude={"arguments"})
 
     async def execute(self, entry: _Entry) -> JsonValue:
         await self.check_stop()
@@ -850,6 +908,7 @@ class SDKAdapter:
                     "decision": entry.admission.decision,
                     "code": entry.admission.code,
                     "input_request": entry.input_request,
+                    **({"input_error": entry.input_error} if entry.input_error is not None else {}),
                 }
                 for call_id, entry in self.entries.items()
             },
@@ -888,13 +947,27 @@ class SDKAdapter:
             spec = self.executor.registry.get(invocation.name)
             if spec.fingerprint != invocation.tool_hash or invocation.run_id != self.run_id:
                 raise ValueError("tool binding changed")
-            parsed = spec.parameters.model_validate(
-                parse_json(invocation.arguments_json), strict=True
-            )
+            input_error = item.get("input_error")
+            parsed = None
+            try:
+                parsed = spec.parameters.model_validate(
+                    parse_json(invocation.arguments_json), strict=True,
+                )
+            except ValidationError as error:
+                expected = ToolInputError(error, spec.parameters.model_json_schema()).details
+                if input_error != expected:
+                    raise ValueError("checkpoint input rejection changed") from None
+            else:
+                if input_error is not None and input_error != blocked_batch_result():
+                    raise ValueError("checkpoint input rejection changed")
+            if input_error is not None and (
+                item["decision"] != "deny" or item["code"] != input_error.get("code")
+            ):
+                raise ValueError("checkpoint input rejection binding changed")
             identity = (
                 OperationIdentity.model_validate(item["identity"]) if item["identity"] else None
             )
-            if (spec.risk != "read" and self.operations is not None
+            if (input_error is None and spec.risk != "read" and self.operations is not None
                     and spec.name not in INPUT_TOOLS) != (identity is not None):
                 raise ValueError("checkpoint lost operation identity")
             if identity is not None and (
@@ -914,7 +987,7 @@ class SDKAdapter:
             admission = Admission(spec, parsed, item["decision"], item["code"], start_emitted=True)
             self.entries[call_id] = _Entry(
                 invocation, admission, identity, asyncio.Event(),
-                input_request=item.get("input_request"),
+                input_request=item.get("input_request"), input_error=input_error,
             )
         history = [messages.Message.model_validate(item) for item in checkpoint["messages"]]
         # Only the final incomplete assistant batch will be replayed by the SDK.

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from krim_agent.contracts import ServiceError, encoded, parse_json
 from krim_agent.development.contracts import (
@@ -209,10 +210,13 @@ def test_isolate_invocation_keeps_one_consistent_arguments_json() -> None:
 
     # Escape attempts keep their original rejection at the unchanged
     # validation layer; relocation never rewrites them into valid paths.
-    absolute = isolate_invocation(_invocation("write", {"path": "/abs.py"}), DIRECTORY)
-    assert parse_json(absolute.arguments_json) == {"path": "/abs.py"}
-    with pytest.raises(ServiceError):
+    absolute = isolate_invocation(
+        _invocation("write", {"path": "/abs.py", "content": "blocked"}), DIRECTORY,
+    )
+    assert parse_json(absolute.arguments_json) == {"path": "/abs.py", "content": "blocked"}
+    with pytest.raises(ValidationError) as invalid_path:
         WriteInput.model_validate(parse_json(absolute.arguments_json))
+    assert [error["loc"] for error in invalid_path.value.errors()] == [("path",)]
 
     browser = _invocation("browser_action", {"action": "goto", "path": "/x"})
     assert isolate_invocation(browser, DIRECTORY) is browser

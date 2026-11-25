@@ -270,7 +270,8 @@ def mount_development(app: FastAPI) -> None:
         preview_origin(request, selected)
         value = await selected.open_preview(principal(request), preview_id)
         return JSONResponse(
-            {"action": value.action, "ticket": value.ticket, "expires_at": value.expires_at},
+            {"action": value.action, "ticket": value.ticket, "expires_at": value.expires_at,
+             "allow_embedding": value.allow_embedding},
             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
         )
 

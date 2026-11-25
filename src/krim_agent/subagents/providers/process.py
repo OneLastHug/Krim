@@ -138,6 +138,21 @@ try:
 except OSError:
     head = None
 mode = "copy"
+marker = target + ".prepared.json"
+if os.path.lexists(target):
+    if os.path.islink(target) or not os.path.isdir(target) or os.path.islink(marker):
+        raise ValueError("invalid workspace directory")
+    if not os.path.exists(marker) and isinstance(limits.get("prior_prepared"), dict):
+        with open(marker, "x") as destination:
+            json.dump({**limits["prior_prepared"], "directory": target, "version": 1}, destination)
+    with open(marker) as source:
+        prepared = json.load(source)
+    if (prepared.get("directory") != target or prepared.get("version") != 1
+            or prepared.get("mode") not in {"copy", "worktree"}
+            or prepared.get("truncated") is not False):
+        raise ValueError("workspace preparation not verified")
+    print(json.dumps({**prepared, "copied": 0, "reused": True}))
+    sys.exit(0)
 if head:
     done = subprocess.run(
         ["git", "worktree", "add", "--detach", target, head],
@@ -172,10 +187,15 @@ for root, dirs, files in os.walk("."):
             skipped += 1
     if truncated:
         break
-print(json.dumps({
+manifest = {
     "mode": mode, "head": head, "copied": copied,
     "skipped": skipped, "truncated": truncated,
-}))
+}
+if not truncated and skipped == 0:
+    with open(marker + ".tmp", "x") as destination:
+        json.dump({**manifest, "directory": target, "version": 1}, destination)
+    os.replace(marker + ".tmp", marker)
+print(json.dumps(manifest))
 """
 
 # 工作目录约束：worker 进程以隔离目录为 cwd 启动（plan §9.2）。包装脚本
@@ -1017,7 +1037,10 @@ class ProcessAgentLoop(AgentLoop):
         run_tools: Any | None = None,
         session_scope: Any | None = None,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        stream_check: Callable[[], None] | None = None,
     ) -> None:
+        # Process workers do not consume model text deltas. Accept the shared
+        # run interface while retaining complete checks around their effects.
         def check() -> None:
             assert_target_current()
             if self._d3_seal != (

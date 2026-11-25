@@ -12,6 +12,8 @@ from krim_agent.config import Settings
 from krim_agent.contracts import ApprovalReply, RunRequest, ServiceError
 from krim_agent.providers.types import ModelText, ModelToolCall
 from krim_agent.tools.output import OutputContract
+from tests.support.builtins import builtin_registry, demo_policy
+from tests.support.fake_provider import FakeProvider
 
 
 class ToolResultProvider(EventProvider):
@@ -84,11 +86,18 @@ async def test_post_failure_preserves_actual_result(tmp_path):
     async def broken_post(invocation, outcome):
         raise RuntimeError("SYNTHETIC_SECRET")
 
-    async with await open_application(tmp_path / "post.db", post=broken_post) as app:
+    async with await open_application(
+        tmp_path / "post.db",
+        provider=FakeProvider(),
+        registry=builtin_registry(),
+        policy=demo_policy,
+        post=broken_post,
+    ) as app:
         run = await app.service.start(RunRequest(text="/add 2 3", request_key="post"))
         await app.service.wait(run.id)
         result = await app.service.result(run.id)
-        assert result.run.status == "failed"
+        assert result.run.status == "failed" and result.run.code == "post_hook_error"
+        assert result.tools[0].status == "failed"
         assert result.tools[0].executor_started is True
         assert result.tools[0].result_available is True
         assert result.tools[0].value == {"sum": 5.0}
@@ -138,7 +147,7 @@ async def test_tool_chain_rejects_and_never_invents_success(tmp_path, mode, code
             )
         ]
     )
-    kwargs = {"provider": provider, "registry": registry_for(execute)}
+    kwargs = {"provider": provider, "registry": registry_for(execute), "policy": demo_policy}
     if mode == "no-policy":
         kwargs["policy"] = None
     if mode == "pre-forge":
@@ -161,10 +170,21 @@ async def test_tool_chain_rejects_and_never_invents_success(tmp_path, mode, code
                     "status": "denied",
                 }
             ]
+        elif mode == "input":
+            assert facts.run.status == "completed" and facts.run.code is None
+            assert facts.tools[0].status == "failed" and facts.tools[0].code == code
+            assert facts.tools[0].executor_started is False
+            assert facts.tools[0].result_available is True
+            assert provider.observations[0]["value"]["errors"][0]["field"] == ["text"]
+            assert "arguments" not in provider.observations[0]
         else:
             assert facts.run.status == "failed" and facts.run.code == code
+            if mode in {"output", "post-forge"}:
+                assert facts.tools[0].status == "failed"
+                assert facts.tools[0].executor_started is True
         assert len(calls) == (1 if mode in {"output", "post-forge"} else 0)
-        assert provider.calls == (2 if mode == "no-policy" else 1) and provider.active == 0
+        assert provider.calls == (2 if mode in {"no-policy", "input"} else 1)
+        assert provider.active == 0
         if mode == "post-forge":
             assert facts.tools[0].value == "actual"
 
@@ -206,8 +226,6 @@ def test_output_schema_never_fetches_remote_or_accepts_invalid_schema(schema):
 def test_registry_rejects_write_and_duplicate_names():
     from dataclasses import replace
 
-    from tests.support.builtins import builtin_registry
-
     spec = builtin_registry()._frozen[0][0]
     with pytest.raises(ValueError):
         replace(spec, risk="write")
@@ -229,9 +247,9 @@ async def test_binding_check_builds_each_schema_once_and_still_rejects_mutation(
         return "actual"
 
     async with await open_application(
-        tmp_path / "schema-check.db", registry=registry_for(execute),
+        tmp_path / "schema-check.db", provider=FakeProvider(), registry=registry_for(execute),
     ) as app:
-        binding = app.service.bindings["demo"]
+        binding = app.service.bindings["target-http"]
         registry = binding.loop.executor.registry
         original = ToolSpec.descriptor
         built = []
@@ -259,7 +277,9 @@ async def test_frozen_definition_change_during_intent_wait_refuses_executor(tmp_
         return "actual"
 
     registry = registry_for(execute)
-    async with await open_application(tmp_path / "freeze.db", registry=registry) as app:
+    async with await open_application(
+        tmp_path / "freeze.db", registry=registry, policy=demo_policy, provider=FakeProvider(),
+    ) as app:
         original = app.store.append
 
         async def replace_definition(run_id, kind, data, **kwargs):
@@ -287,7 +307,10 @@ async def test_approval_bound_once_and_conflicting_or_cross_run_rejected(tmp_pat
         return "ask"
 
     async with await open_application(
-        tmp_path / "approval.db", registry=registry_for(execute), policy=ask
+        tmp_path / "approval.db",
+        registry=registry_for(execute),
+        policy=ask,
+        provider=FakeProvider(),
     ) as app:
         run = await app.service.start(RunRequest(text="/echo ok", request_key="approval"))
         request = await pending(app.service, run.id)
@@ -330,7 +353,11 @@ async def test_denied_expired_cancelled_approval_has_zero_executor_calls(
         [ModelToolCall(id="approval", name="echo", arguments={"text": "ok"})]
     )
     async with await open_application(
-        tmp_path / (action + ".db"), registry=registry_for(execute), policy=ask, provider=provider
+        tmp_path / (action + ".db"),
+        registry=registry_for(execute),
+        policy=ask,
+        provider=provider,
+        settings=Settings(approval_timeout=30),
     ) as app:
         run = await app.service.start(RunRequest(text="request", request_key=action))
         request = await parked_request(app, run.id)
@@ -383,7 +410,9 @@ async def test_schema_tamper_is_a_binding_error_before_new_run(tmp_path):
         raise AssertionError("不得调用")
 
     registry = registry_for(execute)
-    async with await open_application(tmp_path / "schema-tamper.db", registry=registry) as app:
+    async with await open_application(
+        tmp_path / "schema-tamper.db", registry=registry, provider=FakeProvider(),
+    ) as app:
         registry._frozen[0][0].output_schema["$ref"] = "https://example.invalid/never-fetch"
         with pytest.raises(ServiceError, match="tool_binding_changed"):
             await app.service.start(RunRequest(text="/echo x", request_key="tamper"))
@@ -395,12 +424,21 @@ async def test_post_cannot_mutate_nested_original_result(tmp_path):
     async def post(invocation, result):
         result.value["sum"] = -99
 
-    async with await open_application(tmp_path / "nested-post.db", post=post) as app:
+    async with await open_application(
+        tmp_path / "nested-post.db",
+        provider=FakeProvider(),
+        registry=builtin_registry(),
+        policy=demo_policy,
+        post=post,
+    ) as app:
         run = await app.service.start(RunRequest(text="/add 2 3", request_key="nested"))
         await app.service.wait(run.id)
         result = await app.service.result(run.id)
-        assert result.run.code == "post_hook_error" and result.tools[0].value == {"sum": 5.0}
-        assert result.tools[0].executor_started and result.tools[0].result_available
+        assert result.run.status == "failed" and result.run.code == "post_hook_error"
+        receipt = result.tools[0]
+        assert receipt.status == "failed" and receipt.code == "post_hook_error"
+        assert receipt.value == {"sum": 5.0}
+        assert receipt.executor_started and receipt.result_available
 
 
 @pytest.mark.asyncio
@@ -422,6 +460,7 @@ async def test_approval_commit_caller_cancellation_delivers_original_decision_on
         settings=Settings(approval_timeout=3),
         registry=registry_for(execute),
         policy=ask,
+        provider=FakeProvider(),
     ) as app:
         run = await app.service.start(RunRequest(text="/echo bound", request_key="commit"))
         request = await parked_request(app, run.id)
@@ -499,6 +538,7 @@ async def test_approval_commit_racing_public_cancel_cannot_revive_run(
         tmp_path / ("cancel-commit-" + str(stop_first) + ".db"),
         registry=registry_for(execute),
         policy=ask,
+        provider=FakeProvider(),
     ) as app:
         run = await app.service.start(RunRequest(text="/echo bound", request_key="race"))
         request = await parked_request(app, run.id)
@@ -572,6 +612,7 @@ async def test_decision_admitted_before_expiry_survives_delayed_commit(tmp_path,
         tmp_path / "expiry-commit.db",
         registry=registry_for(execute),
         policy=ask,
+        provider=FakeProvider(),
         settings=Settings(approval_timeout=30),
     ) as app:
         run = await app.service.start(RunRequest(text="/echo bound", request_key="expiry-commit"))

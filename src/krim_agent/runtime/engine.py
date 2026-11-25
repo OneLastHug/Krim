@@ -83,15 +83,23 @@ class AgentLoop:
         run_tools: Any | None = None,
         session_scope: SessionToolScope | None = None,
         startup_gate: Callable[[], asyncio.Lock | None] | None = None,
+        stream_check: Callable[[], None] | None = None,
     ) -> None:
         active_executor = executor or self.executor
 
-        def check() -> None:
-            assert_target_current()
+        def check_seal() -> None:
             if self._d3_seal != (
                 compaction.binding_token(), model_step.binding_token(), builder.binding_token()
             ):
                 raise ServiceError("target_binding_changed")
+
+        def check() -> None:
+            assert_target_current()
+            check_seal()
+
+        def check_stream() -> None:
+            (stream_check if stream_check is not None else assert_target_current)()
+            check_seal()
 
         check()
         snapshot = await self.store.snapshot(run_id)
@@ -156,7 +164,7 @@ class AgentLoop:
             event = await self.store.append(run_id, kind, data)
             if kind == "model_start" and compressor is not None:
                 await compressor.store.work_read(compressor.verify)
-            check()
+            (check_stream if kind in {"text", "summary_text", "model_activity"} else check)()
             return event
 
         async def build_history(stepper: Any, request_limit: int | None) -> SDKHistory:
@@ -274,6 +282,7 @@ class AgentLoop:
             tool_context=tool_context,
             emit=emit,
             check=check,
+            stream_check=check_stream,
             approval_request=approval_request,
             read_result=reject_read_result,
             read_receipt=reject_read_receipt,

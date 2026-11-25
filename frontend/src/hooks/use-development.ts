@@ -10,7 +10,7 @@ import type { SessionState } from "./use-session.ts";
 
 // 开发信息栏数据面：只读取后端真实存在的接口；身份、会话或 fence 任一变化即作废在途读取。
 
-const TRANSITIONAL = ["creating", "starting", "stopping"];
+export const TRANSITIONAL = ["creating", "starting", "stopping"];
 const POLL_MS = 3000;
 const MAX_FILE_CHUNKS = 8;
 const CHUNK = 65536;
@@ -270,22 +270,36 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
       else setNotice(noticeFor(error));
     } finally { flight(marker, false); }
   }
-  // 准备环境：已有同 scope 未确认记录时先查回执；request_key 先入账本。
-  async function prepareEnvironment() {
+  // 准备环境：已有同 scope 未确认记录时先查回执；request_key 先入账本。返回是否已确认提交成功。
+  async function prepareEnvironment(): Promise<boolean> {
     const value = chatRef.current;
     const projectId = binding?.project_id;
-    if (!value.ready || !value.actor || !projectId) return;
-    if (!value.canWrite) { setNotice("当前身份无权执行此操作"); return; }
+    if (!value.ready || !value.actor || !projectId) return false;
+    if (!value.canWrite) { setNotice("当前身份无权执行此操作"); return false; }
     const marker = "prepare:" + value.actor.principal_id + ":" + projectId;
-    if (flights.current.has(marker)) return;
+    if (flights.current.has(marker)) return false;
+    const current = capture();
     try {
       const pending = findPendingWrite(readDevWrites(localStorage), "prepare-environment", {
         principal_id: value.actor.principal_id, generation: value.actor.generation,
         workspace_id: value.workspace, session_id: value.id, project_id: projectId,
       });
-      if (pending) { void recoverPending(pending); setNotice("上一次准备结果未确认，正在查找"); return; }
-    } catch (error) { setNotice(noticeFor(error)); return; }
-    const current = capture();
+      if (pending) {
+        // 回执在途中：找回结束并重读环境后回报结果，避免同一次发送误判失败。
+        await recoverPending(pending);
+        if (!current()) return false;
+        try {
+          const fresh = parseEnvironment(await request(ENVIRONMENT_PATH(projectId), apiKey));
+          if (fresh.project_id !== projectId) return false;
+          if (current()) setEnvironment(fresh);
+          return fresh.state === "ready";
+        } catch (error) {
+          // 读取失败不代表未执行：保持 pending 与 notice，返回 false 解除占用，可在本会话再次发送查回执。
+          if (current()) setNotice(noticeFor(error));
+          return false;
+        }
+      }
+    } catch (error) { setNotice(noticeFor(error)); return false; }
     flight(marker, true);
     try {
       const requestKey = crypto.randomUUID();
@@ -299,14 +313,16 @@ export function useDevelopment(chat: SessionState, apiKey: string, active: boole
       });
       persistWrites(ledger);
       const raw = parseEnvironment(await request(target, apiKey, body));
-      if (!current()) return;
+      if (!current()) return false;
       if (raw.project_id !== projectId) throw new Error("环境身份不匹配");
       persistWrites(readDevWrites(localStorage).filter(item => item.request_key !== requestKey));
       setEnvironment(raw);
+      return true;
     } catch (error) {
-      if (!current()) return;
+      if (!current()) return false;
       if (error instanceof TypeError) setNotice("准备结果未知；已保留请求记录，可在信息栏查找结果");
       else setNotice(noticeFor(error));
+      return false;
     } finally { flight(marker, false); }
   }
   async function stopEnvironment() {

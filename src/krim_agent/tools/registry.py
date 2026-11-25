@@ -31,6 +31,50 @@ class ToolRegistry:
         self._dependencies = tuple(dependencies)
         if any(not isinstance(item, ToolRegistry) for item in self._dependencies):
             raise ValueError("invalid source registry")
+        self._runtime_tokens = self._definition_tokens()
+
+    def _definition_tokens(self) -> tuple[tuple[object, ...], ...]:
+        def function(value: object) -> object:
+            return getattr(value, "__func__", value)
+
+        return tuple(
+            (
+                id(spec), spec.name, id(spec.parameters), id(spec.executor),
+                id(spec.scoped_executor), id(spec.external_executor),
+                id(spec.source), id(spec.binding_target), id(spec.output_schema),
+                id(function(spec.parameters.model_validate)),
+                id(function(spec.parameters.model_json_schema)),
+                id(spec.parameters.__pydantic_validator__),
+                id(spec.parameters.__pydantic_core_schema__),
+            )
+            for spec, _ in self._frozen
+        )
+
+    def assert_runtime_current(self) -> None:
+        """Check live identities during text streaming; no schema generation.
+
+        Content mutations remain subject to assert_current at model/tool
+        boundaries. Traverse dependencies so derived registries cannot hide a
+        replaced source definition.
+        """
+        pending = [self]
+        seen: set[int] = set()
+        try:
+            while pending:
+                registry = pending.pop()
+                if id(registry) in seen:
+                    continue
+                seen.add(id(registry))
+                if (
+                    len(registry._items) != len(registry._frozen)
+                    or any(registry._items.get(spec.name) is not spec
+                           for spec, _ in registry._frozen)
+                    or registry._definition_tokens() != registry._runtime_tokens
+                ):
+                    raise ValueError("tool definition changed")
+                pending.extend(registry._dependencies)
+        except (AttributeError, TypeError, ValueError):
+            raise ServiceError("tool_binding_changed") from None
 
     def _checked_schemas(self) -> list[dict[str, JsonValue]]:
         # Derived registries retain the original freeze fence. Verify each DAG

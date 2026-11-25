@@ -29,7 +29,7 @@ from krim_agent.contracts import (
 )
 from krim_agent.providers.openai_compatible import OpenAICompatibleProvider
 from krim_agent.runtime.contracts import settled
-from krim_agent.runtime.service import RunService
+from krim_agent.runtime.service import RunBinding, RunService
 from krim_agent.security import PrincipalContext
 from krim_agent.storage import sessions as sql
 from krim_agent.storage.sqlite import SQLiteStore
@@ -481,6 +481,7 @@ class SessionService:
                         else None,
                     ),
                     account_mcp_service=getattr(self, "account_mcp", None),
+                    upgrade_target=self._boundary_target_upgrade(selected_binding),
                 )
                 await self._supersede_inputs(principal, workspace, result)
                 await self._supersede_goal_turns(principal, workspace, result)
@@ -490,6 +491,22 @@ class SessionService:
         # A cancelled HTTP waiter must not leave an admitted turn behind its
         # input fence; finish admission/cleanup first and then propagate cancel.
         return await settled(accept())
+
+    def _boundary_target_upgrade(self, binding: RunBinding | None) -> dict[str, JsonValue] | None:
+        """binding当前一致时返回现行目标描述符；否则None保持冻结target。
+
+        显式新用户消息才到达此处；内部续接走enqueue，不经过本方法。
+        assert_current失败（含工具/绑定身份漂移）即返回None。冻结行与现行
+        描述符的同异、白名单（仅实现摘要漂移）与busy栅栏全部由storage在
+        升级事务内按实时冻结行核对，service不读快照对比，避免读取后漂移。
+        """
+        if binding is None:
+            return None
+        try:
+            binding.assert_current()
+        except ServiceError:
+            return None
+        return cast(dict[str, JsonValue], parse_json(binding.descriptor_json))
 
     async def _supersede_inputs(
         self, principal: PrincipalContext, workspace: str, accepted: TurnView

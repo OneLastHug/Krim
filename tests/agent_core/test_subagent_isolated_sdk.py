@@ -116,6 +116,7 @@ async def test_assignment_gate_reads_isolated_children() -> None:
         "isolated": {"input": {"workspace": _assignment()}},
         "shared": {"input": {}},
         "malformed": {"input": {"workspace": {"mode": 42}}},
+        "missing_isolation": {"input": {"profile_snapshot": {"workspace": "isolated_write"}}},
     }
     loop = _loop(None, _StubSubagents(tasks))
 
@@ -126,6 +127,8 @@ async def test_assignment_gate_reads_isolated_children() -> None:
     with pytest.raises(ServiceError) as corrupt:
         await loop._isolated_assignment(_child("malformed"))
     assert corrupt.value.code == "facts_corrupt"
+    with pytest.raises(ServiceError, match="facts_corrupt"):
+        await loop._isolated_assignment(_child("missing_isolation"))
 
     # Without the subagent domain service there is nothing to relocate.
     orphan = _loop(None, None)
@@ -198,6 +201,46 @@ def test_bootstrap_command_quotes_the_fixed_script() -> None:
     assert f" {DIRECTORY} " in command
     with pytest.raises(ServiceError):
         bootstrap_command("", {})
+
+
+def test_bootstrap_followup_preserves_worker_edits(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    from krim_agent.subagents.providers.process import PREPARE_WORKSPACE_SCRIPT
+
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "app.py").write_text("source")
+
+    def prepare():
+        return subprocess.run(
+            [sys.executable, "-I", "-c", PREPARE_WORKSPACE_SCRIPT, DIRECTORY, "{}"],
+            cwd=source, capture_output=True, text=True, check=True,
+        )
+
+    assert json.loads(prepare().stdout)["copied"] == 1
+    child = source / DIRECTORY / "app.py"
+    child.write_text("worker changes")
+    (source / "app.py").write_text("later source changes")
+    result = json.loads(prepare().stdout)
+    assert result["reused"] is True and result["copied"] == 0
+    assert child.read_text() == "worker changes"
+
+
+def test_bootstrap_rejects_unverified_existing_copy(tmp_path):
+    import subprocess
+    import sys
+
+    from krim_agent.subagents.providers.process import PREPARE_WORKSPACE_SCRIPT
+
+    (tmp_path / DIRECTORY).mkdir(parents=True)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", PREPARE_WORKSPACE_SCRIPT, DIRECTORY, "{}"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
 
 
 async def _legacy(parameters: Any) -> Any:
