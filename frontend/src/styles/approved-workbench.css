@@ -194,7 +194,7 @@
     :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .account-button > svg { width: 13px; height: 13px; color: var(--muted-foreground); flex-shrink: 0; }
     :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-toolbar {
       z-index: 2; display: flex; align-items: center; gap: 6px; min-height: 44px;
-      padding: 0 12px; border-bottom: 1px solid transparent; background: var(--background); flex-shrink: 0;
+      padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--background); flex-shrink: 0;
     }
     :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .chat-toolbar.is-bordered { border-bottom-color: var(--border); }
     :is(.workbench-shell, .mobile-drawer-content, .session-tree-menu-layer, .dev-dialog, .new-session-project-dialog, .session-sidebar-dialog, .session-search-dialog, .session-project-permission-dialog) .actions-divider { width: 1px; height: 16px; margin: 0 3px; background: var(--border); flex-shrink: 0; }
