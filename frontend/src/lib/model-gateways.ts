@@ -5,6 +5,7 @@ export type GatewayThinking = "omit" | "enabled" | "disabled";
 export interface Gateway { id: string; name: string; baseUrl: string; protocol: GatewayProtocol; keySet: boolean; apiKeyEnv?: string | null }
 export interface GatewayModelLevel { id: string; label: string; effort: string; thinking: GatewayThinking }
 export interface GatewayModel { id: string; gatewayId: string; modelId: string; displayName: string; levels: GatewayModelLevel[]; vision?: boolean; maxOutputTokens?: number | null }
+export interface GatewayDiscoveryDraft { gatewayId?: string; baseUrl: string; protocol: GatewayProtocol; apiKeyEnv?: string | null; keyDraft?: string | null }
 export interface GatewaySelection { modelId: string | null; levelId: string | null }
 export interface WireSelection { gateway_id: string; model_id: string; reasoning_level: string | null }
 export interface GatewayDocument { revision: number; gateways: Gateway[]; models: GatewayModel[]; selection: GatewaySelection }
@@ -50,6 +51,47 @@ export function parseGatewayDocument(raw: unknown): GatewayDocument {
   const selection = wire ? { modelId: modelKey(wire.gateway_id, wire.model_id), levelId: wire.reasoning_level } : { ...EMPTY_SELECTION };
   toWireSelection(selection, models);
   return { revision: revision(v.revision), gateways, models, selection };
+}
+export function parseDiscoveredModels(raw: unknown): GatewayModel[] {
+  const value = object(raw);
+  if (!Array.isArray(value.models) || value.models.length > 2000) throw new Error("端点模型列表响应无效。");
+  // Reuse the saved-model contract; discovery never changes the current document.
+  const parsed = parseGatewayDocument({ revision: 0, gateways: [{ gateway_id: "discovery", name: "discovery", base_url: "", wire_api: "chat_completions", api_key_set: false, models: value.models }], default_selection: null });
+  const seen = new Set<string>();
+  return parsed.models.filter(model => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model.modelId) || !model.displayName || model.displayName.length > 128) throw new Error("端点模型列表响应无效。");
+    if (seen.has(model.modelId)) return false;
+    seen.add(model.modelId);
+    return true;
+  });
+}
+export function gatewayDiscoveryBody(draft: GatewayDiscoveryDraft, expectedRevision: number) {
+  return {
+    base_url: draft.baseUrl.trim(), wire_api: draft.protocol, expected_revision: expectedRevision,
+    ...(draft.gatewayId ? { gateway_id: draft.gatewayId } : {}),
+    api_key_env: draft.keyDraft !== undefined ? null : draft.apiKeyEnv ?? null,
+    ...(typeof draft.keyDraft === "string" && draft.keyDraft ? { api_key: draft.keyDraft } : {}),
+    ...(draft.keyDraft === null ? { clear_api_key: true } : {}),
+  };
+}
+export function gatewayDiscoveryError(error: unknown): string {
+  if (error instanceof RequestError) {
+    const messages: Record<string, string> = {
+      provider_auth: "端点拒绝了密钥，请检查 API Key 或服务器环境变量。",
+      provider_models_unsupported: "此端点未开放模型列表（/models），请手动添加模型 ID。",
+      provider_http_error: "端点获取模型失败，请检查 API 地址与服务状态后重试。",
+      provider_timeout: "获取模型超时，请检查端点连接后重试。",
+      provider_network: "无法连接模型端点，请检查 API 地址和服务器网络。",
+      provider_protocol: "端点返回的模型列表格式无效，可手动添加模型。",
+      provider_response_limit: "端点模型列表超过大小限制，请手动添加所需模型。",
+      provider_config: "接入配置不可用，请检查地址、密钥或环境变量引用。",
+      not_found: "供应商已被移除，请重新读取配置。",
+      invalid_input: "请检查 API 基础地址、协议和密钥设置。",
+    };
+    return messages[error.code] ?? (error.status >= 500 ? "获取模型失败，请稍后重试或手动添加。" : gatewayError(error));
+  }
+  const localMessages = ["请等待配置读取完成。", "上次保存结果尚未确认，请重新读取配置后核对。", "账号已切换，请重新获取模型。", "当前账号没有获取端点模型的权限。"];
+  return error instanceof Error && (localMessages.includes(error.message) || /模型列表响应无效/.test(error.message)) ? error.message : "无法获取模型，请检查网络后重试。";
 }
 export function parseSessionModelSelection(raw: unknown): SessionModelSelection {
   const v = object(raw);

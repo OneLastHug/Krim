@@ -114,6 +114,8 @@ ERROR_CODES = frozenset(
         "provider_usage_conflict",
         "provider_incomplete_stream",
         "provider_http_error",
+        "provider_auth",
+        "provider_models_unsupported",
         "provider_redirect",
         "provider_timeout",
         "provider_network",

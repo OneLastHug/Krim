@@ -47,7 +47,13 @@ async def test_discovery_projects_and_deduplicates_without_mutating_config():
     "status,body,code",
     [
         (302, {}, "provider_http_error"),
-        (401, {"error": "secret-body"}, "provider_http_error"),
+        (400, {}, "provider_http_error"),
+        (429, {}, "provider_http_error"),
+        (500, {}, "provider_http_error"),
+        (401, {"error": "secret-body"}, "provider_auth"),
+        (403, {"error": "secret-body"}, "provider_auth"),
+        (404, {"error": "secret-body"}, "provider_models_unsupported"),
+        (405, {"error": "secret-body"}, "provider_models_unsupported"),
         (200, {"bad": []}, "provider_protocol"),
     ],
 )
@@ -59,6 +65,33 @@ async def test_discovery_rejects_redirects_errors_and_invalid_shape(status, body
         )
     assert error.value.code == code
     assert "secret-body" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [
+        (401, "provider_auth"),
+        (403, "provider_auth"),
+        (404, "provider_models_unsupported"),
+        (405, "provider_models_unsupported"),
+    ],
+)
+async def test_upstream_directory_failures_stay_502_without_echoing_body(status, code):
+    """上游拒绝不镜像其状态码，避免客户端把401当宿主登录态失效；正文不回传。"""
+    config = OpenAICompatibleConfig(base_url="https://gateway.example/v1", model="a")
+    with pytest.raises(ServiceError) as error:
+        await discover_models(
+            config,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    status, json={"error": {"message": "secret-body", "api_key": "sk-upstream"}}
+                )
+            ),
+        )
+    assert error.value.status == 502
+    assert error.value.code == code
+    assert "secret-body" not in str(error.value)
+    assert "sk-upstream" not in str(error.value)
 
 
 async def test_discovery_bounded_payload():

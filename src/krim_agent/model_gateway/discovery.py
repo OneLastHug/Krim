@@ -14,6 +14,8 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 
 _MAX_BYTES = 4 * 1024 * 1024
 _MAX_MODELS = 2000
+_UPSTREAM_AUTH = frozenset({401, 403})
+_UPSTREAM_UNSUPPORTED = frozenset({404, 405})
 
 
 async def discover_models(
@@ -38,6 +40,11 @@ async def discover_models(
                 headers=headers,
             ) as response:
                 if not response.is_success:
+                    if response.status_code in _UPSTREAM_AUTH:
+                        # Keep upstream auth failures distinct from Krim login failures.
+                        raise ServiceError("provider_auth", 502)
+                    if response.status_code in _UPSTREAM_UNSUPPORTED:
+                        raise ServiceError("provider_models_unsupported", 502)
                     raise ServiceError("provider_http_error", 502)
                 raw = bytearray()
                 async for chunk in response.aiter_bytes():

@@ -27,6 +27,7 @@ from krim_agent.storage.model_gateway_models import (
 from krim_agent.storage.sessions import read
 
 from .contracts import (
+    GatewayDiscoveryRequest,
     GatewaySelection,
     GatewaySettingsView,
     GatewayUpdate,
@@ -315,6 +316,62 @@ class ModelGatewayService:
                 max_output_tokens=None,
                 allow_images=False,
             )
+
+        return await read(self.store, operation)
+
+    async def draft_config(
+        self, principal_id: str, body: GatewayDiscoveryRequest | Mapping[str, Any]
+    ) -> OpenAICompatibleConfig:
+        """按未保存的草稿参数构造发现配置；只读事务，不落库、不推进版本。
+
+        `expected_revision` 与当前账号版本不一致报 409；`gateway_id` 给出时
+        按当前账号读取同ID网关（缺失报 404）。密钥语义与保存一致：新密钥
+        只覆盖本次探测，留空复用保存的同ID密钥，clear 清除；env 引用与明
+        文密钥互斥，给出 env 时按保存语义接管本次解析（旧密文不再参与）。
+        """
+        principal = _principal(principal_id)
+        request = (
+            body
+            if isinstance(body, GatewayDiscoveryRequest)
+            else _validate(GatewayDiscoveryRequest, body)
+        )
+
+        async def operation(conn: AsyncConnection) -> OpenAICompatibleConfig:
+            row = await self._current(conn, principal)
+            revision = row["revision"] if row is not None else 0
+            if revision != request.expected_revision:
+                raise ServiceError("revision_conflict", 409)
+            gateway = None
+            secret: Any = None
+            if request.gateway_id is not None:
+                if row is None:
+                    raise ServiceError("not_found", 404)
+                gateway = _gateway_entry(row["document"], request.gateway_id)
+                if gateway is None:
+                    raise ServiceError("not_found", 404)
+                secret = row["secret"]
+            if request.api_key is not None and request.api_key.get_secret_value():
+                api_key: SecretStr = request.api_key
+            elif request.api_key_env is not None:
+                value = os.environ.get(request.api_key_env)
+                if not value:
+                    raise ServiceError("provider_config", 422)
+                api_key = SecretStr(value)
+            elif gateway is not None and not request.clear_api_key:
+                api_key = self._api_key(principal, gateway, secret)
+            else:
+                api_key = SecretStr("")
+            try:
+                return OpenAICompatibleConfig.model_validate(
+                    {
+                        "base_url": request.base_url,
+                        "model": _DISCOVERY_MODEL,
+                        "wire_api": request.wire_api,
+                        "api_key": api_key,
+                    }
+                )
+            except ValidationError:
+                raise ServiceError("invalid_input", 422) from None
 
         return await read(self.store, operation)
 
