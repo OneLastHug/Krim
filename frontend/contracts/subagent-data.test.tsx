@@ -12,7 +12,7 @@ let calls: { url: URL; method: string; body?: Body }[];
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 const member = (id = "a", status: NonNullable<SubagentMember["task"]>["status"] = "running"): SubagentMember => ({ agent_id: id, tree_id: "tree", path: id, role: "agent", status: "active", depth: 1, profile: "worker", provider: "sdk_session", workdir: null, revision: 1, current_task_id: `task-${id}`, parent_path: "lead", tree_status: "open", route_key: null, activation: { activation_id: `activation-${id}`, instance: 1, status: "resident" }, task: { task_id: `task-${id}`, status, run_id: `run-${id}`, ordinal: 1, input: { text: "check" } } });
 const approval = { request_id: "approval-a", run_id: "run-a", call_id: "call-a", name: "shell", arguments: { command: "check" }, arguments_hash: "a".repeat(64), tool_hash: "b".repeat(64), expires_at: null };
-const detail = (id = "a", status: NonNullable<SubagentMember["task"]>["status"] = "running") => ({ agent: member(id, status), messages: [], results: [], events: [{ run_id: `run-${id}`, seq: 0, event_id: `event-${id}`, kind: "run_started", data: {}, at: 1 }], approvals: status === "awaiting_approval" ? [approval] : [], run: { id: `run-${id}`, request_key: "key", status: "running", trace_id: "trace", root_span_id: "span", created_at: 1, finished_at: null, code: null, stop_requested: false }, run_id: `run-${id}`, events_truncated: false });
+const detail = (id = "a", status: NonNullable<SubagentMember["task"]>["status"] = "running") => ({ agent: member(id, status), messages: [], results: [], events: [{ run_id: `run-${id}`, seq: 0, event_id: `event-${id}`, kind: "run_started", data: {}, at: 1 }], approvals: status === "awaiting_approval" ? [approval] : [], run: { id: `run-${id}`, request_key: "key", status: "running", trace_id: "trace", root_span_id: "span", created_at: 1, finished_at: null, code: null, stop_requested: false }, run_id: `run-${id}` });
 const page = (members = [member()], next: string | null = null) => ({ subagents: members, next_after_path: next });
 const chat = (id = "session-a", running = true) => ({ ready: true, actor: { principal_id: "owner", generation: 1 }, workspace: "ws", id, session: { id, status: "open", deleted_at: null }, history: running ? [{ status: "running" }] : [] }) as unknown as SessionState;
 const fence = { current: 1 };
@@ -30,6 +30,29 @@ test("strict contracts reject unknown task states, duplicate pages, and cross-ru
   expect(() => parseSubagentDetail({ ...detail(), run: null }, "a")).toThrow();
   const badState = member(); (badState.task as { status: string }).status = "missing"; expect(() => parseSubagentPage(page([badState]))).toThrow();
   expect(subagentState(member("a", "awaiting_approval"))).toBe("approval");
+});
+
+test("detail keeps full history beyond legacy page limits with long Chinese text intact", () => {
+  const long = "边界验证：" + "逐字保留超长中文内容，不做任何截断。".repeat(4000) + "结尾标记甲乙丙";
+  const events = Array.from({ length: 260 }, (_, index) => ({ run_id: "run-a", seq: index, event_id: `event-${index}`, kind: "text", data: { text: `第${index}段` }, at: index + 1 }));
+  const messages = [
+    { id: "message-0", seq: 1, kind: "task", wake: "auto", body: { text: long }, sender_id: null, task_id: "task-a", accepted_at: 1 },
+    { id: "message-60", seq: 61, kind: "message", wake: "queue_only", body: { text: long }, sender_id: "lead", task_id: "task-a", accepted_at: 2 },
+  ];
+  const results = Array.from({ length: 25 }, (_, index) => ({ seq: index + 1, notification_id: `notification-${index}`, notification_status: "delivered", result_id: `result-${index}`, task_id: `task-${index}`, producer_path: "a", stop_reason: "completed", code: null, output: { text: `结果${index}：${long}` }, diagnostics: null, settled_at: index + 3 }));
+  const parsed = parseSubagentDetail({ agent: member(), messages, results, events, approvals: [], run: { id: "run-a", request_key: "key", status: "completed", trace_id: "trace", root_span_id: "span", created_at: 1, finished_at: 2, code: null, stop_requested: false }, run_id: "run-a" });
+  expect(parsed.events).toHaveLength(260);
+  expect(parsed.events[0]!.seq).toBe(0);
+  expect(parsed.events[259]!.data.text).toBe("第259段");
+  expect(parsed.messages[0]!.body).toEqual({ text: long });
+  expect((parsed.messages[1]!.body as { text: string }).text).toBe(long);
+  expect(long.endsWith("结尾标记甲乙丙")).toBe(true);
+  expect(parsed.results).toHaveLength(25);
+  expect(parsed.results[0]!.output).toEqual({ text: `结果0：${long}` });
+  expect(parsed.results[24]!.output).toEqual({ text: `结果24：${long}` });
+  expect(parsed.events_truncated).toBe(false);
+  expect(parseSubagentDetail({ ...detail(), events_truncated: true }, "a").events_truncated).toBe(true);
+  expect(() => parseSubagentDetail({ ...detail(), events_truncated: "true" }, "a")).toThrow();
 });
 
 test("loads paginated members, hides root, and refreshes read pages without duplication", async () => {

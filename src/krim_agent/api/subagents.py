@@ -27,9 +27,6 @@ from krim_agent.storage.subagent_models import (
 from .sessions import application, principal
 
 MEMBER_LIMIT = 50
-MESSAGE_LIMIT = 50
-RESULT_LIMIT = 20
-EVENT_LIMIT = 200
 
 
 def _domain(request: Request) -> Any:
@@ -280,7 +277,6 @@ def mount_subagents(app: FastAPI) -> None:
                         )
                         .where(subagent_messages.c.target_id == agent_id)
                         .order_by(subagent_messages.c.seq.desc())
-                        .limit(MESSAGE_LIMIT)
                     )
                 ).mappings().all()
             ][::-1]
@@ -306,7 +302,6 @@ def mount_subagents(app: FastAPI) -> None:
                         )
                         .where(subagent_notifications.c.producer_id == agent_id)
                         .order_by(subagent_notifications.c.seq.desc())
-                        .limit(RESULT_LIMIT)
                     )
                 ).mappings().all()
             ][::-1]
@@ -335,8 +330,9 @@ def mount_subagents(app: FastAPI) -> None:
         if latest_run_id is not None:
             view = await service.get(latest_run_id)
             run_view = view.model_dump(mode="json")
+            # 全量返回执行记录：快照本就载入全部事件，前端完整渲染历史。
             snapshot = await store.snapshot(latest_run_id)
-            events = list(snapshot.events)[-EVENT_LIMIT:]
+            events = list(snapshot.events)
             pending = await service.approvals(latest_run_id)
             approvals = [dict(record) | {"run_id": latest_run_id} for record in pending]
         return {
@@ -347,7 +343,7 @@ def mount_subagents(app: FastAPI) -> None:
             "approvals": approvals,
             "run": run_view,
             "run_id": latest_run_id,
-            "events_truncated": len(snapshot.events) > EVENT_LIMIT if latest_run_id else False,
+            "events_truncated": False,
         }
 
     @router.get(base + "/{agent_id}/messages")

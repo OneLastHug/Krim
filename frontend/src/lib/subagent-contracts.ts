@@ -81,6 +81,7 @@ export interface SubagentDetail {
   run: SubagentRun | null;
   /** 当前或最近child run；无run为null。 */
   run_id: string | null;
+  /** 兼容旧服务；新服务始终返回完整记录。 */
   events_truncated: boolean;
 }
 
@@ -281,8 +282,9 @@ function parseApproval(raw: unknown): ApprovalRecord {
 }
 
 /**
- * 单成员详情：消息与结果按 seq 升序去重；事件、审批只能来自详情声明的
- * run（run_id 字段或 run.id），run 为空时不允许残留审批。
+ * 单成员详情：返回全量历史——消息、结果、事件完整保留不截断；消息与
+ * 结果按 seq 升序去重；事件、审批只能来自详情声明的run（run_id字段或
+ * run.id），run为空时不允许残留审批。
  */
 export function parseSubagentDetail(raw: unknown, agentId?: string): SubagentDetail {
   const value = object_(raw);

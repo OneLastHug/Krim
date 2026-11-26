@@ -70,3 +70,14 @@ test("spawn receipt opens the returned agent id without changing tool payload", 
   await act(async () => root.render(<ToolCallCard tool={{ type: "tool", key: "tool-a", stepIndex: 0, name: "spawn_agent", state: "ok", arguments: { task: "check" }, result, resultAvailable: true }} canApprove={false} busy={false} pending={false} onDecision={vi.fn()} onInspect={vi.fn()} onOpenSubagent={open}/>));
   await act(async () => button("查看子代理").click()); expect(open).toHaveBeenCalledWith("child-real"); expect(result.value.agent_id).toBe("child-real");
 });
+
+test("long Chinese history renders fully in the panel without any truncation notice", async () => {
+  const long = "全量输出验证：" + "逐字保留超长中文内容，不做任何截断。".repeat(3000) + "结尾标记甲乙丙";
+  const agent = member();
+  const fullDetail = { agent, messages: [{ id: "message-a", seq: 1, kind: "task", wake: "auto", body: { text: long }, sender_id: null, task_id: "task-a", accepted_at: 1 }], results: [{ seq: 1, notification_id: "notification-a", notification_status: "delivered", result_id: "result-a", task_id: "task-a", producer_path: "lead/worker-a", stop_reason: "completed", code: null, output: { text: long }, diagnostics: null, settled_at: 2 }], events: [{ run_id: "run-a", seq: 0, event_id: "event-a", kind: "text", data: { text: long }, at: 1 }], approvals: [], run: { id: "run-a", request_key: "key", status: "completed", trace_id: "trace", root_span_id: "span", created_at: 1, finished_at: 2, code: null, stop_requested: false }, run_id: "run-a" };
+  const value = state(agent, { detail: fullDetail });
+  await render(value);
+  expect(host.textContent).toContain("结尾标记甲乙丙");
+  expect(host.textContent).toContain("全量输出验证：");
+  expect(host.textContent).not.toContain("当前显示最近一段");
+});

@@ -7,6 +7,7 @@ directory descriptors and O_NOFOLLOW keep operations under /workspace.
 from __future__ import annotations
 
 import codecs
+import difflib
 import fcntl
 import hashlib
 import json
@@ -17,11 +18,46 @@ import sys
 import tempfile
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Iterator
 from typing import Any, BinaryIO, Protocol, cast
 
 CHUNK = 65536
 STAGING = ".krim-file-staging"
+STAT_TEXT_LIMIT = 1 << 20
+STAT_WORK_LIMIT = 5_000_000
+
+
+def _lines(text: str) -> list[str]:
+    """\n-separated lines; a trailing newline closes the last line, not a new one."""
+    if not text:
+        return []
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]]
+    if pieces[-1]:
+        lines.append(pieces[-1])
+    return lines
+
+
+def line_delta(before: str, after: str) -> tuple[int, int] | None:
+    """Real (+added, -removed) counts of the two texts; None beyond the budget.
+
+    The guard bounds SequenceMatcher's worst-case repeated-line matching so
+    pathological inputs stay bounded instead of degrading the mutation lock.
+    """
+    if before == after:
+        return 0, 0
+    before_lines, after_lines = _lines(before), _lines(after)
+    occurrences = Counter(after_lines)
+    if sum(occurrences[line] for line in before_lines) > STAT_WORK_LIMIT:
+        return None
+    matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            removed += i2 - i1
+            added += j2 - j1
+    return added, removed
 
 
 class FileRejected(Exception):
@@ -95,7 +131,7 @@ def transformed(
         raise FileRejected("text_not_unique")
 
 
-def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
+def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool | None]:
     names = parts(request["path"])
     if request["operation"] not in {"write", "edit"}:
         raise FileRejected("invalid_input")
@@ -151,6 +187,17 @@ def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
                     or prior_hash.hexdigest() != request["expected_sha256"]):
                 raise FileRejected("source_changed")
             os.lseek(original_fd, 0, os.SEEK_SET)
+        # Line statistics compare the exact bytes this mutation swaps, read
+        # under the same lock; None means the comparison itself is unbounded.
+        before_text = "" if original is None else None
+        if original is not None and original.st_size <= STAT_TEXT_LIMIT:
+            try:
+                with os.fdopen(os.dup(original_fd), "rb") as reader:
+                    before_text = reader.read(STAT_TEXT_LIMIT).decode("utf-8")
+            except UnicodeDecodeError:
+                before_text = None
+            finally:
+                os.lseek(original_fd, 0, os.SEEK_SET)
         temporary = ".krim-write-" + uuid.uuid4().hex
         fd = os.open(
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=staging
@@ -158,6 +205,7 @@ def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
         original_hash = hashlib.sha256()
         updated_hash = hashlib.sha256()
         size = count = 0
+        compare: list[bytes] | None = [] if before_text is not None else None
         try:
             if original is not None:
                 os.fchmod(fd, stat.S_IMODE(original.st_mode) & 0o777)
@@ -171,6 +219,10 @@ def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
                             updated_hash.update(data)
                             size += len(data)
                             count += replacements
+                            if compare is not None:
+                                compare.append(data)
+                                if size > STAT_TEXT_LIMIT:
+                                    compare = None  # expansion beyond budget: stop retaining
                 else:
                     if original_fd is not None:
                         with os.fdopen(os.dup(original_fd), "rb") as source:
@@ -209,12 +261,28 @@ def mutate(root: str, request: dict[str, Any]) -> dict[str, str | int | bool]:
             os.replace(temporary, names[-1], src_dir_fd=staging, dst_dir_fd=parent)
         temporary = None
         os.fsync(parent)
+        # Statistics never affect the committed mutation outcome: any failure
+        # to compare leaves the fields unset instead of estimating.
+        added = removed = None
+        if before_text is not None and size <= STAT_TEXT_LIMIT:
+            try:
+                after_text = (
+                    request["content"] if request["operation"] == "write"
+                    else b"".join(compare).decode("utf-8")
+                )
+                delta = line_delta(before_text, after_text)
+            except (UnicodeDecodeError, MemoryError, RecursionError):
+                delta = None  # bounded-comparison failure modes; other bugs must surface
+            if delta is not None:
+                added, removed = delta
         return {
             "path": request["path"],
             "size": size,
             "sha256": updated_hash.hexdigest(),
             "replacements": count,
             "created": original is None,
+            "lines_added": added,
+            "lines_removed": removed,
         }
     finally:
         if temporary is not None:

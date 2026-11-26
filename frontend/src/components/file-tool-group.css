@@ -1,0 +1,9 @@
+/* Same native tool row; only approved file grouping/count content is added. */
+.chat-file-group>summary>.chat-file-path{margin-left:0;min-width:0;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-file-group>summary>.chat-file-operations,.chat-file-group>summary>.chat-file-changes,.chat-file-group>summary>.chat-file-unrecorded{margin-left:0;color:var(--muted-foreground);font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.chat-file-group>summary>.chat-file-changes{display:inline-flex;gap:6px;color:var(--foreground)}
+.chat-file-group .chat-file-added{color:var(--status-ok-fg,#136845);font-weight:600}
+.chat-file-group .chat-file-removed{color:var(--status-bad-fg,#9e221b);font-weight:600}
+.chat-file-group .chat-file-calls{margin:3px 0 8px 18px;padding-left:10px;border-left:1px solid var(--border);min-width:0}
+.chat-file-group .chat-file-calls>.chat-tool{margin-top:3px;margin-bottom:4px}
+@media(max-width:700px){.chat-file-group>summary{flex-wrap:wrap}.chat-file-group>summary>.chat-file-path{max-width:calc(100% - 48px)}.chat-file-group>summary>.chat-file-operations{flex-basis:auto}.chat-file-group>summary>.chat-file-unrecorded{white-space:normal}.chat-file-group .chat-file-calls{margin-left:8px;padding-left:8px}}

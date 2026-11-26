@@ -6,6 +6,7 @@ SDK 负责模型请求和流式模型事件；完整 finish/DONE 和工具 JSON 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import traceback
@@ -729,6 +730,35 @@ class _ResponsesBoundary:
         return self.completed_calls
 
 
+def _wire_payloads(payload: str) -> tuple[str, ...]:
+    """Normalize gateways batching complete JSON data lines in one SSE event.
+
+    Standard multiline JSON remains one message. Only an ``Extra data`` parse
+    failure may be split, and every nonempty line must independently be a
+    strict JSON object (or the final DONE marker). No partial JSON recovery.
+    """
+    stripped = payload.strip()
+    if not stripped or stripped == "[DONE]" or "\n" not in stripped:
+        return (payload,)
+    try:
+        parse_json(payload)
+    except json.JSONDecodeError as error:
+        if error.msg != "Extra data":
+            raise
+    else:
+        return (payload,)
+    lines = tuple(line for line in payload.split("\n") if line.strip())
+    if len(lines) < 2:
+        raise ProviderError("provider_protocol")
+    for index, line in enumerate(lines):
+        if line.strip() == "[DONE]":
+            if index != len(lines) - 1:
+                raise ProviderError("provider_protocol")
+        elif not isinstance(parse_json(line), dict):
+            raise ProviderError("provider_protocol")
+    return lines
+
+
 class _GuardedStream(httpx.AsyncByteStream):
     def __init__(
         self, response: httpx.Response, boundary: _StreamBoundary | _ResponsesBoundary
@@ -746,10 +776,11 @@ class _GuardedStream(httpx.AsyncByteStream):
             async for payload in _sse_data(self.raw, self.boundary.config):
                 if not payload.strip():
                     continue
-                normalized = self.boundary.accept(payload)
-                yield ("data: " + normalized + "\n\n").encode()
-                if self.boundary.done:
-                    return
+                for message in _wire_payloads(payload):
+                    normalized = self.boundary.accept(message)
+                    yield ("data: " + normalized + "\n\n").encode()
+                    if self.boundary.done:
+                        return
             self.boundary.complete()
         except ProviderError as error:
             logging.getLogger(__name__).warning(

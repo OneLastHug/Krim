@@ -298,3 +298,73 @@ def test_streaming_replacement_matches_python(tmp_path, old, new, text):
                                     new_string=new, replace_all=True))
     assert (tmp_path / "a.py").read_text() == text.replace(old, new)
     assert changed["replacements"] == text.count(old)
+
+
+def test_line_stats_count_real_before_after_text(tmp_path):
+    created = mutate(tmp_path, write(content="中文\ntest\n"))
+    assert created["created"] and (created["lines_added"], created["lines_removed"]) == (2, 0)
+    changed = mutate(tmp_path, edit(created["sha256"], old_string="中文",
+                                    new_string="漢字\nsecond"))
+    assert (tmp_path / "a.py").read_text() == "漢字\nsecond\ntest\n"
+    assert (changed["lines_added"], changed["lines_removed"]) == (2, 1)
+    expanded = mutate(tmp_path, edit(changed["sha256"], old_string="漢字\nsecond",
+                                     new_string="x\ny\nz"))
+    assert (expanded["lines_added"], expanded["lines_removed"]) == (3, 2)
+
+
+def test_line_stats_cover_replace_all_empty_and_trailing_newline(tmp_path):
+    result = mutate(tmp_path, write(content="x\nx\n"))
+    changed = mutate(tmp_path, edit(result["sha256"], old_string="x",
+                                    new_string="y\nz", replace_all=True))
+    assert changed["replacements"] == 2
+    assert (changed["lines_added"], changed["lines_removed"]) == (4, 2)
+    empty = mutate(tmp_path, write(path="empty.py", content=""))
+    assert (empty["lines_added"], empty["lines_removed"]) == (0, 0)
+    closed = mutate(tmp_path, write(path="nl.py", content="a"))
+    opened = mutate(tmp_path, write(path="nl.py", expected=closed["sha256"], content="a\n"))
+    assert (opened["lines_added"], opened["lines_removed"]) == (1, 1)
+
+
+def test_line_stats_follow_actual_diff_not_parameter_counts(tmp_path):
+    pair = mutate(tmp_path, write(path="pair.py", content="a\nb\n"))
+    merged = mutate(tmp_path, edit(pair["sha256"], path="pair.py",
+                                   old_string="a\nb", new_string="b"))
+    assert (tmp_path / "pair.py").read_text() == "b\n"
+    assert (merged["lines_added"], merged["lines_removed"]) == (0, 1)
+
+
+def test_line_stats_are_null_when_comparison_is_unbounded(tmp_path):
+    oversized = "a" * ((1 << 20) + 1)
+    result = mutate(tmp_path, write(content=oversized))
+    assert result["lines_added"] is None and result["lines_removed"] is None
+    shrunk = mutate(tmp_path, write(content="x", expected=result["sha256"]))
+    assert shrunk["lines_added"] is None and shrunk["lines_removed"] is None
+    reshrunk = mutate(tmp_path, write(content="y", expected=shrunk["sha256"]))
+    assert (reshrunk["lines_added"], reshrunk["lines_removed"]) == (1, 1)
+    big = mutate(tmp_path, write(content=oversized, expected=reshrunk["sha256"]))
+    assert big["lines_added"] is None and big["lines_removed"] is None
+    edited = mutate(tmp_path, edit(big["sha256"], old_string="aaa", new_string="bbb",
+                                   replace_all=True))
+    assert edited["replacements"] > 0
+    assert edited["lines_added"] is None and edited["lines_removed"] is None
+
+
+def test_line_stats_stay_null_for_binary_existing_content(tmp_path):
+    raw = b"\xff\xfe binary"
+    (tmp_path / "a.py").write_bytes(raw)
+    result = mutate(tmp_path, write(expected=sha(raw), content="text\n"))
+    assert result["created"] is False
+    assert result["lines_added"] is None and result["lines_removed"] is None
+    assert (tmp_path / "a.py").read_text() == "text\n"
+
+
+def test_line_stats_bound_expansion_and_identical_rewrite(tmp_path):
+    identical = mutate(tmp_path, write(content="same\n"))
+    again = mutate(tmp_path, write(content="same\n", expected=identical["sha256"]))
+    assert (again["lines_added"], again["lines_removed"]) == (0, 0)
+    result = mutate(tmp_path, write(content="word\n", expected=again["sha256"]))
+    grown = mutate(tmp_path, edit(result["sha256"], old_string="word",
+                                  new_string="w" * ((1 << 20) + 10)))
+    assert grown["size"] > (1 << 20)
+    assert grown["lines_added"] is None and grown["lines_removed"] is None
+    assert (tmp_path / "a.py").read_text() == "w" * ((1 << 20) + 10) + "\n"

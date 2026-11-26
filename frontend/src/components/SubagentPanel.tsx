@@ -4,7 +4,9 @@ import type { SessionState } from "../hooks/use-session";
 import type { useSubagents } from "../hooks/use-subagents";
 import { memberTitle, subagentState, type SubagentMember } from "../lib/subagent-contracts";
 import { openDevelopmentPanel } from "../lib/workbench-events";
-import { projectTurn, type ExecutionPresentationSource } from "../lib/session-presentation";
+import { projectTurn, type ExecutionPresentationSource, type ToolPresentation } from "../lib/session-presentation";
+import { groupFileTools } from "../lib/file-tool-groups";
+import { FileToolGroupCard } from "./FileToolGroupCard";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { MessageMarkdown } from "./messages/MessageMarkdown";
@@ -68,6 +70,7 @@ export function SubagentPanel({ state, chat, onOpenFile, onShowApproval }: { sta
   const assignment = detail?.messages.find(message => message.kind === "task" && message.task_id === member?.current_task_id);
   const outputs = detail?.results ?? [];
   const paths = [...new Set(outputs.flatMap(result => artifactPaths(result.output)))];
+  const renderTool = (item: ToolPresentation) => item.approval ? <button type="button" key={item.key} className="sa-return-approval" onClick={onShowApproval}><Shield aria-hidden="true"/>在主对话中批准此操作<ArrowUpRight aria-hidden="true"/></button> : <ToolCallCard key={item.key} tool={item} canApprove={false} busy={false} pending={false} onDecision={() => undefined} onInspect={() => undefined}/>;
   async function send() {
     if (!member || !text.trim() || state.busy || !canWrite) return;
     const id = member.agent_id, sent = text;
@@ -85,10 +88,10 @@ export function SubagentPanel({ state, chat, onOpenFile, onShowApproval }: { sta
       <div className="sa-agent-transcript">
         {state.detailLoading && !detail && <p role="status">正在读取子代理输出…</p>}
         {assignment && textOf(assignment.body) && <p className="sa-assignment">{textOf(assignment.body)}</p>}
-        {items.map(item => item.type === "assistant" ? <div className="sa-agent-output" key={item.key}><MessageMarkdown text={item.text} onCopy={feedback.copy}/></div> : item.approval ? <button type="button" key={item.key} className="sa-return-approval" onClick={onShowApproval}><Shield aria-hidden="true"/>在主对话中批准此操作<ArrowUpRight aria-hidden="true"/></button> : <ToolCallCard key={item.key} tool={item} canApprove={false} busy={false} pending={false} onDecision={() => undefined} onInspect={() => undefined}/>)}
+        {groupFileTools(items).map(item => item.type === "assistant" ? <div className="sa-agent-output" key={item.key}><MessageMarkdown text={item.text} onCopy={feedback.copy}/></div> : item.type === "file-group" ? <FileToolGroupCard key={item.key} group={item} renderTool={renderTool}/> : renderTool(item))}
         {!items.some(item => item.type === "assistant") && outputs.map(result => textOf(result.output) ? <div className="sa-agent-output" key={result.result_id}><MessageMarkdown text={textOf(result.output)} onCopy={feedback.copy}/></div> : null)}
         {detail && !items.length && !outputs.length && <p className="sa-empty">{stateName === "approval" ? "等待主会话批准工具操作。" : stateName === "running" ? "正在执行，尚未生成输出。" : "还没有已保存的执行输出。"}</p>}
-        {detail?.events_truncated && <p className="sa-empty">执行记录较长，当前显示最近一段。</p>}
+        {detail?.events_truncated && <p className="sa-empty">服务端版本较旧，执行记录未完整返回。</p>}
         {detail?.run?.code && <p className="sa-action-receipt">{detail.run.code === "cancelled" ? "已停止" : runReason(detail.run.code)} <code>{detail.run.code}</code></p>}
         {detail?.messages.filter(message => message.kind !== "task").map(message => <div className="sa-sent-message" key={message.id}><small>后续消息{message.wake === "queue_only" ? " · 仅排队" : ""}</small><p>{textOf(message.body)}</p></div>)}
         {paths.map(path => <button type="button" className="sa-artifact" key={path} onClick={() => onOpenFile(path, path.split("/").at(-1) ?? path)}><FileText aria-hidden="true"/><span>{path}</span><ArrowUpRight aria-hidden="true"/></button>)}

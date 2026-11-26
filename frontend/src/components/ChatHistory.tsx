@@ -4,7 +4,9 @@ import { Button } from "./ui/button";
 import { chatCopy as c, runReason, turnLabels } from "../lib/copy";
 import type { SessionState } from "../hooks/use-session";
 import { useCopyFeedback } from "../hooks/use-copy-feedback";
-import { projectTurn, type TurnPresentation } from "../lib/session-presentation";
+import { projectTurn, type ToolPresentation, type TurnPresentation } from "../lib/session-presentation";
+import { groupFileTools } from "../lib/file-tool-groups";
+import { FileToolGroupCard } from "./FileToolGroupCard";
 import { turnPath, type Turn } from "../lib/session-contracts";
 import { MessageMarkdown } from "./messages/MessageMarkdown";
 import { CopyFeedback } from "./messages/CopyFeedback";
@@ -163,6 +165,12 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
           const StateIcon = waitingApproval ? Shield : turn.status === "running" ? LoaderCircle : turn.status === "queued" ? Clock : turn.status === "failed" ? CircleAlert : Ban;
           const moreOpen = expanded[turn.id] === true;
           const canReuse = chat.canWrite && chat.session?.status === "open" && !chat.turnPending;
+          const renderTool = (item: ToolPresentation) => {
+            const approval = item.approval;
+            const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";
+            const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
+            return <ToolCallCard key={item.key} tool={item} onOpenSubagent={onOpenSubagent} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
+          };
           return <article className="chat-turn" key={turn.id} data-turn-id={turn.id}>
             <div className={`chat-user-wrap${showState ? " has-turn-state" : ""}`}><div className="chat-user-message">
               <div className="chat-user-text" data-ui-data>{turn.text}</div>
@@ -174,14 +182,12 @@ export function ChatHistory({ chat, onTrace, onOpenSubagent, children, empty }: 
               </div>
             </div>
             {!working && items.some(item => item.type === "assistant" && item.partial) && <p className="chat-partial-note">以下为已生成部分</p>}
-            {items.map(item => {
+            {groupFileTools(items).map(item => {
               if (item.type === "assistant") return <div className="chat-assistant" key={item.key}>
                 <div className={item.key === lastAnswer?.key ? "chat-answer" : "chat-step-text"} data-ui-data><MessageMarkdown text={item.text} onCopy={feedback.copy} streaming={working} /></div>
               </div>;
-              const approval = item.approval;
-              const target = approval ? turnPath(chat.workspace, chat.id, turn.id) + "/approvals/" + encodeURIComponent(approval.request_id) : "";
-              const pending = !!target && chat.pendingControls.some(saved => saved.target === target);
-              return <ToolCallCard key={item.key} tool={item} onOpenSubagent={onOpenSubagent} canApprove={chat.canApprove} canAllowSession={!!chat.execution?.policy?.project_id && chat.execution.policy.project_access === "write"} busy={chat.controlling} pending={pending} onInspect={() => { stickToBottom.current = false; void chat.loadDetails(turn); }} onDecision={(allow, scope = "once") => { if (approval) void chat.control(turn, "approval", approval, allow, undefined, undefined, scope); }} />;
+              if (item.type === "file-group") return <FileToolGroupCard key={item.key} group={item} renderTool={renderTool} />;
+              return renderTool(item);
             })}
             {turn.code && <p className="notice chat-turn-notice" data-ui-data>{runReason(turn.code)}<code>{turn.code}</code></p>}
             <div className="chat-answer-actions">
