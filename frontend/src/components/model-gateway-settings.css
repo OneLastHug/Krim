@@ -101,12 +101,43 @@
 .mp-number-unit > span { color: var(--mp-muted); font-size: 11px; }
 .mp-model-add { display: flex; gap: 5px; align-items: center; width: 100%; border-top: 1px solid var(--mp-line-2); padding: 7px 11px; font-size: 11.5px; color: var(--mp-secondary); }
 .mp-model-add:hover:not(:disabled) { background: var(--mp-pill); }
+.mp-model-actions { display: flex; border-top: 1px solid var(--mp-line-2); flex-wrap: wrap; }
+.mp-model-actions .mp-model-add { border-top: 0; width: auto; flex: 1 1 auto; white-space: nowrap; }
+.mp-discovery { margin-top: 10px; border: 1px solid var(--mp-line); border-radius: 8px; overflow: hidden; }
+.mp-discovery-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 10px 2px; }
+.mp-discovery-head > strong { font-size: 12px; font-weight: 500; }
+.mp-discovery-head > strong > span { margin-left: 5px; color: var(--mp-muted); font-weight: 400; }
+.mp-discovery-search { width: auto; margin: 5px 10px; }
+.mp-editor .mp-discovery-search input { border: 0; height: auto; padding: 0; background: transparent; box-shadow: none; border-radius: 0; }
+.mp-discovery-selection { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 1px 5px 6px; }
+.mp-discovery-selection > span { color: var(--mp-muted); font-size: 11px; margin-left: auto; padding-right: 5px; }
+.mp-discovery-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--mp-line-2); }
+.mp-discovery-row { display: flex; align-items: center; gap: 9px; padding: 8px 11px; cursor: pointer; min-width: 0; }
+.mp-discovery-row + .mp-discovery-row { border-top: 1px solid var(--mp-line-2); }
+.mp-discovery-row:hover { background: var(--mp-card-2); }
+.mp-editor .mp-discovery-row > input { width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--mp-accent); }
+.mp-discovery-row > span { min-width: 0; flex: 1; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.mp-discovery-row strong { font-size: 12px; font-weight: 400; }
+.mp-discovery-row small { color: var(--mp-muted); font-size: 10.5px; }
+.mp-discovery-row > small { flex: none; }
+.mp-discovery-row.is-added { cursor: default; color: var(--mp-muted); }
+.mp-discovery-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-top: 1px solid var(--mp-line-2); background: var(--mp-card-2); flex-wrap: wrap; }
+.mp-discovery-foot > span { color: var(--mp-muted); font-size: 11px; flex: 1 1 160px; }
+.mp-discovery-error { color: var(--mp-danger); font-size: 11.5px; margin: 8px 0 0; overflow-wrap: anywhere; }
 .mp-model-add svg { width: 13px; height: 13px; }
 .mp-models-empty { padding: 12px 11px; font-size: 11px; color: var(--mp-muted); }
 .mp-reasoning-toggle { display: flex; align-items: center; gap: 5px; padding: 4px 0 3px; width: 100%; font-size: 11.5px; color: var(--mp-secondary); }
 .mp-reasoning-toggle > svg { width: 11px; height: 11px; transition: transform .12s; }
 .mp-reasoning-toggle > span { margin-left: auto; font-size: 10px; color: var(--mp-muted); }
 .mp-reasoning { padding: 9px 0 3px; }
+.mp-quick-picks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.mp-quick-picks > button { border: 1px solid var(--mp-line); border-radius: 5px; padding: 2px 7px; color: var(--mp-secondary); font-size: 10.5px; }
+.mp-quick-picks > button:hover:not(:disabled) { background: var(--mp-pill); }
+.mp-quick-picks > button[aria-pressed="true"] { color: var(--mp-accent); border-color: var(--mp-accent); }
+.mp-reasoning-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mp-reasoning-presets + .mp-hint { margin: 5px 0 10px; }
+.mp-level-entry + .mp-level-entry { margin-top: 10px; }
+.mp-level-preview { display: block; margin: 4px 2px 0; font-size: 10px; color: var(--mp-muted); line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
 .mp-level-head, .mp-level-row { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, .85fr) minmax(0, 1fr) minmax(0, 1fr) 24px; align-items: center; gap: 6px; }
 .mp-level-head { color: var(--mp-muted); font-size: 10px; padding: 0 2px 5px; }
 .mp-level-row + .mp-level-row { margin-top: 6px; }

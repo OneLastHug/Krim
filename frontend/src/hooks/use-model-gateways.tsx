@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { request, RequestError } from "../api";
 import type { Actor } from "../lib/session-contracts";
-import { EMPTY_SELECTION, gatewayError, gatewayUpdate, modelKey, parseGatewayDocument, toWireSelection, type Gateway, type GatewayDocument, type GatewayModel, type GatewaySelection } from "../lib/model-gateways";
+import { EMPTY_SELECTION, gatewayDiscoveryBody, gatewayError, gatewayUpdate, modelKey, parseDiscoveredModels, parseGatewayDocument, toWireSelection, type Gateway, type GatewayDiscoveryDraft, type GatewayDocument, type GatewayModel, type GatewaySelection } from "../lib/model-gateways";
 
 export interface ModelGatewayContext extends GatewayDocument {
   loading: boolean;
@@ -9,6 +9,7 @@ export interface ModelGatewayContext extends GatewayDocument {
   saving: boolean;
   canWrite: boolean;
   reload: () => Promise<void>;
+  discoverModels: (draft: GatewayDiscoveryDraft) => Promise<GatewayModel[]>;
   saveProvider: (gateway: Gateway, models: GatewayModel[], keyDraft?: string | null) => Promise<void>;
   removeProvider: (id: string) => Promise<void>;
   setDefaultSelection: (selection: GatewaySelection) => Promise<void>;
@@ -71,6 +72,16 @@ export function ModelGatewaysProvider({ apiKey, identity, children }: { apiKey: 
   const api: ModelGatewayContext = {
     ...view.document, loading: view.loading, error: view.error, saving: view.saving, canWrite,
     reload,
+    discoverModels: async draft => {
+      if (!canWrite) throw new Error("当前账号没有获取端点模型的权限。");
+      if (writing.current || loaded.current !== scope || stateRef.current.scope !== scope || stateRef.current.loading) throw new Error("请等待配置读取完成。");
+      if (unconfirmed.current) throw new Error("上次保存结果尚未确认，请重新读取配置后核对。");
+      const expectedRevision = stateRef.current.document.revision;
+      const result = await request("/v2/me/model-gateways/models/discover", apiKey, gatewayDiscoveryBody(draft, expectedRevision));
+      if (!live.current || scopeRef.current !== scope) throw new Error("账号已切换，请重新获取模型。");
+      if (stateRef.current.document.revision !== expectedRevision) throw new RequestError(409, "revision_conflict");
+      return parseDiscoveredModels(result);
+    },
     saveProvider: async (gateway, models, keyDraft) => {
       const document = stateRef.current.document;
       const previous = document.gateways.find(g => g.id === gateway.id);

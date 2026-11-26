@@ -21,6 +21,83 @@ from krim_agent.providers.openai_compatible import OpenAICompatibleConfig
 from krim_agent.storage.sqlite import SQLiteStore
 
 
+class DirectoryFixture(HTTPFixture):
+    """A model-list endpoint in front of the unchanged chat/SSE fixture."""
+
+    async def __aenter__(self):
+        await super().__aenter__()
+        self.directory_requests = []
+        self.directory_server = await asyncio.start_server(self.directory, "127.0.0.1", 0)
+        directory_port = self.directory_server.sockets[0].getsockname()[1]
+        self.directory_url = f"http://127.0.0.1:{directory_port}/v1"
+        return self
+
+    async def __aexit__(self, *args):
+        self.directory_server.close()
+        await self.directory_server.wait_closed()
+        await super().__aexit__(*args)
+
+    async def directory(self, reader, writer):
+        remote_writer = None
+        try:
+            header = await reader.readuntil(b"\r\n\r\n")
+            lines = header.decode("ascii").split("\r\n")
+            method, path, _ = lines[0].split()
+            headers = {
+                key.lower(): value.strip()
+                for key, value in (line.split(":", 1) for line in lines[1:] if ":" in line)
+            }
+            if method == "GET":
+                authenticated = headers.get("authorization") == "Bearer fixture-provider-key"
+                self.directory_requests.append(
+                    {"path": path, "authorization_matches": authenticated}
+                )
+                status = 200 if authenticated else 401
+                if "unsupported" in path:
+                    status = 404
+                models = [
+                    {"id": "custom-model-a", "name": "端点推理模型 A"},
+                    {"id": "custom-model-b", "name": "端点模型 B"},
+                    {
+                        "id": "vendor/reasoning-model-with-a-long-name:latest",
+                        "name": "用于检查窄屏换行的长名称推理模型",
+                    },
+                    {"id": "custom-model-a", "name": "duplicate"},
+                ]
+                payload = (
+                    {"data": [] if "empty" in path else models}
+                    if status == 200
+                    else {"error": "fixture error"}
+                )
+                data = (
+                    b"not-json"
+                    if "invalid" in path
+                    else json.dumps(payload, ensure_ascii=False).encode()
+                )
+                writer.write(
+                    (
+                        f"HTTP/1.1 {status} Fixture\r\n"
+                        "Content-Type: application/json\r\n"
+                        f"Content-Length: {len(data)}\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode()
+                    + data
+                )
+                await writer.drain()
+                return
+            body = await reader.readexactly(int(headers.get("content-length", "0")))
+            remote_reader, remote_writer = await asyncio.open_connection("127.0.0.1", self.port)
+            remote_writer.write(header + body)
+            await remote_writer.drain()
+            while chunk := await remote_reader.read(65536):
+                writer.write(chunk)
+                await writer.drain()
+        finally:
+            if remote_writer is not None:
+                remote_writer.close()
+            writer.close()
+
+
 async def serve(port: int, evidence: Path) -> None:
     await asyncio.to_thread(evidence.mkdir, parents=True, exist_ok=True)
     private = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="krim-gateway-ui-"))
@@ -35,7 +112,7 @@ async def serve(port: int, evidence: Path) -> None:
         await identity.close()
     finally:
         await store.close()
-    async with HTTPFixture(expected_key="fixture-provider-key") as upstream:
+    async with DirectoryFixture(expected_key="fixture-provider-key") as upstream:
         async with await open_application(
             database,
             settings=Settings(database=database),
@@ -56,17 +133,22 @@ async def serve(port: int, evidence: Path) -> None:
                         "model": item["body"].get("model"),
                         "reasoning_effort": item["body"].get("reasoning_effort"),
                         "thinking": item["body"].get("thinking"),
+                        "max_tokens": item["body"].get("max_tokens"),
                         "authorization_matches": item["authorization_matches"],
                     }
                     for item in upstream.requests
                 ]
+
+            @api.get("/__fixture__/directory-requests")
+            async def directory_requests():
+                return upstream.directory_requests
 
             (evidence / "ready.json").write_text(
                 json.dumps(
                     {
                         "fixture_key": token,
                         "workspace": actor.memberships[0].workspace_id,
-                        "upstream": upstream.url,
+                        "upstream": upstream.directory_url,
                         "database": str(database),
                     },
                     ensure_ascii=False,

@@ -8,7 +8,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from krim_agent.contracts import ServiceError
-from krim_agent.model_gateway.contracts import GatewayUpdate
+from krim_agent.model_gateway.contracts import GatewayDiscoveryRequest, GatewayUpdate
 from krim_agent.model_gateway.discovery import discover_models
 from krim_agent.model_gateway.selection import SessionModelUpdate, get_selection, set_selection
 from krim_agent.model_gateway.service import ModelGatewayService
@@ -50,6 +50,12 @@ def mount_model_gateways(app: FastAPI) -> None:
     async def update_settings(body: GatewayUpdate, request: Request) -> JSONResponse:
         service, actor = _access(request, write=True)
         return _response(await service.update(actor.principal_id, body))
+
+    @router.post("/v2/me/model-gateways/models/discover")
+    async def discover_draft(body: GatewayDiscoveryRequest, request: Request) -> JSONResponse:
+        service, actor = _access(request, write=True)
+        config = await service.draft_config(actor.principal_id, body)
+        return _response({"models": await discover_models(config)})
 
     @router.post("/v2/me/model-gateways/{gateway_id}/models/discover")
     async def discover(gateway_id: str, request: Request) -> JSONResponse:

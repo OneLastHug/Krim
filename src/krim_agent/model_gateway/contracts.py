@@ -55,6 +55,37 @@ class GatewayModel(StrictModel):
         return value
 
 
+class GatewayDiscoveryRequest(StrictModel):
+    """草稿模型发现请求；不落库不推进版本，密钥语义与 Gateway 保存一致。
+
+    `gateway_id` 缺省表示纯草稿探测；给出时按当前账号读取保存的同ID网关，
+    留空 `api_key` 复用已存密钥，新值只覆盖本次探测，`clear_api_key` 清除。
+    `api_key_env` 与明文密钥互斥；给出 env 引用时按保存语义接管本次解析。
+    """
+
+    base_url: str = Field(min_length=1, max_length=2048)
+    wire_api: Literal["chat_completions", "responses"] = "chat_completions"
+    gateway_id: str | None = Field(default=None, pattern=GATEWAY_ID_PATTERN)
+    expected_revision: int = Field(ge=0)
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: str | None = Field(default=None, pattern=ENV_NAME_PATTERN)
+    clear_api_key: bool = False
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def secret_key(cls, value: object) -> object:
+        return SecretStr(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def consistent(self) -> GatewayDiscoveryRequest:
+        key = self.api_key.get_secret_value() if self.api_key is not None else ""
+        if key and self.api_key_env is not None:
+            raise ValueError("密钥与密钥引用不能同时提供")
+        if self.clear_api_key and key:
+            raise ValueError("清除与设置密钥不能同时进行")
+        return self
+
+
 class GatewaySelection(StrictModel):
     """一次解析使用的具体网关/模型/档位；runtime 沿用此命名。"""
 

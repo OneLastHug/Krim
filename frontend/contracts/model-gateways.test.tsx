@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ModelGatewaysProvider, useModelGateways, type ModelGatewayContext } from "../src/hooks/use-model-gateways";
-import { gatewayUpdate, modelKey, parseGatewayDocument } from "../src/lib/model-gateways";
+import { gatewayUpdate, modelKey, parseGatewayDocument, type GatewayModel } from "../src/lib/model-gateways";
 import type { Actor } from "../src/lib/session-contracts";
 import { INTENTS, prepareIntent, readIntents } from "../src/lib/session-requests";
 
@@ -100,4 +100,59 @@ test("switching account cannot publish a previous account's in-flight read", asy
   await act(async () => release(json(documentOf(9))));
   expect(context?.revision).toBe(0);
   expect(context?.gateways).toEqual([]);
+});
+
+test("endpoint discovery posts the draft instead of PUT and reuses stored credentials", async () => {
+  await mount();
+  respond = method => method === "POST"
+    ? json({ models: [{ id: "vendor-x", display_name: "端点模型", allow_images: false, reasoning_levels: {} }] })
+    : json(documentOf());
+  let discovered: GatewayModel[] = [];
+  await act(async () => { discovered = await context!.discoverModels({ baseUrl: " https://new.example/v1 ", protocol: "responses", keyDraft: "fixture-discovery-key" }); });
+  expect(calls.filter(call => call.method === "PUT")).toHaveLength(0);
+  const posted = calls.find(call => call.path === "/v2/me/model-gateways/models/discover")!;
+  expect(posted.body).toEqual({ base_url: "https://new.example/v1", wire_api: "responses", expected_revision: 1, api_key: "fixture-discovery-key", api_key_env: null });
+  expect(discovered.map(model => model.modelId)).toEqual(["vendor-x"]);
+  expect(context?.models).toHaveLength(1);
+  expect(localStorage.length).toBe(0);
+  expect(sessionStorage.length).toBe(0);
+  await act(async () => { await context!.discoverModels({ gatewayId: "gw", baseUrl: "https://api.example.com/v1", protocol: "chat_completions", apiKeyEnv: "PROVIDER_KEY" }); });
+  await act(async () => { await context!.discoverModels({ gatewayId: "gw", baseUrl: "https://api.example.com/v1", protocol: "chat_completions", apiKeyEnv: "PROVIDER_KEY", keyDraft: null }); });
+  const [, reuse, clearing] = calls.filter(call => call.path === "/v2/me/model-gateways/models/discover");
+  expect(reuse?.body).toEqual({ base_url: "https://api.example.com/v1", wire_api: "chat_completions", expected_revision: 1, gateway_id: "gw", api_key_env: "PROVIDER_KEY" });
+  expect(clearing?.body).toEqual({ base_url: "https://api.example.com/v1", wire_api: "chat_completions", expected_revision: 1, gateway_id: "gw", api_key_env: null, clear_api_key: true });
+});
+
+test("a failed discovery stays retryable and never blocks an unrelated save", async () => {
+  await mount();
+  respond = method => method === "POST" ? json({ error: { code: "provider_timeout" } }, 504) : json(documentOf());
+  await act(async () => { await expect(context!.discoverModels({ baseUrl: "https://api.example.com/v1", protocol: "chat_completions", keyDraft: "k" })).rejects.toMatchObject({ code: "provider_timeout" }); });
+  respond = () => json(documentOf(2));
+  await act(async () => context!.saveProvider(context!.gateways[0]!, context!.models));
+  expect(calls.filter(call => call.method === "PUT")).toHaveLength(1);
+  expect(context?.revision).toBe(2);
+  respond = method => method === "POST"
+    ? json({ models: [{ id: "vendor-y", display_name: "重试模型", allow_images: false, reasoning_levels: {} }] })
+    : json(documentOf());
+  let retried: GatewayModel[] = [];
+  await act(async () => { retried = await context!.discoverModels({ baseUrl: "https://api.example.com/v1", protocol: "chat_completions" }); });
+  expect(retried.map(model => model.modelId)).toEqual(["vendor-y"]);
+});
+
+test("switching account discards an in-flight discovery response", async () => {
+  await mount();
+  let release!: (value: Response) => void;
+  const ghost = { id: "ghost-model", display_name: "旧账号模型", allow_images: false, reasoning_levels: {} };
+  respond = (method, _body, auth) => {
+    if (method === "POST") return auth === "Bearer account-key" ? new Promise<Response>(resolve => { release = resolve; }) : json({ models: [ghost] });
+    return json(documentOf());
+  };
+  let pending!: Promise<GatewayModel[]>;
+  await act(async () => { pending = context!.discoverModels({ baseUrl: "https://api.example.com/v1", protocol: "chat_completions" }); });
+  await mount("other-key", { ...actor, principal_id: "account-b" });
+  const rejected = expect(pending).rejects.toThrow("账号已切换");
+  await act(async () => release(json({ models: [ghost] })));
+  await rejected;
+  expect(context?.revision).toBe(1);
+  expect(context?.models.map(model => model.modelId)).toEqual(["vendor/model:latest"]);
 });

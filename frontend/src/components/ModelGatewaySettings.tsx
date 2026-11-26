@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Network, Plus, Search, Server, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Cpu, Download, Eye, EyeOff, Network, Plus, Search, Server, Trash2, X } from "lucide-react";
 import { useModelGateways, type ModelGatewayContext } from "../hooks/use-model-gateways";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "./ui/dialog";
-import type { Gateway, GatewayModel, GatewayModelLevel, GatewayProtocol, GatewayThinking } from "../lib/model-gateways";
+import { gatewayDiscoveryError, type Gateway, type GatewayModel, type GatewayModelLevel, type GatewayProtocol, type GatewayThinking } from "../lib/model-gateways";
+import { appendReasoningPreset, OUTPUT_TOKEN_PRESETS, PROTOCOL_HINTS, REASONING_EFFORTS, REASONING_PRESETS, reasoningWirePreview } from "../lib/model-gateway-presets";
 import "./model-gateway-settings.css";
 
 export interface ModelGatewaySettingsProps {}
@@ -22,7 +23,6 @@ const LEVEL_ID = /^[A-Za-z0-9._-]{1,32}$/;
 const EFFORT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const PROTOCOLS = [["chat_completions", "Chat Completions"], ["responses", "Responses"]] as const;
 const THINKING = [["omit", "跟随模型"], ["enabled", "开启"], ["disabled", "关闭"]] as const;
-const COMMON_LEVELS = [["low", "低"], ["medium", "中"], ["high", "高"], ["xhigh", "超高"]] as const;
 
 function nextGatewayId(ids: string[]): string {
   let n = 1;
@@ -149,7 +149,12 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
   const [showKey, setShowKey] = useState(false);
   const [clearKey, setClearKey] = useState(false);
   const [models, setModels] = useState<ModelDraft[]>(() => api.models.filter(model => model.gatewayId === initial?.id).map(model => ({ ...model, levels: model.levels.map(level => ({ ...level })), expanded: false })));
+  const [discovery, setDiscovery] = useState<{ loading: boolean; models: GatewayModel[] | null; selected: Set<string>; query: string; error: string }>({ loading: false, models: null, selected: new Set(), query: "", error: "" });
+  const discoveryTicket = useRef(0);
+  const editorLive = useRef(true);
+  useEffect(() => { editorLive.current = true; return () => { editorLive.current = false; discoveryTicket.current++; }; }, []);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
+  const [reasoningPreset, setReasoningPreset] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(false);
   const [reloadBusy, setReloadBusy] = useState(false);
@@ -162,7 +167,42 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
   const providerId = useRef(initial?.id ?? nextGatewayId(api.gateways.map(gateway => gateway.id)));
   const sequence = useRef(0);
   const controlsBusy = api.loading || api.saving || deleteBusy;
-  const formBusy = controlsBusy || !api.canWrite;
+  const formBusy = controlsBusy || discovery.loading || !api.canWrite;
+  const existingModelIds = new Set(models.map(model => model.modelId.trim()));
+  const discoveredMatches = (discovery.models ?? []).filter(model => `${model.modelId} ${model.displayName}`.toLowerCase().includes(discovery.query.trim().toLowerCase()));
+  const availableMatches = discoveredMatches.filter(model => !existingModelIds.has(model.modelId));
+  const selectedDiscoveries = (discovery.models ?? []).filter(model => discovery.selected.has(model.modelId) && !existingModelIds.has(model.modelId));
+
+  function invalidateDiscovery() {
+    discoveryTicket.current++;
+    setDiscovery({ loading: false, models: null, selected: new Set(), query: "", error: "" });
+  }
+
+  async function discoverModels() {
+    if (formBusy || needsReload) return;
+    const ticket = ++discoveryTicket.current;
+    setDiscovery({ loading: true, models: null, selected: new Set(), query: "", error: "" });
+    try {
+      const result = await api.discoverModels({ gatewayId: initial?.id, baseUrl: url, protocol, apiKeyEnv: initial?.apiKeyEnv, keyDraft: clearKey ? null : key.trim() || undefined });
+      if (!editorLive.current || ticket !== discoveryTicket.current) return;
+      setDiscovery({ loading: false, models: result, selected: new Set(), query: "", error: "" });
+    } catch (caught) {
+      if (!editorLive.current || ticket !== discoveryTicket.current) return;
+      const message = gatewayDiscoveryError(caught);
+      setDiscovery({ loading: false, models: null, selected: new Set(), query: "", error: message });
+      if (isUnknownMessage(message)) { setError(message); setNeedsReload(true); }
+    }
+  }
+
+  function addDiscovered() {
+    if (formBusy || !selectedDiscoveries.length) return;
+    markDirty();
+    setModels(rows => {
+      const ids = new Set(rows.map(model => model.modelId.trim()));
+      return [...rows, ...selectedDiscoveries.filter(model => !ids.has(model.modelId)).map(model => ({ ...model, id: `model-draft-${++sequence.current}`, gatewayId: providerId.current, levels: model.levels.map(level => ({ ...level })), expanded: false }))];
+    });
+    setDiscovery(previous => ({ ...previous, selected: new Set() }));
+  }
 
   function markDirty() {
     dirty.current = true;
@@ -222,7 +262,7 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
-    if (!api.canWrite || controlsBusy || needsReload) return;
+    if (formBusy || needsReload) return;
     if (!name.trim()) { setError("请输入供应商名称。"); return; }
     if (!GATEWAY_ID.test(providerId.current)) { setError("供应商标识无效，请重新读取配置后重试。"); return; }
     let parsed: URL;
@@ -326,21 +366,21 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
         <Field label="名称" id="gateway-name">
           <input id="gateway-name" autoFocus autoComplete="off" maxLength={128} placeholder="例如：团队网关" value={name} disabled={formBusy} onChange={event => { setName(event.target.value); markDirty(); }} />
         </Field>
-        <Field label="API 地址" id="gateway-url">
+        <Field label="API 地址" id="gateway-url" hint={PROTOCOL_HINTS[protocol]}>
           <div className="mp-endpoint">
             <div className="mp-segmented" role="group" aria-label="API 协议">
               {PROTOCOLS.map(([protocolId, text]) => (
-                <button type="button" key={protocolId} aria-pressed={protocol === protocolId} disabled={formBusy} onClick={() => { setProtocol(protocolId); markDirty(); }}>{text}</button>
+                <button type="button" key={protocolId} aria-pressed={protocol === protocolId} disabled={formBusy} onClick={() => { setProtocol(protocolId); invalidateDiscovery(); markDirty(); }}>{text}</button>
               ))}
             </div>
-            <input id="gateway-url" type="url" autoComplete="off" spellCheck={false} placeholder="https://api.example.com/v1" value={url} disabled={formBusy} onChange={event => { setUrl(event.target.value); markDirty(); }} />
+            <input id="gateway-url" type="url" autoComplete="off" spellCheck={false} placeholder="https://api.example.com/v1" value={url} disabled={formBusy} onChange={event => { setUrl(event.target.value); invalidateDiscovery(); markDirty(); }} />
           </div>
         </Field>
         <Field label="API Key" id="gateway-key" hint={clearKey ? "保存后清除密钥。" : initial?.keySet ? "已设置。留空保留，输入新密钥替换。" : "本地免密服务可留空。"}>
           <div className="mp-key-input">
-            <input id="gateway-key" type={showKey ? "text" : "password"} autoComplete="new-password" disabled={formBusy || clearKey} value={key} placeholder={initial?.keySet ? "••••••••••••••••" : "输入 API Key"} onChange={event => { setKey(event.target.value); markDirty(); }} />
+            <input id="gateway-key" type={showKey ? "text" : "password"} autoComplete="new-password" disabled={formBusy || clearKey} value={key} placeholder={initial?.keySet ? "••••••••••••••••" : "输入 API Key"} onChange={event => { setKey(event.target.value); invalidateDiscovery(); markDirty(); }} />
             <button type="button" className="mp-icon-button" aria-label={showKey ? "隐藏输入的密钥" : "显示输入的密钥"} disabled={formBusy || clearKey} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff /> : <Eye />}</button>
-            {initial?.keySet && <button type="button" className="mp-text" disabled={formBusy} onClick={() => { setClearKey(value => !value); setKey(""); markDirty(); }}>{clearKey ? "保留" : "清除"}</button>}
+            {initial?.keySet && <button type="button" className="mp-text" disabled={formBusy} onClick={() => { setClearKey(value => !value); setKey(""); invalidateDiscovery(); markDirty(); }}>{clearKey ? "保留" : "清除"}</button>}
           </div>
         </Field>
         <Field label="模型">
@@ -365,25 +405,38 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
                     </Field>
                     <Field label="最大输出" id={`model-tokens-${model.id}`}>
                       <div className="mp-number-unit"><input id={`model-tokens-${model.id}`} data-model-tokens type="number" min={1} step={1} value={model.maxOutputTokens ?? ""} placeholder="模型默认" disabled={formBusy} onChange={event => patchModel(model.id, { maxOutputTokens: event.target.value ? Number(event.target.value) : null })} /><span>Token</span></div>
+                      <div className="mp-quick-picks" role="group" aria-label="最大输出快捷档位">
+                        <button type="button" aria-pressed={model.maxOutputTokens == null} disabled={formBusy} onClick={() => patchModel(model.id, { maxOutputTokens: null })}>模型默认</button>
+                        {OUTPUT_TOKEN_PRESETS.map(value => <button key={value} type="button" aria-pressed={model.maxOutputTokens === value} disabled={formBusy} onClick={() => patchModel(model.id, { maxOutputTokens: value })}>{value >= 1000000 ? `${value / 1000000}M` : `${value / 1000}K`}</button>)}
+                      </div>
+                      <p className="mp-hint">限制单次回复的输出量；留空由端点决定。此值不同于上下文窗口容量。</p>
                     </Field>
                     <button type="button" className="mp-reasoning-toggle" aria-expanded={!!reasoningOpen[model.id]} disabled={formBusy} onClick={() => setReasoningOpen(values => ({ ...values, [model.id]: !values[model.id] }))}><ChevronRight className={reasoningOpen[model.id] ? "is-open" : ""} aria-hidden="true" />推理档位<span>{model.levels.length || "模型默认"}</span></button>
                     {reasoningOpen[model.id] && (
                       <div className="mp-reasoning">
+                        <div className="mp-reasoning-presets">
+                          <Select label="推理参数预设" value={REASONING_PRESETS.find(item => item.id === reasoningPreset[model.id] && (protocol === "chat_completions" || !item.chatOnly))?.id ?? "common"} options={REASONING_PRESETS.filter(preset => protocol === "chat_completions" || !preset.chatOnly).map(preset => [preset.id, preset.name] as const)} disabled={formBusy} onChange={value => setReasoningPreset(previous => ({ ...previous, [model.id]: value }))} />
+                          <button type="button" className="mp-text" disabled={formBusy} onClick={() => { const preset = REASONING_PRESETS.find(item => item.id === reasoningPreset[model.id] && (protocol === "chat_completions" || !item.chatOnly)) ?? REASONING_PRESETS[0]!; patchModel(model.id, { levels: appendReasoningPreset(model.levels, preset) }); }}>添加预设档位</button>
+                        </div>
+                        <p className="mp-hint">{(REASONING_PRESETS.find(item => item.id === reasoningPreset[model.id] && (protocol === "chat_completions" || !item.chatOnly)) ?? REASONING_PRESETS[0]!).hint} 按端点支持选择，可继续修改。</p>
                         {model.levels.length > 0 && <div className="mp-level-head" aria-hidden="true"><span>名称</span><span>标识</span><span>effort</span><span>thinking</span><span /></div>}
                         {model.levels.map((level, index) => (
-                          <div className="mp-level-row" key={`${model.id}-${index}`}>
+                          <div className="mp-level-entry" key={`${model.id}-${index}`}>
+                          <div className="mp-level-row">
                             <input aria-label={`档位 ${index + 1} 名称`} placeholder="高" maxLength={32} value={level.label} disabled={formBusy} onChange={event => patchLevel(model, index, { label: event.target.value })} />
                             <input aria-label={`档位 ${index + 1} 标识`} placeholder="high" maxLength={32} value={level.id} disabled={formBusy} onChange={event => patchLevel(model, index, { id: event.target.value })} />
                             <input aria-label={`档位 ${index + 1} effort`} placeholder="不发送" list="mp-effort-values" maxLength={64} value={level.effort} disabled={formBusy} onChange={event => patchLevel(model, index, { effort: event.target.value })} />
                             <Select label={`档位 ${index + 1} thinking`} value={level.thinking} options={THINKING} disabled={formBusy} onChange={value => patchLevel(model, index, { thinking: value as GatewayThinking })} />
                             <button type="button" className="mp-icon-button" aria-label={`删除档位 ${level.label || index + 1}`} disabled={formBusy} onClick={() => patchModel(model.id, { levels: model.levels.filter((_, levelIndex) => levelIndex !== index) })}><Trash2 aria-hidden="true" /></button>
                           </div>
+                          <code className="mp-level-preview" aria-label={`档位 ${index + 1} 请求参数`}>{reasoningWirePreview(level, protocol)}</code>
+                          </div>
                         ))}
                         <div className="mp-reasoning-actions">
                           <button className="mp-text" type="button" disabled={formBusy} onClick={() => patchModel(model.id, { levels: [...model.levels, { id: "", label: "", effort: "", thinking: "omit" }] })}><Plus aria-hidden="true" />添加档位</button>
-                          {!model.levels.length && <button type="button" className="mp-text" disabled={formBusy} onClick={() => patchModel(model.id, { levels: COMMON_LEVELS.map(([id, label]) => ({ id, label, effort: id, thinking: "omit" })) })}>填入常用档位</button>}
                         </div>
-                        <p className="mp-hint">effort 可自定义，留空不发送。{protocol === "responses" ? "Responses 的 thinking 须选「跟随模型」。" : "请按模型支持的参数填写。"}</p>
+                        <p className="mp-hint">effort 可选 none、minimal、low、medium、high、xhigh、max，也可自定义；留空不发送。none 会明确发送关闭强度，与留空不同。</p>
+                        <p className="mp-hint">{protocol === "responses" ? "Responses 发送 reasoning.effort；thinking 须选「跟随模型」。" : "Chat Completions 发送 reasoning_effort；thinking 发送 type: enabled / disabled，跟随模型则省略该字段。"}</p>
                       </div>
                     )}
                     <div className="mp-model-bottom"><button type="button" className="mp-text mp-danger" disabled={formBusy} onClick={() => setModelToDelete(model.id)}><Trash2 aria-hidden="true" />移除此模型</button></div>
@@ -393,10 +446,36 @@ function ProviderEditor({ api, initial, preset, onClose, onSaved, onReloaded, on
               </div>
             ))}
             {!models.length && <div className="mp-models-empty">还没有模型，添加后即可在聊天中选择。</div>}
-            <button className="mp-model-add" type="button" disabled={formBusy} onClick={addModel}><Plus aria-hidden="true" />添加模型</button>
+            <div className="mp-model-actions">
+              <button className="mp-model-add" type="button" disabled={formBusy} onClick={addModel}><Plus aria-hidden="true" />添加模型</button>
+              <button className="mp-model-add" type="button" disabled={formBusy || needsReload || !url.trim()} onClick={() => void discoverModels()}><Download aria-hidden="true" />{discovery.loading ? "正在获取…" : "获取端点模型"}</button>
+            </div>
           </div>
+          {discovery.error && <p className="mp-discovery-error" role="alert">{discovery.error}</p>}
+          {discovery.loading && <p className="mp-hint" role="status">正在请求端点的 /models 列表…</p>}
+          {discovery.models !== null && <section className="mp-discovery" aria-label="端点模型列表">
+            <div className="mp-discovery-head"><strong>端点模型 <span>{discovery.models.length}</span></strong><button type="button" className="mp-icon-button" aria-label="收起端点模型列表" onClick={invalidateDiscovery}><X aria-hidden="true" /></button></div>
+            <label className="mp-search mp-discovery-search"><Search aria-hidden="true" /><input placeholder="搜索模型 ID 或名称…" aria-label="搜索端点模型" value={discovery.query} onChange={event => setDiscovery(previous => ({ ...previous, query: event.target.value }))} /></label>
+            <div className="mp-discovery-selection">
+              <button type="button" className="mp-text" disabled={formBusy || !availableMatches.length} onClick={() => setDiscovery(previous => ({ ...previous, selected: new Set([...previous.selected, ...availableMatches.map(model => model.modelId)]) }))}>选择搜索结果</button>
+              <button type="button" className="mp-text" disabled={formBusy || !discovery.selected.size} onClick={() => setDiscovery(previous => ({ ...previous, selected: new Set() }))}>清空选择</button>
+              <span>已选 {selectedDiscoveries.length} 个</span>
+            </div>
+            <div className="mp-discovery-list">
+              {discoveredMatches.map(model => {
+                const exists = existingModelIds.has(model.modelId);
+                return <label className={`mp-discovery-row${exists ? " is-added" : ""}`} key={model.modelId}>
+                  <input type="checkbox" aria-label={`选择模型 ${model.modelId}`} checked={exists || discovery.selected.has(model.modelId)} disabled={formBusy || exists} onChange={event => { const checked = event.target.checked; setDiscovery(previous => { const selected = new Set(previous.selected); if (checked) selected.add(model.modelId); else selected.delete(model.modelId); return { ...previous, selected }; }); }} />
+                  <span><strong>{model.displayName}</strong>{model.displayName !== model.modelId && <small>{model.modelId}</small>}</span>
+                  {exists && <small>已添加</small>}
+                </label>;
+              })}
+              {!discoveredMatches.length && <p className="mp-models-empty">{discovery.models.length ? "没有匹配的模型" : "端点未返回模型，可手动添加模型 ID。"}</p>}
+            </div>
+            <div className="mp-discovery-foot"><span>添加后可设置能力和推理参数，保存后生效。</span><Button type="button" size="sm" disabled={formBusy || !selectedDiscoveries.length} onClick={addDiscovered}>添加所选{selectedDiscoveries.length ? `（${selectedDiscoveries.length}）` : ""}</Button></div>
+          </section>}
         </Field>
-        <datalist id="mp-effort-values">{["minimal", "low", "medium", "high", "xhigh"].map(value => <option value={value} key={value} />)}</datalist>
+        <datalist id="mp-effort-values">{REASONING_EFFORTS.map(([value, label]) => <option value={value} label={label} key={value} />)}</datalist>
         {needsReload && (
           <div className="mp-banner mp-editor-notice" role="alert">
             <span>保存结果尚未确认，当前草稿已保留。请先重新读取配置核对，不会自动换密钥重发。</span>

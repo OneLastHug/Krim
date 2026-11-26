@@ -316,6 +316,163 @@ async def test_gateway_config_supports_discovery_without_models(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_draft_discovery_resolves_saved_keys_without_persisting(tmp_path, monkeypatch):
+    vault = FakeVault()
+    store, service = await _open(tmp_path, vault)
+    try:
+        await service.update(
+            "alice", _update(key="r1", gateway=_gateway(api_key="sk-keep-22222222"))
+        )
+        selection = GatewaySelection(gateway_id="gw", model_id="m1")
+        probe = {
+            "base_url": "https://probe.example.com/v1",
+            "wire_api": "chat_completions",
+            "gateway_id": "gw",
+            "expected_revision": 1,
+        }
+
+        kept = await service.draft_config("alice", dict(probe))
+        assert kept.model == "discovery"
+        assert kept.base_url == "https://probe.example.com/v1"
+        assert kept.wire_api == "chat_completions"
+        assert kept.api_key.get_secret_value() == "sk-keep-22222222"
+
+        override = await service.draft_config(
+            "alice", dict(probe, wire_api="responses", api_key="{{SECRET_0verr1d3}}")
+        )
+        assert override.wire_api == "responses"
+        assert override.api_key.get_secret_value() == "{{SECRET_0verr1d3}}"
+        resolved, _, revision = await service.resolve("alice", selection, None)
+        assert revision == 1
+        assert resolved.wire_api == "chat_completions"
+        assert resolved.api_key.get_secret_value() == "sk-keep-22222222"
+
+        cleared = await service.draft_config("alice", dict(probe, clear_api_key=True))
+        assert cleared.api_key.get_secret_value() == ""
+
+        monkeypatch.setenv("KRIM_TEST_DISCOVERY_KEY", "{{SECRET_3nvpr0be}}")
+        env_probe = await service.draft_config(
+            "alice", dict(probe, api_key_env="KRIM_TEST_DISCOVERY_KEY")
+        )
+        assert env_probe.api_key.get_secret_value() == "{{SECRET_3nvpr0be}}"
+        monkeypatch.delenv("KRIM_TEST_DISCOVERY_KEY")
+        with pytest.raises(ServiceError) as missing_env:
+            await service.draft_config(
+                "alice", dict(probe, api_key_env="KRIM_TEST_DISCOVERY_KEY")
+            )
+        assert missing_env.value.code == "provider_config"
+
+        view = await service.get("alice")
+        assert view.revision == 1
+        assert len(view.gateways) == 1
+        assert view.gateways[0].api_key_set is True
+        assert vault.writes == [("alice", "gw", 1)]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_draft_discovery_enforces_cas_and_account_isolation(tmp_path):
+    store, service = await _open(tmp_path, FakeVault())
+    try:
+        await service.update("alice", _update(key="a1"))
+        probe = {"base_url": "https://probe.example.com/v1", "wire_api": "chat_completions"}
+
+        with pytest.raises(ServiceError) as stale:
+            await service.draft_config("alice", dict(probe, gateway_id="gw", expected_revision=0))
+        assert stale.value.code == "revision_conflict"
+
+        with pytest.raises(ServiceError) as missing:
+            await service.draft_config(
+                "alice", dict(probe, gateway_id="other", expected_revision=1)
+            )
+        assert missing.value.code == "not_found"
+
+        with pytest.raises(ServiceError) as stale_bob:
+            await service.draft_config("bob", dict(probe, gateway_id="gw", expected_revision=1))
+        assert stale_bob.value.code == "revision_conflict"
+
+        with pytest.raises(ServiceError) as foreign:
+            await service.draft_config("bob", dict(probe, gateway_id="gw", expected_revision=0))
+        assert foreign.value.code == "not_found"
+
+        assert (await service.get("alice")).revision == 1
+        assert (await service.get("bob")).revision == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_pure_draft_probe_needs_no_vault_and_stays_unsaved(tmp_path):
+    store, service = await _open(tmp_path)
+    try:
+        config = await service.draft_config(
+            "alice",
+            {
+                "base_url": "https://draft.example.com/v1",
+                "wire_api": "responses",
+                "expected_revision": 0,
+                "api_key": "{{SECRET_n0vault}}",
+            },
+        )
+        assert config.model == "discovery"
+        assert config.base_url == "https://draft.example.com/v1"
+        assert config.wire_api == "responses"
+        assert config.api_key.get_secret_value() == "{{SECRET_n0vault}}"
+
+        with pytest.raises(ServiceError) as bad_url:
+            await service.draft_config(
+                "alice",
+                {"base_url": "ftp://bad", "wire_api": "chat_completions", "expected_revision": 0},
+            )
+        assert bad_url.value.code == "invalid_input"
+
+        with pytest.raises(ServiceError) as both_keys:
+            await service.draft_config(
+                "alice",
+                {
+                    "base_url": "https://draft.example.com/v1",
+                    "wire_api": "chat_completions",
+                    "expected_revision": 0,
+                    "api_key": "{{SECRET_n0vault}}",
+                    "api_key_env": "KRIM_TEST_DISCOVERY_KEY",
+                },
+            )
+        assert both_keys.value.code == "invalid_input"
+
+        with pytest.raises(ServiceError) as clear_and_key:
+            await service.draft_config(
+                "alice",
+                {
+                    "base_url": "https://draft.example.com/v1",
+                    "wire_api": "chat_completions",
+                    "expected_revision": 0,
+                    "api_key": "{{SECRET_n0vault}}",
+                    "clear_api_key": True,
+                },
+            )
+        assert clear_and_key.value.code == "invalid_input"
+
+        with pytest.raises(ServiceError) as bad_id:
+            await service.draft_config(
+                "alice",
+                {
+                    "base_url": "https://draft.example.com/v1",
+                    "wire_api": "chat_completions",
+                    "expected_revision": 0,
+                    "gateway_id": "Bad.Id",
+                },
+            )
+        assert bad_id.value.code == "invalid_input"
+
+        view = await service.get("alice")
+        assert view.revision == 0
+        assert view.gateways == ()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_invalid_update_is_rejected(tmp_path):
     store, service = await _open(tmp_path, FakeVault())
     try:
