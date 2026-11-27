@@ -9,6 +9,7 @@ const labels: Record<ObsCategory, string> = { system: "系统消息", tools: "�
 
 export function ContextSummary({ context, onTrace, compactView = false, dark = document.documentElement.classList.contains("dark") }: { context: SessionContextState; onTrace?: () => void; dark?: boolean; compactView?: boolean }) {
   const { manifest, used, limit, reported } = context;
+  const initialLoading = context.loading && !context.data && !manifest && !reported;
   const ratio = used !== null && limit ? used / limit : null;
   const tokenMode = !!manifest && manifest.estimated_tokens !== null && manifest.items.every(item => item.estimated_tokens !== null);
   const order: ObsCategory[] = ["files", "tool_result", "history", "tools", "system", "memory", "summary", "unknown"];
@@ -30,7 +31,7 @@ export function ContextSummary({ context, onTrace, compactView = false, dark = d
   if (reported?.reasoning !== null && reported?.reasoning !== undefined) reportedRows.push(["推理输出", reported.reasoning]);
   return <div className="context-summary" aria-label="上下文用量与来源">
     <div className="g-context-overview"><strong>{ratio === null ? "输入预估" : `${(ratio * 100).toFixed(1)}% 预估`}</strong><span title={`上次请求输入预估${manifest ? ` · ${manifest.counter_version}` : ""}`}>{contextCount(used)} / {contextCount(limit)}</span></div>
-    {context.loading && <p className="dev-context-note" role="status">正在读取上一完成轮次…</p>}
+    {initialLoading && <p className="dev-context-note" role="status">正在读取上下文用量…</p>}
     {context.error && <div role="status" className="dev-context-note">{context.error}<Button variant="ghost" size="sm" onClick={context.refresh}>重试</Button></div>}
     {!context.turnId && <p className="dev-context-note">发送首条消息后统计各来源占比。</p>}
     {manifest && <>
@@ -45,7 +46,7 @@ export function ContextSummary({ context, onTrace, compactView = false, dark = d
       <p className="dev-context-note">上次请求上报{reported.final === false ? "（未完成）" : reported.final === null ? "（完整性未标记）" : ""}</p>
       <table className="g-context-table" aria-label="上次请求上报用量"><tbody>{reportedRows.map(([label, value]) => <tr key={label}><td>{label}</td><td>{formatReportedTokens(value)}</td><td>tokens</td></tr>)}</tbody></table>
     </div>}
-    {!reported && context.turnId && !context.loading && !context.error && <p className="dev-context-note">上次请求未上报用量。</p>}
+    {!reported && context.turnId && !initialLoading && !context.error && <p className="dev-context-note">上次请求未上报用量。</p>}
     {!compactView && used !== null && limit !== null && <p className="dev-context-note">距自动整理预估余 {contextCount(Math.max(0, limit - used))} tokens</p>}
     {!compactView && !!context.turnId && onTrace && <Button variant="ghost" size="sm" onClick={onTrace}>查看完整上下文</Button>}
   </div>;

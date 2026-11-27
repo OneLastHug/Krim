@@ -51,7 +51,7 @@ export function useSessionContext(chat: SessionState, apiKey: string, active: bo
     return () => controller.abort();
   }, [active, chat.ready, chat.session?.id, query, apiKey, chat.workspace, chat.id, turnId]);
   // 同轮边界刷新期间保留上一次快照，侧栏不在读取间隙闪回"—"；换身份或轮次不沿用旧数据。
-  const data = chat.ready && (reading.query === query || reading.loading && reading.owner === owner) ? reading.value : null;
+  const data = chat.ready && reading.owner === owner ? reading.value : null;
   const { manifest, reported, requestId } = contextRequestSnapshot(data?.requests ?? []);
   const limit = chat.session?.context_policy.compaction_trigger_tokens ?? chat.session?.context_policy.max_tokens
     ?? (manifest?.model_context_window ? Math.max(0, manifest.model_context_window - (manifest.reserved_output_tokens ?? 0)) : null);

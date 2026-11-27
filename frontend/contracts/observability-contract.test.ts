@@ -314,6 +314,29 @@ test("上下文用量优先读运行中的当前轮，按model_start/usage边界
   );
 });
 
+test("同轮边界刷新在请求前后保留快照，新响应到达才更新数字", async () => {
+  let release!: (response: Response) => void;
+  const held = new Promise<Response>(resolve => { release = resolve; });
+  let reads = 0;
+  await withContextProbe(
+    hookChat({ currentTurn: runningTurn(), events: [{ kind: "model_start" }] }),
+    () => ++reads === 1 ? hookDetail("A", "T2", 111) : held,
+    async ({ latest, rerender, until, settle }) => {
+      await until(() => expect(latest().used).toBe(111));
+      const snapshot = latest().data;
+      await rerender(hookChat({ currentTurn: runningTurn(), events: [{ kind: "model_start" }, { kind: "usage" }] }));
+      expect(latest().loading).toBe(true);
+      expect(latest().data).toBe(snapshot);
+      expect(latest().used).toBe(111);
+      await settle();
+      expect(latest().used).toBe(111);
+      await act(async () => release(hookDetail("A", "T2", 222)));
+      await until(() => expect(latest().used).toBe(222));
+      expect(latest().loading).toBe(false);
+    },
+  );
+});
+
 test("切换会话中止在途读取，不把旧轮快照配到新会话", async () => {
   let release!: (response: Response) => void;
   const held = new Promise<Response>(resolve => { release = resolve; });

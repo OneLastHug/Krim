@@ -185,6 +185,36 @@ test("没有上报用量时不把上下文预估填到实际输入", async () =>
   expect(host.querySelector('[aria-label="上次请求上报用量"]')).toBeNull();
   expect(host.querySelector(".g-context-overview")?.textContent).toContain("9,450 / 900,000");
 });
+test("有快照的后台刷新不插入提示或隐藏未上报用量，保持摘要结构", async () => {
+  const value = countedContext(); value.reported = null;
+  await act(async () => root.render(<ContextSummary context={value} compactView/>));
+  const before = host.innerHTML;
+  for (const loading of [true, false, true, false]) {
+    await act(async () => root.render(<ContextSummary context={{ ...value, loading }} compactView/>));
+    expect(host.innerHTML).toBe(before);
+    expect(host.textContent).toContain("上次请求未上报用量");
+    expect(host.textContent).not.toContain("正在读取");
+  }
+});
+test("已有上报用量的后台刷新保留表格，不增加加载提示", async () => {
+  const value = countedContext();
+  await act(async () => root.render(<ContextSummary context={value} compactView/>));
+  const before = host.innerHTML;
+  await act(async () => root.render(<ContextSummary context={{ ...value, loading: true }} compactView/>));
+  expect(host.innerHTML).toBe(before);
+  expect(host.querySelector('[aria-label="上次请求上报用量"]')).not.toBeNull();
+});
+test("仅首次无快照时显示读取反馈，错误后仍可重试", async () => {
+  const value = { ...context(), turnId: "turn", used: null, loading: true };
+  await act(async () => root.render(<ContextSummary context={value} compactView/>));
+  expect(host.querySelector('[role="status"]')?.textContent).toBe("正在读取上下文用量…");
+  expect(host.textContent).not.toContain("上次请求未上报用量");
+  await act(async () => root.render(<ContextSummary context={{ ...value, loading: false, error: "读取失败" }} compactView/>));
+  expect(host.textContent).toContain("读取失败");
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(value.refresh).toHaveBeenCalledOnce();
+});
+
 test("部分上报显示未完成和未知总量，不自行计算或补零", async () => {
   const value = countedContext(); value.reported = { ...value.reported!, total: null, final: false };
   await act(async () => root.render(<ContextSummary context={value} compactView/>));
