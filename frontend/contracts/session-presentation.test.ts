@@ -162,4 +162,144 @@ assert.equal(failed.length, 1);
 assert.deepEqual(failed[0], { type: "assistant", key: "assistant:step:0", text: "部分回答", partial: true });
 checks += 6;
 
+// file_change_preview：预览事件先于完整参数到达，先建卡；数字为该调用的累计快照，整体覆盖。
+const previewEvent = (seq: number, data: Record<string, unknown>, runId = "run-1") => event(seq, "file_change_preview", data, runId);
+const writeArgs = { path: "src/app.ts", content: "完整内容" };
+const fullPipeline = (extra: ReturnType<typeof event>[]) => projectTurn(turn(), [
+  ...extra,
+  event(30, "model_end", { step_index: 1, tool_calls: [{ kind: "tool_call", id: "provider-w", name: "write", arguments: writeArgs }] }),
+  event(31, "tool_start", { call_id: "internal-w", provider_call_id: "provider-w", step_index: 1, name: "write", arguments: writeArgs }),
+  event(32, "tool_intent", { call_id: "internal-w", step_index: 1, decision: "allow" }),
+], []);
+
+const generating = fullPipeline([
+  previewEvent(10, { provider_call_id: "provider-w", step_index: 1, name: "write", path: "src/app.ts", revision: 0, lines_added: 4, lines_removed: null, complete: false }),
+  previewEvent(11, { provider_call_id: "provider-w", step_index: 1, name: "write", path: "src/app.ts", revision: 1, lines_added: 9, lines_removed: 1, count_scope: "replacement", complete: true }),
+]);
+assert.equal(generating.length, 1);
+if (generating[0]!.type === "tool") {
+  assert.equal(generating[0]!.providerCallId, "provider-w");
+  assert.equal(generating[0]!.name, "write");
+  assert.deepEqual(generating[0]!.arguments, writeArgs);
+  assert.equal(generating[0]!.state, "running");
+  assert.deepEqual(generating[0]!.preview, { path: "src/app.ts", revision: 1, linesAdded: 9, linesRemoved: 1, countScope: "replacement", complete: true });
+}
+const previewOnly = projectTurn(turn(), [previewEvent(1, { provider_call_id: "provider-w", step_index: 1, name: "write", path: "src/app.ts", revision: 0, lines_added: 4, lines_removed: null, complete: false })], []);
+assert.equal(previewOnly.length, 1);
+if (previewOnly[0]!.type === "tool") {
+  assert.equal(previewOnly[0]!.arguments, undefined);
+  assert.equal(previewOnly[0]!.state, "preparing");
+  assert.deepEqual(previewOnly[0]!.preview, { path: "src/app.ts", revision: 0, linesAdded: 4, linesRemoved: null, countScope: "file", complete: false });
+}
+checks += 2;
+
+const finished = projectTurn(turn(), [
+  previewEvent(10, { provider_call_id: "provider-w", step_index: 1, name: "write", path: "src/app.ts", revision: 3, lines_added: 12, lines_removed: 2, complete: true }),
+  event(31, "tool_start", { call_id: "internal-w", provider_call_id: "provider-w", step_index: 1, name: "write", arguments: writeArgs }),
+  event(32, "tool_end", { call_id: "internal-w", provider_call_id: "provider-w", step_index: 1, name: "write", arguments: writeArgs, status: "ok", executor_started: true, result_available: true, value: { ok: true, lines_added: 15, lines_removed: 3 } }),
+], []);
+assert.equal(finished.length, 1);
+if (finished[0]!.type === "tool") {
+  assert.equal(finished[0]!.state, "ok");
+  assert.equal(finished[0]!.preview, undefined);
+  assert.deepEqual(finished[0]!.result, { ok: true, lines_added: 15, lines_removed: 3 });
+}
+const failedPreview = projectTurn(turn(), [
+  previewEvent(10, { provider_call_id: "provider-w", step_index: 1, name: "write", path: "src/app.ts", revision: 3, lines_added: 12, lines_removed: 2, complete: true }),
+  event(31, "tool_start", { call_id: "internal-w", provider_call_id: "provider-w", step_index: 1, name: "write", arguments: writeArgs }),
+  event(32, "tool_end", { call_id: "internal-w", provider_call_id: "provider-w", step_index: 1, name: "write", arguments: writeArgs, status: "failed", executor_started: true, result_available: false }),
+], []);
+if (failedPreview[0]!.type === "tool") {
+  assert.equal(failedPreview[0]!.state, "failed");
+  assert.equal(failedPreview[0]!.preview, undefined);
+  assert.equal(failedPreview[0]!.resultAvailable, false);
+}
+checks += 2;
+
+// 重放重复与乱序 revision：同 seq 重复投递去重，同 revision 重放幂等，迟到旧快照不回退。
+const replayed = projectTurn(turn(), [
+  previewEvent(10, { provider_call_id: "provider-r", step_index: 0, name: "edit", path: "a.md", revision: 2, lines_added: 5, lines_removed: 5, complete: false }),
+  previewEvent(10, { provider_call_id: "provider-r", step_index: 0, name: "edit", path: "a.md", revision: 2, lines_added: 5, lines_removed: 5, complete: false }),
+  previewEvent(11, { provider_call_id: "provider-r", step_index: 0, name: "edit", path: "a.md", revision: 2, lines_added: 5, lines_removed: 5, complete: false }),
+], []);
+assert.equal(replayed.length, 1);
+if (replayed[0]!.type === "tool") assert.deepEqual(replayed[0]!.preview, { path: "a.md", revision: 2, linesAdded: 5, linesRemoved: 5, countScope: "file", complete: false });
+const reordered = projectTurn(turn(), [
+  previewEvent(10, { provider_call_id: "provider-r", step_index: 0, name: "edit", path: "a.md", revision: 5, lines_added: 9, lines_removed: 1, complete: false }),
+  previewEvent(11, { provider_call_id: "provider-r", step_index: 0, name: "edit", path: "a.md", revision: 2, lines_added: 3, lines_removed: 0, complete: false }),
+], []);
+if (reordered[0]!.type === "tool") assert.equal(reordered[0]!.preview?.revision, 5);
+checks += 2;
+
+// 跨 run 忽略、跨调用隔离；未知增删保持 null 不伪造 0；非文件工具与非法字段不建卡。
+const isolated = projectTurn(turn(), [
+  previewEvent(1, { provider_call_id: "p-a", step_index: 0, name: "write", path: "a.ts", revision: 1, lines_added: 3, lines_removed: null, complete: false }),
+  previewEvent(2, { provider_call_id: "p-b", step_index: 0, name: "edit", path: "b.ts", revision: 1, lines_added: null, lines_removed: 7, complete: false }),
+  previewEvent(3, { provider_call_id: "p-a", step_index: 0, name: "write", path: "a.ts", revision: 2, lines_added: 99, lines_removed: 1, complete: false }, "other-run"),
+], []);
+assert.equal(isolated.length, 2);
+if (isolated[0]!.type === "tool" && isolated[1]!.type === "tool") {
+  assert.deepEqual(isolated[0]!.preview, { path: "a.ts", revision: 1, linesAdded: 3, linesRemoved: null, countScope: "file", complete: false });
+  assert.deepEqual(isolated[1]!.preview, { path: "b.ts", revision: 1, linesAdded: null, linesRemoved: 7, countScope: "file", complete: false });
+}
+const rejected = projectTurn(turn(), [
+  previewEvent(1, { provider_call_id: "p-s", step_index: 0, name: "shell", path: "x", revision: 0, lines_added: 1, lines_removed: 1, complete: true }),
+  previewEvent(2, { provider_call_id: "p-v", step_index: 0, name: "write", path: "", revision: 0, lines_added: 1, lines_removed: 1, complete: true }),
+  previewEvent(3, { provider_call_id: "p-v2", step_index: 0, name: "write", path: "v.ts", revision: -1, lines_added: 1, lines_removed: 1, complete: true }),
+  previewEvent(4, { provider_call_id: "p-v3", step_index: 0, name: "write", path: "v.ts", revision: 0, lines_added: -3, lines_removed: "5", complete: true }),
+], []);
+assert.equal(rejected.length, 1);
+if (rejected[0]!.type === "tool") {
+  assert.deepEqual(rejected[0]!.preview, { path: "v.ts", revision: 0, linesAdded: null, linesRemoved: null, countScope: "file", complete: true });
+}
+checks += 2;
+
+// dev_write 旧名属同一文件写入族：事件内一致使用时合并同一张卡（表外旧名不做前缀剥离）。
+const legacyNamed = projectTurn(turn(), [
+  previewEvent(1, { provider_call_id: "p-legacy", step_index: 0, name: "dev_write", path: "old.ts", revision: 0, lines_added: 2, lines_removed: null, complete: false }),
+  event(2, "model_end", { step_index: 0, tool_calls: [{ kind: "tool_call", id: "p-legacy", name: "dev_write", arguments: { path: "old.ts", content: "c" } }] }),
+], []);
+assert.equal(legacyNamed.length, 1);
+if (legacyNamed[0]!.type === "tool") {
+  assert.equal(legacyNamed[0]!.name, "dev_write");
+  assert.equal(legacyNamed[0]!.state, "preparing");
+  assert.notEqual(legacyNamed[0]!.preview, undefined);
+}
+// replaces_provider_call_id：同 step 旧 id → 新 id 迁移同一张卡，不留两张卡。
+const migrated = projectTurn(turn(), [
+  previewEvent(1, { provider_call_id: "old-id", step_index: 1, name: "write", path: "m.ts", revision: 0, lines_added: 2, lines_removed: null, complete: false }),
+  previewEvent(2, { provider_call_id: "new-id", replaces_provider_call_id: "old-id", step_index: 1, name: "write", path: "m.ts", revision: 1, lines_added: 6, lines_removed: 1, complete: false }),
+  event(3, "model_end", { step_index: 1, tool_calls: [{ kind: "tool_call", id: "new-id", name: "write", arguments: { path: "m.ts", content: "c" } }] }),
+], []);
+assert.equal(migrated.length, 1);
+if (migrated[0]!.type === "tool") {
+  assert.equal(migrated[0]!.providerCallId, "new-id");
+  assert.equal(migrated[0]!.preview?.revision, 1);
+}
+const migratedLate = projectTurn(turn(), [
+  previewEvent(1, { provider_call_id: "old-id", step_index: 1, name: "write", path: "m.ts", revision: 0, lines_added: 2, lines_removed: null, complete: false }),
+  event(2, "model_end", { step_index: 1, tool_calls: [{ kind: "tool_call", id: "new-id", name: "write", arguments: { path: "m.ts", content: "c" } }] }),
+  previewEvent(3, { provider_call_id: "new-id", replaces_provider_call_id: "old-id", step_index: 1, name: "write", path: "m.ts", revision: 2, lines_added: 8, lines_removed: 1, complete: true }),
+], []);
+assert.equal(migratedLate.length, 1);
+if (migratedLate[0]!.type === "tool") {
+  assert.equal(migratedLate[0]!.providerCallId, "new-id");
+  assert.equal(migratedLate[0]!.preview?.revision, 2);
+  assert.equal(migratedLate[0]!.state, "preparing");
+}
+checks += 2;
+
+// 本轮已终态却无最终工具结果：停止生成状态，数字回到未确认。
+const settled = projectTurn(turn("cancelled"), [
+  previewEvent(1, { provider_call_id: "p-c", step_index: 0, name: "write", path: "c.ts", revision: 1, lines_added: 8, lines_removed: 0, complete: true }),
+], []);
+assert.equal(settled.length, 1);
+if (settled[0]!.type === "tool") {
+  assert.equal(settled[0]!.state, "unknown");
+  assert.equal(settled[0]!.preview, undefined);
+  assert.equal(settled[0]!.previewPath, "c.ts");
+  assert.equal(settled[0]!.resultAvailable, false);
+}
+checks++;
+
 console.log(JSON.stringify({ checks, projection: "run-scoped and read-only" }));

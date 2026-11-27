@@ -217,7 +217,8 @@ class DevelopmentSDKLoop(AgentLoop):
             assert_target_current()
 
         async def emit(kind: str, data: dict[str, JsonValue]) -> RunEvent:
-            (check_stream if kind in {"text", "summary_text", "model_activity"}
+            (check_stream if kind in {"text", "summary_text", "model_activity",
+                                          "file_change_preview"}
              else assert_target_current)()
             if kind == "model_start":
                 await verify_source()

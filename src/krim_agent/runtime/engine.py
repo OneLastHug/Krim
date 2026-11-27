@@ -164,7 +164,8 @@ class AgentLoop:
             event = await self.store.append(run_id, kind, data)
             if kind == "model_start" and compressor is not None:
                 await compressor.store.work_read(compressor.verify)
-            (check_stream if kind in {"text", "summary_text", "model_activity"} else check)()
+            (check_stream if kind in {"text", "summary_text", "model_activity",
+                                      "file_change_preview"} else check)()
             return event
 
         async def build_history(stepper: Any, request_limit: int | None) -> SDKHistory:

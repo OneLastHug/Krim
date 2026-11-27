@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { groupFileTools, fileChangeCount, fileGroupSummary, type FileToolGroup } from "../src/lib/file-tool-groups";
+import { groupFileTools, fileToolPath, fileChangeCount, fileGroupSummary, type FileToolGroup } from "../src/lib/file-tool-groups";
 import type { ToolPresentation, TurnPresentation } from "../src/lib/session-presentation";
 import { FileToolGroupCard } from "../src/components/FileToolGroupCard";
 import { ToolCallCard } from "../src/components/ToolCallCard";
@@ -77,4 +77,62 @@ test("legacy missing counts are explicit and all child call details remain acces
   expect(summary.textContent).toContain("行数未记录");
   expect(summary.textContent).toContain("修改 1 次 · 读取 1 次");
   expect(host.querySelectorAll(".chat-file-calls > details")).toHaveLength(2);
+});
+
+function previewTool(id: string, overrides: Partial<ToolPresentation> = {}): ToolPresentation {
+  return {
+    type: "tool", key: `tool:${id}`, providerCallId: id, stepIndex: 1, name: "write", state: "preparing", resultAvailable: false,
+    preview: { path: "server.mjs", revision: 2, linesAdded: 9, linesRemoved: 1, countScope: "file", complete: true }, ...overrides,
+  };
+}
+const renderGroup = async (items: ToolPresentation[]) => {
+  const group = groups(items)[0]!;
+  await act(async () => root.render(<FileToolGroupCard key={group.key} group={group} renderTool={renderTool}/>));
+};
+
+test("preview-only calls group by the event path before full arguments exist", () => {
+  const items = groupFileTools([previewTool("live"), { type: "assistant", key: "t", text: "生成中", partial: true }]);
+  expect(items.map(x => x.type)).toEqual(["file-group", "assistant"]);
+  expect((items[0] as FileToolGroup).path).toBe("server.mjs");
+  expect(fileToolPath(previewTool("live"))).toBe("server.mjs");
+  // 完整参数到达后参数路径优先于预览路径
+  expect(fileToolPath(previewTool("live", { arguments: { path: "final.mjs", content: "x" } }))).toBe("final.mjs");
+  // dev_write 旧名同组；审批等待与未知工具不并入
+  expect(fileToolPath(previewTool("legacy", { name: "dev_write" }))).toBe("server.mjs");
+  expect(fileToolPath(previewTool("wait", { state: "approval" }))).toBeNull();
+  expect(fileToolPath(previewTool("other", { name: "shell" }))).toBeNull();
+  expect(fileToolPath({ type: "tool", key: "t", stepIndex: 1, name: "write", state: "running", resultAvailable: false })).toBeNull();
+});
+
+test("generating card shows 生成中 with live numbers that update in place and sides stay independent", async () => {
+  await renderGroup([previewTool("live", { preview: { path: "server.mjs", revision: 0, linesAdded: null, linesRemoved: null, countScope: "file", complete: false } })]);
+  const element = host.querySelector<HTMLDetailsElement>(".chat-file-group")!;
+  expect(element.querySelector("summary")!.textContent).toContain("生成中");
+  expect(element.querySelector(".chat-file-changes")).toBeNull();
+  await renderGroup([previewTool("live", { preview: { path: "server.mjs", revision: 1, linesAdded: 4, linesRemoved: null, countScope: "file", complete: false } })]);
+  expect(host.querySelector(".chat-file-group")).toBe(element);
+  expect(element.querySelector(".chat-file-added")!.textContent).toBe("+4");
+  expect(element.querySelector(".chat-file-removed")).toBeNull();
+  await renderGroup([previewTool("live")]);
+  expect(host.querySelector(".chat-file-group")).toBe(element);
+  expect(element.querySelector(".chat-file-added")!.textContent).toBe("+9");
+  expect(element.querySelector(".chat-file-removed")!.textContent).toBe("−1");
+  expect(element.querySelector(".chat-file-changes")!.getAttribute("aria-label")).toContain("实时预览");
+});
+
+test("final receipts replace the preview and failed calls never show success stats", async () => {
+  await renderGroup([tool("done"), previewTool("live")]);
+  const element = host.querySelector<HTMLDetailsElement>(".chat-file-group")!;
+  expect(element.querySelector(".chat-file-changes")!.textContent).toBe("+12−2");
+  expect(element.querySelector(".chat-file-changes")!.getAttribute("aria-label")).toContain("实时预览");
+  expect(element.querySelector("summary")!.textContent).toContain("生成中");
+  await renderGroup([tool("done"), tool("live", { key: "tool:live", state: "ok", resultAvailable: true, result: { ok: true, lines_added: 15, lines_removed: 3 } })]);
+  const chip = element.querySelector(".chat-file-changes")!;
+  expect(chip.textContent).toBe("+18−4");
+  expect(chip.getAttribute("aria-label")).not.toContain("实时预览");
+  expect(element.querySelector("summary")!.textContent).toContain("已完成");
+  await renderGroup([previewTool("live", { state: "failed" })]);
+  expect(host.querySelector(".chat-file-changes")).toBeNull();
+  expect(host.querySelector("summary")!.textContent).toContain("1 次失败");
+  expect(host.querySelector("summary")!.textContent).not.toContain("生成中");
 });

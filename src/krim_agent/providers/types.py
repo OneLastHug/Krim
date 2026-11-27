@@ -41,8 +41,34 @@ class ModelProgress(StrictModel):
     argument_bytes: int = Field(default=0, ge=0)
 
 
+class ModelToolInput(StrictModel):
+    """生成过程中工具参数的原始JSON增量流。
+
+    ``id`` 是 provider call id，与最终 ``ModelToolCall.id`` 一致；``name``
+    是工具schema名，分片元数据到齐前可为空，由最终 ``ModelToolCall``
+    矫正。``delta`` 是原始JSON增量；``complete`` 时附严格校验的规范
+    ``arguments`` 作最终兜底，权威值仍是 ``ModelToolCall``。``stream_id``
+    是SDK流内稳定槽位（首个非空ID分片即固定，跨分片不变），runtime按它
+    跟踪同一调用；id 分片增长时 ``id`` 仍指向最终provider call id。
+    """
+
+    kind: Literal["tool_input"] = "tool_input"
+    id: str = Field(min_length=1, max_length=128)
+    # 稳定流槽位：SDK流内工具ID；跨分片不变，供runtime跨事件聚合。
+    stream_id: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str = Field(default="", max_length=64)
+    delta: str = ""
+    complete: bool = False
+    arguments: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def finite(self) -> "ModelToolInput":
+        check_json(self.arguments)
+        return self
+
+
 type ModelEvent = ModelText | ModelToolCall | ModelUsage
-type ModelStreamEvent = ModelEvent | ModelProgress
+type ModelStreamEvent = ModelEvent | ModelProgress | ModelToolInput
 
 
 @dataclass(frozen=True, slots=True)

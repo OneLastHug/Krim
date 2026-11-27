@@ -46,6 +46,7 @@ from .types import (
     ModelStreamEvent,
     ModelText,
     ModelToolCall,
+    ModelToolInput,
     ModelUsage,
 )
 
@@ -1151,6 +1152,24 @@ class OpenAICompatibleProvider:
                 argument_bytes = 0
                 streamed_arguments: dict[str, int] = {}
                 forwarded = False
+
+                def bind_tool_input(
+                    stream_id: str, boundary: _StreamBoundary | _ResponsesBoundary = boundary,
+                ) -> tuple[str, str]:
+                    # 只用既有边界映射把SDK流内工具ID绑定到最终call id/名称：
+                    # chat在首个非空ID分片固定SDK流ID，ID/名称仍可分片到达，
+                    # 最终值以边界累积为准；Responses的流内ID本就是最终
+                    # call_id。不猜测SDK内部状态。
+                    for index, pinned in boundary.sdk_ids.items():
+                        if pinned == stream_id:
+                            buffer = boundary.calls.get(index)
+                            if buffer is not None and buffer.identifier:
+                                return buffer.identifier, buffer.name
+                    for buffer in boundary.calls.values():
+                        if buffer.identifier == stream_id:
+                            return buffer.identifier, buffer.name
+                    return stream_id, ""
+
                 try:
                     async with ai.stream(
                         self._sdk_model,
@@ -1187,6 +1206,12 @@ class OpenAICompatibleProvider:
                                     yield ModelProgress(
                                         phase="tool_start", argument_bytes=argument_bytes
                                     )
+                                    identifier, tool_name = bind_tool_input(event.tool_call_id)
+                                    yield ModelToolInput(
+                                        id=identifier,
+                                        name=tool_name,
+                                        stream_id=event.tool_call_id,
+                                    )
                             elif isinstance(event, ai.events.ToolDelta):
                                 call_id = event.tool_call_id
                                 delta_bytes = len(event.chunk.encode("utf-8"))
@@ -1198,6 +1223,13 @@ class OpenAICompatibleProvider:
                                     forwarded = True
                                     yield ModelProgress(
                                         phase="tool_arguments", argument_bytes=argument_bytes,
+                                    )
+                                    identifier, tool_name = bind_tool_input(call_id)
+                                    yield ModelToolInput(
+                                        id=identifier,
+                                        name=tool_name,
+                                        stream_id=call_id,
+                                        delta=event.chunk,
                                     )
                             elif isinstance(event, ai.events.ToolEnd):
                                 call = event.tool_call
@@ -1211,6 +1243,20 @@ class OpenAICompatibleProvider:
                                     forwarded = True
                                     yield ModelProgress(
                                         phase="tool_complete", argument_bytes=argument_bytes,
+                                    )
+                                    identifier, tool_name = bind_tool_input(call_id)
+                                    try:
+                                        arguments = parse_json(call.tool_args)
+                                    except (ValueError, RecursionError):
+                                        raise ProviderError("provider_tool_arguments") from None
+                                    if not isinstance(arguments, dict):
+                                        raise ProviderError("provider_tool_arguments")
+                                    yield ModelToolInput(
+                                        id=identifier,
+                                        name=tool_name,
+                                        stream_id=call_id,
+                                        complete=True,
+                                        arguments=arguments,
                                     )
                             elif include_progress:
                                 # Includes provider-only/reasoning activity without retaining

@@ -19,9 +19,11 @@ from krim_agent.providers.types import (
     ModelRequestBudget,
     ModelText,
     ModelToolCall,
+    ModelToolInput,
     ModelUsage,
 )
 from krim_agent.runtime.contracts import ExecutionBudget, settled
+from krim_agent.runtime.file_preview import FileChangePreviews
 from krim_agent.source_fingerprints import source_digest
 from krim_agent.usage import TokenUsage
 
@@ -186,6 +188,7 @@ class ModelStep:
         last_activity_emit_at = started_at
         activity_sequence = 0
         argument_bytes = 0
+        previews = FileChangePreviews(request_messages) if purpose == "task" else None
         async with _attributed_model_timeout(
             end, model_deadline=model_deadline, run_deadline=run_deadline,
         ), (self.request_slot(index) if self.request_slot is not None else nullcontext()):
@@ -206,7 +209,8 @@ class ModelStep:
                     # identity fences cheap; usage/calls and step boundaries
                     # still run the complete live-definition check.
                     check_delta = (self.stream_check
-                                   if type(delta) in (ModelText, ModelProgress) else self.check)
+                                   if type(delta) in (ModelText, ModelProgress, ModelToolInput)
+                                   else self.check)
                     check_delta()
                     if final_usage and not isinstance(delta, ModelUsage):
                         raise ServiceError("provider_event")
@@ -229,6 +233,18 @@ class ModelStep:
                                 raise ServiceError("summary_failed")
                             await self.emit("summary_text" if purpose == "summary" else "text",
                                 {"text": item.text, "step_index": index, **extra})
+                        elif type(delta) is ModelToolInput:
+                            item = ModelToolInput.model_validate(delta.model_dump(mode="json"))
+                            last_activity_at = clock()
+                            if previews is not None:
+                                preview = previews.update(
+                                    item.id, item.name, item.delta, item.complete,
+                                    item.arguments, last_activity_at, item.stream_id,
+                                )
+                                if preview is not None:
+                                    await self.emit("file_change_preview", {
+                                        "span_id": span, "step_index": index, **preview,
+                                    })
                         elif type(delta) is ModelToolCall:
                             call = ModelToolCall.model_validate(delta.model_dump(mode="json"))
                             if purpose == "summary":
@@ -236,6 +252,14 @@ class ModelStep:
                             if call.id in self.seen:
                                 raise ServiceError("duplicate_tool_call")
                             self.seen.add(call.id)
+                            if previews is not None:
+                                preview = previews.update(
+                                    call.id, call.name, "", True, call.arguments, clock(),
+                                )
+                                if preview is not None:
+                                    await self.emit("file_change_preview", {
+                                        "span_id": span, "step_index": index, **preview,
+                                    })
                             calls.append(call)
                             if (budget.max_tool_calls_this_step is not None
                                     and len(calls) > budget.max_tool_calls_this_step):
@@ -320,5 +344,6 @@ def binding_token() -> tuple[object, ...]:
         id(ModelRequestBudget.__post_init__),
         id(build_context_manifest),
         source_digest(Path(__file__).parents[1].joinpath("context/manifest.py")),
+        source_digest(Path(__file__).with_name("file_preview.py")),
         source_digest(__file__),
     )

@@ -1,6 +1,20 @@
 import type { Turn } from "./session-contracts.ts";
+import { canonicalToolName } from "./tool-names.ts";
 
 export type ToolState = "preparing" | "approval" | "running" | "ok" | "denied" | "failed" | "cancelled" | "unknown";
+
+/**
+ * file_change_preview 事件投影出的单次调用实时快照：数字是该调用当前的累计值，
+ * 每次更新整体覆盖；增删两侧可各自未知（null），count_scope 区分整文件或匹配片段口径。
+ */
+export interface FileChangePreview {
+  path: string;
+  revision: number;
+  linesAdded: number | null;
+  linesRemoved: number | null;
+  countScope: "file" | "replacement";
+  complete: boolean;
+}
 
 export interface ApprovalRecord extends Record<string, unknown> {
   request_id: string;
@@ -36,6 +50,12 @@ export interface ToolPresentation {
   risk?: unknown;
   source?: unknown;
   approval?: ApprovalRecord;
+  /** 实时生成预览：仅出现在调用尚未结束且本轮仍在运行时；终态后由最终结果接管。 */
+  preview?: FileChangePreview;
+  /** Keep the known target after cancelled generation, without retaining its counts. */
+  previewPath?: string;
+  /** Stable file-card identity across provider ID fragments and final results. */
+  previewKey?: string;
 }
 
 export type TurnPresentation = AssistantPresentation | ToolPresentation;
@@ -71,13 +91,28 @@ interface ToolAccumulator {
   order: number;
   orderIndex: number;
   approval?: ApprovalRecord;
+  preview?: FileChangePreview;
+  /** Keep the known target after cancelled generation, without retaining its counts. */
+  previewPath?: string;
+  /** Stable file-card identity across provider ID fragments and final results. */
+  previewKey?: string;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 const step = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
+const natural = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const has = (value: object, key: PropertyKey) => Object.prototype.hasOwnProperty.call(value, key);
+const previewPath = (value: unknown): string | null =>
+  typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+const countScope = (value: unknown): "file" | "replacement" => value === "replacement" ? "replacement" : "file";
+
+/** file_change_preview 只来自文件写入/编辑工具；dev_write/dev_edit 是未迁移的旧名，仍属同族。 */
+export function isFileChangeToolName(name: string): boolean {
+  const canonical = canonicalToolName(name);
+  return canonical === "write" || canonical === "edit" || name === "dev_write" || name === "dev_edit";
+}
 
 function stable(value: unknown): string {
   if (value === null) return "null";
@@ -133,6 +168,11 @@ function approvalRecord(raw: unknown, runId: string): ApprovalRecord | null {
 function sameOptional(left: unknown, right: unknown): boolean {
   return left === undefined || right === undefined || stable(left) === stable(right);
 }
+/** 新旧工具名等价：dev_read 与 read 等已知映射视为同一工具，未知名称保持原样比较。 */
+function sameToolName(left: string | undefined, right: string | undefined): boolean {
+  const identity = (name: string) => name === "dev_write" ? "write" : name === "dev_edit" ? "edit" : canonicalToolName(name);
+  return left === undefined || right === undefined || identity(left) === identity(right);
+}
 function stateFromFact(value: unknown): ToolState {
   return toolStatus(value) ?? "unknown";
 }
@@ -178,7 +218,7 @@ export function projectTurn(
       if ((candidate.callId && item.callId && candidate.callId !== item.callId) ||
         (candidate.providerCallId && item.providerCallId && candidate.providerCallId !== item.providerCallId) ||
         (step(candidate.stepIndex) && item.stepIndex >= 0 && candidate.stepIndex !== item.stepIndex) ||
-        !sameOptional(candidate.name, item.name || undefined) || !sameOptional(candidate.arguments, item.arguments)) {
+        !sameToolName(candidate.name, item.name || undefined) || !sameOptional(candidate.arguments, item.arguments)) {
         markConflict(item);
         return item;
       }
@@ -269,6 +309,43 @@ export function projectTurn(
       }
       continue;
     }
+    if (event.kind === "file_change_preview") {
+      const providerCallId = nonempty(data.provider_call_id) ? data.provider_call_id : undefined;
+      const replacesId = nonempty(data.replaces_provider_call_id) ? data.replaces_provider_call_id : undefined;
+      const name = nonempty(data.name) ? data.name : undefined;
+      const path = previewPath(data.path);
+      const revision = step(data.revision) ? data.revision : -1;
+      if (!providerCallId || !name || revision < 0 || path === null || !isFileChangeToolName(name)) continue;
+      // 同 step 的旧 id → 新 id 分片迁移：同一张卡续用，不当作两次调用，也不留幽灵生成卡。
+      if (index < 0) continue;
+      if (replacesId && replacesId !== providerCallId) {
+        const previous = byProviderId.get(replacesId);
+        if (previous && previous.stepIndex === index && !previous.terminal && !previous.conflict) {
+          if (!byProviderId.has(providerCallId)) {
+            byProviderId.delete(replacesId);
+            previous.providerCallId = providerCallId;
+            byProviderId.set(providerCallId, previous);
+          } else {
+            markConflict(previous);
+          }
+        }
+      }
+      const item = upsert({ providerCallId, stepIndex: index, name, order: event.seq });
+      if (!item || item.conflict || item.terminal) continue;
+      // 乱序迟到的旧 revision 不回退快照；同 revision 重放按内容覆盖（等值幂等）。
+      if (item.preview && revision < item.preview.revision) continue;
+      item.previewPath = path;
+      item.previewKey ??= replacesId ?? providerCallId;
+      item.preview = {
+        path,
+        revision,
+        linesAdded: natural(data.lines_added) ? data.lines_added : null,
+        linesRemoved: natural(data.lines_removed) ? data.lines_removed : null,
+        countScope: countScope(data.count_scope),
+        complete: data.complete === true,
+      };
+      continue;
+    }
     if (event.kind === "approval_request") {
       const metadata = approvalRecord(data, turn.run_id);
       if (!metadata) continue;
@@ -313,6 +390,18 @@ export function projectTurn(
     item.state = "approval";
   }
 
+  // 终态收敛：最终工具结果覆盖预览（失败/取消/拒绝不留成功数字），等待审批不展示未确认行数；
+  // 本轮已终态却无最终结果时，删除生成标记并把未确认调用停下，不再呈现生成中。
+  const turnSettled = turn.status !== "running" && turn.status !== "queued";
+  for (const item of tools) {
+    if (!item.preview) continue;
+    if (item.terminal || item.approval || item.state === "approval") { delete item.preview; continue; }
+    if (turnSettled) {
+      delete item.preview;
+      if (item.state === "preparing" || item.state === "running") item.state = "unknown";
+    }
+  }
+
   const validTools = tools.filter(item => !item.conflict);
   if (turn.status === "completed" && Array.isArray(turn.transcript)
     && turn.transcript.some(message => message.role === "assistant")) {
@@ -342,6 +431,7 @@ export function projectTurn(
           key: `tool:${item?.callId ?? providerCallId}`,
           ...(item?.callId ? { callId: item.callId } : {}),
           providerCallId,
+          ...(item?.previewKey ? { previewKey: item.previewKey } : {}),
           stepIndex: item && item.stepIndex >= 0 ? item.stepIndex : -1,
           name: item?.name || rawCall.name,
           state: conflict ? "unknown" : item?.terminal ? item.state : available ? "ok" : "unknown",
@@ -374,6 +464,9 @@ export function projectTurn(
       ...(item.arguments !== undefined ? { arguments: item.arguments } : {}),
       ...(item.resultAvailable ? { result: item.result } : {}),
       resultAvailable: item.resultAvailable,
+      ...(item.preview ? { preview: item.preview } : {}),
+      ...(item.previewPath ? { previewPath: item.previewPath } : {}),
+      ...(item.previewKey ? { previewKey: item.previewKey } : {}),
       ...(item.executorStarted !== undefined ? { executorStarted: item.executorStarted } : {}),
       ...(item.code ? { code: item.code } : {}),
       ...(item.approval ? { approval: item.approval } : {}),
